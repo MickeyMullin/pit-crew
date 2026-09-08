@@ -12,7 +12,7 @@ built to prevent — it has already required one history rewrite.
 
 | Tree | Committed? | Contains | Purpose |
 | --- | --- | --- | --- |
-| `prompts/`, `commands/` | Yes | `{{HOME}}` placeholders | Source of truth |
+| `prompts/**`, `commands/**` | Yes | `{{HOME}}` placeholders | Source of truth (walked recursively) |
 | `deploy/` | No (gitignored) | Real absolute paths | What actually runs |
 | `backups/` | No (gitignored) | Timestamped copies | Undo for the two above |
 
@@ -35,6 +35,7 @@ pending changes exist.
 | The user asked you to... | Do this |
 | --- | --- |
 | Change a prompt | Edit it in `prompts/`, keep `{{HOME}}`, then run `scripts/deploy-reviews.sh` |
+| Add a new prompt family | Just make the directory under `prompts/` — both scripts walk it recursively; neither needs editing |
 | Change a command | Edit it in `commands/`, keep `{{HOME}}`, then run `scripts/deploy-reviews.sh --install` — commands do **not** take effect without the install step |
 | Undo a deploy | `cp -R backups/<timestamp>/deploy/. deploy/` |
 | Preserve a change already made in `deploy/` | Run `scripts/sanitize.sh`, then show the user `git diff` |

@@ -9,12 +9,46 @@ The invocation names the area. Accept any of these forms and resolve them to a f
 
 If the name resolves ambiguously — two plausible areas, or a name that spans a UI surface and an unrelated backend job — state the candidates and the file counts, pick the reading that matches the user's evident intent, say which you picked in one line, and proceed. Do not stop to ask unless proceeding under either reading would waste the whole run.
 
+Provenance (record this before you read anything):
+
+- Capture the commit the dossier describes, before you start reading: `git rev-parse HEAD` for the full SHA, `git rev-parse --short HEAD` for display, plus the branch name and whether the working tree was dirty at the time (`git status --porcelain`). A dossier written against uncommitted work describes a state no one else can check out, so if the tree is dirty, say so in the provenance line rather than pretending the SHA is the whole story.
+- Put a **provenance line directly under the page title**, above the executive summary, reading like: `Documented at a1b2c3d (main) · 8 September 2026 · 47 files`. Keep it visible; a reader's first question about any dossier is how old it is.
+- Immediately after it, emit a machine-readable marker as an HTML comment, on one line, with the **full** SHA:
+
+```
+<!-- doc-provenance: sha=<full-sha> short=<short-sha> branch=<branch> date=<YYYY-MM-DD> dirty=<true|false> area=<area-slug> -->
+```
+
+- That comment is what a later run reads to update the dossier instead of rebuilding it. Emit it exactly in that shape, one `key=value` pair per field, no line breaks inside it — a later run greps for `doc-provenance`, and a reformatted marker is an unreadable one. Never hand-edit it; it is written by the run that produced the page.
+- Maintain a **Documentation history** section as the last section of the page: a table of every run, most recent first, with the short SHA, the full SHA, the date, whether that run was a full build or an update, and a one-line summary of what changed in the docs. Append to it; never replace it. The history is what tells a reader whether a section has been reviewed since the code under it moved.
+
 Scope resolution (do this first, before reading deeply):
 
 - Enumerate the full file set: page/entry points, route handlers, data-access modules, SQL, components, hooks, shared primitives it composes, types and schemas, config, and the tests that cover it. Include line counts.
 - Follow imports outward one hop past the area's own directory, so shared seams it depends on (a pool, a cache factory, a route scaffold, a table primitive) are named and understood, not treated as opaque.
 - Identify what is *out* of scope and say so explicitly in the dossier — especially other consumers of the same data or components, which are the usual source of "I changed one thing and broke another".
 - Note where the area's boundary is: what it owns versus what another repository, another service, or a scheduled job owns. **This is often the single most important fact about an area and it is rarely written down anywhere.**
+
+Updating an existing dossier (check for this before doing scope resolution):
+
+Re-running as the area changes is the expected workflow, and re-reading the whole tree every time is the wrong way to do it. When a prior dossier exists, work from the delta.
+
+- Look for `.local/<area-slug>/index.html`. If it exists, grep it for `doc-provenance` and read the prior SHA. If the file exists but has no marker, it predates this rule: rebuild fully and emit one.
+- **Confirm the prior SHA is still reachable and an ancestor of HEAD**: `git cat-file -e <prior-sha>` then `git merge-base --is-ancestor <prior-sha> HEAD`. If either fails, the branch was rebased, squashed, or the commit is gone, and a diff against it would be fiction. Say so in one line and rebuild fully.
+- If the prior run recorded `dirty=true`, treat its baseline as approximate: the diff will not include whatever was uncommitted then. Say so, and widen the re-read to the whole area if the uncommitted work looks material.
+- With a valid baseline, scope the update from `git diff --stat <prior-sha>..HEAD -- <area paths>` and `git log --oneline <prior-sha>..HEAD -- <area paths>`.
+- **If nothing in the area changed**, do not rebuild and do not re-read the code. Append a Documentation history row recording the new HEAD, the date, "no change", and update the provenance line and marker to the new SHA. Say in chat that the dossier is current as of the new commit and nothing needed rewriting. This is the cheap path and it should be genuinely cheap.
+- **If the area changed**, read only the changed files and the one hop around them, then update the sections those files feed. Rewrite what moved; leave the rest alone. The dossier's value is in its accumulated detail, so do not regenerate a section wholesale when a paragraph is wrong.
+- **Some verification passes are not local, and a diff scoped to the area will not tell you they broke.** Re-run these whenever anything changed anywhere in the repository since the prior SHA, not merely inside the area:
+  - **Dead exports** — an import removed in a distant file is exactly what turns a live export dead, and it never appears in the area's own diff. Re-grep the area's exports repository-wide.
+  - **Computed but never rendered** — the same in reverse: a consumer deleted elsewhere strands a field that still looks used.
+  - **Consistency across siblings** — a sibling endpoint changing its rounding or filtering is a change to this area's correctness story even though no file here moved. Check `git log <prior-sha>..HEAD` for the siblings named in that section.
+  - **Doc-vs-code drift** — re-verify any claim whose supporting code appears in the diff, and any claim in a repository instruction file that itself changed.
+- Cheap-path exception: if `git diff <prior-sha>..HEAD` is empty for the entire repository, skip those passes too. Nothing can have drifted.
+- **Findings ids are stable across runs.** Never renumber. A finding that is now fixed stays in the table marked resolved, with the commit that resolved it; deleting it destroys the record that it was ever true. New findings continue the sequence from the highest id ever used, including resolved ones.
+- Preserve any section a reader may have come to rely on, including "Things that look wrong and are not" — a deliberate choice recorded there stays true until the code changes, and re-deriving it from scratch is how it gets lost.
+- Say in the chat summary which sections were updated, which were left untouched, and which non-local passes you re-ran. A reader needs to know what was actually re-checked rather than assuming the whole page was.
+- If the user asks for a full rebuild, do one and record it in the history as a full build. Prefer a rebuild when the delta touches more than roughly half the area's files — at that point the update is more work than the rebuild and likelier to leave a stale seam behind.
 
 Reading order (follow it — it is what makes the output accurate rather than plausible):
 
@@ -48,7 +82,7 @@ Output artifact:
 - Write one self-contained HTML file to `.local/<area-slug>/index.html` at the repo root, where `<area-slug>` is the area name lowercased with non-alphanumerics collapsed to `-`. `.local/` is gitignored, so the dossier never appears in `git status` or a diff.
 - Self-contained means: no external scripts, stylesheets, fonts, or images. Inline everything. Diagrams are inline SVG. The file must open correctly from `file://` with no network.
 - If the area genuinely warrants companion assets (a large extracted dataset, a generated CSV), put them alongside in the same directory and link them relatively. Prefer one file.
-- Overwrite the file if a prior run produced one. Re-running as the area changes is the expected workflow.
+- Overwrite the file if a prior run produced one, but carry its Documentation history and finding ids forward — see "Updating an existing dossier". Re-running as the area changes is the expected workflow, and after the first run it should normally be an update rather than a rebuild.
 - Also print a short chat summary: where the file is, the `open` command, the three things worth knowing before reading it, and the highest-value findings. Do not paste the dossier into chat.
 - Send the file to the user with SendUserFile so it reaches them on whatever device they are on.
 
@@ -68,6 +102,7 @@ Page structure (use this skeleton so dossiers for different areas read alike; dr
 12. **Issues, risks and drift** — numbered findings, `F-01`…, ordered by cost to the reader. Rules below.
 13. **File index** — every non-test file with line count and a one-line "owns" description, grouped by layer, with a live filter box.
 14. **Taking it over** — how to run it locally, a reading order for the first day, a "you want to X → touch Y → watch out for Z" table, questions worth asking the product or data owner in week one, and the five sentences to remember.
+15. **Documentation history** — the run table described under "Provenance", most recent first. Keep it last; it is reference, not reading.
 
 Findings rules (section 12):
 

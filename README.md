@@ -11,13 +11,15 @@ this repo rather than holding its own.
 | Path | What's in it |
 | --- | --- |
 | `prompts/review/` | Code-review prompts, plus agent-specific execution notes. Agent-agnostic except where noted. |
+| `prompts/document/` | Documentation prompts: build a handover dossier for an area, and derive a client-facing version of it. |
 | `commands/claude/` | Claude Code slash commands that invoke the prompts. See [commands/claude/README.md](commands/claude/README.md). |
 | `scripts/` | The two directions. `deploy-reviews.sh` renders sources into a runnable copy; `sanitize.sh` brings tested edits back. |
 | `deploy/` | Generated, gitignored. The rendered output — the only place real home paths exist. |
 | `backups/` | Generated, gitignored. Timestamped copies of whatever a deploy replaced. One-step undo. |
 
 `prompts/` is grouped by job so later families (triage, release, maintenance) sit
-alongside `review/` rather than crowding it.
+alongside `review/` and `document/` rather than crowding them. The scripts walk `prompts/`
+recursively, so adding a family is just adding a directory — nothing needs teaching.
 
 ## Sanitization
 
@@ -156,6 +158,51 @@ The PR-writing prompts write their full report to `{{HOME}}/agents/output/` befo
 anything to GitHub, so a failed post never loses the review. That directory is
 referenced by absolute path — deliberately, so it stays stable across clones and
 worktrees rather than following the repo you happen to be reviewing.
+
+## The documentation prompts
+
+| Prompt | Use |
+| --- | --- |
+| `prompts/document/document-handoff.md` | Build a self-contained HTML dossier for one area of an application, for an engineer taking ownership of it. |
+| `prompts/document/document-client.md` | Transform that dossier into a client-facing overview of the same area. |
+
+Both write to `.local/<area-slug>/` in the target repo, which is gitignored there:
+`index.html` for the dossier, `client.html` for the client page. The dossier is the
+source of truth; the client page is derived from it and never overwrites it.
+
+### Incremental updates
+
+Every page records the commit it describes in a one-line `doc-provenance` HTML comment,
+and shows the reader a visible provenance line (the dossier shows the SHA; the client
+page shows only a date). A re-run reads that marker and works from
+`git diff <prior-sha>..HEAD` rather than exploring the whole tree again — updating the
+sections the changed files feed and leaving the rest alone. If nothing in the area
+changed, it rewrites nothing and just records the new commit.
+
+Two things make that safe rather than merely fast. It verifies the prior SHA is still an
+ancestor of HEAD, because after a rebase or squash a diff against it would be fiction —
+if it isn't, it rebuilds. And it re-runs the **non-local** verification passes whenever
+anything changed anywhere in the repo, not just inside the area: an import deleted in a
+distant file is exactly what turns one of the area's exports dead, and that never shows
+up in the area's own diff.
+
+Finding ids are stable across runs and resolved findings stay in the table, marked
+resolved. Each page keeps a Documentation history section listing every run.
+
+### Client pages and findings
+
+`document-client.md` strips handover framing, internal paths, and engineering furniture,
+and leads with a plain-language section a non-technical stakeholder can read start to
+finish. It keeps the parts a client actually needs: how each number is computed, where
+the data comes from, what was reconciled against what, and what the area deliberately
+does not do.
+
+Findings are the one part it will not decide alone. It lists them in chat grouped by
+what it would omit, what it would restate as a limitation, and what it must not publish
+without explicit say-so — then defaults to omitting. **It will never publish an
+access-control or data-exposure finding on its own judgment**, even when other findings
+have been approved: that is a security disclosure, and it belongs in a conversation with
+a named owner rather than in a document that may be forwarded onward.
 
 ## Setting up a machine
 
