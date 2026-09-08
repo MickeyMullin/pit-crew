@@ -143,23 +143,29 @@ fi
 # copy-then-delete and reintroduces the half-written window this exists to close.
 stage_dir="$(mktemp -d "$(dirname "$deploy_dir")/.deploy-stage.XXXXXX")"
 trap 'rm -rf "$stage_dir"' EXIT
-mkdir -p "$stage_dir/prompts/review" "$stage_dir/commands/claude"
+mkdir -p "$stage_dir"
 
 rendered=0
+
+# Walk the tree rather than naming known directories. New prompt families --
+# prompts/document, prompts/release, whatever comes next -- are then picked up
+# automatically. Hardcoding the set means a directory nobody remembered to add
+# here is silently dropped from deploy/, which is where the live copy lives.
 render_tree() {
-  local src_dir="$1" dst_dir="$2" f name
-  for f in "$repo_root/$src_dir"/*.md; do
-    [[ -e "$f" ]] || continue
-    name="$(basename "$f")"
-    sed "s|{{HOME}}|$home_substitute|g" "$f" > "$dst_dir/$name"
-    echo "  $src_dir/$name"
+  local root="$1" f rel
+  [[ -d "$repo_root/$root" ]] || return 0
+  while IFS= read -r f; do
+    rel="${f#$repo_root/}"
+    mkdir -p "$stage_dir/$(dirname "$rel")"
+    sed "s|{{HOME}}|$home_substitute|g" "$f" > "$stage_dir/$rel"
+    echo "  $rel"
     rendered=$((rendered + 1))
-  done
+  done < <(find "$repo_root/$root" -type f -name '*.md' | sort)
 }
 
 echo "rendered:"
-render_tree "prompts/review"  "$stage_dir/prompts/review"
-render_tree "commands/claude" "$stage_dir/commands/claude"
+render_tree "prompts"
+render_tree "commands"
 
 if [[ "$rendered" -eq 0 ]]; then
   echo "error: no source files found; refusing to report success." >&2

@@ -125,12 +125,15 @@ changed=0
 unchanged=0
 added=0
 
+# Walks whatever is in deploy/, at any depth, so a new prompt family added to
+# the live copy comes back to the sources without this script being taught about
+# it. Mirrors deploy-reviews.sh, which renders the same way.
 sanitize_tree() {
-  local src_dir="$1" dst_dir="$2" f name staged
-  for f in "$deploy_dir/$src_dir"/*.md; do
-    [[ -e "$f" ]] || continue
-    name="$(basename "$f")"
-    staged="$tmp_dir/$name"
+  local root="$1" f rel staged
+  [[ -d "$deploy_dir/$root" ]] || return 0
+  while IFS= read -r f; do
+    rel="${f#$deploy_dir/}"
+    staged="$tmp_dir/$(basename "$rel")"
 
     sed "s|$home_substitute|{{HOME}}|g" "$f" > "$staged"
 
@@ -139,32 +142,33 @@ sanitize_tree() {
     # something this simple substitution cannot represent -- a literal {{HOME}},
     # say -- and writing it over the source would silently change meaning.
     if ! sed "s|{{HOME}}|$home_substitute|g" "$staged" | cmp -s - "$f"; then
-      echo "error: round trip failed for $src_dir/$name" >&2
+      echo "error: round trip failed for $rel" >&2
       echo "       sanitizing then re-rendering does not reproduce the original." >&2
       echo "       Inspect that file by hand; nothing has been written." >&2
       exit 1
     fi
 
-    if [[ ! -e "$repo_root/$dst_dir/$name" ]]; then
-      echo "  + $dst_dir/$name (new)"
+    if [[ ! -e "$repo_root/$rel" ]]; then
+      echo "  + $rel (new)"
       added=$((added + 1))
-    elif cmp -s "$staged" "$repo_root/$dst_dir/$name"; then
+    elif cmp -s "$staged" "$repo_root/$rel"; then
       unchanged=$((unchanged + 1))
       continue
     else
-      echo "  M $dst_dir/$name"
+      echo "  M $rel"
       changed=$((changed + 1))
     fi
 
     if [[ "$dry_run" -eq 0 ]]; then
       ensure_sources_clean
-      cp "$staged" "$repo_root/$dst_dir/$name"
+      mkdir -p "$repo_root/$(dirname "$rel")"
+      cp "$staged" "$repo_root/$rel"
     fi
-  done
+  done < <(find "$deploy_dir/$root" -type f -name '*.md' | sort)
 }
 
-sanitize_tree "prompts/review"  "prompts/review"
-sanitize_tree "commands/claude" "commands/claude"
+sanitize_tree "prompts"
+sanitize_tree "commands"
 
 if [[ $((changed + added)) -eq 0 ]]; then
   echo "  (nothing to bring back -- sources already match deploy/)"
