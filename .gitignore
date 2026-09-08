@@ -1,0 +1,5 @@
+# Rendered output of scripts/deploy-reviews.sh. Contains real home paths.
+# Local only — never commit.
+deploy/
+
+.DS_Store
