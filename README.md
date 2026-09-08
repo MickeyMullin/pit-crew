@@ -81,7 +81,7 @@ Two prompts can write; one deliberately cannot.
 | --- | --- | --- |
 | `review-local` | Yes | WIP-commits your in-flight work, then edits the tree. Offers three ways to finish. |
 | `review-pr` | Yes, own PR only | Fixes, verifies, commits, pushes, re-reviews once. Never comments on your own PR unasked. |
-| `review-stack` | **No** | Reports only. Posts to the top PR automatically on "approve" alone. |
+| `review-stack` | **No** | Reports only. Never comments on your own stack unasked. |
 
 Both fixing prompts share the same shape: assess whether the current model and effort
 suit the findings and say so; fix and verify; re-review **once** from scratch, because a
@@ -134,11 +134,21 @@ is not improvised back in. A fix belongs in the layer that introduced the proble
 changing that layer invalidates every layer above it, and restacking rewrites branches
 that may already be reviewed. That is not a one-pass automatic operation.
 
-It also posts automatically **only** on an "approve" verdict. Both "fix before merge" and
-"do not merge" write the report and print it, then ask before commenting: each means the
-stack is still moving, so posting pins a findings list to a top PR whose SHAs the fixes
-will invalidate, and puts a public verdict on someone's stack before its author has read
-it. An "approve" does not go stale that way and has nothing to respond to.
+Its posting rules mirror `review-pr`'s. Both "fix before merge" and "do not merge" write
+the report and print it, then ask before commenting: each means the stack is still
+moving, so posting pins a findings list to a top PR whose SHAs the fixes will
+invalidate, and puts a public verdict on someone's stack before its author has read it.
+An "approve" does not go stale that way and posts automatically — but only on a stack
+that is not yours, since an approve on your own top PR is the same noise a self-addressed
+approve is anywhere else.
+
+Authorship is checked against the **top layer's** PR, the only one this review ever
+comments on, and never inferred from the checkout — this prompt checks out the top
+branch as a matter of course. On your own stack it therefore never posts unprompted, for
+any verdict. One case it raises rather than deciding silently: if your stack contains
+layers by other authors, an approve is the verdict they might want recorded, so it says
+so and offers to post. The authorship check grants nothing else — it decides posting
+only, and never licenses fixing.
 
 ### Report output
 
