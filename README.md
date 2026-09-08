@@ -12,7 +12,7 @@ this repo rather than holding its own.
 | --- | --- |
 | `prompts/review/` | Code-review prompts, plus agent-specific execution notes. Agent-agnostic except where noted. |
 | `commands/claude/` | Claude Code slash commands that invoke the prompts. See [commands/claude/README.md](commands/claude/README.md). |
-| `scripts/` | Deployment tooling. `deploy-reviews.sh` renders the sources into a runnable local copy. |
+| `scripts/` | The two directions. `deploy-reviews.sh` renders sources into a runnable copy; `sanitize.sh` brings tested edits back. |
 | `deploy/` | Generated, gitignored. The rendered output — the only place real home paths exist. |
 
 `prompts/` is grouped by job so later families (triage, release, maintenance) sit
@@ -93,12 +93,75 @@ mkdir -p "$HOME/agents/output"
 The script prints those last two commands with real paths filled in; it does not run
 them, since both write outside the repo.
 
-## Editing
+## The two directions
 
-Edit the sources here — never `deploy/`, whose contents are overwritten on every run.
-Keep `{{HOME}}` as the placeholder; committing a real home path defeats the whole
-arrangement. Then re-run `scripts/deploy-reviews.sh` to pick the change up locally.
+Sources are committed and always use `{{HOME}}`. `deploy/` is gitignored, holds real
+paths, and is what actually runs. Changes flow **both ways**, and each direction has a
+script. Never move files between them by hand.
 
-Because `deploy/` sits between the repo and what actually runs, an agent editing a
-prompt mid-review edits the rendered copy, not the repo. Bring such a change back by
-hand, re-placeholdering the home path.
+```
+                   scripts/deploy-reviews.sh  ->
+  prompts/review/*.md                              deploy/prompts/review/*.md
+  commands/claude/*.md                             deploy/commands/claude/*.md
+  (committed, {{HOME}})                            (gitignored, real paths, runs)
+                   <-  scripts/sanitize.sh
+```
+
+### Direction 1: you edited a source, and want to run it
+
+```bash
+scripts/deploy-reviews.sh
+```
+
+Renders sources into `deploy/`, substituting `{{HOME}}`. Refuses to finish if any
+placeholder survives.
+
+### Direction 2: you edited the live copy, tested it, and want to commit it
+
+This is the normal way to change a prompt. Edit the deployed file, run a real review
+against it, and once it behaves, bring the tested version back:
+
+```bash
+scripts/sanitize.sh --dry-run    # what would change
+scripts/sanitize.sh              # write it over the sources
+git diff -- prompts commands     # review before committing
+git add -A && git commit
+```
+
+`sanitize.sh` replaces the real home path with `{{HOME}}`, then verifies the round trip
+file by file — re-rendering what it produced must reproduce the deployed file exactly,
+or it writes nothing. It refuses to run when the sources have uncommitted changes
+(pass `--force` to override), and aborts if any real path survives into the sources.
+It does not `git add`; read the diff yourself.
+
+## Rules
+
+These hold for anyone working in this repo, human or agent:
+
+1. **Never commit a real home directory path.** Sources use `{{HOME}}`. This is the
+   reason the repo is shaped this way.
+2. **Never hand-edit a file in `deploy/` and expect it to survive.**
+   `deploy-reviews.sh` deletes and rebuilds that directory. Run `sanitize.sh` to
+   preserve the change first.
+3. **Never hand-edit a source file to swap paths.** Both directions are scripted, and
+   both verify themselves. A manual `sed` is how a real path reaches history.
+4. **Never move a file directly between the sources and `deploy/`** with `cp` or an
+   editor. Use the scripts.
+5. **Read `git diff` before committing after `sanitize.sh`.** The substitution is
+   textual and rewrites every occurrence of the home path.
+6. `<name>` placeholders in prompts are the agent's, resolved at run time. Leave them
+   alone. Only `{{NAME}}` is substituted by these scripts.
+
+## Which command do I want?
+
+| Situation | Run |
+| --- | --- |
+| Fresh machine, nothing set up | See "Setting up a machine" above |
+| Changed a file in `prompts/` or `commands/` | `scripts/deploy-reviews.sh` |
+| Changed a deployed file and tested it | `scripts/sanitize.sh` |
+| Not sure whether anything drifted | `scripts/sanitize.sh --dry-run` |
+| Deployed copy looks wrong or stale | `scripts/deploy-reviews.sh` to rebuild it |
+| Pulled changes from GitHub | `scripts/deploy-reviews.sh` |
+
+Both scripts are idempotent and safe to run when nothing has changed; they report
+`0 changed` and exit successfully.
