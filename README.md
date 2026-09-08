@@ -67,10 +67,29 @@ added later is caught without anyone remembering to update the check. It never t
 | Prompt | Use |
 | --- | --- |
 | `prompts/review/review-local.md` | Review uncommitted / local branch work before a PR exists. |
-| `prompts/review/review-pr.md` | Review a single GitHub PR and post the report as a PR comment. |
+| `prompts/review/review-pr.md` | Review a single GitHub PR and post the report as a PR comment. On **your own** PR with findings, it may instead fix, verify, commit, and push — see below. |
 | `prompts/review/review-stack.md` | Review a whole stack of PRs, posting one report on the top layer. |
 | `prompts/review/review-dependabot.md` | Review a Dependabot bump, accounting for rebases and re-bumps. |
 | `prompts/review/claude-code-notes.md` | Claude Code–specific execution notes. Loaded alongside the prompt above when running under Claude Code; not applicable to other agents. |
+
+### Fix mode (review-pr only)
+
+`review-pr.md` is the one prompt that can write to a repository. When the PR's author is
+the authenticated GitHub user **and** the review found problems, it may fix them instead
+of posting a comment: it assesses whether the current model and effort suit the
+findings, fixes and verifies, commits and pushes to the existing branch, then re-reviews
+once.
+
+It stops and asks rather than proceeding when a higher-effort model is warranted, when a
+finding needs design judgment, when the PR is stacked and the fix belongs in a lower
+layer, or when the second review still finds anything. That second-run limit is what
+bounds the loop; the count survives across invocations in the report's `Fix attempts:`
+line. When it stops, it supplies a ready-to-paste handoff prompt with real paths,
+branch, PR, and SHA filled in.
+
+Everything else stays read-only. Authorship is confirmed against `gh api user`, never
+inferred from the checked-out branch — so a Dependabot PR, or a colleague's branch you
+have checked out locally, can never trigger it.
 
 ### Report output
 

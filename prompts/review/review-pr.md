@@ -16,7 +16,7 @@ Scope:
 - If a prior report exists, read only its first ~80 lines first — that covers the `## Summary` index, which is enough to enumerate the previous findings without pulling a long Findings section into context. Read the specific finding's full section only when the summary line is too terse to tell what to re-verify, and prefer grepping the report for a file path over reading it end to end.
 - If the prior report records the commit SHA it reviewed, use `git diff <prior-sha>..HEAD` and `git log --oneline <prior-sha>..HEAD` to scope the re-review: concentrate on what changed since, but still confirm the unchanged areas of the diff are consistent with the prior conclusions rather than assuming them.
 - If previous findings exist for this branch, explicitly verify whether each one is resolved, and classify each as resolved, partially resolved, unresolved, or no longer applicable (with a one-line reason). Carry any still-unresolved finding forward into this run's Findings section as a fresh finding with re-derived citations — do not simply reference the old report.
-- Do not modify files, commit, or push. The only permitted GitHub write is posting the finished report as a single PR comment, exactly as described under "Output file" — no inline review comments, no approvals, no edits to the PR body.
+- Do not modify files, commit, or push, and do not post anything other than the finished report as a single PR comment, exactly as described under "Output file" — no inline review comments, no approvals, no edits to the PR body. The **one** exception is the fix mode described under "Fixing your own PR", which applies only when the PR's author is you and the review produced findings; it is off by default and you must confirm authorship explicitly before entering it.
 - Do not run builds or tests unless explicitly requested. You may inspect existing CI results.
 - **Run the repo's comment-length check — it is exempt from the "no builds or tests" rule above.** `scripts/check-comment-length.mjs` (the `pnpm check:comments` gate) needs no build and is strictly read-only: it shells out only to `git diff --name-only`, `git ls-files --others`, `git blame`, `git rev-list`, and `git config`. It never writes, stages, or checks anything out, so it is safe to run against any working tree.
 - Scope it to the PR author, not to yourself. Its default scope attributes blocks to the local `git config user.email` — the reviewer's, not the author's — so on someone else's PR it silently finds nothing. Resolve the author email from the PR's commits (`gh api repos/{owner}/{repo}/pulls/{number}/commits --jq '.[].commit.author.email'`) and run `COMMENT_AUTHOR=<pr-author-email> node scripts/check-comment-length.mjs <base-ref>`. A PR may carry more than one distinct author email — run the check once per email, or fall back to `COMMENT_SCOPE=all`.
@@ -32,9 +32,68 @@ Output file:
 - When deriving the filename from the branch name, replace any character that is not alphanumeric, `-`, or `_` with `-`, and collapse consecutive `-` into one.
 - Overwrite the file if it already exists from a prior run on this branch/PR. Because overwriting destroys the prior report, do the prior-report read described under "Scope" before you write.
 - Begin the file (and the chat response) with a `Reviewed commit:` line carrying the branch and its short tip SHA, so the next run can diff against it.
+- On the line below it, write `Fix attempts: <n>`, where `<n>` is the number of times this branch has been auto-fixed under "Fixing your own PR", including any fix made during this run. Write `Fix attempts: 0` when no fix has been made. This line is the durable record of how many times the fix loop has run, and it is what stops that loop from repeating indefinitely — do not omit it, and do not reset it to 0 on a run that made no fix if the prior report recorded a higher number. Carry the prior value forward.
 - Once the file write has completed — and only then, never before it and never concurrently with it — post the same report as a PR comment with `gh pr comment <number> --body-file {{HOME}}/agents/output/PR-<number>.md`, passing the file that was just written. This is the one GitHub write this review performs.
+- **Do not post the comment if "Fixing your own PR" applies** — that is, the PR is authored by you and this run produced findings. Write the file as normal, then follow that section instead. The file write is never skipped; only the comment is.
 - Skip the comment step when no PR exists for the branch (the report was named after the branch instead); there is nothing to comment on.
 - If `gh pr comment` fails, do not retry it and do not attempt any alternative posting path. State plainly in the chat response that posting the comment failed, include the error, and say the report is saved at `{{HOME}}/agents/output/PR-<number>.md` for manual posting.
+
+Fixing your own PR:
+
+This section changes what happens after a review that found problems on a PR you wrote. It never applies to anyone else's PR, and it never applies to a clean review.
+
+- **Confirm authorship explicitly before anything else here applies.** Compare `gh api user --jq '.login'` against `gh pr view <number> --json author --jq '.author.login'`. Enter this mode only on an exact match. If the two differ, either lookup fails, or the PR is authored by a bot or an org account, this is not your PR: post the comment as described under "Output file" and stop. Never infer authorship from the branch name, from `git config user.email`, from the commit author email resolved for the comment-length check, or from the fact that the branch is checked out locally — a reviewer routinely has someone else's branch checked out, which is precisely when a wrong guess would push commits to a PR that is not theirs.
+- If the review produced no findings, this section does not apply. Post the comment as normal.
+- Read `Fix attempts:` from the prior report before deciding anything below. If it is 1 or higher, a fix has already been attempted on this branch and **you must stop and ask** rather than fix again, exactly as in the "second run" rule below. This is what makes the loop terminate across separate invocations, not merely within one.
+
+Deciding whether to fix:
+
+- Before fixing anything, assess whether the current model and effort level are appropriate to the findings you just recorded. State the assessment and its reasoning in chat before acting on it. This is a judgment call, so make it explicitly rather than defaulting to "yes".
+- Proceed with the fix when the findings are ones you can resolve completely and verify: a wrong conditional, a missing null guard, an off-by-one, an unhandled error path, a stale comment or doc, a missing test case, a mechanical rename left half-applied, an obviously incorrect type.
+- Stop and ask when a finding needs judgment the current setting is not suited to: a concurrency or ordering defect whose fix depends on the surrounding execution model; a security or authorization flaw where a wrong fix looks correct; an architectural or API-shape problem where the right answer is a design decision, not a patch; a data-migration or rollback hazard; anything whose blast radius you cannot bound from the diff alone; or a finding you recorded with hedged language because you were unsure.
+- Also stop and ask if the findings are individually simple but numerous enough that fixing them is a different task from reviewing them, or if two findings suggest conflicting fixes.
+- **If a larger or higher-effort model than the current one is warranted, do not proceed.** Stop and ask the user whether to (a) proceed anyway at the current setting, (b) spawn a subagent at a higher effort to address the findings, or (c) hand it to a separate session. Say which model or effort you would recommend and why. If the user picks (b) or (c), the delegated work follows this same section, including the attempt limit.
+
+Making the fix:
+
+- Fix mode lifts the "do not modify files, commit, or push" rule and the "do not run builds or tests" rule, for this branch only. Nothing else is lifted: still no inline comments, no approvals, no PR body edits, no merges, no force-pushes, no rebases, no amending or reordering existing commits, and no changes outside what the findings call for. Opportunistic cleanup you noticed but did not report as a finding is out of scope.
+- Address the findings, then run the repo's tests, build, lint, and type-check as applicable to what you touched. A fix you have not verified is not a fix. If the repo's checks cannot run, say so plainly and treat the fix as unverified.
+- Commit the fixes as one or more new commits on the existing branch, with messages describing what was wrong and why the change is correct. Never amend or force-push: the PR has been pushed and may have been read, and rewriting its history would invalidate the SHAs cited in the report you just wrote.
+- **If the PR is part of a stack, be more careful.** Fix only this layer, and only within the files this layer's diff already touches. A finding whose real fix belongs in a lower layer is a stop-and-ask, not something to patch here — patching it in the upper layer papers over the lower one and creates a layering violation of exactly the kind this review is meant to catch. Do not rebase, restack, or touch any other layer, even if the fix appears to require it; say so and stop instead.
+- Push the new commits to the PR branch.
+
+After the fix:
+
+- Re-run this entire prompt against the updated branch: re-resolve the tip SHA, re-derive the diff, and review again from scratch. Do not merely re-check the findings you fixed — a fix can introduce a new problem, and that is the main thing this second pass exists to catch.
+- Record `Fix attempts: 1` (or the prior value plus one) in the new report.
+- **If the second run finds nothing, you are done.** Report in chat what was found, what was fixed, and what was pushed, and confirm the second review was clean. Do not post a PR comment: the findings were resolved rather than raised, and the commits are the record.
+- **If the second run finds anything at all, stop.** Do not fix again. Report the remaining findings in chat and ask the user whether to continue attempting fixes. This limit exists to prevent an unbounded fix–review loop, so honour it even when the remaining finding looks trivial and even when it is unrelated to the first round's findings.
+- Continue only on an explicit instruction from the user in response to that question. A general prior approval to fix the PR is not consent to a further round; ask again after each subsequent round.
+- If the user declines to continue, post the current report as a PR comment per "Output file" so the outstanding findings are recorded on the PR, and say that you did.
+
+Handing off:
+
+- Whenever you stop and offer to spawn a subagent or a separate session — whether because a higher-effort model is warranted or because the second run still found problems — **also provide a ready-to-paste prompt for that session**, in a fenced block, as part of the same message. The user should not have to reconstruct the context themselves.
+- The suggested prompt must be self-contained and name, explicitly rather than by reference: the absolute path of the repository working directory; the branch; the PR number and URL; the tip SHA the report was written against; the absolute path of the report file (`{{HOME}}/agents/output/PR-<number>.md`); the specific findings to address, by their summary lines; and the current `Fix attempts:` value.
+- It must also carry the constraints forward, so the delegated session does not start from a blank slate: instruct it to read the report file first, to follow this prompt's "Fixing your own PR" section including the attempt limit, and to stop and ask rather than exceed it.
+- Write real values into that prompt, not placeholders. `<number>`, `<branch>`, and `<ref>` are for citations in the report; a handoff prompt containing them is not usable. Resolve them.
+- Shape it roughly like this, with every field filled in:
+
+```
+Address the review findings on PR #482 (https://github.com/{owner}/{repo}/pull/482)
+in {{HOME}}/dev/{repo}, branch atomic-feedback-lineage, reviewed at commit a1b2c3d.
+
+The full review is at {{HOME}}/agents/output/PR-482.md — read it first.
+Fix attempts so far: 1.
+
+Address these findings:
+- <summary line of finding 1>
+- <summary line of finding 2>
+
+Follow the "Fixing your own PR" section of {{HOME}}/agents/prompts/review/review-pr.md:
+verify each fix, commit and push to the existing branch without amending or
+force-pushing, then re-review. Stop and ask before exceeding the attempt limit.
+```
 
 Review priorities:
 
