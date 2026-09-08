@@ -69,7 +69,7 @@ added later is caught without anyone remembering to update the check. It never t
 | --- | --- |
 | `prompts/review/review-local.md` | Review uncommitted / local branch work before a PR exists. May fix its findings — see below. |
 | `prompts/review/review-pr.md` | Review a single GitHub PR and post the report as a PR comment. On **your own** PR with findings, it may instead fix, verify, commit, and push — see below. |
-| `prompts/review/review-stack.md` | Review a whole stack of PRs, posting one report on the top layer. Never fixes; holds "fix before merge" reports back. |
+| `prompts/review/review-stack.md` | Review a whole stack of PRs, posting one report on the top layer. Never fixes; posts automatically only on "approve". |
 | `prompts/review/review-dependabot.md` | Review a Dependabot bump, accounting for rebases and re-bumps. |
 | `prompts/review/claude-code-notes.md` | Claude Code–specific execution notes. Loaded alongside the prompt above when running under Claude Code; not applicable to other agents. |
 
@@ -79,9 +79,9 @@ Two prompts can write; one deliberately cannot.
 
 | Prompt | Can fix? | What it does with findings |
 | --- | --- | --- |
-| `review-local` | Yes | Edits the working tree. Never commits, stages, or pushes. |
+| `review-local` | Yes | WIP-commits your in-flight work, then edits the tree. Offers three ways to finish. |
 | `review-pr` | Yes, own PR only | Fixes, verifies, commits, pushes, re-reviews once. |
-| `review-stack` | **No** | Reports only. Holds "fix before merge" back from the top PR. |
+| `review-stack` | **No** | Reports only. Posts to the top PR automatically on "approve" alone. |
 
 Both fixing prompts share the same shape: assess whether the current model and effort
 suit the findings and say so; fix and verify; re-review **once** from scratch, because a
@@ -103,15 +103,35 @@ fail that check. On a stacked PR, a fix belonging in a lower layer is a stop-and
 never a patch applied one layer up.
 
 **`review-local` is the one to run first**, before a PR exists. It has no authorship gate
-— uncommitted local work is yours by definition — but a stricter blast radius, because
-uncommitted changes exist in no commit, stash, or remote. It backs up every file before
-editing it, never commits or stages (your staging area reflects intent it cannot know),
-and the prohibition on `git stash`/`checkout`/`reset`/`add` is not relaxed at all.
+— uncommitted local work is yours by definition — but it is the only one editing changes
+that exist in no commit and no remote, so it protects them with git rather than around
+it: before touching anything it commits your in-flight work as a WIP commit and records
+the SHAs either side of it. Its own fixes stay uncommitted on top, so the boundary
+between your work and its stays visible in `git diff`.
+
+It then offers three ways to finish, and runs none of them unasked:
+
+| You want | It offers |
+| --- | --- |
+| The fixes, uncommitted | `git reset --mixed <pre-WIP>` — as if you'd made them by hand |
+| The fixes discarded | `git reset --hard <WIP>` then `git reset --mixed <pre-WIP>` |
+| The fixes committed | `git commit --amend` onto the WIP, with a real message you supply |
+
+The `--hard` is safe only because it targets the WIP commit holding all your work; the
+prompt is required to say so, and to note that restoring returns everything unstaged, so
+a partly staged index is not reconstructed. Nothing else is relaxed — it still may not
+run `stash`, `checkout`, `reset`, or `clean` itself.
 
 **`review-stack` deliberately has no fix mode**, and the prompt says so explicitly so it
 is not improvised back in. A fix belongs in the layer that introduced the problem,
 changing that layer invalidates every layer above it, and restacking rewrites branches
 that may already be reviewed. That is not a one-pass automatic operation.
+
+It also posts automatically **only** on an "approve" verdict. Both "fix before merge" and
+"do not merge" write the report and print it, then ask before commenting: each means the
+stack is still moving, so posting pins a findings list to a top PR whose SHAs the fixes
+will invalidate, and puts a public verdict on someone's stack before its author has read
+it. An "approve" does not go stale that way and has nothing to respond to.
 
 ### Report output
 

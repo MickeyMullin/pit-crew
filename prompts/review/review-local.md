@@ -46,9 +46,13 @@ Deciding whether to fix:
 
 Making the fix:
 
-- **Back up every file before you first edit it.** Copy each one to `{{HOME}}/agents/output/backups/local-<branch>-<timestamp>/`, preserving its path relative to the repository root, and tell the user that directory in your response. This is not optional and not the same as the safety net a pushed branch has: uncommitted changes exist in no commit, no stash, and no remote, so if a fix makes them worse there is nothing to restore from. The backup is the only undo.
-- Fix mode lifts **only** the "do not modify files" rule, and only for files this review flagged. Everything else in "Hard constraints" stands in full. In particular the git-state prohibition is not relaxed by any amount: still no `git stash`, `checkout`, `switch`, `restore`, `reset`, `add`, `clean`, `rebase`, or `merge`. If a fix seems to need one of those, it is out of scope — say so and stop.
-- **Do not commit, stage, or push.** Leave the fixes in the working tree exactly as the dev will find them. The staging area reflects the dev's intent about what belongs in which commit, and you do not know that intent; silently staging your edits destroys the distinction between their work and yours.
+- **Commit the dev's in-flight work to a WIP commit before you edit anything.** This is a git repository; use it. Uncommitted changes exist in no commit and no remote, so until they are committed there is nothing to restore from — and unlike a copy filed away somewhere, a commit is something the dev already knows how to inspect, diff, and undo.
+  - Record the current HEAD short SHA first and note it in your response. Call it the **pre-WIP SHA**; every undo below is expressed against it.
+  - Then `git add -A` and `git commit -m "WIP: in-flight work before automated review fixes"`. Record that commit's SHA too — the **WIP SHA**. Note in your response that `git add -A` respects `.gitignore`, so ignored files are not captured and not protected.
+  - If the working tree is already clean, there is nothing in flight: skip the WIP commit entirely, say so, and treat the pre-WIP SHA as the WIP SHA for the undo instructions.
+  - This is the **only** commit you may create. Do not push it, do not amend anything, and do not create a branch or tag.
+- Fix mode lifts the "do not modify files" rule for files this review flagged, and lifts the git-state prohibition **only** for the single `git add -A` plus `git commit` above. Nothing else is relaxed: still no `git stash`, `checkout`, `switch`, `restore`, `reset`, `clean`, `rebase`, or `merge` run by you, at any point, for any reason. If a fix seems to need one of those, it is out of scope — say so and stop.
+- **Leave your own fixes uncommitted.** The WIP commit exists to protect the dev's work, not to absorb yours. Keeping the fixes as working-tree changes on top of it is what makes both undo paths below one command each, and it keeps the boundary between their work and yours visible in `git diff`.
 - Do not touch files outside the findings, and do not make opportunistic improvements you noticed but did not report.
 - Be aware the dev may have an editor open on these files. Make the edits in one pass and say plainly which files you changed, so a stale buffer written back over your fix is at least diagnosable.
 - Then run the specific tests, build, lint, or type-check that cover what you touched — this run has a reason to, so the "do not run builds or tests" constraint is lifted for verifying your own fixes and nothing else. A fix you have not verified is not a fix; if the checks cannot run, say so and treat it as unverified.
@@ -57,14 +61,44 @@ After the fix:
 
 - Re-run this entire prompt against the updated working tree: re-derive the diff and review again from scratch rather than only re-checking what you fixed. A fix can introduce a new problem, and catching that is the main reason this second pass exists.
 - Record `Fix attempts: 1` (or the prior value plus one) in the new report.
-- If the second pass finds nothing, you are done. Report what was found, what was changed, which files were touched, where the backup is, and what the dev should still run before pushing.
+- If the second pass finds nothing, you are done. Report what was found, what was changed, which files were touched, and what the dev should still run before pushing — then offer the three outcomes below.
 - **If the second pass finds anything at all, stop.** Do not fix again. Report the remaining findings and ask whether to continue. Honour this even when what remains looks trivial or unrelated to the first round.
 - Continue only on an explicit instruction in response to that question. A general approval to fix is not consent to a further round; ask again each time.
+
+Offering the outcome:
+
+- **Always end a run that made fixes by offering all three paths below**, printed explicitly with the real SHAs filled in. The dev should never have to work out how to unwind a WIP commit you created.
+- Never run any of them yourself without being asked to. Offer, then wait.
+- To **keep the fixes**, one command unwinds the WIP commit and leaves everything — the dev's work and your fixes together — as uncommitted changes, exactly as if the dev had made the fixes by hand:
+
+```
+git reset --mixed <pre-WIP SHA>
+```
+
+- To **discard the fixes** and leave the branch as it was when this run started:
+
+```
+git reset --hard <WIP SHA>
+git reset --mixed <pre-WIP SHA>
+```
+
+- Say plainly why the `--hard` is safe here, because `--hard` normally is not: it targets the WIP commit, which contains all of the dev's in-flight work, so it discards only your uncommitted fixes. Running it against any other ref would destroy their work.
+- State one caveat honestly: the restore returns all changes as unstaged. If the dev had a partly staged index, that split is not reconstructed — `git add -A` collapsed it. Nothing is lost, but they may need to re-stage.
+- To **keep the fixes as a commit** — offer this when the dev says they like the changes — fold them into the WIP commit and give it a real message, so the branch ends with one ordinary commit instead of something labelled WIP:
+
+```
+git add -A
+git commit --amend -m "<a real message describing the work>"
+```
+
+- Ask for the message rather than inventing one. The commit will contain the dev's in-flight work *and* your fixes together, which is usually what they want but is worth stating before you do it, since the two are no longer separable afterwards. If they would rather keep them apart, point them at the keep-uncommitted path instead and let them stage the split themselves.
+- This is the one case where a commit you created survives the run. It is still unpushed, and amending is safe precisely because the WIP commit has never left the machine.
+- The first two paths leave no WIP commit behind. If the dev wants none of the three, the WIP commit is a normal commit on their branch and they can keep it as is.
 
 Handing off:
 
 - Whenever you stop and offer to spawn a subagent or separate session, **also provide a ready-to-paste prompt for it**, in a fenced block, in the same message.
-- Resolve every value for real — no `<branch>` or `<file>` placeholders, which belong in citations and make a handoff prompt unusable. Name the absolute repository path, the branch, the absolute path of the report (`{{HOME}}/agents/output/local-<branch>.md`), the backup directory, the findings by their summary lines, the current `Fix attempts:` value, and the fact that the relevant work is uncommitted.
+- Resolve every value for real — no `<branch>` or `<file>` placeholders, which belong in citations and make a handoff prompt unusable. Name the absolute repository path, the branch, the absolute path of the report (`{{HOME}}/agents/output/local-<branch>.md`), the pre-WIP and WIP SHAs if a WIP commit was made, the findings by their summary lines, the current `Fix attempts:` value, and the fact that the relevant work is uncommitted.
 - Carry the constraints forward: instruct the session to read the report first, to follow this prompt's "Fixing what you found" section including the attempt limit and the prohibition on committing, staging, or pushing, and to stop and ask rather than exceed the limit.
 
 Review priorities:

@@ -76,21 +76,47 @@ if [[ ! -d "$deploy_dir" ]]; then
 fi
 
 # Applying would overwrite the sources. That is recoverable through git only if
-# the sources are committed, so uncommitted work in them blocks the run.
-if [[ "$dry_run" -eq 0 && "$force" -eq 0 ]]; then
+# the sources are committed, so uncommitted work in them blocks the run -- but
+# only when there is actually something to write. Checking up front would refuse
+# runs that would not overwrite anything at all, including the common case where
+# the trees already agree and this script is just refreshing the manifest.
+sources_checked=0
+ensure_sources_clean() {
+  [[ "$sources_checked" -eq 0 ]] || return 0
+  sources_checked=1
+  [[ "$dry_run" -eq 0 && "$force" -eq 0 ]] || return 0
   if ! git -C "$repo_root" diff --quiet -- prompts commands 2>/dev/null; then
     echo "error: prompts/ or commands/ has uncommitted changes." >&2
     echo "       Sanitizing would overwrite them with the deploy/ versions." >&2
     echo "       Commit or stash them first, or re-run with --force." >&2
     exit 1
   fi
-fi
+}
 
 echo "repo:       $repo_root"
 echo "deploy dir: $deploy_dir"
 echo "$home_substitute -> {{HOME}}"
 [[ "$dry_run" -eq 1 ]] && echo "mode:       dry run (nothing will be written)"
 echo
+
+# deploy/ and the sources agree once this script finishes -- whether it wrote
+# anything or found nothing to bring back. Either way a render would reproduce
+# what is already there, so refresh deploy-reviews.sh's manifest to say so.
+# Without this it keeps seeing pre-sanitize hashes and refuses to run, blocking
+# on edits that have in fact already been preserved.
+refresh_manifest() {
+  [[ -f "$deploy_dir/.manifest" ]] || return 0
+  local f
+  : > "$deploy_dir/.manifest"
+  while IFS= read -r f; do
+    if command -v shasum >/dev/null 2>&1; then
+      echo "$(shasum -a 256 "$f" | awk '{print $1}') ${f#$deploy_dir/}" >> "$deploy_dir/.manifest"
+    else
+      echo "$(sha256sum "$f" | awk '{print $1}') ${f#$deploy_dir/}" >> "$deploy_dir/.manifest"
+    fi
+  done < <(find "$deploy_dir" -type f -name '*.md' | sort)
+  echo "Render manifest refreshed; deploy/ and the sources are in sync."
+}
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -130,7 +156,10 @@ sanitize_tree() {
       changed=$((changed + 1))
     fi
 
-    [[ "$dry_run" -eq 1 ]] || cp "$staged" "$repo_root/$dst_dir/$name"
+    if [[ "$dry_run" -eq 0 ]]; then
+      ensure_sources_clean
+      cp "$staged" "$repo_root/$dst_dir/$name"
+    fi
   done
 }
 
@@ -141,6 +170,8 @@ if [[ $((changed + added)) -eq 0 ]]; then
   echo "  (nothing to bring back -- sources already match deploy/)"
   echo
   echo "$unchanged file(s) checked, 0 changed."
+  # Not on a dry run: a dry run must leave every trace of state alone.
+  [[ "$dry_run" -eq 1 ]] || refresh_manifest
   exit 0
 fi
 
@@ -166,6 +197,9 @@ if grep -rl "$home_substitute" "$repo_root/prompts" "$repo_root/commands" >/dev/
 fi
 
 echo "No real home path remains in the sources."
+
+refresh_manifest
+
 echo
 echo "Next:"
 echo "  git -C $repo_root diff -- prompts commands   # review before committing"

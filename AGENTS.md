@@ -76,6 +76,10 @@ limits are deliberate, and two matter most:
   what remains looks trivial — it is what prevents an unbounded fix–review loop.
 - **`review-pr` fixes only your own PR**, confirmed by matching `gh api user` against
   the PR author login. Never infer ownership from a checked-out branch.
+- **`review-local` may create exactly one commit** — a WIP commit of the user's
+  in-flight work, made *before* any edit, so there is something to restore from. Your
+  own fixes stay uncommitted on top of it. Offer the finish-up paths; run none of them
+  unless asked.
 
 ## Editing the prompts themselves
 
