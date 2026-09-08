@@ -14,6 +14,7 @@ this repo rather than holding its own.
 | `prompts/document/` | Documentation prompts: build a handover dossier for an area, and derive a client-facing version of it. |
 | `commands/claude/` | Claude Code slash commands that invoke the prompts. See [commands/claude/README.md](commands/claude/README.md). |
 | `scripts/` | The two directions. `deploy-reviews.sh` renders sources into a runnable copy; `sanitize.sh` brings tested edits back. |
+| `TODO.md` | Open decisions not yet made. |
 | `deploy/` | Generated, gitignored. The rendered output — the only place real home paths exist. |
 | `backups/` | Generated, gitignored. Timestamped copies of whatever a deploy replaced. One-step undo. |
 
@@ -209,14 +210,13 @@ a named owner rather than in a document that may be forwarded onward.
 ```bash
 git clone git@github.com:MickeyMullin/pit-crew.git
 cd pit-crew
-scripts/deploy-reviews.sh
+scripts/deploy-reviews.sh --install
 ln -sfn "$PWD/deploy/prompts" "$HOME/agents/prompts"
-cp deploy/commands/claude/review-*.md "$HOME/.claude/commands/"
 mkdir -p "$HOME/agents/output"
 ```
 
-The script prints those last two commands with real paths filled in; it does not run
-them, since both write outside the repo.
+`--install` copies the commands into `~/.claude/commands/`. The script prints the symlink
+command with real paths filled in but does not run it, since it writes outside the repo.
 
 ## The two directions
 
