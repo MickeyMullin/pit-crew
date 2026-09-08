@@ -80,7 +80,7 @@ Two prompts can write; one deliberately cannot.
 | Prompt | Can fix? | What it does with findings |
 | --- | --- | --- |
 | `review-local` | Yes | WIP-commits your in-flight work, then edits the tree. Offers three ways to finish. |
-| `review-pr` | Yes, own PR only | Fixes, verifies, commits, pushes, re-reviews once. |
+| `review-pr` | Yes, own PR only | Fixes, verifies, commits, pushes, re-reviews once. Never comments on your own PR unasked. |
 | `review-stack` | **No** | Reports only. Posts to the top PR automatically on "approve" alone. |
 
 Both fixing prompts share the same shape: assess whether the current model and effort
@@ -95,8 +95,15 @@ They stop and ask when a higher-effort model is warranted, or when a finding nee
 design judgment — concurrency, security, architecture, data migration — rather than a
 mechanical correction.
 
-**`review-pr` additionally gates on authorship**, matching `gh api user` against the PR
-author login. It never infers ownership from the checked-out branch: a reviewer
+**On your own PR, `review-pr` never posts a comment on its own initiative.** Findings get
+fixed rather than reported back to you; a clean review is reported in chat. Either way
+the report file is still written — it is the durable record, and the chat response is the
+notification. An "approve, no findings" comment on your own PR only adds noise to a
+thread other people have to scan. It posts unprompted only on someone else's PR, or on
+yours after asking and being told yes.
+
+**`review-pr` gates all of that on authorship**, matching `gh api user` against the PR
+author login, on every run rather than only when findings exist. It never infers ownership from the checked-out branch: a reviewer
 routinely has someone else's branch checked out, which is exactly when a wrong guess
 would push commits to a PR that isn't theirs. Bot-authored PRs, Dependabot included,
 fail that check. On a stacked PR, a fix belonging in a lower layer is a stop-and-ask,
