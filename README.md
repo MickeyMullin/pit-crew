@@ -14,6 +14,7 @@ this repo rather than holding its own.
 | `commands/claude/` | Claude Code slash commands that invoke the prompts. See [commands/claude/README.md](commands/claude/README.md). |
 | `scripts/` | The two directions. `deploy-reviews.sh` renders sources into a runnable copy; `sanitize.sh` brings tested edits back. |
 | `deploy/` | Generated, gitignored. The rendered output — the only place real home paths exist. |
+| `backups/` | Generated, gitignored. Timestamped copies of whatever a deploy replaced. One-step undo. |
 
 `prompts/` is grouped by job so later families (triage, release, maintenance) sit
 alongside `review/` rather than crowding it.
@@ -66,30 +67,51 @@ added later is caught without anyone remembering to update the check. It never t
 
 | Prompt | Use |
 | --- | --- |
-| `prompts/review/review-local.md` | Review uncommitted / local branch work before a PR exists. |
+| `prompts/review/review-local.md` | Review uncommitted / local branch work before a PR exists. May fix its findings — see below. |
 | `prompts/review/review-pr.md` | Review a single GitHub PR and post the report as a PR comment. On **your own** PR with findings, it may instead fix, verify, commit, and push — see below. |
-| `prompts/review/review-stack.md` | Review a whole stack of PRs, posting one report on the top layer. |
+| `prompts/review/review-stack.md` | Review a whole stack of PRs, posting one report on the top layer. Never fixes; holds "fix before merge" reports back. |
 | `prompts/review/review-dependabot.md` | Review a Dependabot bump, accounting for rebases and re-bumps. |
 | `prompts/review/claude-code-notes.md` | Claude Code–specific execution notes. Loaded alongside the prompt above when running under Claude Code; not applicable to other agents. |
 
-### Fix mode (review-pr only)
+### Fix mode
 
-`review-pr.md` is the one prompt that can write to a repository. When the PR's author is
-the authenticated GitHub user **and** the review found problems, it may fix them instead
-of posting a comment: it assesses whether the current model and effort suit the
-findings, fixes and verifies, commits and pushes to the existing branch, then re-reviews
-once.
+Two prompts can write; one deliberately cannot.
 
-It stops and asks rather than proceeding when a higher-effort model is warranted, when a
-finding needs design judgment, when the PR is stacked and the fix belongs in a lower
-layer, or when the second review still finds anything. That second-run limit is what
-bounds the loop; the count survives across invocations in the report's `Fix attempts:`
-line. When it stops, it supplies a ready-to-paste handoff prompt with real paths,
-branch, PR, and SHA filled in.
+| Prompt | Can fix? | What it does with findings |
+| --- | --- | --- |
+| `review-local` | Yes | Edits the working tree. Never commits, stages, or pushes. |
+| `review-pr` | Yes, own PR only | Fixes, verifies, commits, pushes, re-reviews once. |
+| `review-stack` | **No** | Reports only. Holds "fix before merge" back from the top PR. |
 
-Everything else stays read-only. Authorship is confirmed against `gh api user`, never
-inferred from the checked-out branch — so a Dependabot PR, or a colleague's branch you
-have checked out locally, can never trigger it.
+Both fixing prompts share the same shape: assess whether the current model and effort
+suit the findings and say so; fix and verify; re-review **once** from scratch, because a
+fix can introduce a new problem. If that second pass finds anything at all, stop and ask
+rather than fixing again. The count lives in the report's `Fix attempts:` line, so the
+bound survives across separate invocations rather than only within one session. Any stop
+that offers to delegate must supply a ready-to-paste handoff prompt with real paths,
+branch, and SHAs resolved.
+
+They stop and ask when a higher-effort model is warranted, or when a finding needs
+design judgment — concurrency, security, architecture, data migration — rather than a
+mechanical correction.
+
+**`review-pr` additionally gates on authorship**, matching `gh api user` against the PR
+author login. It never infers ownership from the checked-out branch: a reviewer
+routinely has someone else's branch checked out, which is exactly when a wrong guess
+would push commits to a PR that isn't theirs. Bot-authored PRs, Dependabot included,
+fail that check. On a stacked PR, a fix belonging in a lower layer is a stop-and-ask,
+never a patch applied one layer up.
+
+**`review-local` is the one to run first**, before a PR exists. It has no authorship gate
+— uncommitted local work is yours by definition — but a stricter blast radius, because
+uncommitted changes exist in no commit, stash, or remote. It backs up every file before
+editing it, never commits or stages (your staging area reflects intent it cannot know),
+and the prohibition on `git stash`/`checkout`/`reset`/`add` is not relaxed at all.
+
+**`review-stack` deliberately has no fix mode**, and the prompt says so explicitly so it
+is not improvised back in. A fix belongs in the layer that introduced the problem,
+changing that layer invalidates every layer above it, and restacking rewrites branches
+that may already be reviewed. That is not a one-pass automatic operation.
 
 ### Report output
 
@@ -129,11 +151,19 @@ script. Never move files between them by hand.
 ### Direction 1: you edited a source, and want to run it
 
 ```bash
-scripts/deploy-reviews.sh
+scripts/deploy-reviews.sh            # render into deploy/
+scripts/deploy-reviews.sh --install  # and install the commands into ~/.claude/commands
 ```
 
-Renders sources into `deploy/`, substituting `{{HOME}}`. Refuses to finish if any
-placeholder survives.
+Renders sources into `deploy/`, substituting `{{HOME}}`. Prompts take effect
+immediately, because `agents/prompts` points into `deploy/`; **commands do not** — they
+must be copied into `~/.claude/commands/`, which is what `--install` does.
+
+It renders to a staging directory and swaps it in only after every check passes, so an
+interrupted run cannot leave a half-rendered tree for an agent to read. It refuses to
+run at all if `deploy/` holds edits that never made it back to the sources — rendering
+would discard them and `deploy/` is gitignored, so nothing else would have them. Run
+`sanitize.sh` to keep those edits, or `--force` to discard them deliberately.
 
 ### Direction 2: you edited the live copy, tested it, and want to commit it
 
@@ -152,6 +182,21 @@ file by file — re-rendering what it produced must reproduce the deployed file 
 or it writes nothing. It refuses to run when the sources have uncommitted changes
 (pass `--force` to override), and aborts if any real path survives into the sources.
 It does not `git add`; read the diff yourself.
+
+### Backups and undo
+
+Every deploy first copies what it is about to replace into `backups/<timestamp>/` — the
+outgoing `deploy/` tree, and with `--install` the commands already in
+`~/.claude/commands/`. Neither of those has a git safety net, so this directory is their
+only undo. The run prints the exact restore commands:
+
+```bash
+cp -R backups/<timestamp>/deploy/. deploy/
+cp -R backups/<timestamp>/claude-commands/. ~/.claude/commands/
+```
+
+`backups/` is gitignored and grows on every run; prune it whenever you like. The
+committed sources are not backed up here — git already covers those.
 
 ## Rules
 
@@ -176,11 +221,14 @@ These hold for anyone working in this repo, human or agent:
 | Situation | Run |
 | --- | --- |
 | Fresh machine, nothing set up | See "Setting up a machine" above |
-| Changed a file in `prompts/` or `commands/` | `scripts/deploy-reviews.sh` |
+| Changed a file in `prompts/` | `scripts/deploy-reviews.sh` |
+| Changed a file in `commands/` | `scripts/deploy-reviews.sh --install` |
 | Changed a deployed file and tested it | `scripts/sanitize.sh` |
 | Not sure whether anything drifted | `scripts/sanitize.sh --dry-run` |
 | Deployed copy looks wrong or stale | `scripts/deploy-reviews.sh` to rebuild it |
-| Pulled changes from GitHub | `scripts/deploy-reviews.sh` |
+| Pulled changes from GitHub | `scripts/deploy-reviews.sh --install` |
+| Need to undo a deploy | `cp -R backups/<timestamp>/deploy/. deploy/` |
+| Deploy refused: unsanitized edits | `scripts/sanitize.sh` to keep them, `--force` to discard |
 
 Both scripts are idempotent and safe to run when nothing has changed; they report
 `0 changed` and exit successfully.

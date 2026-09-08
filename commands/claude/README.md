@@ -22,13 +22,17 @@ command is deployed, not when it runs.
 From the repo root:
 
 ```bash
-scripts/deploy-reviews.sh
-cp deploy/commands/claude/review-*.md "$HOME/.claude/commands/"
+scripts/deploy-reviews.sh --install
 ```
 
-The script renders the commands into `deploy/commands/claude/` with `{{HOME}}` replaced,
-and refuses to finish if any placeholder survives. It stops short of the copy because
-that writes outside the repo; it prints the exact command with paths filled in.
+That renders the commands with `{{HOME}}` replaced and copies them into
+`~/.claude/commands/`, backing up whatever was there first. Without `--install` they are
+rendered but **not** installed, and the run says so.
+
+This is the step people forget. Prompts take effect the moment they are rendered,
+because `agents/prompts` points into `deploy/`. Commands do not — Claude Code reads them
+from `~/.claude/commands/`, so a command change stays invisible until it is installed.
+Set `COMMANDS_TARGET` if yours live elsewhere.
 
 This assumes the prompts are deployed to `$HOME/agents/prompts/review/`. If your
 checkout lives elsewhere, see `HOME_SUBSTITUTE` in the root README.
@@ -46,20 +50,27 @@ churn is. To change one:
 
 1. Edit the file **here**, keeping `{{HOME}}` as the placeholder — never commit a real
    home directory path back.
-2. Commit and push.
-3. Re-run the two install commands above.
+2. `scripts/deploy-reviews.sh --install`
+3. Commit and push.
 
-Going the other direction — you edited `~/.claude/commands/` directly and want the
-change in the repo — re-placeholder it on the way back:
+Going the other direction — you edited `~/.claude/commands/` directly and it works:
 
 ```bash
-for f in ~/.claude/commands/review-*.md; do sed "s|$HOME|{{HOME}}|g" "$f" > "commands/claude/$(basename "$f")"; done
-git diff commands/claude/
+cp ~/.claude/commands/review-*.md deploy/commands/claude/
+scripts/sanitize.sh --dry-run
+scripts/sanitize.sh
+git diff -- commands
 ```
 
-Read that diff before committing. The reverse substitution is textual and rewrites every
-occurrence of your home path, not only the intended one — and a missed one is exactly
-the leak this setup exists to prevent.
+`sanitize.sh` re-placeholders the paths and verifies the round trip. Do **not** hand-run
+a reverse `sed` over these files: it rewrites every occurrence of your home path
+textually, and a missed one is exactly the leak this setup exists to prevent.
+
+Do this before the next render, not after — rendering rebuilds `deploy/` from the
+sources. It now refuses when `deploy/` holds unsanitized edits, and backs the tree up
+either way, so a mistake here is recoverable.
+
+See the root README's "The two directions" and "Rules" for the full workflow.
 
 ## Arguments
 

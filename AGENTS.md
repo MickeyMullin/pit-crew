@@ -14,19 +14,29 @@ built to prevent — it has already required one history rewrite.
 | --- | --- | --- | --- |
 | `prompts/`, `commands/` | Yes | `{{HOME}}` placeholders | Source of truth |
 | `deploy/` | No (gitignored) | Real absolute paths | What actually runs |
+| `backups/` | No (gitignored) | Timestamped copies | Undo for the two above |
 
 Files move between them **only** via scripts, never by hand:
 
 - `scripts/deploy-reviews.sh` — sources → `deploy/`, substituting `{{HOME}}` → `$HOME`.
+  Add `--install` to also copy the commands into `~/.claude/commands/`.
 - `scripts/sanitize.sh` — `deploy/` → sources, substituting `$HOME` → `{{HOME}}`.
 
-Both verify their own output and exit non-zero on failure. Both are idempotent.
+Both verify their own output and exit non-zero on failure. Both are idempotent. Before
+overwriting anything, `deploy-reviews.sh` copies it into `backups/<timestamp>/` and
+prints the restore command; it also refuses to run when `deploy/` holds edits that never
+reached the sources, since rendering would discard them.
+
+Exit codes: `0` success, `1` error, `2` bad usage, `3` (`sanitize.sh --dry-run` only)
+pending changes exist.
 
 ## What to do, by situation
 
 | The user asked you to... | Do this |
 | --- | --- |
-| Change a prompt or command | Edit the file in `prompts/` or `commands/`, keep `{{HOME}}`, then run `scripts/deploy-reviews.sh` |
+| Change a prompt | Edit it in `prompts/`, keep `{{HOME}}`, then run `scripts/deploy-reviews.sh` |
+| Change a command | Edit it in `commands/`, keep `{{HOME}}`, then run `scripts/deploy-reviews.sh --install` — commands do **not** take effect without the install step |
+| Undo a deploy | `cp -R backups/<timestamp>/deploy/. deploy/` |
 | Preserve a change already made in `deploy/` | Run `scripts/sanitize.sh`, then show the user `git diff` |
 | Check whether the trees have drifted | Run `scripts/sanitize.sh --dry-run` |
 | Rebuild the deployed copy | Run `scripts/deploy-reviews.sh` |
@@ -43,13 +53,29 @@ Both verify their own output and exit non-zero on failure. Both are idempotent.
 5. Do not modify `<name>` placeholders such as `<number>`, `<owner>`, `<ref>` in the
    prompts. Those are resolved by the reviewing agent at run time and must survive
    deployment unchanged. Only `{{NAME}}` is build-time.
-6. Do not commit `deploy/`. It is gitignored; keep it that way.
+6. Do not commit `deploy/` or `backups/`. Both are gitignored; keep it that way.
+7. Do not pass `--force` to either script to get past a refusal. Both refusals mean
+   real work is about to be destroyed. Run `sanitize.sh` to preserve it, or ask the
+   user. `--force` is theirs to choose, not yours.
 
 ## Before you report a change as done
 
 - `scripts/deploy-reviews.sh` exits 0, or you ran `scripts/sanitize.sh` and it exits 0.
 - `git grep -I "$HOME" -- prompts commands` returns nothing.
 - You showed the user the diff rather than committing silently.
+
+## Fix mode
+
+`review-local.md` and `review-pr.md` may fix the problems they find; `review-stack.md`
+may not, ever, and its prompt says so explicitly — do not improvise it back in. If you
+are running one of these reviews, follow the prompt's own fix section exactly. Its
+limits are deliberate, and two matter most:
+
+- **The one-attempt bound.** Re-review once after fixing; if that pass finds anything,
+  stop and ask. The count is in the report's `Fix attempts:` line. Honour it even when
+  what remains looks trivial — it is what prevents an unbounded fix–review loop.
+- **`review-pr` fixes only your own PR**, confirmed by matching `gh api user` against
+  the PR author login. Never infer ownership from a checked-out branch.
 
 ## Editing the prompts themselves
 

@@ -13,7 +13,7 @@ Scope:
 
 Hard constraints (the working tree is live — treat it as sacred):
 
-- Do not modify files, commit, push, or post anything to GitHub.
+- Do not modify files, commit, push, or post anything to GitHub. The **one** exception is the fix mode described under "Fixing what you found", which edits file contents only — it never commits, stages, pushes, or posts, and it never relaxes the git-state rule below.
 - **Never run any command that mutates git state or the working tree.** Specifically: no `git stash`, `git checkout`, `git switch`, `git restore`, `git reset`, `git add`, `git clean`, `git rebase`, or `git merge`. The dev has uncommitted work; any of these can destroy it. Use read-only inspection (`git diff`, `git diff --staged`, `git status`, `git log`, `git show`, `git merge-base`, `git ls-files`) only.
 - Do not run builds or tests unless explicitly requested. Instead, name the specific test files or commands the dev should run before pushing (see closing notes).
 - **One exception: run `pnpm check:comments`.** It satisfies the constraints above rather than weakening them — `scripts/check-comment-length.mjs` needs no build and is strictly read-only, shelling out only to `git diff --name-only`, `git ls-files --others`, `git blame`, `git rev-list`, and `git config`. It never writes, stages, or checks anything out, so it cannot touch the dev's uncommitted work.
@@ -27,6 +27,45 @@ Output file:
 - Name the file `{{HOME}}/agents/output/local-<branch>.md`, e.g. `{{HOME}}/agents/output/local-atomic-feedback-lineage.md`. The `local-` prefix keeps this from colliding with PR-review output for the same branch.
 - When deriving the filename from the branch name, replace any character that is not alphanumeric, `-`, or `_` with `-`, and collapse consecutive `-` into one.
 - Overwrite the file if it already exists from a prior run on this branch — re-running on the same branch is the expected workflow.
+- Begin the file (and the chat response) with a `Fix attempts: <n>` line, where `<n>` is the number of times this branch has been auto-fixed under "Fixing what you found", including any fix made during this run. Write `Fix attempts: 0` when no fix has been made, and carry a prior report's higher value forward rather than resetting it. This line is what bounds the fix loop across separate runs, not merely within one.
+
+Fixing what you found:
+
+This prompt is meant to be run first, before a PR exists, so that problems are fixed while they are still cheap. When this run finds problems, fixing them here is usually the point — but the working tree is live and uncommitted, so the bar for touching it is higher than it would be on a pushed branch, not lower.
+
+- No authorship check is needed. Uncommitted work on a locally checked-out branch is the dev's own by definition; there is no PR and no one else to attribute it to.
+- If the review found nothing, this section does not apply.
+- Read `Fix attempts:` from the prior report first. If it is 1 or higher, a fix has already been attempted on this branch: **stop and ask** rather than fixing again, exactly as in the "second pass" rule below.
+
+Deciding whether to fix:
+
+- Assess whether the current model and effort level suit the findings you just recorded, and state the assessment and its reasoning in chat before acting. Make the call explicitly rather than defaulting to "yes".
+- Proceed when the findings are ones you can resolve completely and verify: a wrong conditional, a missing null guard, an off-by-one, an unhandled error path, a stale comment or doc, a missing test case, a half-applied rename, an incorrect type.
+- Stop and ask when a finding needs judgment this setting is not suited to: a concurrency or ordering defect, a security or authorization flaw where a wrong fix looks correct, an architectural or API-shape decision, a data-migration or rollback hazard, anything whose blast radius you cannot bound from the diff, or any finding you recorded with hedged language because you were unsure.
+- **If a larger or higher-effort model is warranted, do not proceed.** Stop and ask whether to (a) proceed anyway at the current setting, (b) spawn a subagent at higher effort, or (c) hand it to a separate session, saying which you would recommend and why. Delegated work follows this same section, including the attempt limit.
+
+Making the fix:
+
+- **Back up every file before you first edit it.** Copy each one to `{{HOME}}/agents/output/backups/local-<branch>-<timestamp>/`, preserving its path relative to the repository root, and tell the user that directory in your response. This is not optional and not the same as the safety net a pushed branch has: uncommitted changes exist in no commit, no stash, and no remote, so if a fix makes them worse there is nothing to restore from. The backup is the only undo.
+- Fix mode lifts **only** the "do not modify files" rule, and only for files this review flagged. Everything else in "Hard constraints" stands in full. In particular the git-state prohibition is not relaxed by any amount: still no `git stash`, `checkout`, `switch`, `restore`, `reset`, `add`, `clean`, `rebase`, or `merge`. If a fix seems to need one of those, it is out of scope — say so and stop.
+- **Do not commit, stage, or push.** Leave the fixes in the working tree exactly as the dev will find them. The staging area reflects the dev's intent about what belongs in which commit, and you do not know that intent; silently staging your edits destroys the distinction between their work and yours.
+- Do not touch files outside the findings, and do not make opportunistic improvements you noticed but did not report.
+- Be aware the dev may have an editor open on these files. Make the edits in one pass and say plainly which files you changed, so a stale buffer written back over your fix is at least diagnosable.
+- Then run the specific tests, build, lint, or type-check that cover what you touched — this run has a reason to, so the "do not run builds or tests" constraint is lifted for verifying your own fixes and nothing else. A fix you have not verified is not a fix; if the checks cannot run, say so and treat it as unverified.
+
+After the fix:
+
+- Re-run this entire prompt against the updated working tree: re-derive the diff and review again from scratch rather than only re-checking what you fixed. A fix can introduce a new problem, and catching that is the main reason this second pass exists.
+- Record `Fix attempts: 1` (or the prior value plus one) in the new report.
+- If the second pass finds nothing, you are done. Report what was found, what was changed, which files were touched, where the backup is, and what the dev should still run before pushing.
+- **If the second pass finds anything at all, stop.** Do not fix again. Report the remaining findings and ask whether to continue. Honour this even when what remains looks trivial or unrelated to the first round.
+- Continue only on an explicit instruction in response to that question. A general approval to fix is not consent to a further round; ask again each time.
+
+Handing off:
+
+- Whenever you stop and offer to spawn a subagent or separate session, **also provide a ready-to-paste prompt for it**, in a fenced block, in the same message.
+- Resolve every value for real — no `<branch>` or `<file>` placeholders, which belong in citations and make a handoff prompt unusable. Name the absolute repository path, the branch, the absolute path of the report (`{{HOME}}/agents/output/local-<branch>.md`), the backup directory, the findings by their summary lines, the current `Fix attempts:` value, and the fact that the relevant work is uncommitted.
+- Carry the constraints forward: instruct the session to read the report first, to follow this prompt's "Fixing what you found" section including the attempt limit and the prohibition on committing, staging, or pushing, and to stop and ask rather than exceed the limit.
 
 Review priorities:
 

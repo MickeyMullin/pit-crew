@@ -21,6 +21,9 @@
 #   scripts/sanitize.sh --force      # proceed even if the sources are dirty
 #   HOME_SUBSTITUTE=/Users/other scripts/sanitize.sh
 #
+# Exit codes: 0 nothing pending or changes applied; 1 error; 2 bad usage;
+# 3 --dry-run found pending changes.
+#
 # This does not run `git add`. Read the diff first: the substitution is textual,
 # and a wrong replacement here is exactly the leak this repo exists to prevent.
 #
@@ -147,7 +150,9 @@ echo "$((changed + added)) file(s) to update, $unchanged unchanged."
 if [[ "$dry_run" -eq 1 ]]; then
   echo
   echo "Dry run: nothing written. Re-run without --dry-run to apply."
-  exit 0
+  # Exit 3, not 0: a dry run that found pending changes is a distinct outcome,
+  # and deploy-reviews.sh checks for exactly this before overwriting deploy/.
+  exit 3
 fi
 
 # Last line of defence. If a real path survived into the sources, it is one
