@@ -1,8 +1,8 @@
 # Claude Code commands
 
-Slash commands that invoke the prompts in [`prompts/review/`](../../prompts/review/).
-Each is a thin wrapper: it points Claude Code at the prompt file and tells it to also
-load `claude-code-notes.md`.
+Slash commands that invoke the prompts in [`prompts/`](../../prompts/). Each is a thin
+wrapper: it points Claude Code at the prompt file and tells it to also load
+`claude-code-notes.md`.
 
 ## Placeholder
 
@@ -53,10 +53,10 @@ churn is. To change one:
 2. `scripts/deploy-reviews.sh --install`
 3. Commit and push.
 
-Going the other direction — you edited `~/.claude/commands/` directly and it works:
+Going the other direction — you edited `~/.claude/commands/` directly and it works. **This one is yours to run, not an agent's**: it is the one place a file moves between the trees by hand, and it exists because the edit you are rescuing lives outside the repo entirely. Scope the glob if commands from other tools share that directory — it copies whatever matches.
 
 ```bash
-cp ~/.claude/commands/review-*.md deploy/commands/claude/
+cp ~/.claude/commands/*.md deploy/commands/claude/
 scripts/sanitize.sh --dry-run
 scripts/sanitize.sh
 git diff -- commands
@@ -74,5 +74,7 @@ See the root README's "The two directions" and "Rules" for the full workflow.
 
 ## Arguments
 
-`review-stack.md` is the only command that takes an argument (`$ARGUMENTS`) — the stack
-number, or any PR number in the stack. The others take none.
+Two commands take an argument (`$ARGUMENTS`). `review-stack.md` takes the stack number,
+or any PR number in the stack. `report-day.md` takes the day to report on — a date, a
+weekday name, `yesterday`, or nothing for today — plus anything else worth telling it,
+such as the meetings that left no trace on the machine. The rest take none.

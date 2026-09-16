@@ -12,6 +12,7 @@ this repo rather than holding its own.
 | --- | --- |
 | `prompts/review/` | Code-review prompts, plus agent-specific execution notes. Agent-agnostic except where noted. |
 | `prompts/document/` | Documentation prompts: build a handover dossier for an area, and derive a client-facing version of it. |
+| `prompts/report/` | Reporting prompts: reconstruct a day's work from the machine's own records. |
 | `commands/claude/` | Claude Code slash commands that invoke the prompts. See [commands/claude/README.md](commands/claude/README.md). |
 | `scripts/` | The two directions. `deploy-reviews.sh` renders sources into a runnable copy; `sanitize.sh` brings tested edits back. |
 | `TODO.md` | Open decisions not yet made. |
@@ -19,7 +20,7 @@ this repo rather than holding its own.
 | `backups/` | Generated, gitignored. Timestamped copies of whatever a deploy replaced. One-step undo. |
 
 `prompts/` is grouped by job so later families (triage, release, maintenance) sit
-alongside `review/` and `document/` rather than crowding them. The scripts walk `prompts/`
+alongside `review/`, `document/`, and `report/` rather than crowding them. The scripts walk `prompts/`
 recursively, so adding a family is just adding a directory — nothing needs teaching.
 
 ## Sanitization
@@ -204,6 +205,30 @@ without explicit say-so — then defaults to omitting. **It will never publish a
 access-control or data-exposure finding on its own judgment**, even when other findings
 have been approved: that is a security disclosure, and it belongs in a conversation with
 a named owner rather than in a document that may be forwarded onward.
+
+## The reporting prompt
+
+| Prompt | Use |
+| --- | --- |
+| `prompts/report/report-day.md` | Reconstruct one day's work from Claude Code transcripts, git history, and GitHub activity — shaped for filling in a timesheet. |
+
+Takes a date, a weekday name, `yesterday`, or nothing (today). It reads
+`~/.claude/projects/**/*.jsonl` for what you asked agents to do, `git log --all` across
+your working copies for what landed, and `gh` for the PRs and review comments you posted,
+then groups the day into blocks and proposes a timesheet split.
+
+It is strictly read-only apart from its own report, and it never posts anywhere — a day's
+record names clients, branches, and unreleased work. Output goes to
+`{{HOME}}/agents/output/day-<YYYY-MM-DD>.md`.
+
+Two things it will not do: estimate hours from message volume, or invent the meetings.
+Nothing offline reaches the transcripts, so tell it about them in the invocation — it
+places them as given, and otherwise just points at the quiet hours where something
+clearly happened.
+
+```
+/report-day Tuesday. Outside of Claude I had a 9am standup, a 1pm scope meeting, and 3pm co-work.
+```
 
 ## Setting up a machine
 

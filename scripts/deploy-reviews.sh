@@ -216,14 +216,16 @@ if [[ "$install" -eq 1 ]]; then
   echo
   echo "installing commands into $commands_target"
   installed=0
-  for f in "$deploy_dir/commands/claude"/review-*.md; do
+  for f in "$deploy_dir/commands/claude"/*.md; do
     [[ -e "$f" ]] || continue
+    # README.md documents the commands; it is not one of them.
+    [[ "$(basename "$f")" == "README.md" ]] && continue
     cp "$f" "$commands_target/$(basename "$f")"
     echo "  $(basename "$f")"
     installed=$((installed + 1))
   done
   if [[ "$installed" -eq 0 ]]; then
-    echo "error: no commands were installed; expected review-*.md in the render." >&2
+    echo "error: no commands were installed; expected *.md in the render." >&2
     exit 1
   fi
   echo "$installed command(s) installed."
@@ -231,7 +233,7 @@ else
   echo
   echo "Commands were rendered but NOT installed. Re-run with --install to install"
   echo "them into $commands_target, or copy them yourself:"
-  echo "  cp $deploy_dir/commands/claude/review-*.md $commands_target/"
+  echo "  cp $deploy_dir/commands/claude/*.md $commands_target/"
 fi
 
 if [[ "$backed_up" -gt 0 ]]; then
