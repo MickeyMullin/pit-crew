@@ -16,9 +16,9 @@ Hard constraints (the working tree is live — treat it as sacred):
 - Do not modify files, commit, push, or post anything to GitHub. The **one** exception is the fix mode described under "Fixing what you found", which edits file contents only — it never commits, stages, pushes, or posts, and it never relaxes the git-state rule below.
 - **Never run any command that mutates git state or the working tree.** Specifically: no `git stash`, `git checkout`, `git switch`, `git restore`, `git reset`, `git add`, `git clean`, `git rebase`, or `git merge`. The dev has uncommitted work; any of these can destroy it. Use read-only inspection (`git diff`, `git diff --staged`, `git status`, `git log`, `git show`, `git merge-base`, `git ls-files`) only.
 - Do not run builds or tests unless explicitly requested. Instead, name the specific test files or commands the dev should run before pushing (see closing notes).
-- **One exception: run `pnpm check:comments`.** It satisfies the constraints above rather than weakening them — `scripts/check-comment-length.mjs` needs no build and is strictly read-only, shelling out only to `git diff --name-only`, `git ls-files --others`, `git blame`, `git rev-list`, and `git config`. It never writes, stages, or checks anything out, so it cannot touch the dev's uncommitted work.
-- Run it with no arguments. The dev is the author, so the script's default scope — blocks attributed to `git config user.email` and new on this branch vs `origin/main` — is already correct, and uncommitted and untracked lines always count as theirs. Do not set `COMMENT_AUTHOR` or `COMMENT_SCOPE`.
-- Exit 1 means violations; exit 2 means the check could not run (no git email, unfetchable base). Exit 2 is a tooling problem, not a defect in the branch — say the check did not run, never report it as a finding.
+- **One exception: check comment-block length.** This satisfies the constraints above rather than weakening them — it is a read of the diff, not an execution of anything, so it cannot touch the dev's uncommitted work. Flag any comment block this branch adds whose text runs past 500 characters, counting a run of consecutive single-line comments or one block comment as a single block.
+- Scope it to what this branch adds, against its base. Uncommitted and untracked lines count too — on a local branch they are the dev's by definition. A long comment that was already there is not this branch's problem, so confirm a block is genuinely added by the diff before reporting it.
+- If the repo enforces its own comment-length gate and it is read-only and needs no build, prefer running that over judging by eye, and use its limit rather than 500 if the two differ.
 - If you build a combined diff, patch file, or any other scratch artifact to make the review easier to read, treat it as disposable working material only — use it to _locate_ changes, never as the source of a line number you report. See citation rules below.
 
 Output file:
@@ -110,7 +110,7 @@ Review priorities:
 5. API/schema compatibility and incorrect assumptions about data
 6. Accessibility and keyboard behavior
 7. Tests that provide false confidence or fail to exercise the behavior they claim to cover
-8. Pre-push hygiene: leftover debug statements, commented-out code, stray scratch or generated files, credentials or `.env` content staged for commit, TODOs that should be resolved or ticketed, and comment blocks this branch adds that exceed the repo's enforced 500-character limit (`pnpm check:comments`). Report these as P3 unless a secret is involved (then P0/P1). Do not let this become a style review.
+8. Pre-push hygiene: leftover debug statements, commented-out code, stray scratch or generated files, credentials or `.env` content staged for commit, TODOs that should be resolved or ticketed, and comment blocks this branch adds that exceed 500 characters. Report these as P3 unless a secret is involved (then P0/P1). Do not let this become a style review.
 9. Maintainability issues only when they create a concrete future failure risk
 
 Review standards:

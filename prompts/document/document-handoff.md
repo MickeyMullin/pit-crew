@@ -2,10 +2,10 @@ Produce a complete handover dossier for one area of this application, aimed at a
 
 The invocation names the area. Accept any of these forms and resolve them to a file set before writing anything:
 
-- a route or URL path (`/reports/profitability-dashboard`, `/dispatch/board`)
-- a directory (`apps/portal/src/components/planner`, `apps/jobs/src/dispatch-engine`)
-- a subsystem or feature name in prose ("the recommendation engine", "driver directory", "the leg projection job")
-- an API surface (`/api/dispatch/*`)
+- a route or URL path (`/reports/monthly-summary`, `/orders/board`)
+- a directory (`apps/web/src/components/scheduler`, `apps/worker/src/order-engine`)
+- a subsystem or feature name in prose ("the recommendation engine", "the user directory", "the nightly rollup job")
+- an API surface (`/api/orders/*`)
 
 If the name resolves ambiguously — two plausible areas, or a name that spans a UI surface and an unrelated backend job — state the candidates and the file counts, pick the reading that matches the user's evident intent, say which you picked in one line, and proceed. Do not stop to ask unless proceeding under either reading would waste the whole run.
 

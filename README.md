@@ -16,6 +16,7 @@ this repo rather than holding its own.
 | `commands/claude/` | Claude Code slash commands that invoke the prompts. See [commands/claude/README.md](commands/claude/README.md). |
 | `scripts/` | The two directions. `deploy-reviews.sh` renders sources into a runnable copy; `sanitize.sh` brings tested edits back. |
 | `TODO.md` | Open decisions not yet made. |
+| `LICENSE` | MIT. |
 | `deploy/` | Generated, gitignored. The rendered output — the only place real home paths exist. |
 | `backups/` | Generated, gitignored. Timestamped copies of whatever a deploy replaced. One-step undo. |
 

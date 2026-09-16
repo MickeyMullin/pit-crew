@@ -47,7 +47,7 @@ What to keep, and how to change it:
 - **Behavioral rules and business logic.** State transitions, decision rules, and what triggers what, described in domain vocabulary.
 - **Boundaries.** Keep the "what this area does not do" content and make it prominent. Say which neighbouring capability belongs to a different system, without naming repositories or services. Misplaced expectation about scope is the most common and most expensive client misunderstanding, and this section is the cheapest place to prevent it.
 - **A glossary.** Every domain term the page uses, defined plainly. The dossier's deep-dive vocabulary table is usually the seed for this.
-- **Known limitations, stated as behavior rather than as defects.** "Figures exclude jobs cancelled before dispatch" is a limitation a client needs and can plan around. "F-04: cancelled jobs are not filtered, causing inflated totals" is a defect report. Where the dossier's finding describes a real constraint on how the software behaves today, carry the constraint across in the first form. Where it describes something simply broken, that is a conversation, not a page — see below.
+- **Known limitations, stated as behavior rather than as defects.** "Figures exclude orders cancelled before fulfilment" is a limitation a client needs and can plan around. "F-04: cancelled orders are not filtered, causing inflated totals" is a defect report. Where the dossier's finding describes a real constraint on how the software behaves today, carry the constraint across in the first form. Where it describes something simply broken, that is a conversation, not a page — see below.
 
 Findings — ask, do not decide:
 
@@ -60,7 +60,7 @@ Findings — ask, do not decide:
 Tone and register:
 
 - Confident and plain. The software works and this document explains it; that is the register. Neither defensive nor promotional — no "robust", "seamless", "cutting-edge", and equally no apologising for how something was built.
-- Use the client's domain vocabulary, not the codebase's. Where the code's name for a concept differs from the business's name, use the business's and note the equivalence once in the glossary. A dossier that calls something a `LegProjection` describes a business object the client already has a word for; find that word.
+- Use the client's domain vocabulary, not the codebase's. Where the code's name for a concept differs from the business's name, use the business's and note the equivalence once in the glossary. A dossier that calls something an `AccrualBucket` describes a business object the client already has a word for; find that word.
 - Present tense, active voice, no hedging about what the software does today. Reserve conditional language for genuine uncertainty, and mark it as such.
 - Say "the system", "the platform", or the product's own name. Never "we", "our team", "the developers", or "the client" — the reader is the client, and being referred to in the third person on a page written for them reads badly.
 - Do not name individuals anywhere.

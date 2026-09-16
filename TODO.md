@@ -34,18 +34,6 @@ argument against: the prompt's current constraints are unusually strict for good
 editing a version constraint "to test" anything — and fix mode would have to lift
 precisely the rules that make the review trustworthy.
 
-## The original commit with a home path is still on GitHub
-
-`abf57b1`, the repo's first commit, contains `{{HOME}}/...` in four prompt files. It
-is unreachable from any branch and invisible in the UI, but still fetchable by SHA:
-`gh api repos/MickeyMullin/pit-crew/commits/abf57b1` returns it.
-
-GitHub does not publish a garbage-collection schedule and unreachable objects can persist
-indefinitely. Options: wait, ask GitHub Support to run a gc referencing that SHA, or
-delete and recreate the repository from a clean clone — the last is instant and certain,
-and this repo has no issues, PRs, stars, or forks to lose. Private repo, solo access, and
-the leaked string is a home directory path, so waiting is defensible.
-
 ## `backups/` has no rotation
 
 `scripts/deploy-reviews.sh` creates `backups/<timestamp>/` on every run and never removes
