@@ -171,6 +171,39 @@ layers by other authors, an approve is the verdict they might want recorded, so 
 so and offers to post. The authorship check grants nothing else — it decides posting
 only, and never licenses fixing.
 
+### Reviewing a branch you don't have checked out
+
+`review-pr` and `review-stack` both take a target, so you do not have to set up a
+worktree by hand first:
+
+```
+/review-pr 482
+/review-pr atomic-feedback-lineage
+/review-pr https://github.com/MickeyMullin/example/pull/482
+/review-stack 13
+```
+
+Each accepts a PR number, a branch name, or a PR URL; `review-stack` also takes a stack
+number, and resolves a branch or PR to the stack containing it. A bare number is read as
+a PR number first, since branches named for a number are rare. A branch with no PR stops
+the run and points at `review-local`, which is the prompt for work that has not become a
+PR yet.
+
+**A named target is reviewed in a throwaway worktree** under `{{HOME}}/agents/worktrees/`,
+never by checking it out in your working copy. That is the whole point of naming one:
+your in-flight work is untouched, and a dirty tree does not block the review. The
+worktree is detached at `origin/<branch>` — a local branch of that name may be stale, or
+checked out elsewhere, which would make the add fail — and it is removed when the review
+finishes. If removal refuses because something is in it, the run says so and leaves it
+rather than forcing.
+
+`review-pr` with **no** target keeps the original behavior: it reviews the branch you have
+checked out, in place, with no worktree. In fix mode from a worktree, it pushes with
+`git push origin HEAD:<branch>`, which cannot update the wrong branch.
+
+Citations stay repo-relative either way. The worktree path is scaffolding and never
+appears in a report.
+
 ### Report output
 
 The PR-writing prompts write their full report to `{{HOME}}/agents/output/` before posting
@@ -275,14 +308,16 @@ error — every failure mode it has is described in the message it prints.
 **2. Point `agents/prompts` at the rendered copy.**
 
 ```bash
-mkdir -p "$HOME/agents/output"
+mkdir -p "$HOME/agents/output" "$HOME/agents/worktrees"
 ln -sfn "$PWD/deploy/prompts" "$HOME/agents/prompts"
 ```
 
 The command wrappers all reference `$HOME/agents/prompts/...` by absolute path, so this
 symlink is what makes them resolve. The deploy script prints this exact line with real
 paths filled in but never runs it, because it writes outside the repo. `agents/output/`
-is where the review prompts write their reports before posting anything.
+is where the review prompts write their reports before posting anything, and
+`agents/worktrees/` is where they check out a branch you named rather than one you have
+checked out — see "Reviewing a branch you don't have checked out" below.
 
 **3. Confirm the install for your agent.** Each agent reads its commands from a different
 place, and none of them pick up a change until the file is in that place.

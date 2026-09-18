@@ -1,8 +1,42 @@
-Perform a PR-quality code review of all commits on the currently checked-out local branch.
+Perform a PR-quality code review of all commits on one pull request's branch — the branch named in the invocation, or the currently checked-out one when the invocation names nothing.
+
+Target:
+
+- **The invocation may name what to review.** Accept any of these, and resolve it before anything else happens:
+  - a PR number, with or without a leading `#` (`482`, `#482`)
+  - a branch name (`atomic-feedback-lineage`)
+  - a GitHub PR URL (`https://github.com/<owner>/<repo>/pull/482`)
+- **If the invocation names nothing, review the current checkout** and skip the worktree entirely. That is the original behavior and it stays the default: resolve the active branch and its PR, and work in place.
+- Resolve each form as follows, and say which form you took it as before acting on it:
+  - **URL**: parse `<owner>/<repo>` and the number from it. If that repo is not the one this working directory points at (`gh repo view --json nameWithOwner`), stop and say so. This review reads real files at real paths to build its citations, so it can only review a repo you have a clone of; naming a different one is a request it cannot honour from here.
+  - **All digits**: treat it as a PR number — `gh pr view <number> --json number,headRefName,author,state`. If no such PR exists, and only then, try it as a branch name; a branch named for a number is unusual but not impossible.
+  - **Anything else**: treat it as a branch name — `gh pr view <branch> --json number,headRefName,author,state`. If the branch has no PR, stop and say so, and point at `review-local.md`, which is the prompt for work that has not become a PR yet. Do not silently review it as a local branch.
+- **If the PR is closed or merged, say so and ask before continuing.** Reviewing a merged PR is occasionally what someone wants and usually a mistake about which number they typed.
+- **Review a named target in a throwaway worktree, never by checking it out here.** The point of naming a target is not disturbing what you are working on, and a checkout in this working copy would do exactly that — or refuse, when the tree is dirty.
+
+```
+git worktree prune
+git fetch origin
+git worktree add --detach {{HOME}}/agents/worktrees/<repo>-<branch>-<timestamp> origin/<branch>
+```
+
+- Detached, and from `origin/<branch>` rather than a local branch of the same name: a local copy may be stale, and may be checked out in another worktree, which would make the add fail outright. `git worktree prune` first clears metadata left by any worktree whose directory was removed by hand.
+- **Creating and removing that worktree is the only filesystem write this review performs outside its report**, and it is permitted despite the "do not modify files" rule below, which governs the code under review rather than the checkout it is read from.
+- Run the entire review inside the worktree. Every `git` command, every file read, and every citation check happens there.
+- **Cite repo-relative paths, never worktree-absolute ones.** The worktree path is scaffolding and means nothing to a reader of the report or to GitHub. `src/app/api.ts` is a citation; `{{HOME}}/agents/worktrees/repo-branch-20260918/src/app/api.ts` is a bug in the report.
+- The report file still goes to `{{HOME}}/agents/output/`, which is a fixed absolute path and unaffected by where the review ran.
+- **Remove the worktree when the review is finished**, after the report has been written and posted:
+
+```
+git worktree remove {{HOME}}/agents/worktrees/<repo>-<branch>-<timestamp>
+```
+
+- If that refuses because the worktree holds changes, do **not** pass `--force`. Say the worktree was left in place, give its path, and say what is in it. In fix mode the changes are committed and pushed before this point, so a refusal here means something unexpected is on disk and deleting it would destroy the only copy.
+- **In fix mode, push from the detached worktree explicitly**: `git push origin HEAD:<branch>`. There is no local branch to push, and naming the remote ref directly is both exact and incapable of updating the wrong branch.
 
 Scope:
 
-- Identify the active branch and associated GitHub PR.
+- Identify the branch and PR resolved under "Target" above; when nothing was named, that is the active branch and its associated PR.
 - Before reviewing anything, record the short SHA of the branch's tip commit (`git rev-parse --short HEAD`). Note it up front and use it as the `<ref>` in every citation URL, so the report is pinned to the exact commit reviewed. This is also what makes a later re-review cheap: the next run can diff its own HEAD against the SHA recorded in the prior report.
 - Determine whether the PR is part of a stack by checking the PR resource's `stack` field (e.g. `gh api repos/{owner}/{repo}/pulls/{number} --jq '.stack'`), not by inspecting the base branch — a bottom-layer PR targets the default branch just like a standalone PR, so the base alone can't distinguish them. A `null` value means this is a standalone PR; skip the stack-specific steps below.
 - If the PR is part of a stack, read its position and size from the `stack` object, and read its immediate base branch from the PR's own `base.ref` (the layer directly below it, not `stack.base.ref`, which is the stack's ultimate trunk target).
@@ -16,7 +50,7 @@ Scope:
 - If a prior report exists, read only its first ~80 lines first — that covers the `## Summary` index, which is enough to enumerate the previous findings without pulling a long Findings section into context. Read the specific finding's full section only when the summary line is too terse to tell what to re-verify, and prefer grepping the report for a file path over reading it end to end.
 - If the prior report records the commit SHA it reviewed, use `git diff <prior-sha>..HEAD` and `git log --oneline <prior-sha>..HEAD` to scope the re-review: concentrate on what changed since, but still confirm the unchanged areas of the diff are consistent with the prior conclusions rather than assuming them.
 - If previous findings exist for this branch, explicitly verify whether each one is resolved, and classify each as resolved, partially resolved, unresolved, or no longer applicable (with a one-line reason). Carry any still-unresolved finding forward into this run's Findings section as a fresh finding with re-derived citations — do not simply reference the old report.
-- Do not modify files, commit, or push, and do not post anything other than the finished report, once, in exactly one of the three forms described under "Posting the report" — no inline review comments, no second comment restating the verdict, no edits to the PR body, no merges. The verdict is carried by the form the report is posted in, never by a follow-up message. The **one** exception is the fix mode described under "Fixing your own PR", which applies only when the PR's author is you and the review produced findings; it is off by default and you must confirm authorship explicitly before entering it.
+- Do not modify files, commit, or push. The throwaway worktree described under "Target" is the one exception, and it is scaffolding rather than a change to the code. Do not post anything other than the finished report, once, in exactly one of the three forms described under "Posting the report" — no inline review comments, no second comment restating the verdict, no edits to the PR body, no merges. The verdict is carried by the form the report is posted in, never by a follow-up message. The **one** exception is the fix mode described under "Fixing your own PR", which applies only when the PR's author is you and the review produced findings; it is off by default and you must confirm authorship explicitly before entering it.
 - Do not run builds or tests unless explicitly requested. You may inspect existing CI results.
 - **Check comment-block length — it is exempt from the "no builds or tests" rule above**, because it is a read of the diff rather than an execution of anything. Flag any comment block this PR adds whose text runs past 500 characters, counting a run of consecutive single-line comments or one block comment as a single block.
 - Scope it to this PR's own diff against its real base branch — reuse the base already resolved above, and do not fall back to the repo's default branch, which is the wrong base for a stacked PR. Confirm a flagged block is genuinely added by this PR before reporting it; a long comment that was already there belongs to whoever wrote it.
@@ -71,7 +105,7 @@ Making the fix:
 - Address the findings, then run the repo's tests, build, lint, and type-check as applicable to what you touched. A fix you have not verified is not a fix. If the repo's checks cannot run, say so plainly and treat the fix as unverified.
 - Commit the fixes as one or more new commits on the existing branch, with messages describing what was wrong and why the change is correct. Never amend or force-push: the PR has been pushed and may have been read, and rewriting its history would invalidate the SHAs cited in the report you just wrote.
 - **If the PR is part of a stack, be more careful.** Fix only this layer, and only within the files this layer's diff already touches. A finding whose real fix belongs in a lower layer is a stop-and-ask, not something to patch here — patching it in the upper layer papers over the lower one and creates a layering violation of exactly the kind this review is meant to catch. Do not rebase, restack, or touch any other layer, even if the fix appears to require it; say so and stop instead.
-- Push the new commits to the PR branch.
+- Push the new commits to the PR branch. From a worktree this is `git push origin HEAD:<branch>`, per "Target"; there is no local branch to push and naming the remote ref directly cannot update the wrong one.
 
 After the fix:
 
@@ -141,7 +175,7 @@ Review standards:
 
 Citation rules (follow exactly — line-number errors here have caused false citations before):
 
-- Every file:line reference must come from a fresh, direct read of the real file at its real path (Read tool, or `grep -n` / `sed -n` against the actual path on disk) taken immediately before you write the citation down. Never reuse line numbers you saw earlier from a concatenated diff, a `git diff` / `git show` patch, a Read of a scratch/tmp file, or from memory of an earlier tool call in the conversation — those numbering schemes do not match the source file.
+- Every file:line reference must come from a fresh, direct read of the real file at its real path (Read tool, or `grep -n` / `sed -n` against the actual path on disk) taken immediately before you write the citation down. When the review is running in a worktree, that path is inside the worktree — read it there, and strip the worktree prefix when you write the citation down, which must be repo-relative. Never reuse line numbers you saw earlier from a concatenated diff, a `git diff` / `git show` patch, a Read of a scratch/tmp file, or from memory of an earlier tool call in the conversation — those numbering schemes do not match the source file.
 - Treat any number that came from a diff hunk, a patch file, or a combined review artifact as untrustworthy for citation purposes even if it looks plausible, even if the surrounding content matches. Re-derive it from the real file before it goes in the report.
 - Immediately before finalizing the report, re-open (or re-grep) every cited file at its cited range and confirm the quoted line(s) actually contain the content you're describing. If a file is shorter than the cited line number, or the content doesn't match, fix the citation — do not soften or hedge it, correct it.
 - Format every citation as a Markdown link whose visible text is the repo-relative path + line range, and whose target is the full clickable GitHub blob URL: `[/<path>#L<start>-L<end>](https://github.com/<owner>/<repo>/blob/<ref>/<path>#L<start>-L<end>)`. The link text must NOT repeat the `https://github.com/<owner>/<repo>/blob/<ref>/` prefix — that noise belongs only in the URL, not the visible label. Use the short commit SHA recorded at the start of the review as `<ref>` by default — only use the branch name or a PR-relative diff link if the user asks for that form specifically.
