@@ -76,7 +76,7 @@ added later is caught without anyone remembering to update the check. It never t
 | --- | --- |
 | `prompts/review/review-local.md` | Review uncommitted / local branch work before a PR exists. May fix its findings — see below. |
 | `prompts/review/review-pr.md` | Review a single GitHub PR and post the report — as an approval, a request-changes review, or a comment, depending on what it found. On **your own** PR with findings, it may instead fix, verify, commit, and push — see below. |
-| `prompts/review/review-stack.md` | Review a whole stack of PRs, posting one report on the top layer. Never fixes; posts automatically only on "approve". |
+| `prompts/review/review-stack.md` | Review a whole stack of PRs, posting one report on the top layer — as an approval, a request-changes review, or a comment. Never fixes; posts automatically only on "approve". |
 | `prompts/review/review-dependabot.md` | Review a Dependabot bump, accounting for rebases and re-bumps. |
 | `prompts/review/claude-code-notes.md` | Claude Code–specific execution notes. Loaded alongside the prompt above when running under Claude Code; the Hermes and Codex skills say explicitly not to load it. |
 
@@ -146,13 +146,22 @@ is not improvised back in. A fix belongs in the layer that introduced the proble
 changing that layer invalidates every layer above it, and restacking rewrites branches
 that may already be reviewed. That is not a one-pass automatic operation.
 
-Its posting rules mirror `review-pr`'s. Both "fix before merge" and "do not merge" write
-the report and print it, then ask before commenting: each means the stack is still
-moving, so posting pins a findings list to a top PR whose SHAs the fixes will
-invalidate, and puts a public verdict on someone's stack before its author has read it.
-An "approve" does not go stale that way and posts automatically — but only on a stack
-that is not yours, since an approve on your own top PR is the same noise a self-addressed
-approve is anywhere else.
+Its posting rules mirror `review-pr`'s, including the form: a P0 or P1 is a
+request-changes review, a clean or P3-only stack is an approval, a P2 in between is a
+plain comment — one post, on the top layer's PR only.
+
+**Whether** it posts is a separate question from **how**, and that is where it diverges.
+Both "fix before merge" and "do not merge" write the report and print it, then ask
+first: each means the stack is still moving, so posting pins a findings list to a top PR
+whose SHAs the fixes will invalidate, and publicly blocks or judges someone's stack
+before its author has read it. An "approve" does not go stale that way and posts
+automatically — but only on a stack that is not yours, since an approve on your own top
+PR is the same noise a self-addressed approve is anywhere else, and GitHub would reject
+it regardless.
+
+That an approval is now a real review rather than a comment has one consequence worth
+knowing: on someone else's stack it can satisfy a required-review gate, so an automatic
+approve may be what unblocks a merge. It still never merges anything itself.
 
 Authorship is checked against the **top layer's** PR, the only one this review ever
 comments on, and never inferred from the checkout — this prompt checks out the top
