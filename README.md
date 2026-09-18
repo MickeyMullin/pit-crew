@@ -76,7 +76,7 @@ added later is caught without anyone remembering to update the check. It never t
 | --- | --- |
 | `prompts/review/review-local.md` | Review uncommitted / local branch work before a PR exists. May fix its findings — see below. |
 | `prompts/review/review-pr.md` | Review a single GitHub PR and post the report — as an approval, a request-changes review, or a comment, depending on what it found. On **your own** PR with findings, it may instead fix, verify, commit, and push — see below. |
-| `prompts/review/review-stack.md` | Review a whole stack of PRs, posting one report on the top layer — as an approval, a request-changes review, or a comment. Never fixes; posts automatically only on "approve". |
+| `prompts/review/review-stack.md` | Review a whole stack of PRs, posting one report on the top layer — as an approval, a request-changes review, or a comment. Never fixes, and never posts without being asked. |
 | `prompts/review/review-dependabot.md` | Review a Dependabot bump, accounting for rebases and re-bumps. |
 | `prompts/review/claude-code-notes.md` | Claude Code–specific execution notes. Loaded alongside the prompt above when running under Claude Code; the Hermes and Codex skills say explicitly not to load it. |
 
@@ -88,7 +88,7 @@ Two prompts can write; one deliberately cannot.
 | --- | --- | --- |
 | `review-local` | Yes | WIP-commits your in-flight work, then edits the tree. Offers three ways to finish. |
 | `review-pr` | Yes, own PR only | Fixes, verifies, commits, pushes, re-reviews once. Never comments on your own PR unasked. |
-| `review-stack` | **No** | Reports only. Never comments on your own stack unasked. |
+| `review-stack` | **No** | Reports only. Never posts on any stack unasked. |
 
 Both fixing prompts share the same shape: assess whether the current model and effort
 suit the findings and say so; fix and verify; re-review **once** from scratch, because a
@@ -150,18 +150,18 @@ Its posting rules mirror `review-pr`'s, including the form: a P0 or P1 is a
 request-changes review, a clean or P3-only stack is an approval, a P2 in between is a
 plain comment — one post, on the top layer's PR only.
 
-**Whether** it posts is a separate question from **how**, and that is where it diverges.
-Both "fix before merge" and "do not merge" write the report and print it, then ask
-first: each means the stack is still moving, so posting pins a findings list to a top PR
-whose SHAs the fixes will invalidate, and publicly blocks or judges someone's stack
-before its author has read it. An "approve" does not go stale that way and posts
-automatically — but only on a stack that is not yours, since an approve on your own top
-PR is the same noise a self-addressed approve is anywhere else, and GitHub would reject
-it regardless.
+**Whether** it posts is a separate question from **how**, and that is where it diverges:
+`review-stack` posts nothing without being told to, for any verdict. It writes the
+report, prints it, names the form it would use, and asks. Each form has its own reason
+for that. A findings verdict means the stack is still moving, so posting pins a list of
+problems to a top PR whose SHAs the fixes will invalidate. A request-changes review goes
+further and blocks that PR until someone dismisses it. And an approval is a real review —
+on someone else's stack it can satisfy a required-review gate, so it may be the thing
+that lets the stack merge, which is not a decision to make on a reviewer's behalf.
 
-That an approval is now a real review rather than a comment has one consequence worth
-knowing: on someone else's stack it can satisfy a required-review gate, so an automatic
-approve may be what unblocks a merge. It still never merges anything itself.
+Naming the form is the point of asking: "post the report?" and "submit an approval that
+may unblock this stack?" are different questions. On your own top PR it does not even
+ask, since GitHub rejects a self-approval and a self-addressed comment is just noise.
 
 Authorship is checked against the **top layer's** PR, the only one this review ever
 comments on, and never inferred from the checkout — this prompt checks out the top
