@@ -12,13 +12,27 @@
 # Sources (committed)          ->  Output (local only, gitignored)
 #   prompts/review/*.md        ->  deploy/prompts/review/*.md
 #   commands/claude/*.md       ->  deploy/commands/claude/*.md
+#   commands/skills/*/SKILL.md ->  deploy/commands/skills/*/SKILL.md
 #
 # Usage:
-#   scripts/deploy-reviews.sh            # render into ./deploy
-#   scripts/deploy-reviews.sh --install  # also install the commands into ~/.claude/commands
-#   scripts/deploy-reviews.sh --force    # render even if deploy/ has unsanitized edits
+#   scripts/deploy-reviews.sh                  # render into ./deploy
+#   scripts/deploy-reviews.sh --install        # also install for every agent found
+#   scripts/deploy-reviews.sh --install=codex  # install for named agents only
+#   scripts/deploy-reviews.sh --force          # render even if deploy/ has unsanitized edits
 #   DEPLOY_DIR=/tmp/x scripts/deploy-reviews.sh
 #   HOME_SUBSTITUTE=/Users/other scripts/deploy-reviews.sh
+#
+# Agents and where each one's commands are installed:
+#
+#   claude  ~/.claude/commands/<name>.md          CLAUDE_COMMANDS_TARGET
+#   hermes  ~/.hermes/skills/pit-crew/<name>/     HERMES_SKILLS_TARGET
+#   codex   ~/.codex/skills/<name>/               CODEX_SKILLS_TARGET
+#
+# Claude Code reads a directory of flat markdown slash commands; Hermes and Codex
+# both read SKILL.md skill directories, so those two share one source tree. A bare
+# --install installs for every agent whose directory exists on this machine and
+# says which ones it skipped; --install=<agent>[,<agent>] is explicit and fails if
+# a named agent is not there.
 #
 # Anything about to be overwritten is copied into backups/ first -- both the
 # outgoing deploy/ tree and, with --install, the commands already installed.
@@ -30,18 +44,17 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 deploy_dir="${DEPLOY_DIR:-$repo_root/deploy}"
 
 install=0
+install_agents=""   # empty with install=1 means "every agent found on this machine"
 force=0
 for arg in "$@"; do
   case "$arg" in
     --install) install=1 ;;
+    --install=*) install=1; install_agents="${arg#--install=}" ;;
     --force)   force=1 ;;
-    -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,44p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "error: unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
-
-# Where the Claude Code slash commands live once installed.
-commands_target="${COMMANDS_TARGET:-$HOME/.claude/commands}"
 
 # What {{HOME}} becomes. Override to render for a different account or checkout.
 home_substitute="${HOME_SUBSTITUTE:-$HOME}"
@@ -64,9 +77,82 @@ case "$home_substitute" in
     ;;
 esac
 
+# The agent registry: one line per agent, "name|source|target|form|env".
+#
+# Installing under $home_substitute rather than $HOME is deliberate. The rendered
+# command files contain $home_substitute/agents/prompts/... , so installing them
+# into a different account's directory would hand that account commands pointing
+# at paths it does not have. The two always match unless an env var overrides one.
+#
+# form=flat   a directory of *.md slash commands (Claude Code)
+# form=skills a directory of <name>/SKILL.md skill directories (Hermes, Codex)
+#
+# Hermes is namespaced under a pit-crew/ directory because it discovers SKILL.md
+# at any depth and treats the directory above a skill as its category -- so the
+# extra level both groups these skills and keeps uninstalling them to one `rm -r`.
+# Codex takes its skills at the top level, beside its own, so it gets no wrapper.
+agents="\
+claude|commands/claude|${CLAUDE_COMMANDS_TARGET:-${COMMANDS_TARGET:-$home_substitute/.claude/commands}}|flat|CLAUDE_COMMANDS_TARGET
+hermes|commands/skills|${HERMES_SKILLS_TARGET:-$home_substitute/.hermes/skills/pit-crew}|skills|HERMES_SKILLS_TARGET
+codex|commands/skills|${CODEX_SKILLS_TARGET:-$home_substitute/.codex/skills}|skills|CODEX_SKILLS_TARGET"
+
+agent_field() {
+  # agent_field <name> <1-based field>; prints nothing if the agent is unknown.
+  printf '%s\n' "$agents" | awk -F'|' -v n="$1" -v f="$2" '$1 == n { print $f }'
+}
+
+# An agent counts as present when the PARENT of its target exists: ~/.claude for
+# Claude, ~/.hermes/skills for Hermes, ~/.codex for Codex. The target itself may
+# legitimately not exist yet -- it is ours to create -- but its parent is the
+# agent's own directory, and creating that would be inventing an install.
+agent_present() {
+  [[ -d "$(dirname "$(agent_field "$1" 3)")" ]]
+}
+
+# Resolve which agents this run installs for, before anything is written -- the
+# backup step needs the target list, and an unknown agent name should fail before
+# deploy/ is touched rather than after.
+selected_agents=""
+skipped_agents=""
+if [[ "$install" -eq 1 ]]; then
+  if [[ -n "$install_agents" ]]; then
+    for a in ${install_agents//,/ }; do
+      if [[ -z "$(agent_field "$a" 1)" ]]; then
+        echo "error: unknown agent '$a'." >&2
+        echo "       Known agents: $(printf '%s\n' "$agents" | cut -d'|' -f1 | tr '\n' ' ')" >&2
+        exit 2
+      fi
+      if ! agent_present "$a"; then
+        echo "error: $a was named explicitly but $(dirname "$(agent_field "$a" 3)") does not exist." >&2
+        echo "       Install $a first, or point $(agent_field "$a" 5) somewhere that exists." >&2
+        exit 1
+      fi
+      selected_agents="$selected_agents $a"
+    done
+  else
+    while IFS='|' read -r name _ _ _ _; do
+      [[ -n "$name" ]] || continue
+      if agent_present "$name"; then
+        selected_agents="$selected_agents $name"
+      else
+        skipped_agents="$skipped_agents $name"
+      fi
+    done <<< "$agents"
+    if [[ -z "$selected_agents" ]]; then
+      echo "error: --install was given but no supported agent was found." >&2
+      printf '%s\n' "$agents" | while IFS='|' read -r name _ target _ env; do
+        echo "       $name: expected $(dirname "$target")  (override with $env)" >&2
+      done
+      echo "       Install one, or set its target env var; see --help." >&2
+      exit 1
+    fi
+  fi
+fi
+
 echo "repo:       $repo_root"
 echo "deploy dir: $deploy_dir"
 echo "{{HOME}}   -> $home_substitute"
+[[ -n "$selected_agents" ]] && echo "installing:$selected_agents"
 echo
 
 # Back up whatever is about to be destroyed, before destroying it. deploy/ is
@@ -127,7 +213,9 @@ if [[ -d "$deploy_dir" && "$force" -eq 0 && -f "$deploy_dir/.manifest" ]]; then
 fi
 
 back_up "$deploy_dir" "deploy"
-[[ "$install" -eq 1 ]] && back_up "$commands_target" "claude-commands"
+for a in $selected_agents; do
+  back_up "$(agent_field "$a" 3)" "$a-commands"
+done
 
 if [[ "$backed_up" -gt 0 ]]; then
   echo "backed up:  $backup_dir"
@@ -206,41 +294,93 @@ mv "$stage_dir" "$deploy_dir"
 echo
 echo "$rendered file(s) rendered, no placeholders remaining."
 
-if [[ "$install" -eq 1 ]]; then
-  if [[ ! -d "$commands_target" ]]; then
-    echo >&2
-    echo "error: no commands directory at $commands_target" >&2
-    echo "       create it, or set COMMANDS_TARGET to the right path." >&2
-    exit 1
-  fi
-  echo
-  echo "installing commands into $commands_target"
-  installed=0
-  for f in "$deploy_dir/commands/claude"/*.md; do
+# Both installers report through the global $installed rather than by printing a
+# count, so the names they list can go straight to the screen as they work.
+installed=0
+
+# Install a flat directory of *.md slash commands (Claude Code's form).
+install_flat() {
+  local src="$1" target="$2" f n
+  for f in "$src"/*.md; do
     [[ -e "$f" ]] || continue
     # README.md documents the commands; it is not one of them.
-    [[ "$(basename "$f")" == "README.md" ]] && continue
-    cp "$f" "$commands_target/$(basename "$f")"
-    echo "  $(basename "$f")"
+    n="$(basename "$f")"
+    [[ "$n" == "README.md" ]] && continue
+    cp "$f" "$target/$n"
+    echo "  $n"
     installed=$((installed + 1))
   done
-  if [[ "$installed" -eq 0 ]]; then
-    echo "error: no commands were installed; expected *.md in the render." >&2
-    exit 1
+}
+
+# Install <name>/SKILL.md skill directories (Hermes's and Codex's form). The whole
+# directory is copied, not just SKILL.md, so a skill that later grows scripts/ or
+# references/ beside it installs without this needing to be taught about them.
+install_skills() {
+  local src="$1" target="$2" d n
+  for d in "$src"/*/; do
+    [[ -f "$d/SKILL.md" ]] || continue
+    n="$(basename "$d")"
+    # Replace rather than merge: a file dropped from a skill upstream must not
+    # survive in the installed copy, where nothing would ever remove it.
+    rm -rf "${target:?}/$n"
+    cp -R "$d" "$target/$n"
+    echo "  $n/"
+    installed=$((installed + 1))
+  done
+}
+
+if [[ "$install" -eq 1 ]]; then
+  for a in $selected_agents; do
+    src="$deploy_dir/$(agent_field "$a" 2)"
+    target="$(agent_field "$a" 3)"
+    form="$(agent_field "$a" 4)"
+
+    if [[ ! -d "$src" ]]; then
+      echo "error: nothing rendered at $src for agent $a." >&2
+      exit 1
+    fi
+    mkdir -p "$target"
+
+    echo
+    echo "installing $a into $target"
+    installed=0
+    if [[ "$form" == "flat" ]]; then
+      install_flat "$src" "$target"
+    else
+      install_skills "$src" "$target"
+    fi
+
+    if [[ "$installed" -eq 0 ]]; then
+      echo "error: nothing was installed for $a; expected command files in $src." >&2
+      exit 1
+    fi
+    echo "$installed installed for $a."
+  done
+  if [[ -n "$skipped_agents" ]]; then
+    echo
+    echo "Not installed (no directory for them on this machine):$skipped_agents"
   fi
-  echo "$installed command(s) installed."
 else
   echo
   echo "Commands were rendered but NOT installed. Re-run with --install to install"
-  echo "them into $commands_target, or copy them yourself:"
-  echo "  cp $deploy_dir/commands/claude/*.md $commands_target/"
+  echo "them for every agent found here, or --install=<agent> for one:"
+  printf '%s\n' "$agents" | while IFS='|' read -r name src target form env; do
+    if agent_present "$name"; then
+      echo "  $name -> $target"
+    else
+      echo "  $name -> $target (not found here)"
+    fi
+  done
 fi
 
 if [[ "$backed_up" -gt 0 ]]; then
   echo
   echo "Undo: restore what this run replaced with"
   echo "  cp -R $backup_dir/deploy/. $deploy_dir/"
-  [[ "$install" -eq 1 ]] && echo "  cp -R $backup_dir/claude-commands/. $commands_target/"
+  for a in $selected_agents; do
+    [[ -d "$backup_dir/$a-commands" ]] || continue
+    echo "  cp -R $backup_dir/$a-commands/. $(agent_field "$a" 3)/"
+  done
 fi
 
 if [[ ! -L "$home_substitute/agents/prompts" ]]; then

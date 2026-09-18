@@ -19,7 +19,8 @@ built to prevent — it has already required one history rewrite.
 Files move between them **only** via scripts, never by hand:
 
 - `scripts/deploy-reviews.sh` — sources → `deploy/`, substituting `{{HOME}}` → `$HOME`.
-  Add `--install` to also copy the commands into `~/.claude/commands/`.
+  Add `--install` to also install the command wrappers for every supported agent found
+  on the machine (`--install=<agent>` for a subset).
 - `scripts/sanitize.sh` — `deploy/` → sources, substituting `$HOME` → `{{HOME}}`.
 
 Both verify their own output and exit non-zero on failure. Both are idempotent. Before
@@ -37,6 +38,8 @@ pending changes exist.
 | Change a prompt | Edit it in `prompts/`, keep `{{HOME}}`, then run `scripts/deploy-reviews.sh` |
 | Add a new prompt family | Just make the directory under `prompts/` — both scripts walk it recursively; neither needs editing |
 | Change a command | Edit it in `commands/`, keep `{{HOME}}`, then run `scripts/deploy-reviews.sh --install` — commands do **not** take effect without the install step |
+| Change a command for every agent | `commands/claude/` is Claude Code's flat slash commands; `commands/skills/` is the `SKILL.md` form that Hermes and Codex share. A change to what a command *does* usually belongs in both |
+| Add support for another agent | Add a line to the `agents=` registry in `scripts/deploy-reviews.sh` (`name\|source\|target\|form\|env`) and reuse `commands/skills/` if it reads `SKILL.md`. Do not hardcode a second install path |
 | Undo a deploy | `cp -R backups/<timestamp>/deploy/. deploy/` |
 | Preserve a change already made in `deploy/` | Run `scripts/sanitize.sh`, then show the user `git diff` |
 | Check whether the trees have drifted | Run `scripts/sanitize.sh --dry-run` |
@@ -51,11 +54,14 @@ pending changes exist.
 3. Do not hand-write a `sed` to convert between the two forms. Both directions are
    scripted and self-verifying; an ad-hoc substitution is how a path leaks.
 4. Do not `cp` files between the trees directly.
-5. Do not modify `<name>` placeholders such as `<number>`, `<owner>`, `<ref>` in the
+5. Do not put Claude Code–specific instructions in `commands/skills/` or in a prompt.
+   The skills are shared by Hermes and Codex, and each one says explicitly not to load
+   `claude-code-notes.md`. That file is Claude Code's alone.
+6. Do not modify `<name>` placeholders such as `<number>`, `<owner>`, `<ref>` in the
    prompts. Those are resolved by the reviewing agent at run time and must survive
    deployment unchanged. Only `{{NAME}}` is build-time.
-6. Do not commit `deploy/` or `backups/`. Both are gitignored; keep it that way.
-7. Do not pass `--force` to either script to get past a refusal. Both refusals mean
+7. Do not commit `deploy/` or `backups/`. Both are gitignored; keep it that way.
+8. Do not pass `--force` to either script to get past a refusal. Both refusals mean
    real work is about to be destroyed. Run `sanitize.sh` to preserve it, or ask the
    user. `--force` is theirs to choose, not yours.
 

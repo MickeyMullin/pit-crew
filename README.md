@@ -2,9 +2,10 @@
 
 Prompts, scripts, and scheduled jobs that service the repo so agents can review PRs and keep the shop running.
 
-This is the source of truth for the code-review prompts I run through Claude Code (and
-other agents). The prompts live here; the local machine points at a rendered copy of
-this repo rather than holding its own.
+This is the source of truth for the code-review prompts I run through Claude Code,
+Hermes, and Codex. The prompts themselves are agent-agnostic; each agent gets a thin
+wrapper that invokes them by name. The prompts live here; the local machine points at a
+rendered copy of this repo rather than holding its own.
 
 ## Layout
 
@@ -13,7 +14,8 @@ this repo rather than holding its own.
 | `prompts/review/` | Code-review prompts, plus agent-specific execution notes. Agent-agnostic except where noted. |
 | `prompts/document/` | Documentation prompts: build a handover dossier for an area, and derive a client-facing version of it. |
 | `prompts/report/` | Reporting prompts: reconstruct a day's work from the machine's own records. |
-| `commands/claude/` | Claude Code slash commands that invoke the prompts. See [commands/claude/README.md](commands/claude/README.md). |
+| `commands/claude/` | Claude Code slash commands that invoke the prompts. |
+| `commands/skills/` | The same commands as `SKILL.md` skills, for Hermes and Codex. Both read the same format, so they share one tree. See [commands/README.md](commands/README.md). |
 | `scripts/` | The two directions. `deploy-reviews.sh` renders sources into a runnable copy; `sanitize.sh` brings tested edits back. |
 | `TODO.md` | Open decisions not yet made. |
 | `LICENSE` | MIT. |
@@ -33,8 +35,8 @@ Every home directory root is written as the literal placeholder `{{HOME}}`:
 gh pr comment <number> --body-file {{HOME}}/agents/output/PR-<number>.md
 ```
 
-Nothing that reads these files expands the placeholder on its own. Claude Code does not
-expand `{{HOME}}`, `$HOME`, or `~` inside a command file, and an agent reading a prompt
+Nothing that reads these files expands the placeholder on its own. No agent expands
+`{{HOME}}`, `$HOME`, or `~` inside a command or skill file, and an agent reading a prompt
 treats the path as literal text. Substitution happens at deploy time instead:
 
 ```bash
@@ -73,10 +75,10 @@ added later is caught without anyone remembering to update the check. It never t
 | Prompt | Use |
 | --- | --- |
 | `prompts/review/review-local.md` | Review uncommitted / local branch work before a PR exists. May fix its findings — see below. |
-| `prompts/review/review-pr.md` | Review a single GitHub PR and post the report as a PR comment. On **your own** PR with findings, it may instead fix, verify, commit, and push — see below. |
+| `prompts/review/review-pr.md` | Review a single GitHub PR and post the report — as an approval, a request-changes review, or a comment, depending on what it found. On **your own** PR with findings, it may instead fix, verify, commit, and push — see below. |
 | `prompts/review/review-stack.md` | Review a whole stack of PRs, posting one report on the top layer. Never fixes; posts automatically only on "approve". |
 | `prompts/review/review-dependabot.md` | Review a Dependabot bump, accounting for rebases and re-bumps. |
-| `prompts/review/claude-code-notes.md` | Claude Code–specific execution notes. Loaded alongside the prompt above when running under Claude Code; not applicable to other agents. |
+| `prompts/review/claude-code-notes.md` | Claude Code–specific execution notes. Loaded alongside the prompt above when running under Claude Code; the Hermes and Codex skills say explicitly not to load it. |
 
 ### Fix mode
 
@@ -100,10 +102,15 @@ They stop and ask when a higher-effort model is warranted, or when a finding nee
 design judgment — concurrency, security, architecture, data migration — rather than a
 mechanical correction.
 
-**On your own PR, `review-pr` never posts a comment on its own initiative.** Findings get
-fixed rather than reported back to you; a clean review is reported in chat. Either way
-the report file is still written — it is the durable record, and the chat response is the
-notification. An "approve, no findings" comment on your own PR only adds noise to a
+**On someone else's PR, the verdict is the form of the post**, not a line of prose in it:
+any P0 or P1 submits a request-changes review, a clean or P3-only review submits an
+approval, and a P2 in between posts a plain comment. One post, carrying the whole report.
+
+**On your own PR, `review-pr` never posts on its own initiative** — no comment, no
+approval, no request-changes. Findings get fixed rather than reported back to you; a
+clean review is reported in chat. Either way the report file is still written — it is the
+durable record, and the chat response is the notification. GitHub rejects a self-approval
+outright, and an "approve, no findings" comment on your own PR only adds noise to a
 thread other people have to scan. It posts unprompted only on someone else's PR, or on
 yours after asking and being told yes.
 
@@ -233,16 +240,72 @@ clearly happened.
 
 ## Setting up a machine
 
+These steps are written to be followed by a person or by an agent, in order, without
+consulting anything else. Run them from a shell with `git` available. Every command is
+literal apart from the clone path, which is yours to choose.
+
+**1. Clone the repo and render the runnable copy.**
+
 ```bash
 git clone git@github.com:MickeyMullin/pit-crew.git
 cd pit-crew
 scripts/deploy-reviews.sh --install
-ln -sfn "$PWD/deploy/prompts" "$HOME/agents/prompts"
-mkdir -p "$HOME/agents/output"
 ```
 
-`--install` copies the commands into `~/.claude/commands/`. The script prints the symlink
-command with real paths filled in but does not run it, since it writes outside the repo.
+`scripts/deploy-reviews.sh` renders `prompts/` and `commands/` into `deploy/`, replacing
+`{{HOME}}` with your real home directory. `--install` then installs the command wrappers
+for **every supported agent it finds on this machine** and prints which ones it installed
+for and which it skipped. Skipping an agent you do not have is the expected outcome, not
+a failure. To install for specific agents only, use `--install=claude`, or any
+comma-separated subset of `claude,hermes,codex`.
+
+Expected: the run ends with `N file(s) rendered, no placeholders remaining.` and one
+`installing <agent> into <path>` block per agent. If it exits non-zero, stop and read the
+error — every failure mode it has is described in the message it prints.
+
+**2. Point `agents/prompts` at the rendered copy.**
+
+```bash
+mkdir -p "$HOME/agents/output"
+ln -sfn "$PWD/deploy/prompts" "$HOME/agents/prompts"
+```
+
+The command wrappers all reference `$HOME/agents/prompts/...` by absolute path, so this
+symlink is what makes them resolve. The deploy script prints this exact line with real
+paths filled in but never runs it, because it writes outside the repo. `agents/output/`
+is where the review prompts write their reports before posting anything.
+
+**3. Confirm the install for your agent.** Each agent reads its commands from a different
+place, and none of them pick up a change until the file is in that place.
+
+| Agent | What was installed | Verify | Invoke as |
+| --- | --- | --- | --- |
+| Claude Code | `~/.claude/commands/<name>.md` | `ls ~/.claude/commands` | `/review-pr` |
+| Hermes | `~/.hermes/skills/pit-crew/<name>/SKILL.md` | `ls ~/.hermes/skills/pit-crew` | `/review-pr`, or ask for the skill by name |
+| Codex | `~/.codex/skills/<name>/SKILL.md` | `ls ~/.codex/skills` | `/review-pr`, or ask for the skill by name |
+
+Claude Code takes flat markdown slash commands; Hermes and Codex take `SKILL.md` skill
+directories, and share one source tree because they read the same format. Restart or
+reload the agent if it does not see a newly installed command — most discover commands at
+startup.
+
+**4. Check that no placeholder survived.** A `{{HOME}}` reaching an installed file means
+the render did not substitute it, and the agent will look for a directory literally named
+`{{HOME}}`.
+
+```bash
+grep -rl '{{HOME}}' ~/.claude/commands ~/.hermes/skills/pit-crew ~/.codex/skills 2>/dev/null && echo "BROKEN: unsubstituted placeholders" || echo ok
+```
+
+Expected: `ok`.
+
+**If your directories are elsewhere**, set the target before running the install —
+`CLAUDE_COMMANDS_TARGET`, `HERMES_SKILLS_TARGET`, or `CODEX_SKILLS_TARGET`. If your
+checkout renders for a different account, set `HOME_SUBSTITUTE`; the install targets
+follow it, so the installed files and the account they point at stay consistent.
+
+Per-agent detail, including the Hermes `external_dirs` route that skips the install step
+entirely, is in [commands/README.md](commands/README.md).
 
 ## The two directions
 
@@ -251,23 +314,26 @@ paths, and is what actually runs. Changes flow **both ways**, and each direction
 script. Never move files between them by hand.
 
 ```
-                   scripts/deploy-reviews.sh  ->
-  prompts/review/*.md                              deploy/prompts/review/*.md
-  commands/claude/*.md                             deploy/commands/claude/*.md
-  (committed, {{HOME}})                            (gitignored, real paths, runs)
-                   <-  scripts/sanitize.sh
+                      scripts/deploy-reviews.sh  ->
+  prompts/review/*.md                                 deploy/prompts/review/*.md
+  commands/claude/*.md                                deploy/commands/claude/*.md
+  commands/skills/*/SKILL.md                          deploy/commands/skills/*/SKILL.md
+  (committed, {{HOME}})                               (gitignored, real paths, runs)
+                      <-  scripts/sanitize.sh
 ```
 
 ### Direction 1: you edited a source, and want to run it
 
 ```bash
-scripts/deploy-reviews.sh            # render into deploy/
-scripts/deploy-reviews.sh --install  # and install the commands into ~/.claude/commands
+scripts/deploy-reviews.sh                  # render into deploy/
+scripts/deploy-reviews.sh --install        # and install for every agent found here
+scripts/deploy-reviews.sh --install=codex  # or for named agents only
 ```
 
 Renders sources into `deploy/`, substituting `{{HOME}}`. Prompts take effect
 immediately, because `agents/prompts` points into `deploy/`; **commands do not** — they
-must be copied into `~/.claude/commands/`, which is what `--install` does.
+must be copied into each agent's own directory, which is what `--install` does, for every
+agent it finds here.
 
 It renders to a staging directory and swaps it in only after every check passes, so an
 interrupted run cannot leave a half-rendered tree for an agent to read. It refuses to
@@ -296,13 +362,14 @@ It does not `git add`; read the diff yourself.
 ### Backups and undo
 
 Every deploy first copies what it is about to replace into `backups/<timestamp>/` — the
-outgoing `deploy/` tree, and with `--install` the commands already in
-`~/.claude/commands/`. Neither of those has a git safety net, so this directory is their
-only undo. The run prints the exact restore commands:
+outgoing `deploy/` tree, and with `--install` whatever each agent already had installed,
+under `<agent>-commands/`. Neither of those has a git safety net, so this directory is
+their only undo. The run prints the exact restore commands for the agents it touched:
 
 ```bash
 cp -R backups/<timestamp>/deploy/. deploy/
 cp -R backups/<timestamp>/claude-commands/. ~/.claude/commands/
+cp -R backups/<timestamp>/codex-commands/. ~/.codex/skills/
 ```
 
 `backups/` is gitignored and grows on every run; prune it whenever you like. The
@@ -333,6 +400,7 @@ These hold for anyone working in this repo, human or agent:
 | Fresh machine, nothing set up | See "Setting up a machine" above |
 | Changed a file in `prompts/` | `scripts/deploy-reviews.sh` |
 | Changed a file in `commands/` | `scripts/deploy-reviews.sh --install` |
+| Set up a second agent on a machine | `scripts/deploy-reviews.sh --install` — it installs for whatever it finds |
 | Changed a deployed file and tested it | `scripts/sanitize.sh` |
 | Not sure whether anything drifted | `scripts/sanitize.sh --dry-run` |
 | Deployed copy looks wrong or stale | `scripts/deploy-reviews.sh` to rebuild it |

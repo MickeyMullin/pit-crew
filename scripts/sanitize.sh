@@ -7,9 +7,10 @@
 # deploy/, swaps the real home path back to the {{HOME}} placeholder, and writes
 # the result over the committed sources, ready for review and commit.
 #
-#   sources (committed)          deploy/ (gitignored, real paths)
-#   prompts/review/*.md    --->  deploy/prompts/review/*.md      deploy-reviews.sh
-#   commands/claude/*.md   <---  deploy/commands/claude/*.md     sanitize.sh
+#   sources (committed)             deploy/ (gitignored, real paths)
+#   prompts/review/*.md       --->  deploy/prompts/review/*.md      deploy-reviews.sh
+#   commands/claude/*.md      <---  deploy/commands/claude/*.md     sanitize.sh
+#   commands/skills/*/SKILL.md <--> deploy/commands/skills/*/SKILL.md
 #
 # The point is that deploy/ is what actually runs. Edit a prompt there, run a real
 # review against it, and once it works, bring the tested version back here without
@@ -38,7 +39,7 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run) dry_run=1 ;;
     --force)   force=1 ;;
-    -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,29p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "error: unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -133,7 +134,11 @@ sanitize_tree() {
   [[ -d "$deploy_dir/$root" ]] || return 0
   while IFS= read -r f; do
     rel="${f#$deploy_dir/}"
-    staged="$tmp_dir/$(basename "$rel")"
+    # Stage under the full relative path, not the basename: the skill trees are
+    # <name>/SKILL.md, so a dozen files share one basename and staging by it
+    # would have them overwrite each other.
+    staged="$tmp_dir/$rel"
+    mkdir -p "$(dirname "$staged")"
 
     sed "s|$home_substitute|{{HOME}}|g" "$f" > "$staged"
 
