@@ -2,10 +2,9 @@
 
 Prompts, scripts, and scheduled jobs that service the repo so agents can review PRs and keep the shop running.
 
-This is the source of truth for the code-review prompts I run through Claude Code,
-Hermes, and Codex. The prompts themselves are agent-agnostic; each agent gets a thin
-wrapper that invokes them by name. The prompts live here; the local machine points at a
-rendered copy of this repo rather than holding its own.
+This is the source of truth for the code-review prompts I run through Claude Code, Hermes, and Codex. The prompts themselves are agent-agnostic; each agent gets a thin wrapper that invokes them by name.
+
+For actual usage, the local machine's LLM/agents refer to a deployed copy of the prompts in this repo (e.g., replacing templated variables with real paths), rather than using them directly.
 
 ## Layout
 
