@@ -41,7 +41,7 @@ Analysis:
 
 Output file:
 
-- Write the full report to `{{HOME}}/agents/output/day-<YYYY-MM-DD>.md`, in addition to printing it in chat.
+- Write the full report to `{{HOME}}/agents/output/day-<YYYY-MM-DD-DOW>.md` (`DOW` is three-letter day of week, in lowercase), in addition to printing it in chat.
 - Overwrite a file from a prior run for the same day. Re-running after remembering an offline meeting is the expected workflow.
 - Keep intermediate extraction scripts in a scratch directory, never in the repo being reported on.
 
