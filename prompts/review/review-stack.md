@@ -122,6 +122,14 @@ Review priorities:
 
 Note what is _not_ in this list: layering violations, and whether an individual layer stands alone. Those belong to `review-pr.md` and are out of scope here — this review treats the stack as one merge.
 
+Required passes (run every one that applies to the cumulative diff, and name the ones that ran in the closing notes):
+
+- **Deployment-skew matrix.** When the stack changes a schema, migration, API/message shape, or config alongside code that reads or writes it, establish how each side actually reaches production — which job applies migrations, which image deploys when, and whether anything waits for the other. If they can land in either order, enumerate every state that can coexist: old code on the new schema, new code on the old schema, and old and new code overlapping. Include the states created by merging only the lower part of the stack. For each state, write down what gets stored and what every reader concludes from it. A migration's `DEFAULT` or backfill is a claim about rows nobody measured; if the value it fills in is indistinguishable from a real measurement (a `0` that could mean "none" or "not recorded"), that is a data-integrity finding.
+- **Degraded paths are traced to their readers.** Follow every compatibility shim, fallback, filter, or "skip what we can't store" branch into whatever consumes its output. A fallback that succeeds with less data is worse than one that fails whenever a reader treats the latest write as the complete current truth (a "current" view keyed on the newest receipt, a cache, a snapshot), because the reader silently hides what was dropped. Name the reader and what it shows during the degraded window.
+- **Each layer's stated contract is checked against behavior, not against its tests.** Extract the explicit claims from each layer's PR title and description and any comment that states an invariant ("one tab stop per row", "idempotent", "never publishes a partial batch"). For each, derive what a user or downstream system would observe, verify the tip produces that end to end, then check whether the tests assert the observable or only a proxy for it. A test counting elements with `tabIndex=0` does not test tab order when those elements contain their own focusable children. A claim the code does not meet is a correctness finding at the claim's severity, not a testing P3.
+- **A recommended fix gets the same review as the code.** Before writing a correction into a finding, run it through the passes above. A fallback recommended without naming what its readers will see is how this review's own suggestion becomes the next reviewer's blocking finding.
+- **On a re-review, commits added to address prior findings are the highest-risk surface.** Confirming the prior finding is resolved is not the review. Fixes usually add exactly the shims and fallbacks the passes above target, so apply every pass to the code the fix introduced.
+
 Review standards:
 
 - Report only actionable findings supported by specific code.
@@ -138,6 +146,7 @@ Review standards:
 - Rank findings:
   - P0: immediate catastrophic/security impact
   - P1: serious production correctness, security, data-loss, or deployment blocker
+  - A failure or silent data corruption reachable in any deployment order the repo's own tooling permits is a deployment blocker, so P1, even when a careful operator could avoid it.
   - P2: meaningful defect affecting a subset of users or scenarios
   - P3: lower-risk quality, maintainability, or testing weakness
 
@@ -203,4 +212,4 @@ Finish with:
 - Layer triage: which layers got a full review, which got claim verification (and whether each claim held), which got an additive-only skim, and which were carried forward unchanged from a prior run
 - Previous findings, only if a prior report was found: state the short SHA it reviewed, whether this run took the fast-forward or restack path, which layers were edited versus merely rebased, and the per-finding resolved/partially resolved/unresolved/no-longer-applicable verdicts. Don't name the report file or its directory, and don't mention incidental/OS-specific files (e.g. `.DS_Store`) found while checking — none of that is useful to the developer or a future re-review. Omit this bullet entirely when no prior report exists.
 - Stack coherence: whether every layer's head was an ancestor of the reviewed tip, and whether the tip is conflict-free with the latest trunk
-- What validation was performed, clearly distinguishing inspected CI (including any canary branch) from locally run tests/builds
+- What validation was performed, clearly distinguishing inspected CI (including any canary branch) from locally run tests/builds, and which of the required passes ran

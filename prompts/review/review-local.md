@@ -113,6 +113,14 @@ Review priorities:
 8. Pre-push hygiene: leftover debug statements, commented-out code, stray scratch or generated files, credentials or `.env` content staged for commit, TODOs that should be resolved or ticketed, and comment blocks this branch adds that exceed 500 characters. Report these as P3 unless a secret is involved (then P0/P1). Do not let this become a style review.
 9. Maintainability issues only when they create a concrete future failure risk
 
+Required passes (run every one that applies to the diff, and name the ones that ran in the closing notes):
+
+- **Deployment-skew matrix.** When the diff changes a schema, migration, API/message shape, or config alongside code that reads or writes it, establish how each side actually reaches production — which job applies migrations, which image deploys when, and whether anything waits for the other. If they can land in either order, enumerate every state that can coexist: old code on the new schema, new code on the old schema, and old and new code overlapping. For each state, write down what gets stored and what every reader concludes from it. A migration's `DEFAULT` or backfill is a claim about rows nobody measured; if the value it fills in is indistinguishable from a real measurement (a `0` that could mean "none" or "not recorded"), that is a data-integrity finding.
+- **Degraded paths are traced to their readers.** Follow every compatibility shim, fallback, filter, or "skip what we can't store" branch into whatever consumes its output. A fallback that succeeds with less data is worse than one that fails whenever a reader treats the latest write as the complete current truth (a "current" view keyed on the newest receipt, a cache, a snapshot), because the reader silently hides what was dropped. Name the reader and what it shows during the degraded window.
+- **The branch's stated contract is checked against behavior, not against its tests.** Extract the explicit claims from the commit messages, the branch name or ticket it references, and any comment that states an invariant ("one tab stop per row", "idempotent", "never publishes a partial batch"). For each, derive what a user or downstream system would observe, verify the code produces that end to end, then check whether the tests assert the observable or only a proxy for it. A test counting elements with `tabIndex=0` does not test tab order when those elements contain their own focusable children. A claim the code does not meet is a correctness finding at the claim's severity, not a testing P3.
+- **A recommended fix gets the same review as the code.** Before writing a correction into a finding, run it through the passes above. A fallback recommended without naming what its readers will see is how this review's own suggestion becomes the next reviewer's blocking finding.
+- **On a second pass after a fix, the fix's changes are the highest-risk surface.** Confirming the prior finding is resolved is not the review. Fixes usually add exactly the shims and fallbacks the passes above target, so apply every pass to the code the fix introduced, committed or not.
+
 Review standards:
 
 - Report only actionable findings supported by specific code.
@@ -129,6 +137,7 @@ Review standards:
 - Rank findings:
   - P0: immediate catastrophic/security impact
   - P1: serious production correctness, security, data-loss, or deployment blocker
+  - A failure or silent data corruption reachable in any deployment order the repo's own tooling permits is a deployment blocker, so P1, even when a careful operator could avoid it.
   - P2: meaningful defect affecting a subset of users or scenarios
   - P3: lower-risk quality, maintainability, testing, or pre-push hygiene weakness
 
@@ -186,6 +195,7 @@ Finish with:
 - Readiness recommendation: ready to push and open a PR, fix before pushing, or needs rework
 - Whether any P0/P1/P2 findings remain
 - Whether previous findings from a prior run on this branch were resolved, when applicable
+- Which of the required passes ran
 - Whether the branch is conflict-free with the latest base
 - Working-tree state: whether uncommitted or untracked changes were included in the review, and which findings depend on them
 - Pre-push checklist: the specific tests, builds, lint, or type-check commands the dev should run against these changes, and any that CI will run that have not been run locally
