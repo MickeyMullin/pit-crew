@@ -193,7 +193,6 @@ No actionable findings.
 Finish with:
 
 - Readiness recommendation: ready to push and open a PR, fix before pushing, or needs rework
-- Whether any P0/P1/P2 findings remain
 - Whether previous findings from a prior run on this branch were resolved, when applicable
 - Which of the required passes ran
 - Whether the branch is conflict-free with the latest base

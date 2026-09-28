@@ -138,7 +138,6 @@ Finish with:
 ---
 
 - Merge recommendation: approve, fix before merge, hold/pin, or do not merge
-- Whether any P0/P1/P2 findings remain
 - Changelog coverage: the version ranges whose release notes you actually read, and any range you could not obtain notes for
 - Previous findings, only if a prior report was found: the short SHA it reviewed, whether that SHA is still an ancestor of HEAD (Dependabot rebases), and the per-finding resolved/partially resolved/unresolved/no-longer-applicable verdicts. Omit this bullet entirely when no prior report exists.
 - Whether the branch is conflict-free with the latest base
