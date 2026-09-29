@@ -2,6 +2,11 @@ Perform a PR-quality code review of an entire stack of PRs as one cumulative tre
 
 This prompt is the companion to `review-pr.md`. Use this one to answer "does the end state of this stack work?"; use `review-pr.md` to answer "does this single layer stand on its own?". They are different questions and several rules below are deliberately the inverse of that prompt's.
 
+Tandem mode:
+
+- If the invocation contains `--tandem` or `--tandem-secondary` (optionally `--tandem-secondary@<sha>`), read `{{HOME}}/agents/prompts/review/tandem.md` in full before doing anything else, remove the flag, and resolve what remains under "Setup" below. That file decides which of this prompt's sections run and which files you write; where the two differ, it wins. Without either flag, ignore it.
+- Tandem mode adds nothing to what this prompt may do. It still never fixes, and the primary still posts only on the user's explicit yes.
+
 Setup:
 
 - **Take the stack identity from the invocation.** Accept any of these, and say which form you took it as before acting on it:
@@ -78,6 +83,7 @@ Output file:
 
 - After completing the review, write the full response (Summary, Findings, and closing notes, verbatim) to `{{HOME}}/agents/output/STACK-<number>.md`, where `<number>` is the stack's repo-scoped `number` (not its `id`), in addition to printing it in chat.
 - Overwrite the file if it already exists from a prior run. Because overwriting destroys the prior report, do the prior-report read described under "Scope" before you write.
+- **No AI attribution, anywhere in the report.** Do not say that a model, agent, or tool wrote, reviewed, or found anything: no "reviewed by" line, no per-finding credit, no generated-by footer, no model or provider names. The report goes out as the user's own review. This is unrelated to attributing each finding to the layer that introduced it, which stays required.
 - Begin the file (and the chat response) with a `Reviewed stack:` line carrying the stack number, the top layer's branch, and its short tip SHA.
 - End the file with a `## Review state` section containing a fenced ```json block, wrapped in `<details><summary>Review state (for the next run)</summary>` so it stays collapsed in the PR comment. A tip SHA alone is not enough to scope a re-review after a restack. Record:
   - `stack`, `tip_branch`, `tip_sha`, `base_sha` (the merge base this run diffed against), and `reviewed_at`

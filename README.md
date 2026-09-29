@@ -77,6 +77,7 @@ added later is caught without anyone remembering to update the check. It never t
 | `prompts/review/review-pr.md` | Review a single GitHub PR and post the report — as an approval, a request-changes review, or a comment, depending on what it found. On **your own** PR with findings, it may instead fix, verify, commit, and push — see below. |
 | `prompts/review/review-stack.md` | Review a whole stack of PRs, posting one report on the top layer — as an approval, a request-changes review, or a comment. Never fixes, and never posts without being asked. |
 | `prompts/review/review-dependabot.md` | Review a Dependabot bump, accounting for rebases and re-bumps. |
+| `prompts/review/tandem.md` | Tandem mode for `review-pr`, `review-local`, and `review-stack`: several agents review the same target, and one consolidates their drafts into the single report that gets posted. Invoke the primary with `--tandem` and each secondary with `--tandem-secondary`. |
 | `prompts/review/claude-code-notes.md` | Claude Code–specific execution notes. Loaded alongside the prompt above when running under Claude Code; the Hermes and Codex skills say explicitly not to load it. |
 
 ### Fix mode

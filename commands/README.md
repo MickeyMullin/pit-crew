@@ -8,7 +8,7 @@ The prompts in [`prompts/`](../prompts/) are agent-agnostic. This directory hold
 | Hermes | `skills/<name>/SKILL.md` | A skill directory with YAML frontmatter | `~/.hermes/skills/pit-crew/<name>/` |
 | Codex (ChatGPT) | `skills/<name>/SKILL.md` | The same | `~/.codex/skills/<name>/` |
 
-Hermes and Codex both read `SKILL.md` skill directories, so they share one source tree rather than each getting a near-identical copy to keep in sync. Claude Code needs its own, because its command files are flat markdown with no frontmatter and they additionally load `claude-code-notes.md`, which is Claude Code–specific and does not apply to the other two.
+Hermes and Codex both read `SKILL.md` skill directories, so they share one source tree rather than each getting a near-identical copy to keep in sync. Claude Code needs its own, because its command files are flat markdown (with only a small frontmatter block for the picker's `description` and `argument-hint`) and they additionally load `claude-code-notes.md`, which is Claude Code–specific and does not apply to the other two.
 
 Every wrapper does the same small job: point the agent at the prompt file and tell it to follow that file rather than improvise. The prompt is where the real content lives; these files change rarely.
 

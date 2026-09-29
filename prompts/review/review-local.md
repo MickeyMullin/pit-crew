@@ -1,5 +1,10 @@
 Perform a PR-quality code review of the work on the currently checked-out local branch, _before_ a pull request exists. The goal is to catch problems while they are still cheap to fix — before the branch is pushed and reviewers are pulled in.
 
+Tandem mode:
+
+- If the invocation contains `--tandem` or `--tandem-secondary`, read `{{HOME}}/agents/prompts/review/tandem.md` in full before doing anything else. That file decides which of this prompt's sections run and which files you write; where the two differ, it wins. Without either flag, ignore it.
+- Both reviewers read the same live working tree. The primary must not make the WIP commit or edit anything until every secondary has finished, because either would change the tree a secondary is still reading.
+
 Scope:
 
 - Identify the active branch and resolve the base branch locally: use the repository's default branch (`git symbolic-ref refs/remotes/origin/HEAD`, falling back to `origin/main`, then `origin/master`). There is no PR to read the base from.
@@ -27,6 +32,7 @@ Output file:
 - Name the file `{{HOME}}/agents/output/local-<branch>.md`, e.g. `{{HOME}}/agents/output/local-atomic-feedback-lineage.md`. The `local-` prefix keeps this from colliding with PR-review output for the same branch.
 - When deriving the filename from the branch name, replace any character that is not alphanumeric, `-`, or `_` with `-`, and collapse consecutive `-` into one.
 - Overwrite the file if it already exists from a prior run on this branch — re-running on the same branch is the expected workflow.
+- **No AI attribution, anywhere in the report or in any commit this review makes.** Do not say that a model, agent, or tool wrote, reviewed, or found anything: no "reviewed by" line, no per-finding credit, no generated-by footer, no co-author trailer, no model or provider names. The dev may paste from this report into a PR, so it reads as their own review.
 - Begin the file (and the chat response) with a `Fix attempts: <n>` line, where `<n>` is the number of times this branch has been auto-fixed under "Fixing what you found", including any fix made during this run. Write `Fix attempts: 0` when no fix has been made, and carry a prior report's higher value forward rather than resetting it. This line is what bounds the fix loop across separate runs, not merely within one.
 
 Fixing what you found:
@@ -48,7 +54,7 @@ Making the fix:
 
 - **Commit the dev's in-flight work to a WIP commit before you edit anything.** This is a git repository; use it. Uncommitted changes exist in no commit and no remote, so until they are committed there is nothing to restore from — and unlike a copy filed away somewhere, a commit is something the dev already knows how to inspect, diff, and undo.
   - Record the current HEAD short SHA first and note it in your response. Call it the **pre-WIP SHA**; every undo below is expressed against it.
-  - Then `git add -A` and `git commit -m "WIP: in-flight work before automated review fixes"`. Record that commit's SHA too — the **WIP SHA**. Note in your response that `git add -A` respects `.gitignore`, so ignored files are not captured and not protected.
+  - Then `git add -A` and `git commit -m "WIP: in-flight work before review fixes"`. Record that commit's SHA too — the **WIP SHA**. Note in your response that `git add -A` respects `.gitignore`, so ignored files are not captured and not protected.
   - If the working tree is already clean, there is nothing in flight: skip the WIP commit entirely, say so, and treat the pre-WIP SHA as the WIP SHA for the undo instructions.
   - This is the **only** commit you may create. Do not push it, do not amend anything, and do not create a branch or tag.
 - Fix mode lifts the "do not modify files" rule for files this review flagged, and lifts the git-state prohibition **only** for the single `git add -A` plus `git commit` above. Nothing else is relaxed: still no `git stash`, `checkout`, `switch`, `restore`, `reset`, `clean`, `rebase`, or `merge` run by you, at any point, for any reason. If a fix seems to need one of those, it is out of scope — say so and stop.

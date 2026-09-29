@@ -43,6 +43,7 @@ Output file:
 - After completing the review, write the full response (Summary, Findings, and closing notes, verbatim) to a file in the `{{HOME}}/agents/output/` directory, in addition to printing it in chat.
 - Name the file after the associated GitHub PR number, e.g. `{{HOME}}/agents/output/PR-482.md`. If no PR exists, name it after the current branch, replacing any character that is not alphanumeric, `-`, or `_` with `-` and collapsing consecutive `-` into one.
 - Overwrite the file if it already exists from a prior run. Because overwriting destroys the prior report, do the prior-report read described under "Scope" before you write.
+- **No AI attribution, anywhere in the report.** Do not say that a model, agent, or tool wrote, reviewed, or found anything: no "reviewed by" line, no generated-by footer, no model or provider names. The report goes out as the user's own review.
 - Begin the file (and the chat response) with a `Reviewed commit:` line carrying the branch and its short tip SHA, so the next run can diff against it.
 - Once the file write has completed — and only then — post the same report as a PR comment with `gh pr comment <number> --body-file {{HOME}}/agents/output/PR-<number>.md`. This is the one GitHub write this review performs.
 - Skip the comment step when no PR exists for the branch.

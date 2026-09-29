@@ -54,3 +54,9 @@ Not repository state, but left over from the original cutover and easy to forget
 Both were the pre-migration copies, kept as a diff baseline while the repo was being
 built. They have served that purpose — the deployed prompts were verified byte-identical
 to them — and can be deleted whenever.
+
+## Tandem mode: let the primary launch the secondary
+
+Tandem mode (`prompts/review/tandem.md`) currently needs each agent launched by hand: `/review-pr 805 --tandem` in Claude Code and `$review-pr 805 --tandem-secondary` in Codex, with the user telling the primary when the secondary is done. The next step is for the primary to start the secondary itself, in the background, pinned to the primary's SHA and worktree, and to treat the process exiting as the done signal.
+
+`codex exec` (non-interactive, present in codex-cli 0.151.0) is the obvious mechanism for Codex. Open questions before building it: whether Codex's sandbox can reach `gh` and write to `{{HOME}}/agents/output/` (if not, have it print the report and let the primary write the file), how long a Codex review runs and whether a background command survives that long under each primary agent, and where the per-secondary launch command lives. A small registry in `tandem.md`, shaped like the `agents=` registry in `scripts/deploy-reviews.sh`, keeps it agent-agnostic. Run Phase 1 on a few more PRs first, so the consolidation rules settle before the launch is automated.
