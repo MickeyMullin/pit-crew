@@ -16,6 +16,17 @@ What a secondary may do:
 - End the chat response by naming the draft's path, the verdict the findings would produce (approve, request changes, comment, or for `review-local.md` the readiness recommendation), and that nothing was posted.
 - Remove the worktree when the draft is written, as the calling prompt describes.
 
+Launched secondaries:
+
+A secondary can also be started headless by `{{HOME}}/agents/bin/tandem-secondary`, which says so at the top of its instructions. A launched secondary runs read-only and offline, so the launcher does for it everything that needs GitHub or a write. These rules replace the ones above and below wherever they conflict:
+
+- **The worktree already exists**, pinned to the code under review, and its path is in your instructions. Review there. Do not create, fetch into, or remove a worktree, and do not run the calling prompt's worktree setup or cleanup.
+- **Do not run `gh` or `git fetch`.** You have no network access and both will fail. The launcher's context file holds what the calling prompt would otherwise read from GitHub: the repository, the PR's metadata and description, its author, base and head, its CI check status, the stack object, and whether the code still merges cleanly with its base (`git merge-tree` cannot run in the sandbox, so the launcher runs it). Use the file wherever the calling prompt says to call `gh`. If the review needs something the file does not hold, do not guess: say in the closing notes' validation bullet what could not be checked and why.
+- **Do not write the draft.** You cannot, and you do not need to. Your final message is the draft: the complete report, beginning with its `Reviewed commit:`, `Reviewed stack:`, or `Reviewed tree:` line, with nothing before or after it. The launcher writes it to the suffixed path after checking it.
+- **Read the prior report as usual.** Reading `{{HOME}}/agents/output/` works; only writing is blocked.
+- **A repo check that needs to write** (a cache, a build directory) may fail under the sandbox. Note the failure in the validation bullet; do not work around it.
+- **Never start another secondary.** The launcher refuses to run inside a secondary, but do not try.
+
 Files:
 
 - Each reviewer, primary included, writes its draft to the calling prompt's report path with `-<agent name>` inserted before `.md`:

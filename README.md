@@ -15,6 +15,7 @@ For actual usage, the local machine's LLM/agents refer to a deployed copy of the
 | `prompts/report/` | Reporting prompts: reconstruct a day's work from the machine's own records. |
 | `commands/claude/` | Claude Code slash commands that invoke the prompts. |
 | `commands/skills/` | The same commands as `SKILL.md` skills, for Hermes and Codex. Both read the same format, so they share one tree. See [commands/README.md](commands/README.md). |
+| `bin/` | Executables the prompts call, rendered like the prompts. Today: `tandem-secondary`, which starts a tandem-mode secondary reviewer headless, read-only and offline, and installs its draft only if it validates. |
 | `scripts/` | The two directions. `deploy-reviews.sh` renders sources into a runnable copy; `sanitize.sh` brings tested edits back. |
 | `TODO.md` | Open decisions not yet made. |
 | `LICENSE` | MIT. |

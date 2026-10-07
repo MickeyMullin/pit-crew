@@ -12,7 +12,7 @@ built to prevent — it has already required one history rewrite.
 
 | Tree | Committed? | Contains | Purpose |
 | --- | --- | --- | --- |
-| `prompts/**`, `commands/**` | Yes | `{{HOME}}` placeholders | Source of truth (walked recursively) |
+| `prompts/**`, `commands/**`, `bin/**` | Yes | `{{HOME}}` placeholders | Source of truth (walked recursively; `bin/` holds executables, rendered to `{{HOME}}/agents/bin/` via a symlink into `deploy/bin`) |
 | `deploy/` | No (gitignored) | Real absolute paths | What actually runs |
 | `backups/` | No (gitignored) | Timestamped copies | Undo for the two above |
 
@@ -44,7 +44,7 @@ pending changes exist.
 | Preserve a change already made in `deploy/` | Run `scripts/sanitize.sh`, then show the user `git diff` |
 | Check whether the trees have drifted | Run `scripts/sanitize.sh --dry-run` |
 | Rebuild the deployed copy | Run `scripts/deploy-reviews.sh` |
-| Commit work | Run `git diff -- prompts commands` and confirm no real path appears, then commit |
+| Commit work | Run `git diff -- prompts commands bin` and confirm no real path appears, then commit |
 
 ## Prohibitions
 
@@ -68,7 +68,7 @@ pending changes exist.
 ## Before you report a change as done
 
 - `scripts/deploy-reviews.sh` exits 0, or you ran `scripts/sanitize.sh` and it exits 0.
-- `git grep -I "$HOME" -- prompts commands` returns nothing.
+- `git grep -I "$HOME" -- prompts commands bin` returns nothing.
 - You showed the user the diff rather than committing silently.
 
 ## Fix mode

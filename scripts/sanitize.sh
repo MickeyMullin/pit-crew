@@ -11,6 +11,7 @@
 #   prompts/review/*.md       --->  deploy/prompts/review/*.md      deploy-reviews.sh
 #   commands/claude/*.md      <---  deploy/commands/claude/*.md     sanitize.sh
 #   commands/skills/*/SKILL.md <--> deploy/commands/skills/*/SKILL.md
+#   bin/*                     <-->  deploy/bin/*
 #
 # The point is that deploy/ is what actually runs. Edit a prompt there, run a real
 # review against it, and once it works, bring the tested version back here without
@@ -86,8 +87,8 @@ ensure_sources_clean() {
   [[ "$sources_checked" -eq 0 ]] || return 0
   sources_checked=1
   [[ "$dry_run" -eq 0 && "$force" -eq 0 ]] || return 0
-  if ! git -C "$repo_root" diff --quiet -- prompts commands 2>/dev/null; then
-    echo "error: prompts/ or commands/ has uncommitted changes." >&2
+  if ! git -C "$repo_root" diff --quiet -- prompts commands bin 2>/dev/null; then
+    echo "error: prompts/, commands/, or bin/ has uncommitted changes." >&2
     echo "       Sanitizing would overwrite them with the deploy/ versions." >&2
     echo "       Commit or stash them first, or re-run with --force." >&2
     exit 1
@@ -115,7 +116,7 @@ refresh_manifest() {
     else
       echo "$(sha256sum "$f" | awk '{print $1}') ${f#$deploy_dir/}" >> "$deploy_dir/.manifest"
     fi
-  done < <(find "$deploy_dir" -type f -name '*.md' | sort)
+  done < <(find "$deploy_dir" -type f ! -name .manifest | sort)
   echo "Render manifest refreshed; deploy/ and the sources are in sync."
 }
 
@@ -130,7 +131,7 @@ added=0
 # the live copy comes back to the sources without this script being taught about
 # it. Mirrors deploy-reviews.sh, which renders the same way.
 sanitize_tree() {
-  local root="$1" f rel staged
+  local root="$1" pattern="${2:-*.md}" f rel staged
   [[ -d "$deploy_dir/$root" ]] || return 0
   while IFS= read -r f; do
     rel="${f#$deploy_dir/}"
@@ -168,12 +169,15 @@ sanitize_tree() {
       ensure_sources_clean
       mkdir -p "$repo_root/$(dirname "$rel")"
       cp "$staged" "$repo_root/$rel"
+      # Keep an executable executable, for the same reason deploy-reviews.sh does.
+      [[ -x "$f" ]] && chmod 755 "$repo_root/$rel"
     fi
-  done < <(find "$deploy_dir/$root" -type f -name '*.md' | sort)
+  done < <(find "$deploy_dir/$root" -type f -name "$pattern" | sort)
 }
 
 sanitize_tree "prompts"
 sanitize_tree "commands"
+sanitize_tree "bin" "*"
 
 if [[ $((changed + added)) -eq 0 ]]; then
   echo "  (nothing to bring back -- sources already match deploy/)"
@@ -197,10 +201,10 @@ fi
 
 # Last line of defence. If a real path survived into the sources, it is one
 # commit away from being permanent.
-if grep -rl "$home_substitute" "$repo_root/prompts" "$repo_root/commands" >/dev/null 2>&1; then
+if grep -rl "$home_substitute" "$repo_root/prompts" "$repo_root/commands" "$repo_root/bin" >/dev/null 2>&1; then
   echo >&2
   echo "error: a real home path remains in the sources after sanitizing:" >&2
-  grep -rl "$home_substitute" "$repo_root/prompts" "$repo_root/commands" >&2
+  grep -rl "$home_substitute" "$repo_root/prompts" "$repo_root/commands" "$repo_root/bin" >&2
   echo "       DO NOT COMMIT. Fix these before going further." >&2
   exit 1
 fi
@@ -211,7 +215,7 @@ refresh_manifest
 
 echo
 echo "Next:"
-echo "  git -C $repo_root diff -- prompts commands   # review before committing"
+echo "  git -C $repo_root diff -- prompts commands bin   # review before committing"
 echo "  git -C $repo_root add -A && git commit"
 echo
 echo "deploy/ and the sources now match, so there is no need to re-run"

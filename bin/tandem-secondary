@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+#
+# tandem-secondary — start one tandem-mode secondary reviewer headless, and install
+# its draft only if it is a draft of the code the primary reviewed.
+#
+# The primary agent runs this in the background and waits for it to exit. The
+# secondary runs read-only and offline: this script does everything that needs
+# GitHub or a write (fetching the PR context, writing the draft), so the reviewer
+# itself can be sandboxed down to reading. See prompts/review/tandem.md.
+#
+# Usage:
+#   tandem-secondary --mode pr|local|stack --target <t> --sha <s> --worktree <dir> --draft <path>
+#                    [--entry <id>] [--timeout <seconds>]
+#   tandem-secondary --list
+#
+#   --mode      which review prompt the secondary follows: review-pr, review-local, review-stack
+#   --target    what the primary resolved: a PR number (pr), a stack or PR number (stack),
+#               or the branch name (local)
+#   --sha       the reviewed commit's short SHA (pr, stack), or for local the
+#               `git diff HEAD | git hash-object --stdin` value from the Reviewed tree line
+#   --worktree  where to review: the primary's worktree, or the live checkout for local
+#   --draft     where the validated draft goes; its name must end in -<entry>.md
+#   --entry     which registry entry to run (default: $TANDEM_SECONDARY, else the first entry)
+#   --timeout   seconds before the secondary is killed (default 2700)
+#
+# Exit codes: 0 draft validated and installed; 1 the secondary failed, timed out, or
+# produced a draft that did not validate; 2 bad usage.
+#
+# The last line of output is always one machine-readable summary:
+#   tandem-secondary: ok|failed entry=<id> agent=<a> model=<m> effort=<e> elapsed=<n>s draft=<path> log=<path> [reason=<text>]
+#
+set -euo pipefail
+
+agents_root="{{HOME}}/agents"
+log_dir="$agents_root/logs/tandem"
+
+# The registry: one line per secondary, "id|agent|model|effort". The first line is
+# the default. An empty model or effort leaves that agent's own configured default
+# in place. The id is what names the draft (PR-805-<id>.md), so two entries for the
+# same agent with different models can run side by side and be compared.
+entries="\
+codex|codex|gpt-5.6-terra|high"
+
+usage() { sed -n '2,31p' "${BASH_SOURCE[0]}"; }
+
+entry_field() {
+  # entry_field <id> <1-based field>; prints nothing if the id is unknown.
+  printf '%s\n' "$entries" | awk -F'|' -v n="$1" -v f="$2" '$1 == n { print $f }'
+}
+
+mode="" target="" sha="" worktree="" draft="" entry="${TANDEM_SECONDARY:-}" timeout_s=2700
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --list)
+      printf '%s\n' "$entries" | awk -F'|' 'NR == 1 { d = "  (default)" } NR > 1 { d = "" } { printf "%-16s agent=%s model=%s effort=%s%s\n", $1, $2, ($3 == "" ? "(agent default)" : $3), ($4 == "" ? "(agent default)" : $4), d }'
+      exit 0 ;;
+    --mode)     mode="${2:-}"; shift 2 ;;
+    --target)   target="${2:-}"; shift 2 ;;
+    --sha)      sha="${2:-}"; shift 2 ;;
+    --worktree) worktree="${2:-}"; shift 2 ;;
+    --draft)    draft="${2:-}"; shift 2 ;;
+    --entry)    entry="${2:-}"; shift 2 ;;
+    --timeout)  timeout_s="${2:-}"; shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+# A secondary must never start secondaries of its own. This variable is set on
+# every process this script launches, so a secondary that read the primary's
+# instructions by mistake fails here instead of fanning out.
+if [[ -n "${PIT_CREW_TANDEM_SECONDARY:-}" ]]; then
+  echo "error: refusing to launch a secondary from inside a secondary." >&2
+  exit 2
+fi
+
+[[ -n "$entry" ]] || entry="$(printf '%s\n' "$entries" | head -1 | cut -d'|' -f1)"
+for v in mode target sha worktree draft; do
+  if [[ -z "${!v}" ]]; then echo "error: --$v is required." >&2; usage >&2; exit 2; fi
+done
+case "$mode" in
+  pr)    prompt_name="review-pr";    reviewed_marker="Reviewed commit:" ;;
+  stack) prompt_name="review-stack"; reviewed_marker="Reviewed stack:" ;;
+  local) prompt_name="review-local"; reviewed_marker="Reviewed tree:" ;;
+  *) echo "error: --mode must be pr, local, or stack." >&2; exit 2 ;;
+esac
+if [[ -z "$(entry_field "$entry" 1)" ]]; then
+  echo "error: unknown entry '$entry'. Known: $(printf '%s\n' "$entries" | cut -d'|' -f1 | tr '\n' ' ')" >&2
+  exit 2
+fi
+[[ "$timeout_s" =~ ^[0-9]+$ ]] || { echo "error: --timeout must be a number of seconds." >&2; exit 2; }
+[[ "$sha" =~ ^[0-9a-f]{7,40}$ ]] || { echo "error: --sha must be 7 to 40 hex characters." >&2; exit 2; }
+[[ -d "$worktree" ]] || { echo "error: no such worktree: $worktree" >&2; exit 2; }
+case "$(basename "$draft")" in
+  *-"$entry".md) ;;
+  *) echo "error: the draft name must end in -$entry.md, so it is recognizable as a draft: $draft" >&2; exit 2 ;;
+esac
+
+agent="$(entry_field "$entry" 2)"
+model="$(entry_field "$entry" 3)"
+effort="$(entry_field "$entry" 4)"
+prompt_file="$agents_root/prompts/review/$prompt_name.md"
+tandem_file="$agents_root/prompts/review/tandem.md"
+
+mkdir -p "$log_dir" "$(dirname "$draft")"
+stamp="$(date +%Y%m%d-%H%M%S)"
+base="$(basename "$draft" .md)-$stamp"
+log="$log_dir/$base.log"
+context="$log_dir/$base.context.json"
+instructions="$log_dir/$base.prompt.txt"
+partial="$log_dir/$base.draft.md"
+start="$(date +%s)"
+
+finish() {
+  # finish <ok|failed> [reason]; prints the summary line and exits accordingly.
+  local status="$1" reason="${2:-}"
+  local line="tandem-secondary: $status entry=$entry agent=$agent model=${model:-default} effort=${effort:-default} elapsed=$(( $(date +%s) - start ))s draft=$draft log=$log"
+  [[ -n "$reason" ]] && line="$line reason=$reason"
+  echo "$line"
+  [[ "$status" == "ok" ]] && exit 0
+  exit 1
+}
+
+for f in "$prompt_file" "$tandem_file"; do
+  [[ -f "$f" ]] || { echo "error: prompt not found: $f (has deploy-reviews.sh run?)" >&2; finish failed "prompt-missing"; }
+done
+
+# Pin check: the worktree must be at the commit the primary reviewed, or the two
+# drafts would describe different code. For local reviews the tree hash is the pin,
+# and it covers uncommitted work, which HEAD alone does not.
+if [[ "$mode" == "local" ]]; then
+  actual="$(git -C "$worktree" diff HEAD | git hash-object --stdin)"
+else
+  actual="$(git -C "$worktree" rev-parse HEAD)"
+fi
+case "$actual" in
+  "$sha"*) ;;
+  *) echo "error: $worktree is at $actual, not $sha." >&2; finish failed "pin-mismatch" ;;
+esac
+
+# Whether the reviewed code still merges cleanly with its base, which the review
+# prompts ask about. git merge-tree has to write objects and a temp file, so the
+# sandbox blocks it; it runs here instead. Prints a JSON object.
+composition() {
+  local base_ref="$1" out rc
+  if ! git -C "$worktree" rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
+    jq -n --arg base "$base_ref" '{base: $base, checked: false, reason: "base ref not present locally"}'
+    return 0
+  fi
+  set +e
+  out="$(git -C "$worktree" merge-tree --write-tree --name-only "$base_ref" HEAD 2>&1)"
+  rc=$?
+  set -e
+  jq -n --arg base "$base_ref" --arg base_sha "$(git -C "$worktree" rev-parse --short "$base_ref")" \
+    --argjson rc "$rc" --arg out "$out" \
+    '{base: $base, base_sha: $base_sha, checked: ($rc <= 1), clean: ($rc == 0),
+      conflicted_files: (if $rc == 1 then ($out | split("\n") | .[1:] | map(select(length > 0)) | map(select(test("^Auto-merging|^CONFLICT") | not))) else [] end),
+      note: "computed by the launcher with git merge-tree against the local remote-tracking ref, as fetched by the primary"}'
+}
+
+# The GitHub context the secondary cannot fetch itself. Gathered here, outside any
+# sandbox, with the same gh login the primary uses.
+{
+  repo="$(cd "$worktree" && gh repo view --json nameWithOwner --jq .nameWithOwner)"
+  case "$mode" in
+    pr)
+      pr_json="$(cd "$worktree" && gh pr view "$target" --json number,url,title,body,author,state,baseRefName,headRefName,headRefOid,mergeable,statusCheckRollup)"
+      stack_json="$(cd "$worktree" && gh api "repos/$repo/pulls/$(printf '%s' "$pr_json" | jq -r .number)" --jq '.stack')"
+      comp_json="$(composition "origin/$(printf '%s' "$pr_json" | jq -r .baseRefName)")"
+      jq -n --arg repo "$repo" --argjson pr "$pr_json" --argjson stack "${stack_json:-null}" --argjson comp "$comp_json" \
+        '{repo: $repo, pull_request: $pr, stack: $stack, composition: $comp}'
+      ;;
+    stack)
+      stack_json="$(cd "$worktree" && gh api "repos/$repo/stacks?pull_request=$target" 2>/dev/null || echo null)"
+      trunk="$(printf '%s' "$stack_json" | jq -r '.base.ref // empty' 2>/dev/null || true)"
+      if [[ -n "$trunk" ]]; then comp_json="$(composition "origin/$trunk")"; else comp_json='{"checked": false, "reason": "stack trunk unknown"}'; fi
+      jq -n --arg repo "$repo" --argjson stack "$stack_json" --argjson comp "$comp_json" '{repo: $repo, stack: $stack, composition: $comp}'
+      ;;
+    local)
+      default_ref="$(git -C "$worktree" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)"
+      comp_json="$(composition "$default_ref")"
+      jq -n --arg repo "$repo" --arg branch "$target" --argjson comp "$comp_json" '{repo: $repo, branch: $branch, composition: $comp}'
+      ;;
+  esac
+} > "$context" 2>> "$log" || { echo "error: could not gather GitHub context; see $log" >&2; finish failed "context"; }
+
+cat > "$instructions" <<EOF
+You are running headless as a launched tandem-mode secondary reviewer. No one will answer questions; do not ask any.
+
+Read $tandem_file in full first. Your role is secondary, and its "Launched secondaries" section applies to you. Then follow the instructions in $prompt_file in full, as that file and tandem.md direct. Do not load claude-code-notes.md; it is not for you.
+
+Invocation: $target --tandem-secondary@$sha
+
+Worktree: $worktree
+It already exists and is pinned to the code under review. Review there. Do not create, fetch into, or remove any worktree.
+
+GitHub context: $context
+You have no network access, so gh and git fetch will fail. Use this file wherever the review prompt says to read something from GitHub. Its "composition" object answers whether the code still merges cleanly with its base; git merge-tree cannot run in your sandbox, so do not try it.
+
+Your final message is written verbatim to the draft file. It must be the complete report, beginning with its "$reviewed_marker" line, with nothing before or after it.
+EOF
+
+# The secondary's command line, per agent. Each one must run read-only and offline
+# and deliver the report through the agent's own output capture, never through a
+# write the sandbox would have to allow.
+cmd=()
+case "$agent" in
+  codex)
+    cmd=(codex exec -s read-only -C "$worktree" -o "$partial")
+    [[ -n "$model" ]] && cmd+=(-m "$model")
+    [[ -n "$effort" ]] && cmd+=(-c "model_reasoning_effort=$effort")
+    cmd+=(-)
+    ;;
+  *)
+    echo "error: entry '$entry' uses agent '$agent', which has no launch command yet." >&2
+    finish failed "no-launcher"
+    ;;
+esac
+
+echo "launching $entry ($agent${model:+, $model}${effort:+, $effort}) against $target @ $sha"
+echo "  log: $log"
+
+# perl's alarm is the portable timeout: macOS ships no timeout(1). SIGALRM ends the
+# exec'd agent, which the shell reports as status 142.
+set +e
+PIT_CREW_TANDEM_SECONDARY=1 TMPDIR=/tmp \
+  perl -e 'alarm shift @ARGV; exec @ARGV or die "exec failed: $!\n"' "$timeout_s" "${cmd[@]}" \
+  < "$instructions" >> "$log" 2>&1
+rc=$?
+set -e
+
+[[ "$rc" -eq 142 ]] && finish failed "timeout-${timeout_s}s"
+
+# Validate the draft, never the exit code: the agent exits 0 whenever its own run
+# completed, including runs whose every command failed.
+[[ -s "$partial" ]] || finish failed "no-draft(exit=$rc)"
+first="$(grep -m1 -v '^[[:space:]]*$' "$partial" || true)"
+case "$first" in
+  "$reviewed_marker"*) ;;
+  *) finish failed "draft-does-not-start-with-$reviewed_marker" ;;
+esac
+pinned=0
+for tok in $(printf '%s\n' "$first" | grep -oE '[0-9a-f]{7,40}' || true); do
+  case "$sha" in "$tok"*) pinned=1 ;; esac
+  case "$tok" in "$sha"*) pinned=1 ;; esac
+done
+[[ "$pinned" -eq 1 ]] || finish failed "draft-reviewed-other-code"
+grep -q '^## Summary' "$partial" || finish failed "draft-has-no-summary"
+
+mv "$partial" "$draft"
+finish ok

@@ -13,6 +13,7 @@
 #   prompts/review/*.md        ->  deploy/prompts/review/*.md
 #   commands/claude/*.md       ->  deploy/commands/claude/*.md
 #   commands/skills/*/SKILL.md ->  deploy/commands/skills/*/SKILL.md
+#   bin/*                      ->  deploy/bin/*   (executables keep their mode)
 #
 # Usage:
 #   scripts/deploy-reviews.sh                  # render into ./deploy
@@ -239,21 +240,27 @@ rendered=0
 # prompts/document, prompts/release, whatever comes next -- are then picked up
 # automatically. Hardcoding the set means a directory nobody remembered to add
 # here is silently dropped from deploy/, which is where the live copy lives.
+# The text trees hold only Markdown; bin/ holds scripts of any name, so it walks
+# every file. An executable source stays executable: sed writes a fresh file with
+# the default mode, and a launcher that lost its x bit would fail only when an
+# agent tried to run it, mid-review.
 render_tree() {
-  local root="$1" f rel
+  local root="$1" pattern="${2:-*.md}" f rel
   [[ -d "$repo_root/$root" ]] || return 0
   while IFS= read -r f; do
     rel="${f#$repo_root/}"
     mkdir -p "$stage_dir/$(dirname "$rel")"
     sed "s|{{HOME}}|$home_substitute|g" "$f" > "$stage_dir/$rel"
+    [[ -x "$f" ]] && chmod 755 "$stage_dir/$rel"
     echo "  $rel"
     rendered=$((rendered + 1))
-  done < <(find "$repo_root/$root" -type f -name '*.md' | sort)
+  done < <(find "$repo_root/$root" -type f -name "$pattern" | sort)
 }
 
 echo "rendered:"
 render_tree "prompts"
 render_tree "commands"
+render_tree "bin" "*"
 
 if [[ "$rendered" -eq 0 ]]; then
   echo "error: no source files found; refusing to report success." >&2
@@ -283,7 +290,7 @@ manifest="$stage_dir/.manifest"
 while IFS= read -r f; do
   rel="${f#$stage_dir/}"
   echo "$(hash_file "$f") $rel" >> "$manifest"
-done < <(find "$stage_dir" -type f -name '*.md' | sort)
+done < <(find "$stage_dir" -type f ! -name .manifest | sort)
 
 # Everything rendered and checked. Swap the staged tree in. Rebuilding from
 # scratch also drops any file deleted upstream, which a copy-over would keep.
@@ -383,8 +390,10 @@ if [[ "$backed_up" -gt 0 ]]; then
   done
 fi
 
-if [[ ! -L "$home_substitute/agents/prompts" ]]; then
-  echo
-  echo "Note: $home_substitute/agents/prompts is not a symlink into this render."
-  echo "  ln -sfn $deploy_dir/prompts $home_substitute/agents/prompts"
-fi
+for d in prompts bin; do
+  if [[ ! -L "$home_substitute/agents/$d" ]]; then
+    echo
+    echo "Note: $home_substitute/agents/$d is not a symlink into this render."
+    echo "  ln -sfn $deploy_dir/$d $home_substitute/agents/$d"
+  fi
+done
