@@ -2,8 +2,8 @@ Perform a PR-quality code review of the work on the currently checked-out local 
 
 Tandem mode:
 
-- If the invocation contains `--tandem` or `--tandem-secondary`, read `{{HOME}}/agents/prompts/review/tandem.md` in full before doing anything else. That file decides which of this prompt's sections run and which files you write; where the two differ, it wins. Without either flag, ignore it.
-- Both reviewers read the same live working tree. The primary must not make the WIP commit or edit anything until every secondary has finished, because either would change the tree a secondary is still reading.
+- If the invocation contains `--tandem` (optionally `--tandem=<id>[,<id>...]` or `--tandem=manual`) or `--tandem-secondary`, read `{{HOME}}/agents/prompts/review/tandem.md` in full before doing anything else. That file decides which of this prompt's sections run and which files you write; where the two differ, it wins. Without either flag, ignore it.
+- Both reviewers read the same live working tree. The primary must not make the WIP commit or edit anything until every secondary has finished, including one the launcher started, because either would change the tree a secondary is still reading.
 
 Scope:
 

@@ -2,10 +2,13 @@ Tandem mode: two or more agents review the same target independently, and one of
 
 Roles:
 
-- **Primary**: invoked with `--tandem`. Reviews the target, writes its own draft, waits for the secondaries, consolidates, and then carries on with the calling prompt's posting and fix sections using the consolidated report. There is exactly one primary per review.
-- **Secondary**: invoked with `--tandem-secondary`, or `--tandem-secondary@<sha>` to pin the commit (see "Same target" below). Reviews the target and writes one draft file. That is the whole of its job.
-- **Remove the flag from the invocation before resolving the target.** `805 --tandem` names PR 805; the flag is not part of a branch name or a PR number.
-- **Your agent name** is the name of the agent you are running as, capitalized: `Claude`, `Codex`, `Hermes`. It is used only in file and worktree names, never in any report text.
+- **Primary**: invoked with `--tandem`. Starts the secondaries, reviews the target, writes its own draft, waits for the secondaries, consolidates, and then carries on with the calling prompt's posting and fix sections using the consolidated report. There is exactly one primary per review. The flag picks the secondaries:
+  - `--tandem`: launch the launcher's default secondary (see "Launching secondaries" below).
+  - `--tandem=<id>[,<id>...]`: launch these launcher entries instead, e.g. `--tandem=codex` or `--tandem=codex,hermes-kimi`.
+  - `--tandem=manual`: launch nothing. The user starts each secondary by hand and tells you when it is done.
+- **Secondary**: invoked with `--tandem-secondary`, or `--tandem-secondary@<sha>` to pin the commit (see "Same target" below), when started by hand; or started headless by the launcher (see "Launched secondaries"). Reviews the target and produces one draft. That is the whole of its job.
+- **Remove the flag from the invocation before resolving the target.** `805 --tandem=codex` names PR 805; the flag is not part of a branch name or a PR number.
+- **Your reviewer id** names your draft. For a primary, and for a secondary started by hand, it is the name of the agent you are running as, capitalized: `Claude`, `Codex`, `Hermes`. For a launched secondary it is the launcher entry id, such as `codex`. It is used only in file and worktree names, never in any report text.
 
 What a secondary may do:
 
@@ -27,16 +30,38 @@ A secondary can also be started headless by `{{HOME}}/agents/bin/tandem-secondar
 - **A repo check that needs to write** (a cache, a build directory) may fail under the sandbox. Note the failure in the validation bullet; do not work around it.
 - **Never start another secondary.** The launcher refuses to run inside a secondary, but do not try.
 
+Launching secondaries (primary only):
+
+Unless the flag was `--tandem=manual`, the primary starts its secondaries itself with `{{HOME}}/agents/bin/tandem-secondary`, one run per secondary. `tandem-secondary --list` shows the entries and which is the default.
+
+- **Launch after setup and before your own review.** First do everything the calling prompt does before reviewing: resolve the target, fetch, create the worktree (or, with no named target, settle on the current checkout), record the short tip SHA, and record your start time. For `review-local.md`, compute the `Reviewed tree:` hash now, since it is the pin. Only then launch, so the secondary reviews exactly what you will.
+- **The command**, with every value resolved:
+
+```
+{{HOME}}/agents/bin/tandem-secondary --mode pr|local|stack --target <target> --sha <short-sha or tree hash> --worktree <path> --draft <unsuffixed report path with -<id> before .md> [--entry <id>]
+```
+
+  - `--target`: the PR number for `pr`; the stack number or the PR number you resolved it from for `stack`; the branch name for `local`.
+  - `--worktree`: your worktree, or the checkout itself when you are reviewing in place (always, for `review-local.md`).
+  - `--draft`: for example `{{HOME}}/agents/output/PR-805-codex.md`. Name it with the entry id, not the agent name.
+  - `--entry`: one run per id named in `--tandem=<id>,...`. Omit it for a bare `--tandem` and the launcher uses its default; read the id it chose from its summary line.
+- **Run it in the background and do not wait for it before starting your own review.** A real review takes minutes. Use your environment's way to start a command in the background and be told when it exits. If your environment has none, do not run it in the foreground: fall back to `--tandem=manual`, say so, and give the user each secondary's invocation to start by hand.
+- **Leave the reviewed code alone until every launched secondary has exited.** It is reading the same worktree, or for `review-local.md` the same live tree. Do not remove the worktree, check anything out in it, or, under `review-local.md`, make the WIP commit or edit any file.
+- **The launcher's last line of output is its verdict**: `tandem-secondary: ok ...` or `tandem-secondary: failed ... reason=<why>`, with the draft and log paths. Read that line; do not judge by exit code alone.
+- **On `failed`, never consolidate silently without that secondary.** Tell the user the entry, the reason, and the log path, and ask whether to consolidate without it, re-run it, or start it by hand.
+- Do not start a secondary for the re-review after a fix; that review is yours alone (see "Consolidating").
+
 Files:
 
-- Each reviewer, primary included, writes its draft to the calling prompt's report path with `-<agent name>` inserted before `.md`:
-  - `review-pr.md`: `{{HOME}}/agents/output/PR-<number>-<agent name>.md`
-  - `review-local.md`: `{{HOME}}/agents/output/local-<branch>-<agent name>.md`
-  - `review-stack.md`: `{{HOME}}/agents/output/STACK-<number>-<agent name>.md`
+- Each reviewer, primary included, writes its draft to the calling prompt's report path with `-<reviewer id>` inserted before `.md`:
+  - `review-pr.md`: `{{HOME}}/agents/output/PR-<number>-<reviewer id>.md`
+  - `review-local.md`: `{{HOME}}/agents/output/local-<branch>-<reviewer id>.md`
+  - `review-stack.md`: `{{HOME}}/agents/output/STACK-<number>-<reviewer id>.md`
+- **These names are case-insensitive on macOS.** `PR-805-codex.md` from the launcher and `PR-805-Codex.md` from Codex started by hand are the same file. Do not run the same agent both ways in one review.
 - Overwrite a draft left by an earlier tandem run. Drafts are working material and are never posted.
 - **Only the primary writes the unsuffixed report path**, and only with the consolidated result. That file is the one that gets posted, carries `Fix attempts:`, and serves as the prior report for the next run.
-- **A suffixed draft is never a prior report.** When the calling prompt looks for a prior report, including any near-match search of `{{HOME}}/agents/output/`, ignore files whose name carries an agent-name suffix. A draft may hold findings the consolidation rejected, and treating it as history would resurrect them.
-- Add `-<agent name>` to the worktree directory name too, so two reviewers starting in the same second cannot collide: `{{HOME}}/agents/worktrees/<repo>-<branch>-<timestamp>-<agent name>`.
+- **A suffixed draft is never a prior report.** When the calling prompt looks for a prior report, including any near-match search of `{{HOME}}/agents/output/`, ignore any file whose name carries a reviewer-id suffix after the PR number, stack number, or branch (`PR-805-Codex.md`, `PR-805-codex-xhigh.md`). A draft may hold findings the consolidation rejected, and treating it as history would resurrect them.
+- Add `-<reviewer id>` to the worktree directory name too, so two reviewers starting in the same second cannot collide: `{{HOME}}/agents/worktrees/<repo>-<branch>-<timestamp>-<reviewer id>`. Launched secondaries share the primary's worktree and create none.
 
 Same target:
 
@@ -47,8 +72,8 @@ Same target:
 
 Consolidating (primary only):
 
-- Write your own draft first, then check for the secondaries' drafts. If they are not there yet, say which you are waiting for, name the path each will write, and wait for the user to tell you they are done. Do not poll the directory in a loop.
-- **When told a secondary is done, check its draft before reading its findings.** It must exist, have been modified after your recorded start time, and carry the same `Reviewed commit:`, `Reviewed stack:`, or `Reviewed tree:` value as your own draft. If any check fails, stop and say which one, and ask whether to proceed without that draft or re-run it. Never consolidate drafts of different code.
+- Write your own draft first, then wait for the secondaries. For a launched secondary, wait for its launcher to exit and read its summary line, as described under "Launching secondaries". For one started by hand, say which you are waiting for, name the path it will write, and wait for the user to tell you it is done. Never poll the directory in a loop.
+- **When a secondary is done, check its draft before reading its findings**, even when the launcher already validated it. It must exist, have been modified after your recorded start time, and carry the same `Reviewed commit:`, `Reviewed stack:`, or `Reviewed tree:` value as your own draft. If any check fails, stop and say which one, and ask whether to proceed without that draft or re-run it. Never consolidate drafts of different code.
 - **Merge by root cause, not by title.** Two findings describing the same defect through different symptoms or different citations become one finding. Keep the clearer explanation, and combine the triggering scenarios when each adds something.
 - **Every finding raised by only one reviewer is verified against the code before it goes in or comes out.** A secondary's finding does not enter the report on the secondary's word, and it is not dropped because you missed it. If you had considered the same code and dismissed it, re-examine it: keep the finding unless you can name the specific code that refutes it.
 - **On a priority disagreement, take the higher priority** unless you can refute the higher one with code. Consolidation must never lower a finding into a rank that selects a lighter posting form; the calling prompt's rule against ranking a finding P3 because P3 approves applies here with the same force.

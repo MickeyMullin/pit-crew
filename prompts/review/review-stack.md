@@ -4,7 +4,7 @@ This prompt is the companion to `review-pr.md`. Use this one to answer "does the
 
 Tandem mode:
 
-- If the invocation contains `--tandem` or `--tandem-secondary` (optionally `--tandem-secondary@<sha>`), read `{{HOME}}/agents/prompts/review/tandem.md` in full before doing anything else, remove the flag, and resolve what remains under "Setup" below. That file decides which of this prompt's sections run and which files you write; where the two differ, it wins. Without either flag, ignore it.
+- If the invocation contains `--tandem` (optionally `--tandem=<id>[,<id>...]` or `--tandem=manual`) or `--tandem-secondary` (optionally `--tandem-secondary@<sha>`), read `{{HOME}}/agents/prompts/review/tandem.md` in full before doing anything else, remove the flag, and resolve what remains under "Setup" below. That file decides which of this prompt's sections run and which files you write; where the two differ, it wins. Without either flag, ignore it.
 - Tandem mode adds nothing to what this prompt may do. It still never fixes, and the primary still posts only on the user's explicit yes.
 
 Setup:
