@@ -13,7 +13,7 @@ Arguments:
 
 What this sweep must never do:
 
-- Merge, close, or reopen any PR, or approve one yourself. Approval happens only inside a reviewer's single post, when `review-dependabot.md`'s "Posting the report" gate selects it: no findings at all, recommendation `approve`, complete changelog coverage, conflict-free, and green CI. Every other recommendation is the user's to act on.
+- Merge, close, or reopen any PR, or approve one yourself. Approval happens only inside a reviewer's single post, when `review-dependabot.md`'s "Posting the report" gate selects it: no finding above P3, recommendation `approve`, complete changelog coverage, conflict-free, and green CI. Every other recommendation is the user's to act on.
 - Comment `@dependabot rebase`, `@dependabot recreate`, or any other bot command, anywhere.
 - Push, commit, fix anything, or edit any file in the repository under review.
 - Re-run a workflow, add or remove a label, or edit a PR's title or body.
@@ -51,7 +51,7 @@ Steps, in order:
    - `{{HOME}}/agents/output/PR-<number>.md` exists;
    - its `Reviewed commit:` SHA equals the PR's current head, compared as full SHAs (expand the report's short SHA with `git rev-parse <short-sha>` in the clone; a prefix match is not equality);
    - the set of failing checks named in the report's `CI status` note equals the set failing now, by exact check name, and no check is still queued or in progress;
-   - if the report's recommendation is `approve` with no findings, the PR already carries an approval from the active identity on that SHA (`gh api repos/<owner>/<repo>/pulls/<number>/reviews`). A clean report posted as a comment, because CI was unresolved or because it predates automatic approval, is reviewed fresh so the approval gets its chance.
+   - if the report's recommendation is `approve` with no finding above P3, the PR already carries an approval from the active identity on that SHA (`gh api repos/<owner>/<repo>/pulls/<number>/reviews`). A clean report posted as a comment, because CI was unresolved or because it predates automatic approval, is reviewed fresh so the approval gets its chance.
    - If any one fails, or the report does not let you tell, review the PR fresh. A Dependabot rebase or re-bump changes the head and so always triggers a fresh review; never reuse a verdict across a SHA change.
    - A reused row takes its recommendation and findings from that report's `Merge recommendation` line and Summary, its date from the report file's modification date, and its post URL from the PR's existing comment or review whose body starts with the same `Reviewed commit:` line, if one exists.
 1. **Review each remaining PR, in PR-number order, `N` at a time.**

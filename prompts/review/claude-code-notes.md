@@ -20,7 +20,7 @@ If the notification arrives while you are still reviewing, finish your own draft
 
 These cover the mechanics `review-dependabot-sweep.md` leaves to the agent.
 
-**Models.** Run the sweep session itself on Sonnet 5.5 at medium effort; the orchestrator only lists, spawns, collects, and tabulates. Start each reviewer with the Agent tool's `model: "sonnet"` and `effort: "high"`, since a reviewer would otherwise inherit the orchestrator's medium effort. When the prompt's escalation rule fires, start that PR's reviewer with `model: "opus"` and `effort: "high"`.
+**Models.** The `/review-dependabot-sweep` command runs the orchestrator on Sonnet (`model: sonnet` in its frontmatter); medium effort is enough, since it only lists, spawns, collects, and tabulates. Start each reviewer with the Agent tool's `model: "sonnet"` and `effort: "high"`, since a reviewer would otherwise inherit the orchestrator's medium effort. When the prompt's escalation rule fires, start that PR's reviewer with `model: "opus"` and `effort: "high"`.
 
 **The pool.** Start the first `N` reviewers as general-purpose subagents in one message, each with `run_in_background: true`. Do not poll, `sleep`, or watch them with Monitor: Claude Code notifies you when a subagent completes. On each completion notification, validate that reviewer's return, then start the next waiting PR in the same turn, so the pool refills one-for-one and stays full until the queue is empty. When the queue is empty and reviewers are still running, say in chat which PRs are still in flight, then stop until their notifications arrive.
 

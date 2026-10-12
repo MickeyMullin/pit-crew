@@ -1,6 +1,7 @@
 ---
-description: "Sweep every open Dependabot PR in a repo: review each one, find the PRs that must land together, and end with one table of recommendations and a merge order. Approves only clean bumps with green CI; never merges or pushes."
+description: "Sweep every open Dependabot PR in a repo: review each one, find the PRs that must land together, and end with one table of recommendations and a merge order. Approves only bumps with nothing above P3 and green CI; never merges or pushes."
 argument-hint: "[owner/repo] [PR numbers...] [--parallel N] [--force]"
+model: sonnet
 ---
 
 Follow the instructions in `{{HOME}}/agents/prompts/review/review-dependabot-sweep.md` in full. You are

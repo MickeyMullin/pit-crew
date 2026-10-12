@@ -1,5 +1,5 @@
 ---
-description: "Review a Dependabot dependency bump, accounting for rebases and re-bumps of the same PR. Approves automatically when the bump has no findings and green CI."
+description: "Review a Dependabot dependency bump, accounting for rebases and re-bumps of the same PR. Approves automatically when the bump has nothing above P3 and green CI."
 argument-hint: "[PR number | PR URL] [head SHA] [sibling context]"
 ---
 
