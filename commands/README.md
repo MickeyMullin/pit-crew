@@ -92,6 +92,6 @@ See the root README's "The two directions" and "Rules" for the full workflow.
 
 ## Arguments
 
-Two of these take an argument. `review-stack` takes the stack number, or any PR number in the stack. `report-day` takes the day to report on — a date, a weekday name, `yesterday`, or nothing for today — plus anything else worth telling it, such as the meetings that left no trace on the machine. The rest take none.
+All of these take arguments, and every one is optional. `review-pr` takes a PR number, branch, or PR URL, and nothing means the current checkout. `review-stack` takes the stack number, or any PR number, branch, or PR URL in the stack. `review-local` takes no target. All three accept the tandem flags. `review-dependabot` takes a PR number or URL, and nothing means the current checkout; a sweep also passes it the head SHA and a sibling note. `review-dependabot-sweep` takes an `owner/repo`, PR numbers to limit the sweep, `--parallel N`, and `--force`, in any order, and nothing means every open Dependabot PR in the current repo. `report-day` takes the day to report on — a date, a weekday name, `yesterday`, or nothing for today — plus anything else worth telling it, such as the meetings that left no trace on the machine.
 
-Claude Code's command files interpolate it as `$ARGUMENTS`. The skills have no equivalent placeholder — a skill receives the invocation text as written — so each one tells the agent what to look for in the invocation and what to do when it carries nothing.
+Claude Code's command files interpolate them as `$ARGUMENTS`. The skills have no equivalent placeholder — a skill receives the invocation text as written — so each one tells the agent what to look for in the invocation and what to do when it carries nothing.
