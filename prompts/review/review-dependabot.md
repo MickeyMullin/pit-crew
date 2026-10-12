@@ -42,7 +42,7 @@ Scope:
   - **CI infrastructure**: runner, network, quota, or credential failures unrelated to the code.
 - For each failing check, name the file or package responsible and the fix, including where the fix belongs: in this PR, in a companion change, or on the base branch followed by a Dependabot rebase. A PR that is only `BLOCKED` on a required review has no failing check. Do not re-run a workflow to gather evidence; that is a GitHub write this review does not make.
 - Check for a pre-existing report from a prior run before starting, in `{{HOME}}/agents/output/` under the name this run would write (see "Output file"). If one exists, read only its first ~80 lines — the `## Summary` index — and verify each prior finding as resolved, partially resolved, unresolved, or no longer applicable. Because Dependabot rebases and re-bumps, also confirm the prior report's SHA is still an ancestor of HEAD (`git merge-base --is-ancestor <prior-sha> HEAD`); if it is not, the branch was rewritten and the prior findings must be re-derived from scratch rather than diffed forward.
-- Do not modify files, commit, or push. Do not `pnpm install`, `pnpm update`, regenerate a lockfile, or edit a version constraint to "test" anything. The only permitted GitHub write is posting the finished report as a single PR comment, exactly as described under "Output file".
+- Do not modify files, commit, or push. Do not `pnpm install`, `pnpm update`, regenerate a lockfile, or edit a version constraint to "test" anything. The only permitted GitHub write is posting the finished report once, in exactly one of the forms described under "Posting the report".
 - Do not run builds or tests unless explicitly requested.
 - The repo's comment-length check does not apply here — a Dependabot diff adds no comments. Skip it entirely and do not mention it in the report.
 
@@ -74,9 +74,26 @@ Output file:
 - Overwrite the file if it already exists from a prior run. Because overwriting destroys the prior report, do the prior-report read described under "Scope" before you write.
 - **No AI attribution, anywhere in the report.** Do not say that a model, agent, or tool wrote, reviewed, or found anything: no "reviewed by" line, no generated-by footer, no model or provider names. The report goes out as the user's own review.
 - Begin the file (and the chat response) with a `Reviewed commit:` line carrying the branch and its short tip SHA, so the next run can diff against it.
-- Once the file write has completed — and only then — post the same report as a PR comment with `gh pr comment <number> --body-file {{HOME}}/agents/output/PR-<number>.md`. This is the one GitHub write this review performs.
-- Skip the comment step when no PR exists for the branch.
-- If `gh pr comment` fails, do not retry it and do not attempt any alternative posting path. State plainly in the chat response that posting failed, include the error, and say the report is saved for manual posting.
+
+Posting the report:
+
+- Choose the form of the post, by the rules below, before you write the report file, since its closing notes record that choice. Any wait for CI happens then too.
+- Once the file write has completed — and only then, never before it and never concurrently with it — post the report to the PR in the form chosen, passing the file that was just written. This is the one GitHub write this review performs, and it happens exactly once.
+- **A clean bump is approved automatically.** Post the report as an approval — `gh pr review <number> --approve --body-file {{HOME}}/agents/output/PR-<number>.md` — only when every one of these holds:
+  - the review has **no findings at all**, of any priority. A single P3 means a plain comment, not an approval;
+  - the merge recommendation is `approve`;
+  - changelog coverage is complete: you read the notes for every release in every bumped range, with no gap;
+  - the branch is conflict-free with the latest base;
+  - CI is green on the reviewed SHA: every check has concluded and passed (skipped and neutral count as passed). A PR with no checks configured satisfies this trivially;
+  - the PR is open, not a draft, and authored by Dependabot.
+- **CI still queued or in progress, with everything else qualifying: wait for it, then decide.** Run `gh pr checks <number> --watch --interval 60` and let it run to completion; do not poll by hand. Then re-check with a plain `gh pr checks <number>`: green means approve, and anything else means a plain comment. If `--watch` itself errors out rather than completing, post a plain comment and say in the closing notes that CI was unresolved when you stopped waiting, and why.
+- **Otherwise post a plain comment**: `gh pr comment <number> --body-file {{HOME}}/agents/output/PR-<number>.md`.
+- **Except when that would leave a stale approval standing.** If the recommendation is `fix before merge`, `hold`, or `do not merge`, and the PR carries an approval from the active GitHub identity (`gh api user --jq .login`) on an earlier commit (`gh api repos/{owner}/{repo}/pulls/<number>/reviews`, comparing each review's `user.login`, `state`, and `commit_id`), post the report as a request-changes review instead: `gh pr review <number> --request-changes --body-file {{HOME}}/agents/output/PR-<number>.md`. A plain comment does not supersede an approval on GitHub, so an earlier automatic approval would otherwise keep vouching for a version this review says not to merge.
+- Never approve to be agreeable, and never rank a finding lower, or leave one out, so that a PR qualifies. The findings are decided before you know which form they select. A CI coverage gap that leaves a runtime bump untested is a P3 finding, and it blocks the approval like any other.
+- One post, carrying the whole report as its body. Never post a comment and then an approval, or an approval and then a comment restating it.
+- Skip the post entirely when no PR exists for the branch.
+- If the `gh` command fails, do not retry it, do not fall back to a different form, and do not attempt any alternative posting path. State plainly in the chat response which form you attempted, include the error, and say the report is saved for manual posting.
+- State in the chat response which form was used, so the record of what landed on the PR is visible without opening it.
 
 Review priorities:
 
@@ -168,6 +185,7 @@ Finish with:
 ---
 
 - Merge recommendation: exactly one of `approve`, `fix before merge`, `hold`, or `do not merge` (a pin is a `hold`; say what to pin in the findings)
+- Posted as: approval, comment, or request changes, and why; for an approval, say that every condition under "Posting the report" held
 - Changelog coverage: the version ranges whose release notes you actually read, and any range you could not obtain notes for
 - Previous findings, only if a prior report was found: the short SHA it reviewed, whether that SHA is still an ancestor of HEAD (Dependabot rebases), and the per-finding resolved/partially resolved/unresolved/no-longer-applicable verdicts. Omit this bullet entirely when no prior report exists.
 - Whether the branch is conflict-free with the latest base

@@ -1,6 +1,6 @@
 ---
 name: review-dependabot-sweep
-description: Sweep every open Dependabot PR in a repo, review each one, find the PRs that must land together, and end with one table of recommendations and a merge order. Never merges, approves, or pushes.
+description: Sweep every open Dependabot PR in a repo, review each one, find the PRs that must land together, and end with one table of recommendations and a merge order. Approves only clean bumps with green CI; never merges or pushes.
 ---
 
 # Sweep a repo's Dependabot PRs

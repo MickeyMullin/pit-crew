@@ -1,6 +1,6 @@
 ---
 name: review-dependabot
-description: Review a Dependabot dependency bump, accounting for rebases and re-bumps of the same PR.
+description: Review a Dependabot dependency bump, accounting for rebases and re-bumps of the same PR. Approves automatically when the bump has no findings and green CI.
 ---
 
 # Review a Dependabot bump
