@@ -104,9 +104,7 @@ They stop and ask when a higher-effort model is warranted, or when a finding nee
 design judgment — concurrency, security, architecture, data migration — rather than a
 mechanical correction.
 
-**On someone else's PR, the verdict is the form of the post**, not a line of prose in it:
-any P0 or P1 submits a request-changes review, a clean or P3-only review submits an
-approval, and a P2 in between posts a plain comment. One post, carrying the whole report.
+**On someone else's PR, the verdict is the form of the post**, not a line of prose in it: any P0, P1, or P2 submits a request-changes review, and a clean or P3-only review submits an approval once CI is green (a plain comment when CI failed). One post, carrying the whole report.
 
 **On your own PR, `review-pr` never posts on its own initiative** — no comment, no
 approval, no request-changes. Findings get fixed rather than reported back to you; a
@@ -148,9 +146,7 @@ is not improvised back in. A fix belongs in the layer that introduced the proble
 changing that layer invalidates every layer above it, and restacking rewrites branches
 that may already be reviewed. That is not a one-pass automatic operation.
 
-Its posting rules mirror `review-pr`'s, including the form: a P0 or P1 is a
-request-changes review, a clean or P3-only stack is an approval, a P2 in between is a
-plain comment — one post, on the top layer's PR only.
+Its posting rules mirror `review-pr`'s, including the form: a P0, P1, or P2 is a request-changes review, and a clean or P3-only stack is an approval (a plain comment when CI is not green) — one post, on the top layer's PR only.
 
 **Whether** it posts is a separate question from **how**, and that is where it diverges:
 `review-stack` posts nothing without being told to, for any verdict. It writes the
