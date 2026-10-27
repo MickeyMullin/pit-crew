@@ -10,8 +10,13 @@
   },
   "scripts": {
     "start": "node src/server.ts",
+    "dev": "PIT_VIEW_INSTANCE=dev node src/server.ts",
     "test": "node --test \"test/**/*.test.ts\"",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "service:install": "node scripts/service.ts install",
+    "service:uninstall": "node scripts/service.ts uninstall",
+    "service:status": "node scripts/service.ts status",
+    "service:restart": "node scripts/service.ts restart"
   },
   "devDependencies": {
     "@types/node": "26.6.5",

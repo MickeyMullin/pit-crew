@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- deploy/com.mickey.pit-view.plist: the template pnpm service:install renders; it fills every
+     placeholder at install time and writes the result to ~/Library/LaunchAgents, never here -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mickey.pit-view</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__APP_DIR__/src/server.ts</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__APP_DIR__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- the PATH of the installing shell, so gh and the review commands resolve; launchd's own
+         PATH lacks most user tool locations. No PIT_VIEW_INSTANCE: this is the default instance,
+         on 127.0.0.1:4791 with ~/.config/pit-view and ~/.local/state/pit-view -->
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- restarted after a crash or a failed start; a clean exit, as on SIGTERM, stays stopped -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local/state/pit-view/server.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local/state/pit-view/server.err.log</string>
+</dict>
+</plist>

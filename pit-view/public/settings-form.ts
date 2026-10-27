@@ -7,7 +7,7 @@ import type { View } from '../src/poller.ts'
 // the page posts here after a save, so an open dashboard rereads density and the agent column
 export const configChannel = 'pit-view.config'
 
-// where the server keeps the config, as the page header shows it
+// where the default instance keeps the config, shown until /api/instance names the real file
 export const configPathText = '~/.config/pit-view/config.json'
 
 export type AvatarMode = 'initials' | 'github' | 'image'

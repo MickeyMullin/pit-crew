@@ -12,7 +12,7 @@ import { openCache } from './cache.ts'
 import type { Cache } from './cache.ts'
 import { createClients } from './clients.ts'
 import type { ClientState, Clients } from './clients.ts'
-import { cacheFile, ConfigError, configFile, expandHome, readConfig, saveConfig, validateConfig } from './config.ts'
+import { cacheFile, ConfigError, configFile, expandHome, readConfig, saveConfig, tildePath, validateConfig } from './config.ts'
 import type { Clock, Config } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner } from './github.ts'
@@ -20,6 +20,9 @@ import { createPoller, systemTimers } from './poller.ts'
 import type { Patch, Poller, Timers } from './poller.ts'
 
 export const defaultPort = 4791
+// a named instance's port when PIT_VIEW_PORT is unset; any other name must set it
+export const instancePorts: ReadonlyMap<string, number> = new Map([['', defaultPort], ['dev', 4792]])
+export const instancePattern = /^[a-z][a-z0-9-]{0,31}$/
 // loopback only, in every hosting mode
 export const host = '127.0.0.1'
 
@@ -35,6 +38,8 @@ export type ServerOptions = {
   cachePath: string
   publicDir: string
   log: (line: string) => void
+  // '' for the default instance (the deployed app), or a name such as dev
+  instance?: string
   keepaliveMs?: number
   pageSize?: number
 }
@@ -394,6 +399,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'GET', pattern: /^\/api\/events$/, handle: (req, res, url) => events(req, res, url) },
     { method: 'POST', pattern: /^\/api\/clients\/([^/]+)$/, handle: (req, res, _url, match) => updateClient(req, res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/refresh$/, handle: (_req, res) => json(res, 200, poller.refresh('manual')) },
+    { method: 'GET', pattern: /^\/api\/instance$/, handle: (_req, res) => json(res, 200, { name: options.instance ?? '', configPath: tildePath(options.configPath, home), pid: process.pid }) },
     { method: 'GET', pattern: /^\/api\/config$/, handle: (_req, res) => json(res, 200, stored) },
     { method: 'PUT', pattern: /^\/api\/config$/, handle: (req, res) => putConfig(req, res) },
     { method: 'GET', pattern: /^\/api\/people\/suggestions$/, handle: (_req, res) => json(res, 200, suggestions()) },
@@ -447,28 +453,43 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   return { port, url: `http://${host}:${port}`, poller, clients, cache, close }
 }
 
-const portFrom = (value: string | undefined): number => {
-  if (value === undefined || value === '') return defaultPort
-  const port = Number(value)
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`PIT_VIEW_PORT must be a port number, got ${value}`)
-  return port
+export type Runtime = { instance: string, port: number, configPath: string, cachePath: string }
+
+// PIT_VIEW_INSTANCE picks the instance (unset for the app, dev for development) and with it the
+// config and state folders and the default port; PIT_VIEW_PORT still overrides the port
+export const resolveRuntime = (env: Record<string, string | undefined>, home: string): Runtime => {
+  const instance = env.PIT_VIEW_INSTANCE ?? ''
+  if (instance !== '' && !instancePattern.test(instance)) {
+    throw new Error(`PIT_VIEW_INSTANCE must be lowercase letters, digits and -, starting with a letter, got ${instance}`)
+  }
+  const value = env.PIT_VIEW_PORT ?? ''
+  let port = instancePorts.get(instance)
+  if (value !== '') {
+    port = Number(value)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`PIT_VIEW_PORT must be a port number, got ${value}`)
+  }
+  if (port === undefined) throw new Error(`PIT_VIEW_INSTANCE=${instance} has no default port; set PIT_VIEW_PORT too`)
+  return { instance, port, configPath: configFile(home, instance), cachePath: cacheFile(home, instance) }
 }
 
 // the real defaults, resolved here and nowhere else; no path depends on the working directory
 export const main = async (): Promise<void> => {
   const home = homedir()
   const log = (line: string): void => console.log(`${new Date().toISOString()} ${line}`)
+  let runtime: Runtime
   let server: PitServer
   try {
+    runtime = resolveRuntime(process.env, home)
     server = await startServer({
       home,
-      port: portFrom(process.env.PIT_VIEW_PORT),
+      instance: runtime.instance,
+      port: runtime.port,
       runner: commandRunner('gh'),
       clock: { now: () => Date.now() },
       timers: systemTimers,
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      configPath: configFile(home),
-      cachePath: cacheFile(home),
+      configPath: runtime.configPath,
+      cachePath: runtime.cachePath,
       publicDir: fileURLToPath(new URL('../public', import.meta.url)),
       log,
     })
@@ -476,7 +497,8 @@ export const main = async (): Promise<void> => {
     console.error(`pit-view: ${messageOf(error)}`)
     process.exit(1)
   }
-  log(`Pit View listening on ${server.url}`)
+  const named = runtime.instance === '' ? '' : ` (instance ${runtime.instance}, config ${tildePath(runtime.configPath, home)})`
+  log(`Pit View listening on ${server.url}${named}`)
   const shutdown = (signal: string): void => {
     log(`${signal}: shutting down`)
     server.close().then(() => process.exit(0), (error: unknown) => {

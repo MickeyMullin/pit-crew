@@ -14,3 +14,8 @@ demo/
 .env
 .env.*
 .DS_Store
+
+# the launchd template holds placeholders only (pnpm service:install renders it outside the repo);
+# pit-crew's root .gitignore keeps its own rendered deploy/ out, which would match this folder too
+!/deploy/
+!/deploy/com.mickey.pit-view.plist

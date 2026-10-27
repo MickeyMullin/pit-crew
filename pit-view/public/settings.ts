@@ -7,6 +7,7 @@ import { avatar } from './cells.ts'
 import { byId, h, setText, svg } from './dom.ts'
 import type { Shape } from './dom.ts'
 import { formatClock } from './format.ts'
+import { loadInstance, showInstance } from './instance.ts'
 import {
   avatarChoices, changeKind, configChannel, configPathText, densityChoices, errorId, fieldId, isDirty, kindChoices, needsRefresh,
   newPerson, newTicket, openSuggestions, previewPerson, refreshChoices, sampleTextsFrom, serverError, sourceChoices, ticketSample,
@@ -566,6 +567,11 @@ const load = async (): Promise<void> => {
 }
 
 setText(byId('config-path'), configPathText)
+void loadInstance().then((info) => {
+  if (info === null) return
+  showInstance(info)
+  setText(byId('config-path'), info.configPath)
+})
 mountThemeToggle(byId<HTMLButtonElement>('theme'))
 bindStatic()
 

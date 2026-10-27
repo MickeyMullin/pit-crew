@@ -78,9 +78,19 @@ export const defaultConfig = (): Config => ({
   showAgentColumn: false,
 })
 
-export const configFile = (home: string): string => join(home, '.config', 'pit-view', 'config.json')
-export const stateDir = (home: string): string => join(home, '.local', 'state', 'pit-view')
-export const cacheFile = (home: string): string => join(stateDir(home), 'cache.sqlite')
+// the default instance ('') is the deployed app; a named one, such as dev, keeps folders of its own
+export const instanceFolder = (instance: string): string => instance === '' ? 'pit-view' : `pit-view-${instance}`
+export const configDir = (home: string, instance = ''): string => join(home, '.config', instanceFolder(instance))
+export const configFile = (home: string, instance = ''): string => join(configDir(home, instance), 'config.json')
+export const stateDir = (home: string, instance = ''): string => join(home, '.local', 'state', instanceFolder(instance))
+export const cacheFile = (home: string, instance = ''): string => join(stateDir(home, instance), 'cache.sqlite')
+
+// a path under home written with ~, as the pages show it
+export const tildePath = (path: string, home: string): string => {
+  if (path === home) return '~'
+  if (path.startsWith(`${home}/`)) return `~/${path.slice(home.length + 1)}`
+  return path
+}
 
 // '~' and '~/x' resolve against home; anything else is returned unchanged
 export const expandHome = (path: string, home: string): string => {

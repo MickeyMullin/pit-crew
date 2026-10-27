@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { openCache } from '../src/cache.ts'
 import type { Config } from '../src/config.ts'
 import type { Patch, View } from '../src/poller.ts'
-import { PortInUseError, startServer } from '../src/server.ts'
+import { PortInUseError, resolveRuntime, startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { failed, fakeRunner, fakeTime, fixtureRunner, gatedRunner, githubCalls, tempDir } from './helpers.ts'
@@ -454,6 +454,56 @@ test('a port already in use is an error naming the port, and the running server\
     await h.server.poller.idle()
     assert.equal(h.server.cache.cycle(cycle!)?.state, 'finished')
   } finally {
+    await h.cleanup()
+  }
+})
+
+test('GET /api/instance names the default instance, its config file under ~ and its process', async () => {
+  const h = await setup()
+  try {
+    const { status, body } = await getJson<Record<string, unknown>>(`${h.base}/api/instance`)
+    assert.equal(status, 200)
+    assert.deepEqual(body, { name: '', configPath: '~/.config/pit-view/config.json', pid: process.pid })
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a dev instance runs beside the app with its own config and cache, sharing neither', async () => {
+  const h = await setup()
+  const dev = resolveRuntime({ PIT_VIEW_INSTANCE: 'dev' }, h.home)
+  await mkdir(join(dev.configPath, '..'), { recursive: true })
+  await writeFile(dev.configPath, JSON.stringify({ repo: scenario.repo, viewer: scenario.viewer }), 'utf8')
+  const server = await startServer({
+    home: h.home,
+    instance: dev.instance,
+    port: 0,
+    runner: fixtureRunner().runner,
+    clock: h.time.clock,
+    timers: h.time.timers,
+    timeZone: scenario.timeZone,
+    configPath: dev.configPath,
+    cachePath: dev.cachePath,
+    publicDir: join(h.home, 'public'),
+    log: () => {},
+    pageSize: scenario.pageSize,
+  })
+  try {
+    const { body } = await getJson<Record<string, unknown>>(`${server.url}/api/instance`)
+    assert.deepEqual(body, { name: 'dev', configPath: '~/.config/pit-view-dev/config.json', pid: process.pid })
+    const stored = (await getJson<Config>(`${server.url}/api/config`)).body
+    const saved = await send(`${server.url}/api/config`, 'PUT', { ...stored, repo: 'octo-org/dev-only' })
+    assert.equal(saved.status, 200)
+    assert.equal(JSON.parse(await readFile(dev.configPath, 'utf8')).repo, 'octo-org/dev-only')
+    assert.equal(JSON.parse(await readFile(h.configPath, 'utf8')).repo, scenario.repo)
+    assert.equal((await getJson<View>(`${h.base}/api/view`)).body.repo, scenario.repo)
+    await server.poller.idle()
+    // the save started a config cycle in the dev cache only
+    assert.notEqual(server.cache.latestCycle('octo-org/dev-only'), null)
+    assert.equal(h.server.cache.latestCycle('octo-org/dev-only'), null)
+    assert.notEqual(dev.cachePath, join(h.home, '.local', 'state', 'pit-view', 'cache.sqlite'))
+  } finally {
+    await server.close()
     await h.cleanup()
   }
 })

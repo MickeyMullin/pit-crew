@@ -286,8 +286,10 @@ clearly happened.
 ```bash
 cd pit-view
 pnpm install   # once, for the dev-only type checker
-pnpm start     # http://127.0.0.1:4791
+pnpm dev       # the development instance, http://127.0.0.1:4792
 ```
+
+The deployed app runs from a clone of `master` at `~/app/pit-crew`, on http://127.0.0.1:4791, kept running by the `com.mickey.pit-view` launch agent; [pit-view/deploy/README.md](pit-view/deploy/README.md) covers deploying and updating it. The two instances keep separate config and state folders, so they run at the same time.
 
 It needs Node 26 or later and a logged-in `gh`; [pit-view/README.md](pit-view/README.md) covers configuration and tests. Its design, rules and progress checklist live in [pit-view/DESIGN.md](pit-view/DESIGN.md), which is the authority for any change to it.
 
@@ -462,7 +464,7 @@ These hold for anyone working in this repo, human or agent:
 | Not sure whether anything drifted | `scripts/sanitize.sh --dry-run` |
 | Deployed copy looks wrong or stale | `scripts/deploy-reviews.sh` to rebuild it |
 | Pulled changes from GitHub | `scripts/deploy-reviews.sh --install` |
-| Want the PR dashboard | `pnpm start` in `pit-view/` (`pnpm install` once first) |
+| Want the PR dashboard | Open http://127.0.0.1:4791 (the deployed app), or `pnpm dev` in `pit-view/` for the development instance on 4792 (`pnpm install` once first) |
 | Need to undo a deploy | `cp -R backups/<timestamp>/deploy/. deploy/` |
 | Deploy refused: unsanitized edits | `scripts/sanitize.sh` to keep them, `--force` to discard |
 

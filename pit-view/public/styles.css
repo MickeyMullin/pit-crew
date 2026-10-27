@@ -156,6 +156,20 @@ button {
   letter-spacing: -0.01em;
 }
 
+/* a named instance such as dev; the deployed app shows none */
+.instance-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--amber-edge);
+  border-radius: 4px;
+  background: var(--amber-bg);
+  color: var(--amber-fg);
+  font: 600 11px var(--font-mono);
+}
+
+.instance-badge[hidden] {
+  display: none;
+}
+
 .control,
 .icon-button,
 .button {

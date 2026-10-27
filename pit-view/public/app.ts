@@ -7,6 +7,7 @@ import { byId, setText } from './dom.ts'
 import { clearFilters, cycleSort, initialControls, pressTile, setClosedRange, setFilter, setGrouped } from './filters.ts'
 import type { ClosedRangeKey, Controls, Filters } from './filters.ts'
 import { createHoverCard } from './hovercard.ts'
+import { loadInstance, showInstance } from './instance.ts'
 import { createLive } from './live.ts'
 import { render } from './render.ts'
 import type { Settings, UiState } from './render.ts'
@@ -236,6 +237,9 @@ try {
 }
 
 mountThemeToggle(byId<HTMLButtonElement>('theme'))
+void loadInstance().then((info) => {
+  if (info !== null) showInstance(info)
+})
 
 // the stream first, so no patch is missed; the view follows once it opens
 live.start()
