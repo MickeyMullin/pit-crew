@@ -16,6 +16,7 @@ For actual usage, the local machine's LLM/agents refer to a deployed copy of the
 | `commands/claude/` | Claude Code slash commands that invoke the prompts. |
 | `commands/skills/` | The same commands as `SKILL.md` skills, for Hermes and Codex. Both read the same format, so they share one tree. See [commands/README.md](commands/README.md). |
 | `bin/` | Executables the prompts call, rendered like the prompts. Today: `tandem-secondary`, which starts a tandem-mode secondary reviewer headless, read-only and offline, and installs its draft only if it validates. |
+| `pit-view/` | Pit View, a local dashboard for the pull requests in one GitHub repository. A separate Node app, outside the deploy trees; see "Pit View" below. |
 | `scripts/` | The two directions. `deploy-reviews.sh` renders sources into a runnable copy; `sanitize.sh` brings tested edits back. |
 | `TODO.md` | Open decisions not yet made. |
 | `LICENSE` | MIT. |
@@ -278,6 +279,20 @@ clearly happened.
 /report-day Tuesday. Outside of Claude I had a 9am standup, a 1pm scope meeting, and 3pm co-work.
 ```
 
+## Pit View
+
+`pit-view/` holds Pit View, a local dashboard for the pull requests in one GitHub repository: which PRs need your attention, which of your own are blocked or ready, and what closed today. It reads GitHub through `gh` and never writes there, and it reads the review reports in `~/agents/output` (by default) to show whether your own PRs have a current self-review.
+
+```bash
+cd pit-view
+pnpm install   # once, for the dev-only type checker
+pnpm start     # http://127.0.0.1:4791
+```
+
+It needs Node 26 or later and a logged-in `gh`; [pit-view/README.md](pit-view/README.md) covers configuration and tests. Its design, rules and progress checklist live in [pit-view/DESIGN.md](pit-view/DESIGN.md), which is the authority for any change to it.
+
+It is not part of the deploy trees: `scripts/deploy-reviews.sh` and `scripts/sanitize.sh` never touch it, and it uses no `{{HOME}}` placeholders. It writes `~` and resolves it at runtime, and its config and cache live under your home directory, outside the repo. The repo's first rule still applies: no real home path, and no real client data, may be committed under `pit-view/`. Before committing there, `grep -rI --exclude-dir=node_modules "$HOME" pit-view` must print nothing.
+
 ## Setting up a machine
 
 These steps are written to be followed by a person or by an agent, in order, without
@@ -447,6 +462,7 @@ These hold for anyone working in this repo, human or agent:
 | Not sure whether anything drifted | `scripts/sanitize.sh --dry-run` |
 | Deployed copy looks wrong or stale | `scripts/deploy-reviews.sh` to rebuild it |
 | Pulled changes from GitHub | `scripts/deploy-reviews.sh --install` |
+| Want the PR dashboard | `pnpm start` in `pit-view/` (`pnpm install` once first) |
 | Need to undo a deploy | `cp -R backups/<timestamp>/deploy/. deploy/` |
 | Deploy refused: unsanitized edits | `scripts/sanitize.sh` to keep them, `--force` to discard |
 

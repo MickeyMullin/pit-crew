@@ -31,6 +31,14 @@ reached the sources, since rendering would discard them.
 Exit codes: `0` success, `1` error, `2` bad usage, `3` (`sanitize.sh --dry-run` only)
 pending changes exist.
 
+## Pit View (`pit-view/`)
+
+`pit-view/` is Pit View, a local dashboard for the pull requests in one GitHub repository: a separate Node app with its own `package.json`, run with `pnpm start` from `pit-view/` (`pnpm install` once first). `pit-view/DESIGN.md` is its design and progress tracker and the authority for any change there: read it before editing anything under `pit-view/`, follow its code conventions (section 4), and tick its milestones and add to its session log as work lands.
+
+It is not part of either tree above. `scripts/deploy-reviews.sh` and `scripts/sanitize.sh` do not touch it, it must not depend on either, and its own `pnpm` scripts never move files between the sources and `deploy/`. It holds no `{{HOME}}` placeholders: it writes `~` and resolves it at runtime with `os.homedir()`, and its config, cache and the reports it reads live under the home directory, never in the repo.
+
+The one rule covers it too. No real home path may be committed under `pit-view/`, and neither may real client data: colleague logins, PR titles, job URLs, ticket keys, or repository names other than its default config value. Its test fixtures are invented and must stay that way.
+
 ## What to do, by situation
 
 | The user asked you to... | Do this |
@@ -44,6 +52,7 @@ pending changes exist.
 | Preserve a change already made in `deploy/` | Run `scripts/sanitize.sh`, then show the user `git diff` |
 | Check whether the trees have drifted | Run `scripts/sanitize.sh --dry-run` |
 | Rebuild the deployed copy | Run `scripts/deploy-reviews.sh` |
+| Change Pit View | Read `pit-view/DESIGN.md` first, edit in `pit-view/`, then run `pnpm test` and `pnpm check` from `pit-view/`. Nothing is deployed; neither script is involved |
 | Commit work | Run `git diff -- prompts commands bin` and confirm no real path appears, then commit |
 
 ## Prohibitions
@@ -69,6 +78,7 @@ pending changes exist.
 
 - `scripts/deploy-reviews.sh` exits 0, or you ran `scripts/sanitize.sh` and it exits 0.
 - `git grep -I "$HOME" -- prompts commands bin` returns nothing.
+- For a change under `pit-view/`, also: `pnpm test` and `pnpm check` pass in `pit-view/`, and `grep -rI --exclude-dir=node_modules "$HOME" pit-view` returns nothing.
 - You showed the user the diff rather than committing silently.
 
 ## Fix mode

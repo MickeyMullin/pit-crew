@@ -1,0 +1,34 @@
+{
+  "repo": "Port-City/meridian",
+  "viewer": "",
+  "people": [],
+  "tickets": [
+    {
+      "enabled": true,
+      "kind": "jira",
+      "name": "Jira",
+      "source": "title-then-branch",
+      "pattern": "\\b[a-z]+-\\d+\\b",
+      "baseUrl": "",
+      "linkTemplate": "{baseUrl}/browse/{key}"
+    },
+    {
+      "enabled": true,
+      "kind": "github-issues",
+      "name": "GitHub",
+      "source": "linked-issues",
+      "pattern": "",
+      "baseUrl": "",
+      "linkTemplate": "https://github.com/{repo}/issues/{n}"
+    }
+  ],
+  "refreshSeconds": 300,
+  "todayStartsAt": "local",
+  "bots": [
+    "dependabot",
+    "renovate"
+  ],
+  "reportsDir": "~/agents/output",
+  "density": "comfortable",
+  "showAgentColumn": false
+}

@@ -1,0 +1,159 @@
+<!-- public/settings.html -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<script>
+  // before first paint: the stored theme, or System; public/theme.ts owns the key and values
+  ;(() => {
+    let theme = 'system'
+    try {
+      const stored = window.localStorage.getItem('pit-view.theme')
+      if (stored === 'light' || stored === 'dark') theme = stored
+    } catch {
+      // blocked storage means System
+    }
+    document.documentElement.dataset.theme = theme
+    document.documentElement.style.colorScheme = theme === 'system' ? 'light dark' : theme
+  })()
+</script>
+<title>Settings · Pit View</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@500;600&amp;display=swap">
+<link rel="stylesheet" href="/styles.css">
+<script type="module" src="/settings.ts"></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to the settings</a>
+
+<header class="site-header">
+  <a class="back-link" href="/">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M19 12H5"></path><path d="M11 6l-6 6 6 6"></path></svg>
+    Dashboard
+  </a>
+  <h1 class="page-title">Settings</h1>
+  <div class="spacer"></div>
+  <span id="config-path" class="config-path mono" title="The settings file this page reads and writes"></span>
+  <button id="theme" type="button" class="icon-button theme-toggle" aria-label="Theme: System. Switch to light" title="Theme: System. Switch to light">
+    <svg class="theme-icon theme-icon-system" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"></circle><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"></path></svg>
+    <svg class="theme-icon theme-icon-light" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="M4.9 4.9l1.4 1.4"></path><path d="M17.7 17.7l1.4 1.4"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="M4.9 19.1l1.4-1.4"></path><path d="M17.7 6.3l1.4-1.4"></path></svg>
+    <svg class="theme-icon theme-icon-dark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"></path></svg>
+  </button>
+</header>
+
+<main id="main" class="settings">
+  <p id="load-state" class="load-state" role="status">Loading the settings…</p>
+
+  <form id="settings-form" class="settings-form" novalidate hidden>
+    <div id="form-errors" class="form-errors" tabindex="-1" hidden></div>
+
+    <section id="repository" class="card settings-card" aria-labelledby="repository-heading">
+      <h2 id="repository-heading" class="card-title">Repository and viewer</h2>
+      <div class="field-grid">
+        <div class="field">
+          <label for="f-repo">Repository</label>
+          <input id="f-repo" class="input mono" type="text" autocomplete="off" spellcheck="false" aria-describedby="f-repo-hint">
+          <p id="f-repo-hint" class="hint">The one GitHub repository tracked, as owner/name.</p>
+          <p id="f-repo-error" class="field-error" hidden></p>
+        </div>
+        <div class="field">
+          <label for="f-viewer">Viewing as</label>
+          <input id="f-viewer" class="input mono" type="text" autocomplete="off" spellcheck="false" aria-describedby="f-viewer-hint">
+          <p id="f-viewer-hint" class="hint">Defaults to the gh login. Uses gh's own token; nothing else to sign in to.</p>
+          <p id="f-viewer-error" class="field-error" hidden></p>
+        </div>
+      </div>
+    </section>
+
+    <section id="people" class="card settings-card" aria-labelledby="people-heading">
+      <div class="card-head">
+        <h2 id="people-heading" class="card-title">People</h2>
+        <span class="card-sub">alias and avatar shown in place of the GitHub login</span>
+      </div>
+      <div class="col-heads person-grid" aria-hidden="true">
+        <span>GitHub login</span><span>Alias</span><span>Initials</span><span>Avatar</span><span>Color</span><span>Preview</span><span></span>
+      </div>
+      <div id="people-list" class="rows"></div>
+      <p id="people-empty" class="hint" hidden>Nobody listed yet.</p>
+      <div class="row-actions">
+        <button id="add-person" type="button" class="button button-add">+ Add person</button>
+      </div>
+      <div id="suggestions" class="suggestions" hidden>
+        <h3 id="suggestions-heading" class="suggestions-title">Seen in PRs, not listed yet</h3>
+        <ul id="suggestions-list" class="suggestions-list" aria-labelledby="suggestions-heading"></ul>
+      </div>
+      <p class="hint">Anyone not listed gets their GitHub avatar and login. New authors and reviewers are suggested here the first time they appear in a PR. You always show as You.</p>
+    </section>
+
+    <section id="tickets" class="card settings-card" aria-labelledby="tickets-heading">
+      <div class="card-head">
+        <h2 id="tickets-heading" class="card-title">Tickets</h2>
+        <span class="card-sub">optional; a PR can carry tickets from several systems at once</span>
+      </div>
+      <div id="tickets-list" class="rows"></div>
+      <p id="tickets-empty" class="hint" hidden>No ticket systems: tickets are hidden everywhere.</p>
+      <div class="row-actions">
+        <button id="add-ticket" type="button" class="button button-add">+ Add ticket system</button>
+      </div>
+      <p class="hint">Systems are tried in this order. Patterns look in the title, then the branch, ignoring case; never the description, except for the "no-ticket" marker. {key} and {n} fill in from the ticket, {repo} from the repository and {baseUrl} from the base URL; leave the base URL empty to show keys without links.</p>
+    </section>
+
+    <section id="behavior" class="card settings-card" aria-labelledby="behavior-heading">
+      <h2 id="behavior-heading" class="card-title">Behavior</h2>
+      <div class="field-grid">
+        <div class="field">
+          <label for="f-refreshSeconds">Refresh every</label>
+          <select id="f-refreshSeconds" class="input" aria-describedby="f-refreshSeconds-hint"></select>
+          <p id="f-refreshSeconds-hint" class="hint">Only while a Pit View page is open, visible and not paused.</p>
+          <p id="f-refreshSeconds-error" class="field-error" hidden></p>
+        </div>
+        <div class="field">
+          <label for="f-todayStartsAt">"Today" starts at</label>
+          <select id="f-todayStartsAt" class="input" aria-describedby="f-todayStartsAt-hint"></select>
+          <p id="f-todayStartsAt-hint" class="hint">Where the Closed section's Today and Yesterday begin.</p>
+          <p id="f-todayStartsAt-error" class="field-error" hidden></p>
+        </div>
+        <div class="field">
+          <label for="f-bots">Bots</label>
+          <input id="f-bots" class="input mono" type="text" autocomplete="off" spellcheck="false" aria-describedby="f-bots-hint">
+          <p id="f-bots-hint" class="hint">Parts of a login, separated by commas. PRs by these collapse into a bot group.</p>
+          <p id="f-bots-error" class="field-error" hidden></p>
+        </div>
+        <div class="field">
+          <label for="f-reportsDir">Self-review reports</label>
+          <input id="f-reportsDir" class="input mono" type="text" autocomplete="off" spellcheck="false" aria-describedby="f-reportsDir-hint">
+          <p id="f-reportsDir-hint" class="hint">The folder review reports are read from, never written to.</p>
+          <p id="f-reportsDir-error" class="field-error" hidden></p>
+        </div>
+        <div class="field">
+          <label for="f-density">Row density</label>
+          <select id="f-density" class="input" aria-describedby="f-density-hint"></select>
+          <p id="f-density-hint" class="hint">Compact rows fit more PRs on screen.</p>
+          <p id="f-density-error" class="field-error" hidden></p>
+        </div>
+        <div class="field">
+          <span class="field-label">Agent column</span>
+          <label class="check">
+            <input id="f-showAgentColumn" type="checkbox" aria-describedby="f-showAgentColumn-hint">
+            Show the Agent column
+          </label>
+          <p id="f-showAgentColumn-hint" class="hint">For review sessions, which arrive in phase 2; until then the column stays empty.</p>
+          <p id="f-showAgentColumn-error" class="field-error" hidden></p>
+        </div>
+      </div>
+    </section>
+
+    <div class="save-bar">
+      <p id="save-status" class="save-status" role="status"></p>
+      <div class="spacer"></div>
+      <button id="revert" type="button" class="button">Discard changes</button>
+      <button id="save" type="submit" class="button button-primary">Save</button>
+    </div>
+  </form>
+</main>
+</body>
+</html>

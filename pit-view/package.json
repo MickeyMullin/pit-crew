@@ -1,0 +1,20 @@
+{
+  "name": "pit-view",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local dashboard for tracking pull requests in one GitHub repository.",
+  "type": "module",
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "start": "node src/server.ts",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2"
+  }
+}

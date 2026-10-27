@@ -1,0 +1,135 @@
+<!-- public/index.html -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<script>
+  // before first paint: the stored theme, or System; public/theme.ts owns the key and values
+  ;(() => {
+    let theme = 'system'
+    try {
+      const stored = window.localStorage.getItem('pit-view.theme')
+      if (stored === 'light' || stored === 'dark') theme = stored
+    } catch {
+      // blocked storage means System
+    }
+    document.documentElement.dataset.theme = theme
+    document.documentElement.style.colorScheme = theme === 'system' ? 'light dark' : theme
+  })()
+</script>
+<title>Pit View</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@500;600&amp;display=swap">
+<link rel="stylesheet" href="/styles.css">
+<script type="module" src="/app.ts"></script>
+</head>
+<body data-density="comfortable">
+<a class="skip-link" href="#main">Skip to the dashboard</a>
+
+<header class="site-header">
+  <div class="brand">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="6" cy="6" r="2.5"></circle><circle cx="6" cy="18" r="2.5"></circle><circle cx="18" cy="18" r="2.5"></circle><path d="M6 8.5v7"></path><path d="M18 15.5V10a4 4 0 0 0-4-4h-4"></path><path d="M12 4l-2 2 2 2"></path></svg>
+    <span class="brand-name">Pit View</span>
+  </div>
+  <a class="control repo" href="/settings.html#repository" title="Change the repository in Settings">
+    <span id="repo-name">…</span>
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"></path></svg>
+  </a>
+  <div class="viewing-as">
+    <span>viewing as</span>
+    <span id="viewer" class="viewer"></span>
+  </div>
+  <div class="spacer"></div>
+  <span id="sync-status" class="sync-status mono" data-tone="normal">connecting…</span>
+  <span id="sync-live" class="sr-only" aria-live="polite"></span>
+  <button id="refresh" type="button" class="icon-button" aria-label="Refresh now" title="Refresh now">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M20 12a8 8 0 1 1-2.3-5.6"></path><path d="M20 4v5h-5"></path></svg>
+  </button>
+  <button id="pause" type="button" class="icon-button pause" aria-pressed="false" aria-label="Pause updates" title="Pause updates">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><rect x="6" y="4.5" width="4" height="15" rx="1"></rect><rect x="14" y="4.5" width="4" height="15" rx="1"></rect></svg>
+  </button>
+  <button id="theme" type="button" class="icon-button theme-toggle" aria-label="Theme: System. Switch to light" title="Theme: System. Switch to light">
+    <svg class="theme-icon theme-icon-system" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"></circle><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"></path></svg>
+    <svg class="theme-icon theme-icon-light" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="M4.9 4.9l1.4 1.4"></path><path d="M17.7 17.7l1.4 1.4"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="M4.9 19.1l1.4-1.4"></path><path d="M17.7 6.3l1.4-1.4"></path></svg>
+    <svg class="theme-icon theme-icon-dark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"></path></svg>
+  </button>
+  <a class="icon-button" href="/settings.html" aria-label="Settings" title="Settings">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path></svg>
+  </a>
+</header>
+<div id="offline-banner" class="offline-banner" hidden></div>
+
+<main id="main" class="dashboard">
+  <div id="tiles" class="tiles" role="group" aria-label="Summary"></div>
+
+  <section id="mine" class="section" aria-labelledby="mine-heading">
+    <div class="section-head">
+      <h2 id="mine-heading">
+        <button id="mine-toggle" type="button" class="disclosure" aria-expanded="true" aria-controls="mine-body">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"></path></svg>
+          Mine
+        </button>
+      </h2>
+      <span id="mine-count" class="section-count"></span>
+      <span id="mine-fresh" class="section-fresh"></span>
+    </div>
+    <div id="mine-body" class="section-body">
+      <div id="mine-banner" hidden></div>
+      <div class="card">
+        <div id="mine-box" class="table-box">
+          <table id="mine-table" class="prs prs-open" aria-labelledby="mine-heading"></table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="others" class="section" aria-labelledby="others-heading">
+    <div class="section-head">
+      <h2 id="others-heading">
+        <button id="others-toggle" type="button" class="disclosure" aria-expanded="true" aria-controls="others-body">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"></path></svg>
+          Others'
+        </button>
+      </h2>
+      <span id="others-count" class="section-count"></span>
+      <span id="others-fresh" class="section-fresh"></span>
+    </div>
+    <div id="others-body" class="section-body">
+      <div class="card">
+        <div id="others-box" class="table-box">
+          <table id="others-table" class="prs prs-open" aria-labelledby="others-heading"></table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="closed" class="section" aria-labelledby="closed-heading">
+    <div class="section-head">
+      <h2 id="closed-heading">
+        <button id="closed-toggle" type="button" class="disclosure" aria-expanded="true" aria-controls="closed-body">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"></path></svg>
+          Closed
+        </button>
+      </h2>
+      <div id="closed-range" class="segmented" role="group" aria-label="Closed range"></div>
+      <span id="closed-count" class="section-count"></span>
+      <span id="closed-fresh" class="section-fresh"></span>
+    </div>
+    <div id="closed-body" class="section-body">
+      <div class="card">
+        <div id="closed-box" class="table-box">
+          <table id="closed-table" class="prs prs-closed" aria-labelledby="closed-heading"></table>
+        </div>
+        <p id="closed-note" class="table-note" hidden></p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="hovercard" class="hovercard" role="tooltip" hidden></div>
+</body>
+</html>

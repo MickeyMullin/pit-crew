@@ -1,0 +1,16 @@
+node_modules/
+
+# local state belongs under ~ (section 2 of DESIGN.md); these keep a stray copy out of the public repo
+config.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+.local/
+worktrees/
+demo/
+*.log
+*.plist
+.env
+.env.*
+.DS_Store

@@ -1,0 +1,266 @@
+{
+  "data": {
+    "rateLimit": {
+      "cost": 1,
+      "remaining": 4979,
+      "resetAt": "2026-10-26T15:00:00Z"
+    },
+    "search": {
+      "issueCount": 8,
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": "Y3Vyc29yOnYyOmZpeHR1cmUtMTA4"
+      },
+      "nodes": [
+        {
+          "number": 100,
+          "title": "fix(sync): raise the upstream timeout",
+          "url": "https://github.com/octo-example/orbit/pull/100",
+          "author": {
+            "__typename": "User",
+            "login": "vera-quill",
+            "avatarUrl": "https://avatars.githubusercontent.com/u/9000101?v=4"
+          },
+          "state": "MERGED",
+          "merged": true,
+          "mergedBy": {
+            "login": "vera-quill"
+          },
+          "closedAt": "2026-10-26T13:10:00Z",
+          "headRefName": "fix/orb-266-timeout",
+          "body": "Doubles the timeout.",
+          "closingIssuesReferences": {
+            "nodes": []
+          },
+          "timelineItems": {
+            "nodes": [
+              {
+                "actor": {
+                  "login": "vera-quill"
+                },
+                "createdAt": "2026-10-26T13:10:01Z"
+              }
+            ]
+          }
+        },
+        {
+          "number": 93,
+          "title": "Try a different retry library",
+          "url": "https://github.com/octo-example/orbit/pull/93",
+          "author": {
+            "__typename": "User",
+            "login": "lee-park",
+            "avatarUrl": "https://avatars.githubusercontent.com/u/9000105?v=4"
+          },
+          "state": "CLOSED",
+          "merged": false,
+          "mergedBy": null,
+          "closedAt": "2026-10-26T12:00:00Z",
+          "headRefName": "spike/retry-lib",
+          "body": "Spike, no-ticket.",
+          "closingIssuesReferences": {
+            "nodes": []
+          },
+          "timelineItems": {
+            "nodes": [
+              {
+                "actor": {
+                  "login": "lee-park"
+                },
+                "createdAt": "2026-10-26T12:00:00Z"
+              }
+            ]
+          }
+        },
+        {
+          "number": 99,
+          "title": "feat(reports): ORB-280 weekly summary email",
+          "url": "https://github.com/octo-example/orbit/pull/99",
+          "author": {
+            "__typename": "User",
+            "login": "priya-k",
+            "avatarUrl": "https://avatars.githubusercontent.com/u/9000104?v=4"
+          },
+          "state": "MERGED",
+          "merged": true,
+          "mergedBy": {
+            "login": "sam-tran"
+          },
+          "closedAt": "2026-10-26T02:30:00Z",
+          "headRefName": "feat/weekly-summary",
+          "body": "Adds the weekly summary.",
+          "closingIssuesReferences": {
+            "nodes": []
+          },
+          "timelineItems": {
+            "nodes": [
+              {
+                "actor": {
+                  "login": "sam-tran"
+                },
+                "createdAt": "2026-10-26T02:30:00Z"
+              }
+            ]
+          }
+        },
+        {
+          "number": 97,
+          "title": "fix(export): escape commas in CSV cells",
+          "url": "https://github.com/octo-example/orbit/pull/97",
+          "author": {
+            "__typename": "User",
+            "login": "sam-tran",
+            "avatarUrl": "https://avatars.githubusercontent.com/u/9000103?v=4"
+          },
+          "state": "MERGED",
+          "merged": true,
+          "mergedBy": {
+            "login": "alex-mendez"
+          },
+          "closedAt": "2026-10-25T21:53:00Z",
+          "headRefName": "fix/csv-escaping",
+          "body": "Fixes #51",
+          "closingIssuesReferences": {
+            "nodes": [
+              {
+                "number": 51,
+                "title": "CSV export breaks on commas",
+                "url": "https://github.com/octo-example/orbit/issues/51"
+              }
+            ]
+          },
+          "timelineItems": {
+            "nodes": [
+              {
+                "actor": {
+                  "login": "alex-mendez"
+                },
+                "createdAt": "2026-10-25T21:53:01Z"
+              }
+            ]
+          }
+        },
+        {
+          "number": 96,
+          "title": "chore(deps): bump undici from 6.21.0 to 6.21.1",
+          "url": "https://github.com/octo-example/orbit/pull/96",
+          "author": {
+            "__typename": "Bot",
+            "login": "dependabot",
+            "avatarUrl": "https://avatars.githubusercontent.com/in/1000201?v=4"
+          },
+          "state": "CLOSED",
+          "merged": false,
+          "mergedBy": null,
+          "closedAt": "2026-10-24T06:30:00Z",
+          "headRefName": "dependabot/npm_and_yarn/undici-6.21.1",
+          "body": "Bumps undici from 6.21.0 to 6.21.1.",
+          "closingIssuesReferences": {
+            "nodes": []
+          },
+          "timelineItems": {
+            "nodes": [
+              {
+                "actor": {
+                  "login": "dependabot"
+                },
+                "createdAt": "2026-10-24T06:30:01Z"
+              }
+            ]
+          }
+        },
+        {
+          "number": 98,
+          "title": "feat(ui): dark mode for the settings page",
+          "url": "https://github.com/octo-example/orbit/pull/98",
+          "author": {
+            "__typename": "User",
+            "login": "lee-park",
+            "avatarUrl": "https://avatars.githubusercontent.com/u/9000105?v=4"
+          },
+          "state": "CLOSED",
+          "merged": false,
+          "mergedBy": null,
+          "closedAt": "2026-10-23T19:40:00Z",
+          "headRefName": "feat/settings-dark-mode",
+          "body": "ORB-222",
+          "closingIssuesReferences": {
+            "nodes": []
+          },
+          "timelineItems": {
+            "nodes": [
+              {
+                "actor": {
+                  "login": "priya-k"
+                },
+                "createdAt": "2026-10-23T19:40:00Z"
+              }
+            ]
+          }
+        },
+        {
+          "number": 95,
+          "title": "feat(api): ORB-240 rate limit the public endpoints",
+          "url": "https://github.com/octo-example/orbit/pull/95",
+          "author": {
+            "__typename": "User",
+            "login": "alex-mendez",
+            "avatarUrl": "https://avatars.githubusercontent.com/u/9000102?v=4"
+          },
+          "state": "MERGED",
+          "merged": true,
+          "mergedBy": {
+            "login": "vera-quill"
+          },
+          "closedAt": "2026-10-23T15:12:00Z",
+          "headRefName": "feat/public-rate-limit",
+          "body": "Adds a token bucket per key.",
+          "closingIssuesReferences": {
+            "nodes": []
+          },
+          "timelineItems": {
+            "nodes": [
+              {
+                "actor": {
+                  "login": "vera-quill"
+                },
+                "createdAt": "2026-10-23T15:12:00Z"
+              }
+            ]
+          }
+        },
+        {
+          "number": 94,
+          "title": "chore(deps): update dependency prettier to v3.6.2",
+          "url": "https://github.com/octo-example/orbit/pull/94",
+          "author": {
+            "__typename": "Bot",
+            "login": "renovate",
+            "avatarUrl": "https://avatars.githubusercontent.com/in/1000202?v=4"
+          },
+          "state": "MERGED",
+          "merged": true,
+          "mergedBy": {
+            "login": "alex-mendez"
+          },
+          "closedAt": "2026-10-23T09:00:00Z",
+          "headRefName": "renovate/prettier-3.x",
+          "body": "This PR contains the following updates: prettier 3.6.1 to 3.6.2.",
+          "closingIssuesReferences": {
+            "nodes": []
+          },
+          "timelineItems": {
+            "nodes": [
+              {
+                "actor": {
+                  "login": "alex-mendez"
+                },
+                "createdAt": "2026-10-23T09:00:01Z"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
