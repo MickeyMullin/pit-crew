@@ -6,12 +6,12 @@ import { test } from 'node:test'
 import { openCache } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
-import type { OpenRow } from '../src/derive.ts'
+import type { OpenRow, RowRefresh } from '../src/derive.ts'
 import { createGh } from '../src/github.ts'
 import { createPoller } from '../src/poller.ts'
 import type { Sync, View } from '../src/poller.ts'
 import { openRows } from '../public/state.ts'
-import { offlineBanner, oldestFetch, rowMarker, sectionMarker, syncStatus, tableState } from '../public/status.ts'
+import { offlineBanner, oldestFetch, refreshButton, rowMarker, sectionMarker, syncStatus, tableState } from '../public/status.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { failed, fakeRunner, fakeTime, field, fixtureRunner } from './helpers.ts'
 
@@ -211,4 +211,33 @@ test('the header and banner name the cause: sign-in, rate limit, an interrupted 
   assert.equal(syncStatus(stopped, live(time.clock.now())).text, 'interrupted · cached 10:05 AM')
   const unknown = { ...failedSync, cycle: { ...failedSync.cycle!, errorKind: null } }
   assert.equal(offlineBanner(unknown, live(time.clock.now()))?.lead, 'Can\'t reach GitHub. Showing cached data from 10:05 AM (10m old).')
+})
+
+test('a row\'s own refresh reads refreshing, or failed with its cause, ahead of what the cycles say', () => {
+  const at = '2026-10-26T14:00:00Z'
+  const base = Date.parse(at)
+  const finished = syncWith({ id: 3, trigger: 'interval', state: 'finished', startedAt: at, finishedAt: at, error: null, errorKind: null, prsUpdated: 18, prsTotal: 18 })
+  const failedWith = (errorKind: Extract<RowRefresh, { state: 'failed' }>['errorKind'], error = 'gh api graphql failed'): RowRefresh =>
+    ({ state: 'failed', at, error, errorKind })
+  const withRefresh = (refresh: RowRefresh | null, state: OpenRow['freshness']['state'] = 'current') => ({ ...row(at, state), refresh })
+  // running: a muted age at once, even on a fresh row
+  assert.deepEqual(rowMarker(withRefresh({ state: 'running', startedAt: at }), finished, live(base + minute)), { kind: 'muted', tip: 'cached 10:00 AM, refreshing this PR' })
+  // failed: the amber dot, with the cause in the words the banner uses
+  const tip = (refresh: RowRefresh): string | undefined => rowMarker(withRefresh(refresh), finished, live(base + minute))?.tip
+  assert.equal(tip(failedWith('auth')), 'cached 10:00 AM, refreshing this PR failed: GitHub did not accept gh\'s sign-in; check it with gh auth status in a terminal')
+  assert.equal(tip(failedWith('rateLimit')), 'cached 10:00 AM, refreshing this PR failed: GitHub\'s rate limit stopped it')
+  assert.equal(tip(failedWith('network')), 'cached 10:00 AM, refreshing this PR failed: can\'t reach GitHub')
+  assert.equal(tip(failedWith('graphql', 'GitHub GraphQL error: Could not resolve to a PullRequest.')), 'cached 10:00 AM, refreshing this PR failed: GitHub GraphQL error: Could not resolve to a PullRequest')
+  assert.equal(rowMarker(withRefresh(failedWith('auth')), finished, live(base + minute))?.kind, 'stale')
+  // with no refresh of its own, the cycles' reading stands
+  assert.equal(rowMarker(withRefresh(null), finished, live(base + minute)), null)
+  assert.deepEqual(rowMarker(withRefresh(null, 'stale'), finished, live(base + minute)), { kind: 'stale', tip: 'cached 10:00 AM, refresh failed' })
+})
+
+test('the row refresh button is named for its PR and says when it is refreshing or last failed', () => {
+  assert.deepEqual(refreshButton({ number: 941, refresh: null }), { state: 'idle', label: 'Refresh #941', tip: 'Refresh #941' })
+  assert.deepEqual(refreshButton({ number: 941, refresh: { state: 'running', startedAt: scenario.now } }), { state: 'running', label: 'Refreshing #941', tip: 'Refreshing #941…' })
+  assert.deepEqual(refreshButton({ number: 941, refresh: { state: 'failed', at: scenario.now, error: 'gh: API rate limit exceeded', errorKind: 'rateLimit' } }), {
+    state: 'failed', label: 'Refresh #941', tip: 'Refresh #941; the last try failed: GitHub\'s rate limit stopped it',
+  })
 })

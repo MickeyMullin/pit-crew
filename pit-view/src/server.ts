@@ -98,6 +98,12 @@ const readJson = async (req: IncomingMessage): Promise<unknown> => {
   }
 }
 
+// a write that takes no body: one sent anyway must still be JSON, as every body must
+const noBody = async (req: IncomingMessage): Promise<void> => {
+  const length = Number(req.headers['content-length'] ?? 0)
+  if (length > 0 || req.headers['transfer-encoding'] !== undefined) await readJson(req)
+}
+
 // a page reached through another name (DNS rebinding) is refused, whatever its address
 const loopbackHosts = (port: number): Set<string> => new Set([`${host}:${port}`, `localhost:${port}`, `[::1]:${port}`])
 
@@ -296,6 +302,13 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     json(res, 200, { active: change.active, cycle })
   }
 
+  // one PR's row, fetched on its own; a deliberate one-shot like Refresh, so paused pages may ask
+  const refreshPr = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
+    if (!/^[1-9]\d{0,8}$/.test(raw)) throw new HttpError(400, 'the PR number must be a positive integer')
+    await noBody(req)
+    json(res, 200, await poller.refreshPr(Number(raw)))
+  }
+
   const putConfig = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const body = await readJson(req)
     let saved: Config
@@ -421,6 +434,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'GET', pattern: /^\/api\/events$/, handle: (req, res, url) => events(req, res, url) },
     { method: 'POST', pattern: /^\/api\/clients\/([^/]+)$/, handle: (req, res, _url, match) => updateClient(req, res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/refresh$/, handle: (_req, res) => json(res, 200, poller.refresh('manual')) },
+    { method: 'POST', pattern: /^\/api\/prs\/([^/]+)\/refresh$/, handle: (req, res, _url, match) => refreshPr(req, res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/instance$/, handle: (_req, res) => json(res, 200, { name: options.instance ?? '', configPath: tildePath(options.configPath, home), pid: process.pid }) },
     { method: 'GET', pattern: /^\/api\/config$/, handle: (_req, res) => json(res, 200, stored) },
     { method: 'PUT', pattern: /^\/api\/config$/, handle: (req, res) => putConfig(req, res) },

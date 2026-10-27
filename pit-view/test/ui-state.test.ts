@@ -236,3 +236,25 @@ test('ages, intervals and times format as the page shows them', () => {
   assert.match(formatClock('2026-10-25T21:53:00Z', true), /^[A-Z][a-z]{2} \d{1,2}:\d{2} [AP]M$/)
   assert.match(formatDay('2026-10-26T16:00:00Z'), /^[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2}$/)
 })
+
+test('a page applying a one-PR refresh\'s patches matches a fresh view, through the refreshing state and back', async () => {
+  const { poller, patches } = harness()
+  poller.refresh('manual')
+  await poller.idle()
+  const loaded = await poller.view()
+  const from = patches.length
+  const result = await poller.refreshPr(106)
+  assert.equal(result.outcome, 'open')
+  const sent = patches.slice(from)
+  assert.equal(sent.length, 2)
+  // mid-way the page shows the row refreshing, in the group it was in
+  const midway = applyPatch(loaded, sent[0]!)
+  const row = openRows(midway).find((entry) => entry.number === 106) as OtherRow
+  assert.deepEqual([row.refresh?.state, row.group], ['running', 'yourMove'])
+  assert.equal(sent[0]!.sync, undefined)
+  // and at the end matches the server again, with no cycle in between
+  const caught = sent.reduce(applyPatch, loaded)
+  assert.deepEqual(comparable(caught), comparable(await poller.view()))
+  assert.equal(openRows(caught).find((entry) => entry.number === 106)?.refresh, null)
+  assert.deepEqual(caught.sync, loaded.sync)
+})

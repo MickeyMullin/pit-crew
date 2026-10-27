@@ -11,7 +11,9 @@ import type { Patch, View } from '../src/poller.ts'
 import { hostAllowed, originAllowed, PortInUseError, resolveRuntime, startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
 import { scenario } from './fixtures/scenario.ts'
-import { failed, fakeRunner, fakeTime, fixtureRunner, gatedRunner, githubCalls, tempDir } from './helpers.ts'
+import type { MineRow, OpenRow } from '../src/derive.ts'
+import type { RunResult } from '../src/github.ts'
+import { failed, fakeRunner, fakeTime, field, fixtureRunner, gatedRunner, githubCalls, ok, singlePr, tempDir } from './helpers.ts'
 import type { FakeRunner, FakeTime } from './helpers.ts'
 
 type Harness = { server: PitServer, time: FakeTime, runner: FakeRunner, home: string, configPath: string, base: string, cleanup: () => Promise<void> }
@@ -647,3 +649,204 @@ test('close ends the open streams and fails the cycle in flight', async () => {
   await rm(h.home, { recursive: true, force: true })
 })
 
+// one-PR refreshes
+
+const isSingle = (args: string[]): boolean => args[0] === 'api' && (field(args, 'query') ?? '').includes('query SinglePullRequest')
+
+// the fixture gh, with the one-PR query answered by answer whenever it returns a result
+const withSingle = (answer: (number: number) => RunResult | null | Promise<RunResult | null>): FakeRunner => {
+  const base = fixtureRunner()
+  return fakeRunner(async (args) => (isSingle(args) ? await answer(Number(field(args, 'number'))) : null) ?? base.runner(args))
+}
+
+const singleCalls = (fake: FakeRunner) => githubCalls(fake).filter((call) => isSingle(call.args))
+
+const rowsOf = (view: View): OpenRow[] => [...view.mine.groups, ...view.others.groups].flatMap((group) => group.rows as OpenRow[])
+
+const rowIn = (view: View, number: number): OpenRow | undefined => rowsOf(view).find((row) => row.number === number)
+
+const filled = async (h: Harness): Promise<void> => {
+  assert.equal((await send(`${h.base}/api/refresh`, 'POST')).status, 200)
+  await h.server.poller.idle()
+}
+
+test('POST /api/prs/<n>/refresh fetches that PR alone and patches its row to every page, paused and hidden ones too, with no cycle', async () => {
+  const retitled = 'fix(webhooks): retry with backoff, take two'
+  const runner = withSingle(async (number) => number === 101 ? ok(JSON.stringify(await singlePr(101, { patch: { title: retitled } }))) : null)
+  const h = await setup({ runner })
+  try {
+    await filled(h)
+    const paused = await openStream(h.base, 'client=tab-1&visible=true&paused=true')
+    const hidden = await openStream(h.base, 'client=tab-2&visible=false&paused=false')
+    const before = githubCalls(runner).length
+    const { status, body } = await send(`${h.base}/api/prs/101/refresh`, 'POST')
+    assert.equal(status, 200)
+    assert.deepEqual(body, { number: 101, outcome: 'open', joined: false, error: null, errorKind: null })
+    // exactly one GitHub call, the one-PR query for #101
+    const made = githubCalls(runner).slice(before)
+    assert.equal(made.length, 1)
+    assert.match(field(made[0]!.args, 'query') ?? '', /^query SinglePullRequest\(/)
+    assert.equal(field(made[0]!.args, 'number'), '101')
+    for (const stream of [paused, hidden]) {
+      // first the row alone, marked refreshing
+      const started = await stream.patch()
+      assert.deepEqual(started.rows.map((row) => [row.number, row.refresh?.state]), [[101, 'running']])
+      assert.deepEqual([started.removed, started.tiles, started.sync], [[], undefined, undefined])
+      // then the fetched row, with tiles and counts, and no sync: no cycle ran
+      const done = await stream.patch()
+      assert.equal(done.version, started.version + 1)
+      const row = done.rows.find((entry) => entry.number === 101)
+      assert.deepEqual([row?.title, row?.refresh, row?.freshness.state], [retitled, null, 'current'])
+      assert.ok(done.rows.every((entry) => entry.number === 101))
+      assert.ok(done.tiles !== undefined && done.counts !== undefined)
+      assert.equal(done.sync, undefined)
+      stream.close()
+    }
+    assert.equal(h.server.cache.latestCycle(scenario.repo)?.id, 1)
+    assert.equal(h.server.cache.runningCycle(), null)
+    const { body: view } = await getJson<View>(`${h.base}/api/view`)
+    assert.equal(rowIn(view, 101)?.title, retitled)
+    assert.equal(view.sync.cycle?.id, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('refreshes of one PR already in flight are joined, each PR asking GitHub once', async () => {
+  const runner = gatedRunner(fixtureRunner())
+  const h = await setup({ runner })
+  try {
+    runner.release()
+    await filled(h)
+    runner.hold()
+    const asks = [101, 101, 104].map((number) => send(`${h.base}/api/prs/${number}/refresh`, 'POST'))
+    await delay(30)
+    runner.release()
+    const answers = await Promise.all(asks)
+    assert.deepEqual(answers.map((answer) => [answer.body.number, answer.body.outcome]), [[101, 'open'], [101, 'open'], [104, 'open']])
+    assert.deepEqual([answers[0]!.body.joined, answers[1]!.body.joined].sort(), [false, true])
+    assert.equal(answers[2]!.body.joined, false)
+    assert.deepEqual(singleCalls(runner).map((call) => field(call.args, 'number')).sort(), ['101', '104'])
+    // done is done: the next ask fetches again
+    assert.equal((await send(`${h.base}/api/prs/101/refresh`, 'POST')).body.joined, false)
+    assert.equal(singleCalls(runner).length, 3)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a PR found merged or closed leaves the open rows at once, and the next cycle\'s closed search shows it', async () => {
+  const runner = withSingle(async (number) => number === 102 ? ok(JSON.stringify(await singlePr(102, { state: 'MERGED' }))) : null)
+  const h = await setup({ runner })
+  try {
+    await filled(h)
+    const { body: before } = await getJson<View>(`${h.base}/api/view`)
+    const stream = await openStream(h.base, 'client=tab-1&visible=true&paused=true')
+    assert.deepEqual((await send(`${h.base}/api/prs/102/refresh`, 'POST')).body, { number: 102, outcome: 'closed', joined: false, error: null, errorKind: null })
+    await stream.patch()
+    const done = await stream.patch()
+    assert.deepEqual([done.removed, done.rows], [[102], []])
+    assert.equal(done.counts?.mine.open, before.counts.mine.open - 1)
+    assert.equal(done.tiles?.mineReadyToMerge, before.tiles.mineReadyToMerge - 1)
+    stream.close()
+    const { body: after } = await getJson<View>(`${h.base}/api/view`)
+    assert.equal(rowIn(after, 102), undefined)
+    // Closed is the closed search's, unchanged until the next cycle
+    assert.deepEqual(after.closed, before.closed)
+    const stored = h.server.cache.db.prepare('SELECT state FROM prs WHERE repo = $repo AND number = 102').get({ repo: scenario.repo })
+    assert.equal(stored?.state, 'closed')
+    assert.equal(h.server.cache.latestCycle(scenario.repo)?.id, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a failed one-PR refresh stays on its row with its kind, and the board never reads offline', async () => {
+  let mode: 'up' | 'auth' | 'limited' | 'down' | 'missing' = 'up'
+  const runner = withSingle((number) => {
+    if (mode === 'auth') return failed('HTTP 401: Bad credentials (https://api.github.com/graphql)')
+    if (mode === 'limited') return { code: 1, stdout: JSON.stringify({ errors: [{ type: 'RATE_LIMITED', message: 'API rate limit exceeded' }] }), stderr: '' }
+    if (mode === 'down') return failed('error connecting to api.github.com')
+    if (mode === 'missing') return { code: 1, stdout: JSON.stringify({ errors: [{ type: 'NOT_FOUND', message: `Could not resolve to a PullRequest with the number of ${number}.` }] }), stderr: '' }
+    return null
+  })
+  const h = await setup({ runner })
+  try {
+    await filled(h)
+    for (const [next, kind] of [['auth', 'auth'], ['limited', 'rateLimit'], ['down', 'network'], ['missing', 'graphql']] as const) {
+      mode = next
+      const { status, body } = await send(`${h.base}/api/prs/101/refresh`, 'POST')
+      assert.equal(status, 200)
+      assert.deepEqual([body.outcome, body.errorKind, typeof body.error], ['failed', kind, 'string'])
+      const { body: view } = await getJson<View>(`${h.base}/api/view`)
+      const row = rowIn(view, 101)
+      assert.deepEqual([row?.refresh?.state, row?.refresh?.state === 'failed' ? row.refresh.errorKind : null], ['failed', kind])
+      // the cached row and every section stay as they were; no cycle failed
+      assert.equal(row?.freshness.state, 'current')
+      assert.deepEqual([view.sync.cycle?.state, view.sync.cycle?.errorKind], ['finished', null])
+      assert.deepEqual([view.sync.sections.open.state, view.sync.sections.closed.state], ['current', 'current'])
+      assert.ok(rowsOf(view).filter((entry) => entry.number !== 101).every((entry) => entry.refresh === null))
+    }
+    // a cycle that fetches the row clears its failure
+    mode = 'up'
+    await filled(h)
+    assert.equal(rowIn((await getJson<View>(`${h.base}/api/view`)).body, 101)?.refresh, null)
+    // and so does a refresh of its own that succeeds
+    mode = 'auth'
+    await send(`${h.base}/api/prs/101/refresh`, 'POST')
+    mode = 'up'
+    assert.equal((await send(`${h.base}/api/prs/101/refresh`, 'POST')).body.outcome, 'open')
+    assert.equal(rowIn((await getJson<View>(`${h.base}/api/view`)).body, 101)?.refresh, null)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a one-PR refresh re-derives the stacks it moves and rescans its own self-review report', async () => {
+  const runner = withSingle(async (number) => number === 111 ? ok(JSON.stringify(await singlePr(111, { patch: { baseRefName: 'main' } }))) : null)
+  const h = await setup({ runner })
+  try {
+    await filled(h)
+    const { body: before } = await getJson<View>(`${h.base}/api/view`)
+    assert.deepEqual([110, 111, 112].map((number) => rowIn(before, number)?.stack), [{ position: 1, size: 3 }, { position: 2, size: 3 }, { position: 3, size: 3 }])
+    const stream = await openStream(h.base, 'client=tab-1&visible=false&paused=false')
+    await send(`${h.base}/api/prs/111/refresh`, 'POST')
+    await stream.patch()
+    const done = await stream.patch()
+    // #111 now starts its own stack: every row whose stack changed comes along
+    assert.deepEqual(done.rows.map((row) => [row.number, row.stack]).sort((a, b) => Number(a[0]) - Number(b[0])), [
+      [110, null], [111, { position: 1, size: 2 }], [112, { position: 2, size: 2 }],
+    ])
+    stream.close()
+
+    // a self-review written since the last cycle shows on the next refresh of that PR
+    assert.equal((rowIn(before, 101) as MineRow).selfReview.state, 'none')
+    await mkdir(join(h.home, 'agents', 'output'), { recursive: true })
+    await writeFile(join(h.home, 'agents', 'output', 'PR-101.md'), 'Reviewed commit: `fix/webhook-retry` @ `e37eacd`\n', 'utf8')
+    await send(`${h.base}/api/prs/101/refresh`, 'POST')
+    assert.equal((rowIn((await getJson<View>(`${h.base}/api/view`)).body, 101) as MineRow).selfReview.state, 'current')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a one-PR refresh passes the Host, Origin and content-type checks for writes, and wants a PR number', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    const before = githubCalls(h.runner).length
+    assert.equal((await send(`${h.base}/api/prs/101/refresh`, 'POST', undefined, { Origin: 'http://attacker.test' })).status, 403)
+    assert.equal((await raw(h.server.port, '/api/prs/101/refresh', { Host: 'pit-view.attacker.test' }, 'POST')).status, 403)
+    assert.equal((await send(`${h.base}/api/prs/101/refresh`, 'POST', 'number=101', { 'Content-Type': 'text/plain' })).status, 415)
+    assert.equal((await send(`${h.base}/api/prs/abc/refresh`, 'POST')).status, 400)
+    assert.equal((await send(`${h.base}/api/prs/0/refresh`, 'POST')).status, 400)
+    assert.equal((await raw(h.server.port, '/api/prs/101/refresh')).status, 405)
+    assert.equal(githubCalls(h.runner).length, before)
+    // the page's own origin, with no body or a JSON one
+    assert.equal((await send(`${h.base}/api/prs/101/refresh`, 'POST', undefined, { Origin: h.base })).status, 200)
+    assert.equal((await send(`${h.base}/api/prs/101/refresh`, 'POST', {})).status, 200)
+    assert.equal(singleCalls(h.runner).length, 2)
+  } finally {
+    await h.cleanup()
+  }
+})

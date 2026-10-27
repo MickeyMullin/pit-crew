@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Clock } from '../src/config.ts'
-import type { RawClosedResponse, RawOpenResponse, Runner, RunOptions, RunResult } from '../src/github.ts'
+import type { RawClosedResponse, RawOpenPr, RawOpenResponse, RawPrState, RawSingleResponse, Runner, RunOptions, RunResult } from '../src/github.ts'
 import type { Timers } from '../src/poller.ts'
 import { scenario } from './fixtures/scenario.ts'
 
@@ -15,6 +15,18 @@ export const readFixture = async <T>(name: string): Promise<T> =>
 export const openPage1 = (): Promise<RawOpenResponse> => readFixture('open-page-1.json')
 export const openPage2 = (): Promise<RawOpenResponse> => readFixture('open-page-2.json')
 export const closedSearch = (): Promise<RawClosedResponse> => readFixture('closed.json')
+
+// one PR as the SinglePullRequest query returns it: a fixture node, changed by patch, in a state
+export const singlePr = async (number: number, { state = 'OPEN', patch = {} }: { state?: RawPrState, patch?: Partial<RawOpenPr> } = {}): Promise<RawSingleResponse> => {
+  const nodes = [...(await openPage1()).data.repository!.pullRequests.nodes, ...(await openPage2()).data.repository!.pullRequests.nodes]
+  const pr = nodes.find((node) => node.number === number)
+  return {
+    data: {
+      rateLimit: { cost: 1, remaining: 4990, resetAt: '2026-10-26T15:00:00Z' },
+      repository: { defaultBranchRef: { name: scenario.defaultBranch }, pullRequest: pr === undefined ? null : { ...pr, ...patch, state } },
+    },
+  }
+}
 
 export const ok = (stdout: string): RunResult => ({ code: 0, stdout, stderr: '' })
 export const failed = (stderr: string, stdout = ''): RunResult => ({ code: 1, stdout, stderr })
@@ -50,6 +62,7 @@ export const fixtureRunner = (): FakeRunner =>
         if (after === scenario.page2After) return ok(JSON.stringify(await openPage2()))
       }
       if (query.includes('query ClosedPullRequests')) return ok(JSON.stringify(await closedSearch()))
+      if (query.includes('query SinglePullRequest')) return ok(JSON.stringify(await singlePr(Number(field(args, 'number')))))
     }
     return failed(`fixture runner has no answer for: gh ${args.slice(0, 2).join(' ')}`)
   })

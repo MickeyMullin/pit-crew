@@ -3,8 +3,8 @@ import type { Cache, CachedView, Cycle, CycleErrorKind, FinishResult, SectionFre
 import { expandHome } from './config.ts'
 import type { Clock, Config } from './config.ts'
 import { deriveView, isMine } from './derive.ts'
-import type { ClosedView, Counts, DerivedView, Freshness, MineSection, OpenRow, OthersSection, PersonView, Tiles } from './derive.ts'
-import { fetchClosedPrs, fetchOpenPrs, GhError } from './github.ts'
+import type { ClosedView, Counts, DerivedView, Freshness, MineSection, OpenRow, OthersSection, PersonView, RowRefresh, Tiles } from './derive.ts'
+import { fetchClosedPrs, fetchOpenPrs, fetchPr, GhError } from './github.ts'
 import type { Gh, RawOpenPr } from './github.ts'
 import { scanReports } from './reports.ts'
 import type { ReportInfo, ReportTarget } from './reports.ts'
@@ -69,11 +69,23 @@ export type PatchBody = Partial<Omit<Patch, 'version' | 'now'>>
 
 export type RefreshResult = { started: boolean, cycle: number | null }
 
+// a one-PR refresh: still open, found closed or merged (and removed from the open rows), or
+// failed with GitHub's reason; joined when it rode along with a refresh already in flight
+export type PrRefreshResult = {
+  number: number
+  outcome: 'open' | 'closed' | 'failed'
+  joined: boolean
+  error: string | null
+  errorKind: Extract<RowRefresh, { state: 'failed' }>['errorKind'] | null
+}
+
 export type Poller = {
   // the whole dashboard from the cache, never waiting on GitHub
   view: () => Promise<View>
   // manual, config and autoReview one-shots; joins a running cycle
   refresh: (trigger: Exclude<Trigger, 'active' | 'interval'>) => RefreshResult
+  // fetches one PR and patches its row, outside any cycle; joins a refresh of that PR in flight
+  refreshPr: (number: number) => Promise<PrRefreshResult>
   // the clients changed; returns the cycle started or joined under the active rule, or null
   setActive: (activeCount: number, becameActive: boolean) => number | null
   // a saved config replaced `before`; emits the recomputed rows and starts a config cycle when needed
@@ -176,10 +188,11 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
-  // own PRs a page brings that the cycle's scan did not cover (new, or on a new branch)
-  const scanNew = async (prs: readonly RawOpenPr[], settings: Config): Promise<void> => {
+  // own PRs a page brings that the cycle's scan did not cover (new, or on a new branch), or with
+  // force every own PR given, since a one-PR refresh may be after a new report
+  const scanNew = async (prs: readonly RawOpenPr[], settings: Config, force = false): Promise<void> => {
     const known = scanned ?? new Map<number, string>()
-    const targets = ownTargets(prs, settings).filter((target) => known.get(target.number) !== target.headRefName)
+    const targets = ownTargets(prs, settings).filter((target) => force || known.get(target.number) !== target.headRefName)
     if (targets.length === 0) return
     try {
       const found = await scanReports(reportsDir(settings), targets)
@@ -198,6 +211,11 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
+  // one-PR refreshes by repo and number: running, or failed until the row is next fetched
+  const rowRefreshes = new Map<string, RowRefresh>()
+  const prJobs = new Map<string, Promise<PrRefreshResult>>()
+  const prKey = (repo: string, number: number): string => `${repo}#${number}`
+
   const snapshot = (settings: Config, reportMap: ReadonlyMap<number, ReportInfo>): Snapshot => {
     const cached = cache.readView(settings.repo)
     const freshness = new Map<number, Freshness>(cached.open.map((row) => [row.number, { state: row.freshness.state, fetchedAt: row.freshness.fetchedAt }]))
@@ -211,6 +229,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       timeZone,
       reports: reportMap,
       freshness: (number) => freshness.get(number) ?? { state: 'current', fetchedAt: iso(clock.now()) },
+      refresh: (number) => rowRefreshes.get(prKey(settings.repo, number)) ?? null,
     })
     const rows = new Map<number, OpenRow>()
     for (const group of [...view.mine.groups, ...view.others.groups]) {
@@ -340,6 +359,10 @@ export const createPoller = (options: PollerOptions): Poller => {
         await scanNew(page.prs, config())
         if (!live()) throw new CycleStopped()
         const written = cache.writeOpenPage(cycle.id, page)
+        // a row the cycle fetched no longer carries its own failed refresh
+        for (const row of written) {
+          if (rowRefreshes.get(prKey(repo, row.number))?.state === 'failed') rowRefreshes.delete(prKey(repo, row.number))
+        }
         pagesDone = page.page
         if (shown()) applyPage(written.map((row) => row.number), sent)
       }, { pageSize }).then(() => {}, (error: unknown) => {
@@ -400,6 +423,55 @@ export const createPoller = (options: PollerOptions): Poller => {
     if (current !== null) return { started: false, cycle: current.cycle.id }
     const cycle = start(trigger)
     return { started: cycle !== null, cycle: cycle?.id ?? null }
+  }
+
+  // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that
+  // row and any other its change moved (stacks), or its removal once closed; a failure stays on
+  // the row and never touches the cycles, so the board does not read offline
+  const runPrRefresh = async (number: number): Promise<PrRefreshResult> => {
+    const settings = config()
+    const { repo } = settings
+    const key = prKey(repo, number)
+    const shown = (): boolean => !stopped && config().repo === repo
+    const before = snapshot(settings, reports)
+    rowRefreshes.set(key, { state: 'running', startedAt: iso(clock.now()) })
+    const started = snapshot(settings, reports).rows.get(number)
+    if (started !== undefined) patch({ rows: [started] })
+    let outcome: PrRefreshResult['outcome'] = 'failed'
+    let failure: Extract<RowRefresh, { state: 'failed' }> | null = null
+    try {
+      const found = await fetchPr(gh, repo, number)
+      if (!stopped && found.state === 'OPEN') {
+        await scanNew([found.pr], config(), true)
+        cache.writePr(repo, found.pr, found.defaultBranch)
+        outcome = 'open'
+      } else if (!stopped) {
+        // the next cycle's closed search shows it in Closed
+        cache.closePr(repo, number)
+        outcome = 'closed'
+      }
+      rowRefreshes.delete(key)
+    } catch (error) {
+      failure = { state: 'failed', at: iso(clock.now()), error: messageOf(error), errorKind: error instanceof GhError ? error.kind : 'internal' }
+      rowRefreshes.set(key, failure)
+      log(`PR #${number}: refresh failed: ${failure.error}`)
+    }
+    if (shown()) {
+      const next = snapshot(config(), reports)
+      const rows = [...next.rows.values()].filter((row) => row.number === number || !same(row, before.rows.get(row.number)))
+      const removed = [...before.rows.keys()].filter((known) => !next.rows.has(known))
+      patch({ rows, removed, tiles: next.view.tiles, counts: next.view.counts })
+    }
+    return { number, outcome, joined: false, error: failure?.error ?? null, errorKind: failure?.errorKind ?? null }
+  }
+
+  const refreshPr = (number: number): Promise<PrRefreshResult> => {
+    const key = prKey(config().repo, number)
+    const running = prJobs.get(key)
+    if (running !== undefined) return running.then((result) => ({ ...result, joined: true }))
+    const job = runPrRefresh(number).finally(() => prJobs.delete(key))
+    prJobs.set(key, job)
+    return job
   }
 
   const setActive = (count: number, becameActive: boolean): number | null => {
@@ -482,5 +554,5 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
-  return { view, refresh, setActive, configChanged, idle, stop, version: () => version }
+  return { view, refresh, refreshPr, setActive, configChanged, idle, stop, version: () => version }
 }

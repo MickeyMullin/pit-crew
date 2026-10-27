@@ -190,11 +190,14 @@ test('Closed sorts by outcome, author, closed by and closedAt', async () => {
   assert.deepEqual(by, [...by].sort((a, b) => a.localeCompare(b, 'en')))
 })
 
-test('every column has a sort key except the phase 2 agent column', () => {
+test('every column has a sort key except the phase 2 agent column and the trailing row refresh', () => {
   const unsorted = (columns: readonly { key: string, sort?: unknown }[]): string[] => columns.filter((column) => column.sort === undefined).map((column) => column.key)
-  assert.deepEqual(unsorted(mineColumns(true)), ['agent'])
-  assert.deepEqual(unsorted(othersColumns(true)), ['agent'])
-  assert.deepEqual(unsorted(mineColumns(false)), [])
+  assert.deepEqual(unsorted(mineColumns(true)), ['agent', 'refresh'])
+  assert.deepEqual(unsorted(othersColumns(true)), ['agent', 'refresh'])
+  assert.deepEqual(unsorted(mineColumns(false)), ['refresh'])
+  // the refresh column is last, so revealing its button never moves another column
+  assert.equal(mineColumns(true).at(-1)?.key, 'refresh')
+  assert.equal(othersColumns(false).at(-1)?.key, 'refresh')
   const range = { label: 'Today', isMondayRule: false, from: scenario.todayFrom, to: scenario.now, rows: [] }
   assert.deepEqual(unsorted(closedColumns(range)), [])
 })

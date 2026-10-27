@@ -2,15 +2,15 @@
 // the three tables: column definitions, the arrangement of rows into groups, and keyed rendering
 import type { ClosedRange, ClosedRow, MineRow, OpenRow, OtherRow } from '../src/derive.ts'
 import type { View } from '../src/poller.ts'
-import { avatar, chip, issueChip, mergeChip, pip, ticketChip } from './cells.ts'
+import { avatar, chip, icons, issueChip, mergeChip, pip, ticketChip } from './cells.ts'
 import { closedTally, hasTickets } from './closed.ts'
-import { h, sync } from './dom.ts'
+import { h, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import { closedSortValues, mineSortValues, othersSortValues } from './filters.ts'
 import type { Sort, SortValue } from './filters.ts'
 import { formatAge, formatClock, plural, shortSha } from './format.ts'
 import { rowFreshness } from './state.ts'
-import { rowMarker } from './status.ts'
+import { refreshButton, rowMarker } from './status.ts'
 import type { Marker, TableState } from './status.ts'
 
 export type TableKey = 'mine' | 'others' | 'closed'
@@ -26,6 +26,8 @@ export type Column<R> = {
   width: string
   cell: (row: R, ctx: CellContext) => { sig: unknown, build: () => Node[] }
   sort?: SortValue<R>
+  // the header names the column for screen readers only
+  hideLabel?: true
 }
 
 // the agent column exists from phase 2; config.showAgentColumn turns it on
@@ -34,6 +36,32 @@ const agentColumn = <R>(): Column<R> => ({
   label: 'Agent',
   width: '168px',
   cell: () => ({ sig: null, build: () => [h('span', { class: 'muted' }, '—')] }),
+})
+
+// the row's own refresh, last and fixed-width so showing it never moves a column; app.ts
+// handles its clicks, and focus comes back to it by data-focus when a patch rebuilds it
+const refreshColumn = <R extends OpenRow>(): Column<R> => ({
+  key: 'refresh',
+  label: 'Refresh',
+  hideLabel: true,
+  width: '52px',
+  cell: (row) => {
+    const button = refreshButton(row)
+    return {
+      sig: button,
+      build: () => [h('button', {
+        type: 'button',
+        class: 'row-refresh',
+        'data-refresh': row.number,
+        'data-state': button.state,
+        'aria-label': button.label,
+        'aria-busy': button.state === 'running' ? 'true' : null,
+        title: button.tip,
+        'data-focus': 'refresh',
+        'data-focus-key': `refresh:${row.number}`,
+      }, svg(icons.refresh, { size: 14, stroke: '2.2' }))],
+    }
+  },
 })
 
 const prCell = <R extends { number: number, url: string }>(hover: boolean): Column<R>['cell'] => (row) => ({
@@ -128,6 +156,7 @@ export const mineColumns = (agent: boolean): Column<MineRow>[] => [
   { key: 'activity', label: 'Last activity', width: '176px', cell: activityCell, sort: mineSortValues.activity },
   { key: 'merge', label: 'Merge', width: '120px', cell: mergeCell, sort: mineSortValues.merge },
   ...(agent ? [agentColumn<MineRow>()] : []),
+  refreshColumn<MineRow>(),
 ]
 
 export const othersColumns = (agent: boolean): Column<OtherRow>[] => [
@@ -160,6 +189,7 @@ export const othersColumns = (agent: boolean): Column<OtherRow>[] => [
   { key: 'activity', label: 'Last activity', width: '176px', cell: activityCell, sort: othersSortValues.activity },
   { key: 'merge', label: 'Merge', width: '120px', cell: mergeCell, sort: othersSortValues.merge },
   ...(agent ? [agentColumn<OtherRow>()] : []),
+  refreshColumn<OtherRow>(),
 ]
 
 // the Ticket column, between PR and Title, only when a row in the range has a ticket
@@ -330,7 +360,7 @@ const arrows = { asc: '↑', desc: '↓' } as const
 const headerCell = <R>(model: TableModel<R>, column: Column<R>): HTMLTableCellElement => {
   const dir = model.sort !== null && model.sort.key === column.key ? model.sort.dir : null
   const attrs = { scope: 'col', class: `col-${column.key}`, 'aria-sort': dir === null ? null : ariaSort[dir] }
-  if (column.sort === undefined) return h('th', attrs, column.label)
+  if (column.sort === undefined) return h('th', attrs, column.hideLabel === true ? h('span', { class: 'sr-only' }, column.label) : column.label)
   const button = h('button', { type: 'button', class: dir === null ? 'sort' : 'sort sort-active', title: `Sort by ${column.label}`, 'data-focus-key': `sort:${model.table}:${column.key}` },
     column.label,
     h('span', { class: 'sort-arrow', 'aria-hidden': 'true' }, dir === null ? '' : arrows[dir]))

@@ -91,6 +91,11 @@ export type Cache = {
   writeOpenPage: (cycleId: number, page: OpenPage) => CachedPr[]
   // stores the closed search, which covers both Closed ranges
   writeClosed: (cycleId: number, result: ClosedResult) => CachedClosed
+  // stores one PR fetched on its own, outside any cycle, stamped with the repo's latest cycle so
+  // it reads as current; returns the row as written
+  writePr: (repo: string, pr: RawOpenPr, defaultBranch: string | null) => CachedPr
+  // marks a PR found closed or merged on its own as gone from the open list; false when it was not open
+  closePr: (repo: string, number: number) => boolean
   // stores a failed response, so the section can report the error it hit
   recordError: (cycleId: number, kind: SnapshotKind, page: number | null, error: string) => void
   // a null error marks the cycle successful and removes PRs absent from its full open list
@@ -158,7 +163,8 @@ const toCycle = (row: Row): Cycle => {
 // a row is current once the latest cycle has fetched it; otherwise it waits on a running
 // cycle or was missed by a finished one
 const rowFreshness = (cycle: number, fetchedAt: string, latest: Cycle | null): RowFreshness => {
-  if (latest !== null && cycle === latest.id) return { state: 'current', fetchedAt, error: null }
+  // with no cycle yet, only a one-PR refresh can have written the row
+  if (latest === null || cycle === latest.id) return { state: 'current', fetchedAt, error: null }
   if (latest?.state === 'running') return { state: 'pending', fetchedAt, error: null }
   return { state: 'stale', fetchedAt, error: latest?.error ?? null }
 }
@@ -349,6 +355,32 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     return { cycle: cycleId, fetchedAt: at, result }
   })
 
+  const writePr = (repo: string, pr: RawOpenPr, defaultBranch: string | null): CachedPr => transaction(() => {
+    const at = now()
+    const latest = latestCycle(repo)
+    // no cycle yet is cycle 0, which no real cycle id ever is
+    const cycleId = latest?.id ?? 0
+    run('INSERT INTO prs (repo, number, state, updated_at, head_oid, fetched_at, cycle, last_seen_at, data) VALUES ($repo, $number, \'open\', $updatedAt, $headOid, $at, $cycle, $at, $data) ON CONFLICT (repo, number) DO UPDATE SET state = \'open\', updated_at = excluded.updated_at, head_oid = excluded.head_oid, fetched_at = excluded.fetched_at, cycle = excluded.cycle, last_seen_at = excluded.last_seen_at, data = excluded.data', {
+      repo, number: pr.number, updatedAt: pr.updatedAt, headOid: pr.headRefOid, at, cycle: cycleId, data: JSON.stringify(pr),
+    })
+    if (defaultBranch !== null) setMeta(metaKey('defaultBranch', repo), defaultBranch)
+    return {
+      repo,
+      number: pr.number,
+      state: 'open',
+      updatedAt: pr.updatedAt,
+      headOid: pr.headRefOid,
+      fetchedAt: at,
+      cycle: cycleId,
+      lastSeenAt: at,
+      pr,
+      freshness: rowFreshness(cycleId, at, latest),
+    }
+  })
+
+  const closePr = (repo: string, number: number): boolean =>
+    run('UPDATE prs SET state = \'closed\', fetched_at = $at WHERE repo = $repo AND number = $number AND state = \'open\'', { repo, number, at: now() }) > 0
+
   const recordError = (cycleId: number, kind: SnapshotKind, page: number | null, error: string): void => {
     const { repo } = requireRunning(cycleId)
     insertSnapshot({ cycle: cycleId, repo, kind, page, at: now(), error, payload: null })
@@ -440,6 +472,8 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     startCycle,
     writeOpenPage,
     writeClosed,
+    writePr,
+    closePr,
     recordError,
     finishCycle,
     readView,

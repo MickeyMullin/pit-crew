@@ -1,7 +1,7 @@
 // public/status.ts
 // what the page says about freshness, from the view's sync and this page's own pause: the
 // header's sync status, the offline banner, row and section markers and the tables' states; pure
-import type { OpenRow } from '../src/derive.ts'
+import type { OpenRow, RowRefresh } from '../src/derive.ts'
 import type { Sync } from '../src/poller.ts'
 import { formatAge, formatCached, formatInterval, formatSince } from './format.ts'
 import { rowFreshness } from './state.ts'
@@ -94,15 +94,48 @@ export const offlineBanner = (sync: Sync, { paused, nowMs, timeZone }: Reading):
 // the interval and a cycle is still on its way or this page is paused; none when current
 export type Marker = { kind: 'stale' | 'muted', tip: string } | null
 
-export const rowMarker = (row: Pick<OpenRow, 'freshness'>, sync: Pick<Sync, 'cycle' | 'refreshSeconds'>, { paused, nowMs, timeZone }: Reading): Marker => {
+// why a row's own refresh failed, in the words the banner uses for a cycle
+export const rowRefreshCause = (refresh: Extract<RowRefresh, { state: 'failed' }>): string => {
+  switch (refresh.errorKind) {
+    case 'network':
+      return 'can\'t reach GitHub'
+    case 'auth':
+      return 'GitHub did not accept gh\'s sign-in; check it with gh auth status in a terminal'
+    case 'rateLimit':
+      return 'GitHub\'s rate limit stopped it'
+    default:
+      return refresh.error.trim().replace(/[.\s]+$/, '') || 'unknown error'
+  }
+}
+
+// a row's own refresh, running or failed, outranks what the cycles say about it
+export const rowMarker = (
+  row: Pick<OpenRow, 'freshness'> & { refresh?: RowRefresh | null },
+  sync: Pick<Sync, 'cycle' | 'refreshSeconds'>,
+  { paused, nowMs, timeZone }: Reading,
+): Marker => {
   const { fetchedAt } = row.freshness
   const state = rowFreshness(row, sync)
   const cached = `cached ${formatCached(fetchedAt, nowMs, timeZone)}`
+  const refresh = row.refresh ?? null
+  if (refresh?.state === 'running') return { kind: 'muted', tip: `${cached}, refreshing this PR` }
+  if (refresh?.state === 'failed') return { kind: 'stale', tip: `${cached}, refreshing this PR failed: ${rowRefreshCause(refresh)}` }
   if (state === 'stale') return { kind: 'stale', tip: `${cached}, refresh failed` }
   const old = nowMs - Date.parse(fetchedAt) > sync.refreshSeconds * 1000
   if (!old) return null
   if (state === 'pending') return { kind: 'muted', tip: `${cached}, refreshing` }
   return paused ? { kind: 'muted', tip: `${cached}, paused` } : null
+}
+
+// the row's refresh button: its accessible name and tooltip, and the state it shows
+export type RefreshButton = { state: 'idle' | 'running' | 'failed', label: string, tip: string }
+
+export const refreshButton = (row: Pick<OpenRow, 'number' | 'refresh'>): RefreshButton => {
+  const refresh = row.refresh
+  if (refresh?.state === 'running') return { state: 'running', label: `Refreshing #${row.number}`, tip: `Refreshing #${row.number}…` }
+  const label = `Refresh #${row.number}`
+  if (refresh?.state === 'failed') return { state: 'failed', label, tip: `${label}; the last try failed: ${rowRefreshCause(refresh)}` }
+  return { state: 'idle', label, tip: label }
 }
 
 // a stale section shows the same dot in its heading

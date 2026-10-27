@@ -1,7 +1,7 @@
 // src/derive.ts
 import type { Clock, Config, Person, TicketSystem } from './config.ts'
 import type {
-  RawCheckContext, RawClosedPr, RawIssueRef, RawOpenPr, RawReview, RawReviewer, RawTimelineItem,
+  GhErrorKind, RawCheckContext, RawClosedPr, RawIssueRef, RawOpenPr, RawReview, RawReviewer, RawTimelineItem,
 } from './github.ts'
 import type { ReportInfo } from './reports.ts'
 import { closedRanges, iso } from './time.ts'
@@ -36,6 +36,11 @@ export type LastActivity = { at: string, actor: string | null, text: string }
 export type FreshnessState = 'current' | 'pending' | 'stale'
 export type Freshness = { state: FreshnessState, fetchedAt: string }
 
+// this row's own one-PR refresh: on its way, or failed with GitHub's reason; null otherwise
+export type RowRefresh =
+  | { state: 'running', startedAt: string }
+  | { state: 'failed', at: string, error: string, errorKind: GhErrorKind | 'internal' }
+
 export type PrBase = {
   number: number
   url: string
@@ -55,6 +60,7 @@ export type PrBase = {
   merge: MergeState
   lastActivity: LastActivity
   freshness: Freshness
+  refresh: RowRefresh | null
   // phase 2
   agent: null
 }
@@ -136,6 +142,8 @@ export type DeriveContext = {
   reports?: ReadonlyMap<number, ReportInfo>
   // per-row freshness from the cache; defaults to current as of now
   freshness?: (number: number) => Freshness
+  // one-PR refreshes running or failed, from the poller; defaults to none
+  refresh?: (number: number) => RowRefresh | null
 }
 
 const same = (a: string | null | undefined, b: string | null | undefined): boolean =>
@@ -584,6 +592,7 @@ const prBase = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, S
   merge,
   lastActivity: deriveLastActivity(pr, ctx.config),
   freshness: freshnessOf(pr.number, ctx),
+  refresh: ctx.refresh?.(pr.number) ?? null,
   agent: null,
 })
 

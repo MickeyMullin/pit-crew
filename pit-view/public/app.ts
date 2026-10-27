@@ -211,6 +211,13 @@ byId('refresh').addEventListener('click', () => {
   void fetch('/api/refresh', { method: 'POST' }).catch(() => {})
 })
 
+// a row's own refresh: one PR, paused or not; its patches redraw the row, so the answer is unused
+document.addEventListener('click', (event) => {
+  const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button.row-refresh[data-refresh]') : null
+  if (button === null) return
+  void fetch(`/api/prs/${encodeURIComponent(button.dataset.refresh ?? '')}/refresh`, { method: 'POST' }).catch(() => {})
+})
+
 byId('pause').addEventListener('click', () => {
   ui.paused = !ui.paused
   writePaused(ui.paused)

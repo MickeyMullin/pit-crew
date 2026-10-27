@@ -165,6 +165,19 @@ export type RawOpenResponse = {
   }
 }
 
+export type RawPrState = 'OPEN' | 'CLOSED' | 'MERGED'
+
+export type RawSingleResponse = {
+  data: {
+    rateLimit: RawRateLimit
+    repository: {
+      defaultBranchRef: { name: string } | null
+      // null when no PR has that number
+      pullRequest: (RawOpenPr & { state: RawPrState }) | null
+    } | null
+  }
+}
+
 export type RawClosedPr = {
   number: number
   title: string
@@ -200,6 +213,14 @@ export type OpenPage = {
   rateLimit: RawRateLimit
   // the parsed gh output, for the snapshots table
   raw: RawOpenResponse
+}
+
+// what fetchPr resolves with: the PR in the open-row shape, and whether it is still open
+export type SinglePr = {
+  state: RawPrState
+  pr: RawOpenPr
+  defaultBranch: string | null
+  rateLimit: RawRateLimit
 }
 
 export type ClosedResult = {
@@ -253,6 +274,48 @@ const reviewerFields = '__typename ... on User { login } ... on Bot { login } ..
 const actorFields = '__typename login avatarUrl'
 const issueRefFields = 'closingIssuesReferences(first: 10) { nodes { number title url } }'
 
+// every field an open row is derived from, shared by the open list and the one-PR refresh
+const openPrFields = `number title url isDraft
+author { ${actorFields} }
+headRefName baseRefName headRefOid
+createdAt updatedAt additions deletions changedFiles
+mergeable mergeStateStatus reviewDecision
+body
+reviewRequests(first: 50) { nodes { requestedReviewer { ${reviewerFields} } } }
+latestReviews(first: 50) { nodes { author { login } state submittedAt commit { oid } } }
+headCommit: commits(last: 1) {
+  nodes {
+    commit {
+      oid committedDate
+      statusCheckRollup {
+        contexts(first: 100) {
+          totalCount
+          nodes {
+            __typename
+            ... on CheckRun { name conclusion status detailsUrl checkSuite { workflowRun { workflow { name } } } }
+            ... on StatusContext { context state targetUrl }
+          }
+        }
+      }
+    }
+  }
+}
+recentCommits: commits(last: 30) { totalCount nodes { commit { oid committedDate } } }
+${issueRefFields}
+timelineItems(last: 5, itemTypes: [PULL_REQUEST_COMMIT, PULL_REQUEST_REVIEW, ISSUE_COMMENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, RENAMED_TITLE_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
+  nodes {
+    __typename
+    ... on PullRequestCommit { commit { oid committedDate author { name user { login } } } }
+    ... on PullRequestReview { author { login } state submittedAt createdAt }
+    ... on IssueComment { author { login } createdAt }
+    ... on ReviewRequestedEvent { actor { login } createdAt requestedReviewer { ${reviewerFields} } }
+    ... on ReadyForReviewEvent { actor { login } createdAt }
+    ... on ConvertToDraftEvent { actor { login } createdAt }
+    ... on RenamedTitleEvent { actor { login } createdAt }
+    ... on HeadRefForcePushedEvent { actor { login } createdAt beforeCommit { oid } afterCommit { oid } }
+  }
+}`
+
 export const openPrsQuery = `query OpenPullRequests($owner: String!, $name: String!, $first: Int!, $after: String) {
   rateLimit { cost remaining resetAt }
   repository(owner: $owner, name: $name) {
@@ -261,47 +324,20 @@ export const openPrsQuery = `query OpenPullRequests($owner: String!, $name: Stri
       totalCount
       pageInfo { hasNextPage endCursor }
       nodes {
-        number title url isDraft
-        author { ${actorFields} }
-        headRefName baseRefName headRefOid
-        createdAt updatedAt additions deletions changedFiles
-        mergeable mergeStateStatus reviewDecision
-        body
-        reviewRequests(first: 50) { nodes { requestedReviewer { ${reviewerFields} } } }
-        latestReviews(first: 50) { nodes { author { login } state submittedAt commit { oid } } }
-        headCommit: commits(last: 1) {
-          nodes {
-            commit {
-              oid committedDate
-              statusCheckRollup {
-                contexts(first: 100) {
-                  totalCount
-                  nodes {
-                    __typename
-                    ... on CheckRun { name conclusion status detailsUrl checkSuite { workflowRun { workflow { name } } } }
-                    ... on StatusContext { context state targetUrl }
-                  }
-                }
-              }
-            }
-          }
-        }
-        recentCommits: commits(last: 30) { totalCount nodes { commit { oid committedDate } } }
-        ${issueRefFields}
-        timelineItems(last: 5, itemTypes: [PULL_REQUEST_COMMIT, PULL_REQUEST_REVIEW, ISSUE_COMMENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, RENAMED_TITLE_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
-          nodes {
-            __typename
-            ... on PullRequestCommit { commit { oid committedDate author { name user { login } } } }
-            ... on PullRequestReview { author { login } state submittedAt createdAt }
-            ... on IssueComment { author { login } createdAt }
-            ... on ReviewRequestedEvent { actor { login } createdAt requestedReviewer { ${reviewerFields} } }
-            ... on ReadyForReviewEvent { actor { login } createdAt }
-            ... on ConvertToDraftEvent { actor { login } createdAt }
-            ... on RenamedTitleEvent { actor { login } createdAt }
-            ... on HeadRefForcePushedEvent { actor { login } createdAt beforeCommit { oid } afterCommit { oid } }
-          }
-        }
+        ${openPrFields}
       }
+    }
+  }
+}`
+
+// one PR by number, for a row's own refresh; state says whether it is still open
+export const singlePrQuery = `query SinglePullRequest($owner: String!, $name: String!, $number: Int!) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name }
+    pullRequest(number: $number) {
+      state
+      ${openPrFields}
     }
   }
 }`
@@ -470,6 +506,17 @@ export const fetchOpenPrs = async (
     after = pullRequests.pageInfo.endCursor
   }
   return { pages: page, totalCount }
+}
+
+// one PR by number, in the same shape as an open-list node; its state is kept apart
+export const fetchPr = async (gh: Gh, repo: string, number: number): Promise<SinglePr> => {
+  const { owner, name } = splitRepo(repo)
+  const raw = await gh.graphql<RawSingleResponse>(singlePrQuery, { owner, name, number })
+  const repository = raw.data.repository
+  if (repository === null) throw new GhError('graphql', `repository ${repo} not found`)
+  if (repository.pullRequest === null) throw new GhError('graphql', `PR #${number} not found in ${repo}`)
+  const { state, ...pr } = repository.pullRequest
+  return { state, pr, defaultBranch: repository.defaultBranchRef?.name ?? null, rateLimit: raw.data.rateLimit }
 }
 
 // GitHub search takes second precision with an explicit offset

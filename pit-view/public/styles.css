@@ -230,8 +230,55 @@ button {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #refresh[data-running] svg {
+  #refresh[data-running] svg,
+  .row-refresh[data-state='running'] svg {
     animation: none;
+  }
+}
+
+/* a row's own refresh: faded out, never hidden, until its row is hovered or holds focus, so it
+   stays in the tab order and the accessibility tree; always shown while running or failed */
+.row-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line-control);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.prs tr:hover .row-refresh,
+.prs tr:focus-within .row-refresh,
+.row-refresh[data-state='running'],
+.row-refresh[data-state='failed'] {
+  opacity: 1;
+}
+
+.row-refresh:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+.row-refresh[data-state='running'] svg {
+  animation: spin 1s linear infinite;
+}
+
+.row-refresh[data-state='failed'] {
+  background: var(--amber-bg);
+  border-color: var(--amber-edge);
+  color: var(--amber-fg);
+}
+
+/* touch screens have no hover to reveal it */
+@media (hover: none) {
+  .row-refresh {
+    opacity: 1;
   }
 }
 
