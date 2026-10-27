@@ -404,9 +404,9 @@ export const ticketSample = (system: TicketForm, repo: string, texts: readonly S
 export type Choice<T extends string | number> = { value: T, label: string }
 
 export const refreshChoices: Choice<Config['refreshSeconds']>[] = [
-  { value: 300, label: '5 minutes (default)' },
-  { value: 120, label: '2 minutes' },
   { value: 60, label: '60 seconds' },
+  { value: 120, label: '2 minutes' },
+  { value: 300, label: '5 minutes (default)' },
 ]
 
 export const todayChoices = (timeZone: string): Choice<Config['todayStartsAt']>[] => [

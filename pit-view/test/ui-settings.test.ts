@@ -113,8 +113,9 @@ test('only the settings the poller refreshes for start a refresh', () => {
   assert.equal(needsRefresh(before, { ...before, people: [] }), true)
 })
 
-test('the refresh interval offers 5 minutes as the default, then 2 minutes and 60 seconds', () => {
-  assert.deepEqual(refreshChoices.map((choice) => [choice.value, choice.label]), [[300, '5 minutes (default)'], [120, '2 minutes'], [60, '60 seconds']])
+test('the refresh interval offers 60 seconds, 2 minutes and 5 minutes, smallest first, with 5 minutes the default', () => {
+  assert.deepEqual(refreshChoices.map((choice) => [choice.value, choice.label]), [[60, '60 seconds'], [120, '2 minutes'], [300, '5 minutes (default)']])
+  assert.equal(defaultConfig().refreshSeconds, 300)
 })
 
 test('a valid form passes the checks, and the server accepts what it sends', () => {
@@ -170,7 +171,7 @@ test('the server\'s refusals land on the field they name, and the rest stay with
   const form = formOf()
   const config = sample()
   const place = (bad: unknown) => serverError(refusal(bad), form)
-  assert.deepEqual(place({ ...config, refreshSeconds: 10 }), { field: 'refreshSeconds', message: 'Must be one of 300, 120, 60.' })
+  assert.deepEqual(place({ ...config, refreshSeconds: 10 }), { field: 'refreshSeconds', message: 'Must be one of 60, 120, 300.' })
   assert.deepEqual(place({ ...config, repo: 'orbit' }), { field: 'repo', message: 'Must look like owner/name.' })
   const people = config.people.map((person) => ({ ...person }))
   people[2]!.avatar = '/elsewhere/priya.png'

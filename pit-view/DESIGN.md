@@ -32,7 +32,7 @@ Configuration lives in `~/.config/pit-view/config.json`, with `~` expanded at ru
 | `viewer` | string | output of `gh api user --jq .login` | Whose PRs count as "Mine" and whose reviews count as "yours". |
 | `people` | list of `{login, alias, initials, color, avatar}` | empty | `avatar` is `initials`, `github`, or a local image path under `~`. Unlisted logins get their GitHub avatar and login. New authors are suggested in Settings the first time they appear. |
 | `tickets` | list of ticket systems (below) | Jira first, then GitHub issues | Optional; an empty list hides tickets everywhere. |
-| `refreshSeconds` | 300, 120 or 60 | 300 | The UI's interval, applied only while a page is active (section 3). Shown in the header as "every 5m". |
+| `refreshSeconds` | 60, 120 or 300 | 300 | The UI's interval, applied only while a page is active (section 3). Shown in the header as "every 5m". |
 | `todayStartsAt` | `local` or `utc` | `local` | Local midnight in the machine's time zone. |
 | `bots` | list of login substrings | `["dependabot", "renovate"]` | PRs by these collapse into a bot group. |
 | `reportsDir` | path | `~/agents/output` | Where review reports are found for self-review detection. v1 is file-based; section 10, Report storage, proposes making this a legacy import source. |
@@ -253,7 +253,7 @@ Shared row fields (`PrBase`):
 
 `OtherRow` adds `section: "others"`, `group` (`yourMove`, `readyToMerge`, `waitingOnAuthor`, `bots`) and `flags` (list of `{ "kind": "reReview", "label": "Re-review · 1 push since yours", "count": 1 }` or `{ "kind": "requestedOfYou", "label": "Requested of you" }`).
 
-`MineRow` adds `section: "mine"`, `group` (`changesRequested`, `readyToMerge`, `awaitingReview`, `drafts`), `stage` (`changesRequested`, `awaitingReview`, `approved`, `draft`), `selfReview` (`{ "state": "current" | "stale" | "none", "reviewedOid": "b5d43a3", "headOid": "5c65b9b", "tandem": true, "file": "PR-101.md", "at": "..." }`) and `changesRequested` (`{ "login": "alex", "alias": "Alex", "at": "..." }` from the latest changes-requested review, for the call-out banner, or null).
+`MineRow` adds `section: "mine"`, `group` (`changesRequested`, `readyToMerge`, `awaitingReview`, `drafts`), `stage` (`changesRequested`, `reReviewRequested`, `updatedNotRequested`, `awaitingReview`, `approved`, `draft`), `selfReview` (`{ "state": "current" | "stale" | "none", "reviewedOid": "b5d43a3", "headOid": "5c65b9b", "tandem": true, "file": "PR-101.md", "at": "..." }`) and `changesRequested` (`{ "login": "alex", "alias": "Alex", "at": "..." }` from the latest changes-requested review, for the call-out banner, or null).
 
 `ClosedRow` is `number`, `url`, `title`, `author`, `outcome` (`merged` or `closed`), `closedBy` (`{ "alias": "Alex", "login": "alex", "text": "merged by Alex" }`, with `text` "merged by you" for the viewer, or `{ "label": "superseded", "text": "superseded" }`, or `{ "label": "merged" | "closed", "text": ... }` when GitHub names no actor), `closedAt`, `tickets`.
 
@@ -391,12 +391,20 @@ Within a group, the default (attention) order is: flags first (Re-review, then R
 
 | Group | Stage | Rule |
 | --- | --- | --- |
-| Changes requested | changesRequested | not a draft and `reviewDecision == CHANGES_REQUESTED` |
+| Changes requested | changesRequested | not a draft, `reviewDecision == CHANGES_REQUESTED`, and not yet answered (below) |
 | Ready to merge | approved | merge state `ready` |
+| Awaiting review | reReviewRequested or updatedNotRequested | not a draft, `reviewDecision == CHANGES_REQUESTED`, and answered (below) |
 | Awaiting review | awaitingReview or approved | any other non-draft PR |
 | Drafts | draft | `isDraft`; collapsed by default |
 
-The Changes requested group drives the red call-out banner above the Mine table: one line per PR, "<reviewer> requested changes on #n · <age>", the title, and the self-review state, with "Open review" (the PR's review URL) and, in phase 2, "Start a fix session".
+A changes request is answered once the viewer has acted on it, so it stops reading as the viewer's move and waits on its reviewers instead:
+
+- **Re-review requested** (`reReviewRequested`): every reviewer whose latest review is `CHANGES_REQUESTED` is in `reviewRequests` again. A pending request means it was made after that review, since submitting a review clears it. A team request does not count. With one reviewer this is simply that reviewer re-requested.
+- **Updated · re-review not requested** (`updatedNotRequested`): otherwise, commits landed after the latest changes-requested review: that review's `commit.oid` differs from `headRefOid`, or, when its commit is null, the head commit's `committedDate` is later than its `submittedAt`. This is the same test as Others' Waiting on author.
+
+Re-review requested wins when both hold. An answered PR keeps the Changes requested issue chip, since that is still GitHub's review decision, and keeps `changesRequested` on its row; its reviewer pip shows ✗ after a push and, under the reviewer pip rule above, ○ once re-requested. It sorts with Awaiting review.
+
+The Changes requested group drives the red call-out banner above the Mine table: one line per PR, "<reviewer> requested changes on #n · <age>", the title, and the self-review state, with "Open review" (the PR's review URL) and, in phase 2, "Start a fix session". Answered PRs are not in the group, so they leave the banner, and the banner disappears when none remain.
 
 ### Self-review detection (Mine only)
 
@@ -462,7 +470,7 @@ Type: Inter 400/500/600/700 for UI, 13px base; JetBrains Mono 500/600 for PR num
 
 1. **Header**: logo and "Pit View"; repo selector button; "viewing as" avatar and login; sync status ("updated 38s ago · every 5m"; "refreshing · 12 of 30" while a cycle runs; "offline · cached 10:02 AM" in amber after a failed cycle; "paused · updated 4m ago" while this page is paused); in phase 4, the auto-review indicator (section 10); refresh button; pause button; theme toggle; settings link.
 1. **Offline banner** (only when the latest cycle failed): amber strip, "Can't reach GitHub. Showing cached data from <time> (<age> old)." plus "Ages, CI and merge states may be out of date. Retrying every <interval>." While this page is paused, the second sentence ends "Updates are paused; Refresh retries once." instead. `<time>` is the oldest fetch time among the rows and sections shown. When the cycle failed partway, the first sentence reads "Refresh stopped partway: <n> of <m> PRs updated; the rest show cached data from <time> (<age> old)." As built (M11), the opening clause and the header's word follow `cycle.errorKind`: unreachable reads as above ("offline"); `auth` reads "GitHub did not accept gh's sign-in" ("sign-in failed") and adds "Check it with gh auth status in a terminal." before the retry sentence; `rateLimit` reads "GitHub's rate limit stopped the refresh" ("rate-limited"); `interrupted` reads "The last refresh stopped when Pit View did" ("interrupted"); any other kind reads "The refresh failed (<error>)" ("refresh failed"). A failure recorded without a kind reads as unreachable.
-1. **Summary tiles**, five, in a wrapping grid: Your move (blue number), Changes requested on yours (red card), Yours ready to merge (green number), Waiting on author (gray number), Closed today (purple number; subtext "<n> yesterday · <m> merged, <c> closed", or "Fri–Sun*" on Mondays).
+1. **Summary tiles**, five, in a wrapping grid: Your move (blue number), Changes requested on yours (a red card with a red number while the Changes requested group holds any PR; at 0 a plain card with a gray number), Yours ready to merge (green number), Waiting on author (gray number), Closed today (purple number; subtext "<n> yesterday · <m> merged, <c> closed", or "Fri–Sun*" on Mondays).
 1. **Mine** section.
 1. **Others'** section.
 1. **Closed** section.
@@ -498,7 +506,7 @@ Each tile is a button (`aria-pressed`). Clicking one clears all filters, opens i
 | Tile | Section | Filter |
 | --- | --- | --- |
 | Your move | Others' | Status = Your move |
-| Changes requested on yours | Mine | Issues = Changes requested |
+| Changes requested on yours | Mine | Status = Changes requested |
 | Yours ready to merge | Mine | Merge = Ready |
 | Waiting on author | Others' | Status = Waiting on author |
 | Closed today | Closed | range = Today |
@@ -512,10 +520,10 @@ Each section heading is a disclosure button (chevron rotates, `aria-expanded`) t
 Each table has a filter bar, a column header row, then rows (grouped or flat):
 
 - **Filter bar**: text search (title or number, a leading `#` ignored), per-table selects, a "Group by status" checkbox (Mine and Others'), a count ("12 PRs" or "3 of 12 shown"), and a Clear button when any filter is set.
-  - Mine selects: Issues (any, none, Changes requested, Conflicts, CI failing); Self-review (any, Current, Stale, None); Merge (any, Ready, Not ready).
+  - Mine selects: Status (any, Changes requested, Ready to merge, Awaiting review, Drafts); Issues (any, none, Changes requested, Conflicts, CI failing); Self-review (any, Current, Stale, None); Merge (any, Ready, Not ready). The Status select is what the Changes requested tile sets, since an answered PR keeps its Changes requested chip but has left that group (section 5).
   - Others' selects: Status (any, Your move, Ready to merge, Waiting on author, Dependabot); Author (all, then each alias seen); Issues (any, none, Changes requested, Conflicts, CI failing, CI running); Merge (any, Ready, Needs review, Blocked).
   - Closed selects: Author (all, then each alias); Outcome (all, Merged, Closed unmerged). Closed also has a Today / Yesterday segmented control in its heading, with the range summary ("Mon Oct 26 · 10 merged, 3 closed unmerged").
-- **Sorting**: every column header is a button. First click sorts ascending (arrow ↑), second descending (↓), third returns to attention order. Sorting applies within groups when grouped, across all rows when not. Sort keys: PR number; title; author alias; review (flags first, then reviewed, then unreviewed; Mine: changes requested, awaiting, approved, draft); self-review (stale, none, current); issues (more issues first); last activity (most recent first ascending); merge (ready, needs review, blocked, draft); Closed time by `closedAt`.
+- **Sorting**: every column header is a button. First click sorts ascending (arrow ↑), second descending (↓), third returns to attention order. Sorting applies within groups when grouped, across all rows when not. Sort keys: PR number; title; author alias; review (flags first, then reviewed, then unreviewed; Mine: changes requested, then awaiting with re-review requested and updated, then approved, then draft); self-review (stale, none, current); issues (more issues first); last activity (most recent first ascending); merge (ready, needs review, blocked, draft); Closed time by `closedAt`.
 - **Group headers**: label (colored per group), count, one-line explanation, and for collapsible groups (Mine Drafts, Others' bots) a Show n / Hide button. Bot groups also carry a "Run sweep" action in phase 2. Collapsible groups open automatically while any filter is set. Empty groups are hidden; when every group is empty the table says "No PRs match these filters."
 
 ### Columns
@@ -534,7 +542,7 @@ On hovering a PR number or title (and on keyboard focus of the PR link): full ti
 
 ### Settings page
 
-Sections: Repository and viewer (two text fields; viewer notes it defaults to the gh login and uses gh's token); People (table of login, alias, initials, avatar mode select, live preview with color swatch; "+ Add person"; note that unlisted people get their GitHub avatar); Tickets (table of systems with on/off, kind select, source, key pattern, link template, sample chip; "+ Add ticket system"; note on where patterns look); Behavior (refresh interval with "5 minutes (default)" first, then 2 minutes and 60 seconds, noted as applying only while a page is open, visible and not paused; "Today" starts at; bots list; self-review reports folder); in phase 4, Auto-review (section 10). The config file path is shown in the page header.
+Sections: Repository and viewer (two text fields; viewer notes it defaults to the gh login and uses gh's token); People (table of login, alias, initials, avatar mode select, live preview with color swatch; "+ Add person"; note that unlisted people get their GitHub avatar); Tickets (table of systems with on/off, kind select, source, key pattern, link template, sample chip; "+ Add ticket system"; note on where patterns look); Behavior (refresh interval offering 60 seconds, 2 minutes and "5 minutes (default)", smallest first, with 5 minutes selected by default, noted as applying only while a page is open, visible and not paused; "Today" starts at; bots list; self-review reports folder); in phase 4, Auto-review (section 10). The config file path is shown in the page header.
 
 As built (M10), at `/settings.html` (`public/settings.html`, `settings.ts`, and the pure `settings-form.ts`):
 
@@ -896,3 +904,4 @@ Each milestone is sized for one focused session or subagent. Check items off as 
 - M11 and M12 landed: an end-to-end run against the default repository with the real `gh`, a temporary home and a logging `gh` shim on `PATH` (desktop and phone widths, light, dark and the theme toggle, tiles, filters, sorting, grouping, the hover card, Pause and Refresh, Settings load, validation, save with its `config` cycle, an image avatar, the unsaved-changes guard, unreachable and refused-sign-in GitHub simulated by the shim, and the Monday rule on a server started with a Monday clock), with rows spot-checked against `gh pr view` and the report files; the shim's log showed no GitHub call while the only page was hidden or paused past the interval, an `active` cycle on resuming, and none on returning within 30 seconds. Fixes: the `checking` merge state for `mergeStateStatus` `UNKNOWN`, which had shown approved, clean PRs as Blocked and grouped them as Waiting on author for a cycle; bot commits named `dependabot[bot]` as their actor; the viewer offered as a people suggestion; ticket samples finding no key when no open PR carries one (closed titles are now searched too); a Settings preview asking the server for an unsaved image; two concurrent `gh auth token` reads per cycle; and the failure's kind (`cycles.error_kind`, schema version 3, carried as `sync.cycle.errorKind`) so a refused sign-in, a rate limit, an interrupted cycle or another failure no longer reads as "Can't reach GitHub". 194 passing tests. pit-crew's `CLAUDE.md` (with its `AGENTS.md` target) and `README.md` now describe `pit-view/`, and `pit-view/.gitignore` also keeps out stray configs, caches, worktrees, demo folders, logs and plists.
 - M13 landed: the deployed app follows the `~/app` convention as a clone of `master` at `~/app/pit-crew` under the `com.mickey.pit-view` launch agent (replacing the earlier `local.pit-view` label and `~/Library/Logs/pit-view/` logs), rendered from a committed placeholder template by `pnpm service:install`, with `service:uninstall`, `service:status` and `service:restart` and `deploy/README.md`; `PIT_VIEW_INSTANCE=dev` (`pnpm dev`) gives the development checkout port 4792 and its own config and state folders, shown in the title and header, and `GET /api/instance` reports the instance and the server's pid; `pit-view/.gitignore` re-admits `deploy/`, which pit-crew's root `deploy/` rule would otherwise hide; 215 passing tests; the agent's live checks wait for the first deployment.
 - Reverse proxy support for the app: the `allowedHosts` config key (bare host names, validated, empty by default, carried over by Settings) widens the Host check to those names with any port and the write Origin check to `http` and `https` on them; the server still binds loopback only; the event stream now sends `Cache-Control: no-cache, no-store, no-transform` beside `X-Accel-Buffering: no`; `deploy/README.md` covers a generic Caddy `reverse_proxy` setup and keeping it LAN-only, since there is no sign-in; 220 passing tests.
+- Mine's answered changes requests: a PR of the viewer's whose review decision is Changes requested, but where every reviewer requesting changes has been re-requested or commits landed after the latest changes-requested review, moves from Changes requested to Awaiting review with the stage "Re-review requested" or "Updated · re-review not requested" (`changesResponse` in `src/derive.ts`); it keeps the Changes requested chip, so the Changes requested tile now presets a new Mine Status filter, and the banner and tile count only unanswered PRs, the tile's number going gray at 0; the Settings refresh interval now lists 60 seconds, 2 minutes and 5 minutes, smallest first, with 5 minutes still the default, and the config check names them in the same order; 223 passing tests.

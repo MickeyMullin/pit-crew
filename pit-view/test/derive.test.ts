@@ -276,6 +276,98 @@ test('mine groups and stages', async () => {
   assert.equal('flags' in await mine(101), false)
 })
 
+// #101 answered by the viewer: a push past alex-mendez's review, or alex-mendez re-requested
+const pushedOid = 'c0ffee5d1e2a3b4c5d6e7f8091a2b3c4d5e6f708'
+
+const pushedPast = (pr: RawOpenPr): RawOpenPr => {
+  const copy = structuredClone(pr)
+  const head = copy.headCommit.nodes[0]
+  assert.ok(head)
+  head.commit = { ...head.commit, oid: pushedOid, committedDate: '2026-10-26T09:30:00Z' }
+  copy.recentCommits.nodes.push({ commit: { oid: pushedOid, committedDate: '2026-10-26T09:30:00Z' } })
+  copy.recentCommits.totalCount += 1
+  copy.headRefOid = pushedOid
+  return copy
+}
+
+const requesting = (pr: RawOpenPr, ...logins: string[]): RawOpenPr =>
+  variant(pr, { reviewRequests: { nodes: logins.map((login) => ({ requestedReviewer: { __typename: 'User', login } })) } })
+
+// the review's commit is null, so only the dates can tell
+const withoutReviewCommit = (pr: RawOpenPr): RawOpenPr =>
+  variant(pr, { latestReviews: { nodes: pr.latestReviews.nodes.map((review) => ({ ...review, commit: null })) } })
+
+const answered = async () => {
+  const asked = find(await page1(), 101)
+  return { asked, pushed: pushedPast(asked), reRequested: requesting(asked, 'alex-mendez') }
+}
+
+const mineOf = (pr: RawOpenPr): MineRow => {
+  const found = deriveOpenRow(pr, ctx(), new Map())
+  assert.equal(found?.section, 'mine')
+  return found as MineRow
+}
+
+test('changes requested on yours stays your move until you push past the review or re-request the reviewer', async () => {
+  const { asked, pushed, reRequested } = await answered()
+  const placed = (pr: RawOpenPr) => [mineOf(pr).group, mineOf(pr).stage]
+  // not answered yet: the review is on the head commit and nobody was re-requested
+  assert.deepEqual(placed(asked), ['changesRequested', 'changesRequested'])
+  assert.deepEqual(placed(withoutReviewCommit(asked)), ['changesRequested', 'changesRequested'])
+  // answered with commits: by commit, or by date when the review's commit is null
+  assert.deepEqual(placed(pushed), ['awaitingReview', 'updatedNotRequested'])
+  assert.deepEqual(placed(withoutReviewCommit(pushed)), ['awaitingReview', 'updatedNotRequested'])
+  // answered by re-requesting the reviewer, with or without a push
+  assert.deepEqual(placed(reRequested), ['awaitingReview', 'reReviewRequested'])
+  assert.deepEqual(placed(requesting(pushed, 'alex-mendez')), ['awaitingReview', 'reReviewRequested'])
+  // requesting someone else, or a team, is no answer to alex-mendez
+  assert.deepEqual(placed(requesting(asked, 'sam-tran')), ['changesRequested', 'changesRequested'])
+  const team = variant(asked, { reviewRequests: { nodes: [{ requestedReviewer: { __typename: 'Team', name: scenario.team } }] } })
+  assert.deepEqual(placed(team), ['changesRequested', 'changesRequested'])
+  // with two reviewers requesting changes, both must be re-requested
+  const twice = variant(asked, {
+    latestReviews: { nodes: asked.latestReviews.nodes.map((review) => ({ ...review, state: 'CHANGES_REQUESTED' as const })) },
+  })
+  assert.deepEqual(placed(requesting(twice, 'alex-mendez')), ['changesRequested', 'changesRequested'])
+  assert.deepEqual(placed(requesting(twice, 'alex-mendez', 'sam-tran')), ['awaitingReview', 'reReviewRequested'])
+  // a draft stays a draft
+  assert.deepEqual(placed(variant(pushed, { isDraft: true })), ['drafts', 'draft'])
+})
+
+test('an answered changes request keeps GitHub\'s decision as the chip, the reviewer and the pip', async () => {
+  const { pushed, reRequested } = await answered()
+  for (const pr of [pushed, reRequested]) {
+    const found = mineOf(pr)
+    assert.equal(found.issues[0]?.kind, 'changesRequested')
+    assert.deepEqual(found.changesRequested, { login: 'alex-mendez', alias: 'Alex', at: '2026-10-25T22:14:00Z' })
+  }
+  // the pip keeps its ✗ after a push; a re-requested reviewer shows as requested, as every pip does
+  assert.equal(mineOf(pushed).reviewers.find((pip) => pip.login === 'alex-mendez')?.state, 'changes')
+  assert.equal(mineOf(reRequested).reviewers.find((pip) => pip.login === 'alex-mendez')?.state, 'requested')
+})
+
+test('the changes-requested banner group and tile count only PRs not yet answered', async () => {
+  const { pushed, reRequested } = await answered()
+  const closed = deriveClosed(await closedPrs(), ctx())
+  const replacing101 = async (pr: RawOpenPr): Promise<OpenRow[]> =>
+    deriveOpenRows((await allOpen()).map((entry) => entry.number === 101 ? pr : entry), scenario.defaultBranch, ctx())
+  for (const pr of [pushed, reRequested]) {
+    const all = await replacing101(pr)
+    const groups = groupRows(all).mine.groups
+    // the banner draws one line per row in this group, so it disappears with it
+    assert.deepEqual(groups.find((group) => group.key === 'changesRequested')?.rows, [])
+    assert.deepEqual(groups.find((group) => group.key === 'awaitingReview')?.rows.map((entry) => entry.number), [101, 120, 104])
+    const tiles = deriveTiles(all, closed)
+    assert.deepEqual([tiles.mineChangesRequested, tiles.mineChangesRequestedDetail], [0, null])
+  }
+  // one answered and one not: only the unanswered one counts
+  const second = variant(find(await page1(), 101), { number: 121, url: 'https://github.com/octo-example/orbit/pull/121' })
+  const all = [...await replacing101(pushed), deriveOpenRow(second, ctx(), new Map())!]
+  const tiles = deriveTiles(all, closed)
+  assert.deepEqual([tiles.mineChangesRequested, tiles.mineChangesRequestedDetail], [1, { number: 121, by: 'Alex', at: '2026-10-25T22:14:00Z' }])
+  assert.deepEqual(groupRows(all).mine.groups[0]?.rows.map((entry) => entry.number), [121])
+})
+
 test('self-review is current, stale or none against the head commit', async () => {
   const { dir, cleanup } = await tempDir()
   try {

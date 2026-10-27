@@ -99,7 +99,8 @@ const tiles = (view: View, nowMs: number): Tile[] => {
       count: t.mineChangesRequested,
       label: 'Changes requested on yours',
       sub: detail === null ? 'nothing to address' : `#${detail.number} · ${detail.by}, ${formatAge(detail.at, nowMs)} ago`,
-      tone: 'red',
+      // red only while there is something to address
+      tone: t.mineChangesRequested > 0 ? 'red' : 'gray',
       alarm: t.mineChangesRequested > 0,
       target: 'mine',
     },
@@ -281,6 +282,7 @@ export const render = (frame: Frame, actions: Actions): void => {
     attention: openAttention,
   })
   filterBar('mine', ui, mine, [
+    { field: 'status', label: 'Filter Mine by status group', value: mineFilters.status, options: statusOptions(view.mine.groups) },
     { field: 'issues', label: 'Filter Mine by issue', value: mineFilters.issues, options: mineIssueOptions },
     { field: 'selfReview', label: 'Filter Mine by self-review', value: mineFilters.selfReview, options: selfReviewOptions },
     { field: 'merge', label: 'Filter Mine by merge state', value: mineFilters.merge, options: mineMergeOptions },

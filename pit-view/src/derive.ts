@@ -67,7 +67,8 @@ export type OtherGroup = 'yourMove' | 'readyToMerge' | 'waitingOnAuthor' | 'bots
 export type OtherRow = PrBase & { section: 'others', group: OtherGroup, flags: Flag[] }
 
 export type MineGroup = 'changesRequested' | 'readyToMerge' | 'awaitingReview' | 'drafts'
-export type MineStage = 'changesRequested' | 'awaitingReview' | 'approved' | 'draft'
+// reReviewRequested and updatedNotRequested: changes were requested and the viewer has answered
+export type MineStage = 'changesRequested' | 'reReviewRequested' | 'updatedNotRequested' | 'awaitingReview' | 'approved' | 'draft'
 
 export type SelfReview = {
   state: 'current' | 'stale' | 'none'
@@ -236,9 +237,12 @@ export const reviewerPips = (pr: RawOpenPr, config: Config): Reviewer[] => {
 export const viewerReview = (pr: RawOpenPr, config: Config): RawReview | undefined =>
   pr.latestReviews.nodes.find((review) => same(review.author?.login, config.viewer) && review.state !== 'PENDING')
 
-export const isRequestedOfViewer = (pr: RawOpenPr, config: Config): boolean =>
+// a user, not a team, with a pending review request
+const isRequestedOf = (pr: RawOpenPr, login: string | undefined): boolean =>
   pr.reviewRequests.nodes.some(({ requestedReviewer: reviewer }) =>
-    reviewer !== null && reviewer.__typename !== 'Team' && same(reviewer.login, config.viewer))
+    reviewer !== null && reviewer.__typename !== 'Team' && same(reviewer.login, login))
+
+export const isRequestedOfViewer = (pr: RawOpenPr, config: Config): boolean => isRequestedOf(pr, config.viewer)
 
 // commits after oid in the last-30 window; null when oid is outside it (force push or rebase)
 const commitsSince = (pr: RawOpenPr, oid: string | null | undefined): number | null => {
@@ -333,6 +337,14 @@ const pushedSinceChangesRequest = (pr: RawOpenPr): boolean => {
   return head !== undefined && review.submittedAt !== null && Date.parse(head) > Date.parse(review.submittedAt)
 }
 
+// how the viewer answered a changes request on their own PR: re-requested every reviewer whose
+// latest review requests changes, or pushed past the latest one; null while it is still theirs to do
+export const changesResponse = (pr: RawOpenPr): 'reReviewRequested' | 'updatedNotRequested' | null => {
+  const requesting = countedReviews(pr).filter((review) => review.state === 'CHANGES_REQUESTED')
+  if (requesting.length > 0 && requesting.every((review) => isRequestedOf(pr, review.author?.login))) return 'reReviewRequested'
+  return pushedSinceChangesRequest(pr) ? 'updatedNotRequested' : null
+}
+
 const changesRequestedBy = (pr: RawOpenPr, config: Config): ChangesRequestedBy | null => {
   const review = latestChangesRequest(pr)
   if (pr.reviewDecision !== 'CHANGES_REQUESTED' || review === undefined || review.submittedAt === null) return null
@@ -356,7 +368,11 @@ export const otherGroup = (pr: RawOpenPr, issues: readonly Issue[], merge: Merge
 
 export const mineGroupAndStage = (pr: RawOpenPr, merge: MergeState): { group: MineGroup, stage: MineStage } => {
   if (pr.isDraft) return { group: 'drafts', stage: 'draft' }
-  if (pr.reviewDecision === 'CHANGES_REQUESTED') return { group: 'changesRequested', stage: 'changesRequested' }
+  if (pr.reviewDecision === 'CHANGES_REQUESTED') {
+    // once answered, the PR waits on its reviewers like any other
+    const response = changesResponse(pr)
+    return response === null ? { group: 'changesRequested', stage: 'changesRequested' } : { group: 'awaitingReview', stage: response }
+  }
   if (merge.state === 'ready') return { group: 'readyToMerge', stage: 'approved' }
   return { group: 'awaitingReview', stage: pr.reviewDecision === 'APPROVED' ? 'approved' : 'awaitingReview' }
 }

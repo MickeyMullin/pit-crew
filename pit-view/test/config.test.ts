@@ -109,7 +109,7 @@ test('validateConfig names the offending setting', () => {
   const cases: [Record<string, unknown>, RegExp][] = [
     [{ ...base, colour: 'blue' }, /config\.colour is not a known setting/],
     [{ ...base, repo: 'just-a-name' }, /owner\/name/],
-    [{ ...base, refreshSeconds: 30 }, /refreshSeconds must be one of 300, 120, 60/],
+    [{ ...base, refreshSeconds: 30 }, /refreshSeconds must be one of 60, 120, 300/],
     [{ ...base, todayStartsAt: 'noon' }, /todayStartsAt/],
     [{ ...base, bots: ['dependabot', 7] }, /bots must hold strings/],
     [{ ...base, showAgentColumn: 'yes' }, /showAgentColumn must be true or false/],

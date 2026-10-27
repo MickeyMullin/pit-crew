@@ -53,10 +53,14 @@ test('search matches the title case-insensitively or the number, a leading # ign
   assert.equal(matchesQuery('cache#', row), false)
 })
 
-test('Mine filters: issues by kind or none, self-review state, and merge ready or not', async () => {
+test('Mine filters: status group, issues by kind or none, self-review state, and merge ready or not', async () => {
   const { rows } = await fixtureView()
   const mine = mineRowsOf(rows)
   assert.ok(mine.length >= 4)
+  for (const group of ['changesRequested', 'readyToMerge', 'awaitingReview', 'drafts'] as const) {
+    const picked = mine.filter(mineFilter({ status: group }))
+    assert.ok(picked.length > 0 && picked.every((row) => row.group === group))
+  }
   const changes = mine.filter(mineFilter({ issues: 'changesRequested' }))
   assert.deepEqual(numbers(changes), numbers(mine.filter((row) => row.issues.some((issue) => issue.kind === 'changesRequested'))))
   assert.ok(changes.length > 0)
@@ -277,7 +281,7 @@ test('a tile clears every filter, opens its section alone and applies its preset
   const changes = pressTile(yourMove, 'mineChangesRequested')
   assert.equal(changes.tile, 'mineChangesRequested')
   assert.deepEqual(changes.expanded, { mine: true, others: false, closed: false })
-  assert.deepEqual(changes.filters, { ...noFilters(), mine: { ...noFilters().mine, issues: 'changesRequested' } })
+  assert.deepEqual(changes.filters, { ...noFilters(), mine: { ...noFilters().mine, status: 'changesRequested' } })
   assert.deepEqual(pressTile(sorted, 'mineReadyToMerge').filters, { ...noFilters(), mine: { ...noFilters().mine, merge: 'ready' } })
   const closed = pressTile(setClosedRange(sorted, 'yesterday'), 'closedToday')
   assert.deepEqual([closed.closedRange, closed.expanded, closed.filters], ['today', { mine: false, others: false, closed: true }, noFilters()])
@@ -311,7 +315,7 @@ test('changing a filter by hand releases the tile and keeps the filters; sorting
 })
 
 test('each tile\'s preset shows exactly the rows its count counts, and a patch moving a row in keeps the tile', async () => {
-  const { rows, mine, others, tiles } = await fixtureView()
+  const { rows, mine, others, closed, tiles } = await fixtureView()
   const matched = (controls: Controls, table: 'mine' | 'others'): number =>
     table === 'mine'
       ? arrange<MineRow>({ table, groups: mine.groups, match: matchesMine(controls.filters.mine), sortValue: null, dir: 'asc', grouped: true, filtered: true, openGroups: new Set() }).matched
@@ -320,6 +324,18 @@ test('each tile\'s preset shows exactly the rows its count counts, and a patch m
   assert.equal(matched(pressTile(initialControls(), 'waitingOnAuthor'), 'others'), tiles.waitingOnAuthor)
   assert.equal(matched(pressTile(initialControls(), 'mineReadyToMerge'), 'mine'), tiles.mineReadyToMerge)
   assert.equal(matched(pressTile(initialControls(), 'mineChangesRequested'), 'mine'), tiles.mineChangesRequested)
+
+  // a changes request the viewer answered (here by re-requesting the reviewer) leaves the tile
+  // and its preset, though the PR keeps its Changes requested chip
+  const answered = rows.map((row) => row.section === 'mine' && row.group === 'changesRequested'
+    ? { ...row, group: 'awaitingReview' as const, stage: 'reReviewRequested' as const }
+    : row)
+  const moved = regroup({ mine, others }, answered)
+  const preset = pressTile(initialControls(), 'mineChangesRequested')
+  const shown = arrange<MineRow>({ table: 'mine', groups: moved.mine.groups, match: matchesMine(preset.filters.mine), sortValue: null, dir: 'asc', grouped: true, filtered: true, openGroups: new Set() })
+  assert.equal(shown.matched, deriveTiles(answered, closed).mineChangesRequested)
+  assert.equal(shown.matched, 0)
+  assert.ok(mineRowsOf(answered).some(mineFilter({ issues: 'changesRequested' })))
 
   // the controls are the page's own: regrouping after a patch never touches them
   const controls = pressTile(initialControls(), 'yourMove')

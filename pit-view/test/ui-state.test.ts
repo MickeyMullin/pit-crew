@@ -231,7 +231,7 @@ test('ages, intervals and times format as the page shows them', () => {
   assert.equal(formatAge('2026-10-27T15:00:00Z', now), '0m')
   assert.equal(formatSince('2026-10-27T14:05:00Z', now), '38s ago')
   assert.equal(formatSince('2026-10-27T14:01:38Z', now), '4m ago')
-  assert.deepEqual([300, 120, 60, 90].map(formatInterval), ['5m', '2m', '1m', '90s'])
+  assert.deepEqual([60, 120, 300, 90].map(formatInterval), ['1m', '2m', '5m', '90s'])
   assert.match(formatClock('2026-10-25T21:53:00Z'), /^\d{1,2}:\d{2} [AP]M$/)
   assert.match(formatClock('2026-10-25T21:53:00Z', true), /^[A-Z][a-z]{2} \d{1,2}:\d{2} [AP]M$/)
   assert.match(formatDay('2026-10-26T16:00:00Z'), /^[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2}$/)

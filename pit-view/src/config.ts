@@ -31,7 +31,7 @@ export type Config = {
   viewer: string
   people: Person[]
   tickets: TicketSystem[]
-  refreshSeconds: 300 | 120 | 60
+  refreshSeconds: 60 | 120 | 300
   todayStartsAt: 'local' | 'utc'
   bots: string[]
   // stored with ~; expand with expandHome before use
@@ -212,7 +212,7 @@ export const validateConfig = (input: unknown): Config => {
     viewer: str(input, 'viewer', 'config').trim(),
     people: list(input, 'people', 'config').map(toPerson),
     tickets: list(input, 'tickets', 'config').map(toTicketSystem),
-    refreshSeconds: oneOf(input, 'refreshSeconds', [300, 120, 60], 'config'),
+    refreshSeconds: oneOf(input, 'refreshSeconds', [60, 120, 300], 'config'),
     todayStartsAt: oneOf(input, 'todayStartsAt', ['local', 'utc'], 'config'),
     bots: list(input, 'bots', 'config').map((bot) => typeof bot === 'string' ? bot : fail('config.bots must hold strings')),
     reportsDir: str(input, 'reportsDir', 'config'),

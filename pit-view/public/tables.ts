@@ -79,6 +79,8 @@ const mergeCell = (row: OpenRow): { sig: unknown, build: () => Node[] } => ({
 
 const stageLabels: Record<MineRow['stage'], string> = {
   changesRequested: 'Changes requested',
+  reReviewRequested: 'Re-review requested',
+  updatedNotRequested: 'Updated · re-review not requested',
   awaitingReview: 'Awaiting review',
   approved: 'Approved',
   draft: 'Draft',

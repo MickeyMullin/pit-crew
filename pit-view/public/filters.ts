@@ -1,13 +1,14 @@
 // public/filters.ts
 // the page's own table controls, pure: filters and their predicates, the sort cycle and its
 // keys, Group by status, and the summary tiles as filter presets; no DOM here
-import type { ClosedRow, MineRow, OpenRow, OtherGroup, OtherRow } from '../src/derive.ts'
+import type { ClosedRow, MineGroup, MineRow, OpenRow, OtherGroup, OtherRow } from '../src/derive.ts'
 import { plural } from './format.ts'
 import { attentionOrder } from './state.ts'
 import type { ShownGroup, TableKey } from './tables.ts'
 
 export type MineFilters = {
   query: string
+  status: 'any' | MineGroup
   issues: 'any' | 'none' | 'changesRequested' | 'conflicts' | 'ciFailing'
   selfReview: 'any' | 'current' | 'stale' | 'none'
   merge: 'any' | 'ready' | 'notReady'
@@ -49,7 +50,7 @@ export type Controls = {
 }
 
 export const noFilters = (): Filters => ({
-  mine: { query: '', issues: 'any', selfReview: 'any', merge: 'any' },
+  mine: { query: '', status: 'any', issues: 'any', selfReview: 'any', merge: 'any' },
   others: { query: '', status: 'any', author: '', issues: 'any', merge: 'any' },
   closed: { query: '', author: '', outcome: 'all' },
 })
@@ -137,7 +138,8 @@ const matchesIssues = (issues: string, row: OpenRow): boolean => {
 }
 
 export const matchesMine = (filters: MineFilters) => (row: MineRow): boolean =>
-  matchesQuery(filters.query, row)
+  (filters.status === 'any' || row.group === filters.status)
+  && matchesQuery(filters.query, row)
   && matchesIssues(filters.issues, row)
   && (filters.selfReview === 'any' || row.selfReview.state === filters.selfReview)
   && (filters.merge === 'any' || (filters.merge === 'ready') === (row.merge.state === 'ready'))
@@ -178,7 +180,7 @@ export const nextSort = (current: Sort, key: string): Sort => {
 }
 
 const mergeRank: Record<OpenRow['merge']['state'], number> = { ready: 0, needsReview: 1, needsApproval: 1, checking: 2, blocked: 3, draft: 4 }
-const stageRank: Record<MineRow['stage'], number> = { changesRequested: 0, awaitingReview: 1, approved: 2, draft: 3 }
+const stageRank: Record<MineRow['stage'], number> = { changesRequested: 0, reReviewRequested: 1, updatedNotRequested: 1, awaitingReview: 1, approved: 2, draft: 3 }
 const selfReviewRank: Record<MineRow['selfReview']['state'], number> = { stale: 0, none: 1, current: 2 }
 
 const openValues = {
@@ -278,7 +280,7 @@ type Preset = { target: TableKey, apply: (filters: Filters) => Filters, range?: 
 
 export const tilePresets: Record<TileKey, Preset> = {
   yourMove: { target: 'others', apply: (f) => ({ ...f, others: { ...f.others, status: 'yourMove' } }) },
-  mineChangesRequested: { target: 'mine', apply: (f) => ({ ...f, mine: { ...f.mine, issues: 'changesRequested' } }) },
+  mineChangesRequested: { target: 'mine', apply: (f) => ({ ...f, mine: { ...f.mine, status: 'changesRequested' } }) },
   mineReadyToMerge: { target: 'mine', apply: (f) => ({ ...f, mine: { ...f.mine, merge: 'ready' } }) },
   waitingOnAuthor: { target: 'others', apply: (f) => ({ ...f, others: { ...f.others, status: 'waitingOnAuthor' } }) },
   closedToday: { target: 'closed', apply: (f) => f, range: 'today' },
