@@ -2,6 +2,12 @@ Perform an upgrade-risk review of a Dependabot pull request.
 
 This is not a general code review. A Dependabot PR contains no authored logic — the diff is a version bump plus a lockfile. The review's job is to answer one question: **does adopting this new version change the behavior of this repo's code, and if so, where?** Nearly all the work happens outside the diff — in the dependency's changelog and in this repo's call sites.
 
+Re-reviews:
+
+- **A terse request to go again repeats the prior invocation.** When the user asks to re-review, review again, or re-run in a short message that names no PR ("re-review", "pull latest and re-review", "go again"), fetch the latest remote state and repeat the most recent review invocation in this conversation: this prompt, the same PR, and the same sibling note. Explicit words in the new message win.
+- **A head SHA or an "already fetched" statement does not carry over**, since re-pulling means reviewing the new tip. If the prior invocation had either, say so in chat before starting. Never drop anything else silently.
+- A re-review is a full review under this prompt: re-resolve the PR, re-record the tip SHA, read the prior report, and verify each prior finding. If the PR was merged or closed since, say so and stop, as "Target" does.
+
 Target:
 
 - **The invocation may name the PR to review**: a PR number, with or without a leading `#` (`793`, `#793`), or a GitHub PR URL (`https://github.com/<owner>/<repo>/pull/793`). Say which form you took it as before acting on it.
