@@ -30,5 +30,6 @@
   ],
   "reportsDir": "~/agents/output",
   "density": "comfortable",
-  "showAgentColumn": false
+  "showAgentColumn": false,
+  "allowedHosts": []
 }

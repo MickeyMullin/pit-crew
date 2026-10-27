@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { openCache } from '../src/cache.ts'
 import type { Config } from '../src/config.ts'
 import type { Patch, View } from '../src/poller.ts'
-import { PortInUseError, resolveRuntime, startServer } from '../src/server.ts'
+import { hostAllowed, originAllowed, PortInUseError, resolveRuntime, startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { failed, fakeRunner, fakeTime, fixtureRunner, gatedRunner, githubCalls, tempDir } from './helpers.ts'
@@ -376,6 +376,101 @@ test('requests for another host name, or writes from another origin, are refused
     assert.equal((await send(`${h.base}/api/refresh`, 'POST', undefined, { Origin: 'http://attacker.test' })).status, 403)
     assert.equal(h.server.cache.latestCycle(scenario.repo), null)
     assert.equal((await send(`${h.base}/api/refresh`, 'POST', undefined, { Origin: h.base })).status, 200)
+    await h.server.poller.idle()
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('hostAllowed accepts the loopback names on the server\'s port, and allowed hosts with any port or none', () => {
+  const allowed = ['pit.example.test']
+  for (const header of ['127.0.0.1:4791', 'localhost:4791', '[::1]:4791', 'pit.example.test', 'pit.example.test:443', 'PIT.Example.test:8443']) {
+    assert.equal(hostAllowed(header, 4791, allowed), true, header)
+  }
+  for (const header of [undefined, '', '127.0.0.1', '127.0.0.1:4792', 'localhost', 'pit.example.test.evil.test', 'evil.pit.example.test', 'pit.example.test:', 'pit.example.test:abc', 'pit.example.test/x', 'user@pit.example.test']) {
+    assert.equal(hostAllowed(header, 4791, allowed), false, String(header))
+  }
+  assert.equal(hostAllowed('pit.example.test', 4791, []), false)
+})
+
+test('originAllowed accepts the loopback origins, and http or https on an allowed host', () => {
+  const allowed = ['pit.example.test']
+  for (const origin of ['http://127.0.0.1:4791', 'http://localhost:4791', 'http://[::1]:4791', 'https://pit.example.test', 'http://pit.example.test', 'https://pit.example.test:8443', 'HTTPS://PIT.EXAMPLE.TEST']) {
+    assert.equal(originAllowed(origin, 4791, allowed), true, origin)
+  }
+  for (const origin of ['null', 'http://127.0.0.1:4792', 'https://127.0.0.1:4791', 'http://attacker.test', 'https://pit.example.test.attacker.test', 'ftp://pit.example.test', 'https://pit.example.test/', 'https://user@pit.example.test', 'pit.example.test']) {
+    assert.equal(originAllowed(origin, 4791, allowed), false, origin)
+  }
+  assert.equal(originAllowed('https://pit.example.test', 4791, []), false)
+})
+
+test('with allowedHosts set, a proxied host is served, its page may write, and the event stream is unbuffered with keepalives', async () => {
+  const h = await setup({ config: { allowedHosts: ['pit.example.test'] } })
+  try {
+    assert.equal((await raw(h.server.port, '/api/view', { Host: 'pit.example.test' })).status, 200)
+    assert.equal((await raw(h.server.port, '/api/view', { Host: 'other.example.test' })).status, 403)
+    const write = (origin: string): Promise<{ status: number, type: string, body: string }> =>
+      raw(h.server.port, '/api/refresh', { Host: 'pit.example.test', Origin: origin }, 'POST')
+    assert.equal((await write('http://attacker.test')).status, 403)
+    assert.equal(h.server.cache.latestCycle(scenario.repo), null)
+    assert.equal((await write('https://pit.example.test')).status, 200)
+    await h.server.poller.idle()
+
+    // a stream through the proxy's Host: headers that keep a proxy from buffering, then keepalives
+    const stream = await new Promise<{ headers: Record<string, unknown>, next: () => Promise<string>, close: () => void }>((resolve, reject) => {
+      const req = request({ host: '127.0.0.1', port: h.server.port, path: '/api/events?client=proxied&visible=false&paused=false', headers: { Host: 'pit.example.test' } }, (res) => {
+        res.setEncoding('utf8')
+        let buffer = ''
+        const waiting: ((text: string) => void)[] = []
+        const drain = (): void => {
+          for (let end = buffer.indexOf('\n\n'); end >= 0 && waiting.length > 0; end = buffer.indexOf('\n\n')) {
+            const text = buffer.slice(0, end)
+            buffer = buffer.slice(end + 2)
+            waiting.shift()!(text)
+          }
+        }
+        res.on('data', (chunk: string) => {
+          buffer += chunk
+          drain()
+        })
+        const next = (): Promise<string> => new Promise((resolveFrame) => {
+          waiting.push(resolveFrame)
+          drain()
+        })
+        resolve({ headers: res.headers, next, close: () => req.destroy() })
+      })
+      req.on('error', reject)
+      req.end()
+    })
+    assert.match(String(stream.headers['content-type']), /^text\/event-stream/)
+    assert.match(String(stream.headers['cache-control']), /no-cache/)
+    assert.match(String(stream.headers['cache-control']), /no-transform/)
+    assert.equal(stream.headers['x-accel-buffering'], 'no')
+    assert.equal(stream.headers['content-length'], undefined)
+    assert.equal(await stream.next(), ': connected')
+    await until(() => h.server.clients.size() === 1)
+    h.time.advance(30_000)
+    assert.equal(await stream.next(), ': keepalive')
+    h.time.advance(30_000)
+    assert.equal(await stream.next(), ': keepalive')
+    stream.close()
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('allowedHosts saved through PUT /api/config apply at once, and a malformed one is refused', async () => {
+  const h = await setup()
+  try {
+    assert.equal((await raw(h.server.port, '/api/view', { Host: 'pit.example.test' })).status, 403)
+    const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
+    assert.deepEqual(stored.allowedHosts, [])
+    const bad = await send(`${h.base}/api/config`, 'PUT', { ...stored, allowedHosts: ['https://pit.example.test'] })
+    assert.equal(bad.status, 400)
+    assert.match(String(bad.body.error), /allowedHosts/)
+    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, allowedHosts: ['Pit.Example.Test'] })).status, 200)
+    assert.deepEqual(JSON.parse(await readFile(h.configPath, 'utf8')).allowedHosts, ['pit.example.test'])
+    assert.equal((await raw(h.server.port, '/api/view', { Host: 'pit.example.test' })).status, 200)
     await h.server.poller.idle()
   } finally {
     await h.cleanup()

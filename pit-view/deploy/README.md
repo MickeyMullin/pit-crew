@@ -1,6 +1,6 @@
 # Deploying Pit View to `~/app`
 
-Follows the Ghostwolf hosting convention: `~/dev` is for development, `~/app` holds a separate clone on `master`, and `launchd` supervises the process. Pit View is loopback-only, so there is no Caddy route, no LAN hostname and no DNS entry: its server refuses any `Host` header other than its loopback address.
+Follows the Ghostwolf hosting convention: `~/dev` is for development, `~/app` holds a separate clone on `master`, and `launchd` supervises the process. The server binds loopback only and by default answers only to its loopback names; to reach it from the LAN, put a reverse proxy in front of it and list the proxy's host name in `allowedHosts` (Serving behind a reverse proxy, below).
 
 The deployed app is a clone of the whole pit-crew repository at `~/app/pit-crew`, running from its `pit-view/` folder. Only `pit-view/` is used there; pit-crew's own `scripts/deploy-reviews.sh` keeps running from the development checkout. A clone under `/Volumes/Hyperspace/app` works the same way, since the service is generated from wherever the clone lives.
 
@@ -37,14 +37,14 @@ Register it in `~/app/service-registry.yaml`, writing each `~` as the absolute h
     source_path: ~/dev/pit-crew/pit-view
     deployed_path: ~/app/pit-crew/pit-view
     repository: git@github.com:MickeyMullin/pit-crew.git
-    hostname: 127.0.0.1
+    hostname: pit.example.test    # the proxy's real name, as listed in allowedHosts
     port: 4791
     dev_port: 4792
-    exposure: loopback-only
+    exposure: lan-only
     runtime: node-typescript
     database: ~/.local/state/pit-view/cache.sqlite
     launchd_label: com.mickey.pit-view
-    notes: "PR dashboard. Runs from the pit-view/ folder of a full pit-crew clone. Loopback only: no Caddy route or LAN name, and the server refuses any other Host header. The development checkout runs beside it with pnpm dev on 4792, with its own ~/.config/pit-view-dev and ~/.local/state/pit-view-dev, so the two can run at once."
+    notes: "PR dashboard. Runs from the pit-view/ folder of a full pit-crew clone. Binds loopback only; Caddy terminates HTTPS for the LAN name and proxies to 127.0.0.1:4791, and the name is in the app config's allowedHosts. No sign-in, so the route must stay LAN-only. The development checkout runs beside it with pnpm dev on 4792, with its own ~/.config/pit-view-dev and ~/.local/state/pit-view-dev, so the two can run at once."
 ```
 
 ### Seeding the app's config
@@ -83,6 +83,31 @@ Run from `~/app/pit-crew/pit-view`:
 | `pnpm service:uninstall` | boots the agent out and removes the plist; the config, cache and logs stay |
 
 With the agent running, a manual `pnpm start` of the default instance exits with the port-taken message; use `pnpm dev` for a second copy.
+
+## Serving behind a reverse proxy
+
+The server always binds 127.0.0.1 and refuses any `Host` it does not know, so a LAN name needs two things. First, list the name in the app's `~/.config/pit-view/config.json` and restart the agent (`pnpm service:restart`), since the server reads the file at startup. If the file does not exist yet, `{ "allowedHosts": ["pit.example.test"] }` alone is enough; every other key takes its default:
+
+```json
+"allowedHosts": ["pit.example.test"]
+```
+
+Entries are bare host names: no scheme, port or path. With a name listed, the server accepts that `Host` with any port or none, and writes whose `Origin` is `https://` or `http://` on that name.
+
+Second, a proxy on the same machine that terminates HTTPS and passes the `Host` header through, which Caddy's `reverse_proxy` does by default:
+
+```caddyfile
+pit.example.test {
+	reverse_proxy 127.0.0.1:4791 {
+		# the event stream flushes at once; this keeps every other response unbuffered too
+		flush_interval -1
+	}
+}
+```
+
+Do not add `encode` to this site: compressing would hold back the event stream. The stream's own headers (`Cache-Control: no-cache, no-store, no-transform`, `X-Accel-Buffering: no`) and its 30-second keepalives keep other proxies from buffering it or timing it out.
+
+Pit View has no sign-in. Anyone who can reach the proxy can use the whole app, Refresh and Settings writes included, and a Settings write can change the repository, the reports folder and `allowedHosts` itself. Limit the proxy to the LAN (for example with a `remote_ip` matcher for the local subnet) and never publish it beyond the network.
 
 ## Checks after the first deployment
 

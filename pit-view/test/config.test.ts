@@ -29,6 +29,20 @@ test('config and cache files live under the given home', () => {
   assert.equal(cacheFile(home), '/home/tester/.local/state/pit-view/cache.sqlite')
 })
 
+test('allowedHosts holds bare host names only, lowercased and without repeats', () => {
+  const base = defaultConfig()
+  assert.deepEqual(base.allowedHosts, [])
+  assert.deepEqual(validateConfig({ ...base, allowedHosts: [' Pit.Example.Test ', 'pit.example.test', 'dash.example.test', '192.168.10.5'] }).allowedHosts,
+    ['pit.example.test', 'dash.example.test', '192.168.10.5'])
+  for (const bad of ['https://pit.example.test', 'pit.example.test:443', 'pit.example.test/', 'pit.example.test/x', '*.example.test', '', 'pit_view.example.test', '-pit.example.test', 'pit..example.test', 'user@pit.example.test', '[::1]', `${'a'.repeat(64)}.example.test`]) {
+    assert.throws(() => validateConfig({ ...base, allowedHosts: [bad] }), (error: unknown) => error instanceof ConfigError && /config\.allowedHosts/.test(error.message), bad)
+  }
+  assert.throws(() => validateConfig({ ...base, allowedHosts: 'pit.example.test' }), /config\.allowedHosts must be a list/)
+  assert.throws(() => validateConfig({ ...base, allowedHosts: [42] }), /config\.allowedHosts must hold strings/)
+  const { allowedHosts: _hosts, ...missing } = base
+  assert.throws(() => validateConfig(missing), /config\.allowedHosts must be a list/)
+})
+
 test('a missing file loads the defaults plus the gh login', async () => {
   const { dir, cleanup } = await tempDir()
   try {

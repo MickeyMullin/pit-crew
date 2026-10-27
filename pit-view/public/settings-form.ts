@@ -78,7 +78,7 @@ export const parseBots = (text: string): string[] => {
 }
 
 // the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit
-// (notifications) are carried over from the config it loaded
+// (allowedHosts, notifications) are carried over from the config it loaded
 export const toConfig = (form: Form, base: Config): Config => {
   const config: Config = {
     repo: form.repo.trim(),
@@ -103,6 +103,7 @@ export const toConfig = (form: Form, base: Config): Config => {
     reportsDir: form.reportsDir.trim(),
     density: form.density,
     showAgentColumn: form.showAgentColumn,
+    allowedHosts: base.allowedHosts,
   }
   if (base.notifications !== undefined) config.notifications = base.notifications
   return config

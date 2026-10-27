@@ -31,6 +31,8 @@ const sample = (): Config => ({
   ...defaultConfig(),
   repo: 'octo-example/orbit',
   viewer: 'vera-quill',
+  // not on the page, so a save must carry it over
+  allowedHosts: ['pit.example.test'],
   people: [
     { login: 'alex-mendez', alias: 'Alex', initials: 'AM', color: '#0F766E', avatar: 'initials' },
     { login: 'sam-tran', alias: 'Sam', initials: 'ST', color: '#B4410C', avatar: 'github' },

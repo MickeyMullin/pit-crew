@@ -38,6 +38,8 @@ export type Config = {
   reportsDir: string
   density: 'comfortable' | 'compact'
   showAgentColumn: boolean
+  // host names a reverse proxy may reach the server by, besides its loopback names
+  allowedHosts: string[]
   notifications?: Notifications
 }
 
@@ -76,6 +78,7 @@ export const defaultConfig = (): Config => ({
   reportsDir: '~/agents/output',
   density: 'comfortable',
   showAgentColumn: false,
+  allowedHosts: [],
 })
 
 // the default instance ('') is the deployed app; a named one, such as dev, keeps folders of its own
@@ -127,8 +130,26 @@ const personKeys = ['login', 'alias', 'initials', 'color', 'avatar'] as const
 const ticketKeys = ['enabled', 'kind', 'name', 'source', 'pattern', 'baseUrl', 'linkTemplate'] as const
 const configKeys = [
   'repo', 'viewer', 'people', 'tickets', 'refreshSeconds', 'todayStartsAt',
-  'bots', 'reportsDir', 'density', 'showAgentColumn', 'notifications',
+  'bots', 'reportsDir', 'density', 'showAgentColumn', 'allowedHosts', 'notifications',
 ] as const
+
+// a bare DNS name: dot-separated labels of letters, digits and inner hyphens, with no scheme,
+// port, path or wildcard
+const hostnamePattern = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/
+
+export const isHostname = (value: string): boolean => hostnamePattern.test(value)
+
+// trimmed, lowercased and without repeats; anything else than a bare host name is refused
+const toAllowedHosts = (values: unknown[]): string[] => {
+  const hosts: string[] = []
+  for (const value of values) {
+    if (typeof value !== 'string') return fail('config.allowedHosts must hold strings')
+    const name = value.trim().toLowerCase()
+    if (!isHostname(name)) fail(`config.allowedHosts must hold bare host names such as pit.example.test, with no scheme, port or path; got ${value}`)
+    if (!hosts.includes(name)) hosts.push(name)
+  }
+  return hosts
+}
 
 const toPerson = (value: unknown, index: number): Person => {
   const where = `people[${index}]`
@@ -197,6 +218,7 @@ export const validateConfig = (input: unknown): Config => {
     reportsDir: str(input, 'reportsDir', 'config'),
     density: oneOf(input, 'density', ['comfortable', 'compact'], 'config'),
     showAgentColumn: bool(input, 'showAgentColumn', 'config'),
+    allowedHosts: toAllowedHosts(list(input, 'allowedHosts', 'config')),
   }
   if (input.notifications !== undefined) config.notifications = toNotifications(input.notifications)
   return config

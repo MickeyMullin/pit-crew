@@ -99,7 +99,26 @@ const readJson = async (req: IncomingMessage): Promise<unknown> => {
 }
 
 // a page reached through another name (DNS rebinding) is refused, whatever its address
-const allowedHosts = (port: number): Set<string> => new Set([`${host}:${port}`, `localhost:${port}`, `[::1]:${port}`])
+const loopbackHosts = (port: number): Set<string> => new Set([`${host}:${port}`, `localhost:${port}`, `[::1]:${port}`])
+
+// the Host header names the server: a loopback name with the server's port, or a host in
+// config.allowedHosts (the name a reverse proxy passes through) with any port or none
+export const hostAllowed = (header: string | undefined, port: number, allowed: readonly string[]): boolean => {
+  if (header === undefined) return false
+  const name = header.toLowerCase()
+  if (loopbackHosts(port).has(name)) return true
+  const match = /^([a-z0-9.-]+)(?::\d{1,5})?$/.exec(name)
+  return match !== null && allowed.includes(match[1] ?? '')
+}
+
+// a write's Origin is the server's own page: a loopback origin with the server's port, or
+// http or https on an allowed host, with any port or none
+export const originAllowed = (origin: string, port: number, allowed: readonly string[]): boolean => {
+  const value = origin.toLowerCase()
+  if (value.startsWith('http://') && loopbackHosts(port).has(value.slice('http://'.length))) return true
+  const match = /^https?:\/\/([a-z0-9.-]+)(?::\d{1,5})?$/.exec(value)
+  return match !== null && allowed.includes(match[1] ?? '')
+}
 
 const clientIdPattern = /^[A-Za-z0-9_-]{1,100}$/
 
@@ -245,10 +264,13 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     }
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-store',
+      // nothing between the page and the server may hold, cache or compress the stream
+      'Cache-Control': 'no-cache, no-store, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     })
+    // each frame goes out as soon as it is written, through a proxy too
+    req.socket.setNoDelay(true)
     // the first bytes flush the headers, so the page's EventSource opens before it fetches the view
     res.write(': connected\n\n')
     streams.add(res)
@@ -408,11 +430,12 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   ]
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    if (!allowedHosts(port).has(req.headers.host ?? '')) throw new HttpError(403, 'unknown host; open Pit View at its loopback address')
+    const allowed = stored.allowedHosts
+    if (!hostAllowed(req.headers.host, port, allowed)) throw new HttpError(403, 'unknown host; open Pit View at its loopback address or a host in allowedHosts')
     const method = req.method ?? 'GET'
     const origin = req.headers.origin
     // writes from another site's page are refused; the page's own requests carry its origin or none
-    if (method !== 'GET' && origin !== undefined && !allowedHosts(port).has(origin.replace(/^http:\/\//, ''))) {
+    if (method !== 'GET' && origin !== undefined && !originAllowed(origin, port, allowed)) {
       throw new HttpError(403, 'cross-origin request refused')
     }
     const url = new URL(req.url ?? '/', `http://${host}:${port}`)
