@@ -10,6 +10,7 @@ Arguments:
   - One or more PR numbers, with or without a leading `#` (`793 794`): limit the sweep to those PRs.
   - `--force`: review every PR fresh, even one unchanged since its last report.
 - Anything else in the invocation is bad usage. Say what you could not read and stop, rather than guessing.
+- **A terse request to go again repeats the prior sweep.** When the user asks to re-run, sweep again, or re-review in a short message that names no arguments ("go again", "pull latest and re-run"), repeat the most recent sweep invocation in this conversation with the same arguments: `owner/repo`, PR numbers, `--parallel N`, and `--force`. Explicit words in the new message win. If an argument cannot be repeated as written (a listed PR was merged or closed), say what changed before starting. Never drop an argument silently.
 
 What this sweep must never do:
 

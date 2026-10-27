@@ -49,7 +49,7 @@ Unless the flag was `--tandem=manual`, the primary starts its secondaries itself
 - **Leave the reviewed code alone until every launched secondary has exited.** It is reading the same worktree, or for `review-local.md` the same live tree. Do not remove the worktree, check anything out in it, or, under `review-local.md`, make the WIP commit or edit any file.
 - **The launcher's last line of output is its verdict**: `tandem-secondary: ok ...` or `tandem-secondary: failed ... reason=<why>`, with the draft and log paths. Read that line; do not judge by exit code alone.
 - **On `failed`, never consolidate silently without that secondary.** Tell the user the entry, the reason, and the log path, and ask whether to consolidate without it, re-run it, or start it by hand.
-- Do not start a secondary for the re-review after a fix; that review is yours alone (see "Consolidating").
+- Do not start a secondary for the re-review after a fix; that review is yours alone (see "Consolidating"). A re-review the user asks for later is a different thing (see "Re-reviews").
 
 Files:
 
@@ -83,5 +83,12 @@ Consolidating (primary only):
 - **The consolidated report reads as one review.** It does not mention tandem mode, the number of reviewers, which reviewer found what, which findings were dropped, or any agent or model name. The no-attribution rule in the calling prompt's output section applies to it in full.
 - Report the consolidation to the user in chat instead: which findings came from which draft, which were merged, which were dropped or re-ranked and why, and any finding you first dismissed and then kept. Chat is where attribution belongs; the report is not.
 - Write the consolidated report to the unsuffixed path, then continue with the calling prompt from its posting section (for `review-local.md`, from "Fixing what you found"). The verdict, the posting form, the CI gate, the authorship checks, fix mode, and the `Fix attempts:` bound all run on the consolidated findings exactly as they would on a single review.
-- **In fix mode, the re-review after fixing is a single-agent review by the primary.** Tandem mode covers the first review only. Say so in chat, so the user can run another tandem round instead if they want one.
+- **In fix mode, the re-review after fixing is a single-agent review by the primary.** Tandem mode covers the review that found the problems, not this automatic second pass of the same run. Say so in chat, so the user can run another tandem round instead if they want one. This rule is not a precedent for a re-review the user asks for afterward, which repeats the tandem flag (see "Re-reviews").
 - Remove your worktree only after the consolidated report is written and posted or declined, as the calling prompt describes. You need it for the fresh citation reads above.
+
+Re-reviews:
+
+- **A re-review the user asks for is a new tandem run.** When the calling prompt's "Re-reviews" section carries a tandem flag forward from a terse request, start again from the top of this file: re-pin the target, record a new start time, launch the same secondaries again (the same `--tandem=<id>` entries, the default for a bare `--tandem`, or for `--tandem=manual` a fresh invocation for the user to start each one), write fresh drafts, and consolidate. Never reuse a prior round's drafts; their pin no longer matches.
+- **A carried `--tandem-secondary@<sha>` keeps the flag, not the SHA.** A re-pull means the new tip, and the old pin is the code already reviewed. Say so, and ask for the SHA the primary is reviewing now.
+- **Where feasible covers the launcher too.** If a named entry is no longer in `tandem-secondary --list`, say so before starting and ask whether to run with the remaining entries, the default, or `--tandem=manual`. Never fall back to a single-agent review without saying so first.
+- **Two re-reviews, two rules.** The re-review after the primary's own fix mode (see "Consolidating") is the automatic second pass of the same run, bounded by `Fix attempts:`, and is single-agent. A re-review the user asks for in a later message is a new run and repeats the prior flags, tandem included. Do not reason from one to the other.

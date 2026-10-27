@@ -2,6 +2,13 @@ Perform a PR-quality code review of an entire stack of PRs as one cumulative tre
 
 This prompt is the companion to `review-pr.md`. Use this one to answer "does the end state of this stack work?"; use `review-pr.md` to answer "does this single layer stand on its own?". They are different questions and several rules below are deliberately the inverse of that prompt's.
 
+Re-reviews:
+
+- **A terse request to go again repeats the prior invocation.** When the user asks to re-review, review again, or re-run in a short message that names no stack and no flags ("re-review", "pull latest and re-review", "go again"), fetch the latest remote state and repeat the most recent review invocation in this conversation: this prompt, the same stack identity, and the same flags, including `--tandem`, `--tandem=<id>`, `--tandem=manual`, and `--tandem-secondary`. Every section below reads that repeated invocation as if the user had just typed it, so a carried tandem flag means reading `tandem.md` again; its "Re-reviews" section says what carries over.
+- **Explicit words in the new message win.** If it adds, removes, or changes a flag or the stack identity, follow it. "Re-review without tandem" drops tandem.
+- **Repeat it where feasible, and never drop a flag silently.** If the prior invocation cannot be repeated as written (the stack merged or closed, its top branch was deleted), say what changed and ask, or state the closest alternative, before starting. If any flag is dropped for any reason, say so in chat before the review starts, not afterward.
+- **A re-review is a full review under this prompt.** Re-resolve the stack, re-record the tip SHA, read the prior report, verify each prior finding, and treat the commits added to address them as the highest-risk surface, per the required passes. A yes to posting the prior report is not a yes to posting this one; offer again.
+
 Tandem mode:
 
 - If the invocation contains `--tandem` (optionally `--tandem=<id>[,<id>...]` or `--tandem=manual`) or `--tandem-secondary` (optionally `--tandem-secondary@<sha>`), read `{{HOME}}/agents/prompts/review/tandem.md` in full before doing anything else, remove the flag, and resolve what remains under "Setup" below. That file decides which of this prompt's sections run and which files you write; where the two differ, it wins. Without either flag, ignore it.

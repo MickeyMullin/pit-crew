@@ -1,5 +1,14 @@
 Perform a PR-quality code review of the work on the currently checked-out local branch, _before_ a pull request exists. The goal is to catch problems while they are still cheap to fix — before the branch is pushed and reviewers are pulled in.
 
+Re-reviews:
+
+- **A terse request to go again repeats the prior invocation.** When the user asks to re-review, review again, or re-run in a short message that names no flags ("re-review", "pull latest and re-review", "go again"), repeat the most recent review invocation in this conversation: this prompt and the same flags, including `--tandem`, `--tandem=<id>`, `--tandem=manual`, and `--tandem-secondary`. Every section below reads that repeated invocation as if the user had just typed it, so a carried tandem flag means reading `tandem.md` again; its "Re-reviews" section says what carries over.
+- **"Pull latest" here means re-fetching the base and re-reading the live tree**, never `git pull` or a merge into the dev's branch, which the hard constraints below forbid. If the user wants their branch updated, that is theirs to do; say so.
+- **Explicit words in the new message win.** If it adds, removes, or changes a flag, follow it. "Re-review without tandem" drops tandem.
+- **Repeat it where feasible, and never drop a flag silently.** If the prior invocation cannot be repeated as written (a different branch is now checked out), say what changed and ask, or state the closest alternative, before starting. If any flag is dropped for any reason, say so in chat before the review starts, not afterward.
+- **A re-review is a full review under this prompt.** Re-derive the diff, re-record the HEAD SHA, read the prior report, verify each prior finding, and treat the changes made to address them as the highest-risk surface, per the required passes.
+- This is not the second pass under "After the fix", which this prompt runs on its own and which is single-agent under tandem mode. A re-review the user asks for is a new run and carries the prior flags.
+
 Tandem mode:
 
 - If the invocation contains `--tandem` (optionally `--tandem=<id>[,<id>...]` or `--tandem=manual`) or `--tandem-secondary`, read `{{HOME}}/agents/prompts/review/tandem.md` in full before doing anything else. That file decides which of this prompt's sections run and which files you write; where the two differ, it wins. Without either flag, ignore it.
