@@ -221,6 +221,15 @@ test('the sync status reads updated, refreshing or paused, and its key changes o
   assert.deepEqual([paused.text, paused.tone], ['paused · updated 4m ago', 'warn'])
   assert.notEqual(paused.key, syncStatus(end, { paused: false, nowMs }).key)
   assert.equal(syncStatus(end, { paused: true, nowMs: nowMs + 3_000 }).text, 'paused · updated just now')
+
+  // idle reads apart from paused, keys its own announcement, and gives way to pause
+  const idleStatus = syncStatus(end, { paused: false, idle: true, nowMs: nowMs + 2 * 60 * minute })
+  assert.deepEqual([idleStatus.text, idleStatus.tone], ['idle · updated 2h ago', 'normal'])
+  assert.notEqual(idleStatus.key, syncStatus(end, { paused: false, nowMs }).key)
+  assert.notEqual(idleStatus.key, paused.key)
+  assert.deepEqual(syncStatus(end, { paused: true, idle: true, nowMs: nowMs + 4 * minute }), paused)
+  // a cycle that runs while idle (another tab, Refresh) still reads refreshing
+  assert.equal(syncStatus(mid, { paused: false, idle: true, nowMs }).text, midStatus.text)
 })
 
 test('ages, intervals and times format as the page shows them', () => {

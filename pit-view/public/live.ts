@@ -1,9 +1,10 @@
 // public/live.ts
 // the page's link to the server: one event stream per page load under one client id, and the
-// visibility and pause reports; the page never polls, it only says whether it is looking
+// visibility, pause and idle reports; the page never polls, it only says whether it is looking
+import type { ClientState } from '../src/clients.ts'
 import type { Patch } from '../src/poller.ts'
 
-export type ClientState = { visible: boolean, paused: boolean }
+export type { ClientState }
 
 export type LiveOptions = {
   clientId: string
@@ -30,8 +31,8 @@ export const createLive = (options: LiveOptions): Live => {
   let retryTimer: ReturnType<typeof setTimeout> | undefined
 
   const url = (): string => {
-    const { visible, paused } = options.state()
-    const query = new URLSearchParams({ client: options.clientId, visible: String(visible), paused: String(paused) })
+    const { visible, paused, idle } = options.state()
+    const query = new URLSearchParams({ client: options.clientId, visible: String(visible), paused: String(paused), idle: String(idle) })
     return `/api/events?${query.toString()}`
   }
 

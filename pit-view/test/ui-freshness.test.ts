@@ -87,6 +87,9 @@ test('a cycle that cannot reach GitHub reads offline, with the banner, stale row
   const pausedStatus = syncStatus(down.sync, paused(now))
   assert.equal(pausedStatus.text, 'paused · offline · cached 10:05 AM')
   assert.notEqual(pausedStatus.key, syncStatus(down.sync, live(now)).key)
+  // idle leads the header the same way, and leaves the banner as it is for an active page
+  assert.equal(syncStatus(down.sync, { ...live(now), idle: true }).text, 'idle · offline · cached 10:05 AM')
+  assert.deepEqual(offlineBanner(down.sync, { ...live(now), idle: true }), offlineBanner(down.sync, live(now)))
 
   // every row is shown from the cache, each with the stale dot; both sections too
   const rows = openRows(down)

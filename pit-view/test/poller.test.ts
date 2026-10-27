@@ -290,21 +290,21 @@ test('with every client hidden or paused the timer is cleared and nothing polls'
     change === null ? null : poller.setActive(change.activeCount, change.becameActive)
 
   // a hidden tab, then a paused one: neither is active
-  report(clients.connect('tab-a', { visible: false, paused: false }).change)
-  const b = clients.connect('tab-b', { visible: true, paused: true })
+  report(clients.connect('tab-a', { visible: false, paused: false, idle: false }).change)
+  const b = clients.connect('tab-b', { visible: true, paused: true, idle: false })
   report(b.change)
   time.advance(2 * 60 * minute)
   assert.equal(githubCalls(runner).length, 0)
   assert.equal(time.pending(), 0)
 
   // tab b resumes: one active cycle, and the interval timer is set
-  assert.equal(report(clients.update('tab-b', { visible: true, paused: false })), 1)
+  assert.equal(report(clients.update('tab-b', { visible: true, paused: false, idle: false })), 1)
   await poller.idle()
   assert.equal(time.pending(), 1)
 
   // it pauses again: the timer goes, nextCycleAt goes null, and hours pass with no call
   const calls = githubCalls(runner).length
-  report(clients.update('tab-b', { visible: true, paused: true }))
+  report(clients.update('tab-b', { visible: true, paused: true, idle: false }))
   assert.equal(time.pending(), 0)
   assert.deepEqual(patches[patches.length - 1]?.sync?.ui, { activeClients: 0, nextCycleAt: null })
   time.advance(5 * 60 * minute)

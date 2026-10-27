@@ -109,8 +109,14 @@
         <div class="field">
           <label for="f-refreshSeconds">Refresh every</label>
           <select id="f-refreshSeconds" class="input" aria-describedby="f-refreshSeconds-hint"></select>
-          <p id="f-refreshSeconds-hint" class="hint">Only while a Pit View page is open, visible and not paused.</p>
+          <p id="f-refreshSeconds-hint" class="hint">Only while a Pit View page is open, visible, not paused and not idle.</p>
           <p id="f-refreshSeconds-error" class="field-error" hidden></p>
+        </div>
+        <div class="field">
+          <label for="f-idleMinutes">Stop when idle after</label>
+          <input id="f-idleMinutes" class="input mono" type="number" inputmode="numeric" min="0" max="1440" step="1" autocomplete="off" aria-describedby="f-idleMinutes-hint">
+          <p id="f-idleMinutes-hint" class="hint">Minutes with no mouse, keyboard or touch before a visible page stops updating; any activity resumes it. 0 means never.</p>
+          <p id="f-idleMinutes-error" class="field-error" hidden></p>
         </div>
         <div class="field">
           <label for="f-todayStartsAt">"Today" starts at</label>

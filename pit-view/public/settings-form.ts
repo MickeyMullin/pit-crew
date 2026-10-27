@@ -32,6 +32,8 @@ export type Form = {
   people: PersonForm[]
   tickets: TicketForm[]
   refreshSeconds: Config['refreshSeconds']
+  // minutes as typed; 0 means never idle
+  idleMinutes: string
   todayStartsAt: Config['todayStartsAt']
   // login substrings as typed: commas or new lines between them
   bots: string
@@ -48,6 +50,7 @@ export const toForm = (config: Config, makeId: MakeId): Form => ({
   people: config.people.map((person) => personForm(person, makeId())),
   tickets: config.tickets.map((system) => ({ ...system, id: makeId() })),
   refreshSeconds: config.refreshSeconds,
+  idleMinutes: String(config.idleMinutes),
   todayStartsAt: config.todayStartsAt,
   bots: config.bots.join(', '),
   reportsDir: config.reportsDir,
@@ -77,6 +80,15 @@ export const parseBots = (text: string): string[] => {
   return bots
 }
 
+// the same range as idleRange in src/config.ts, which a test keeps in step
+export const idleLimits = { min: 5, max: 1440 } as const
+
+// whole minutes only; anything else is NaN, which the checks refuse before a save
+export const parseIdleMinutes = (text: string): number => {
+  const value = text.trim()
+  return /^\d{1,5}$/.test(value) ? Number(value) : Number.NaN
+}
+
 // the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit
 // (allowedHosts, notifications) are carried over from the config it loaded
 export const toConfig = (form: Form, base: Config): Config => {
@@ -98,6 +110,7 @@ export const toConfig = (form: Form, base: Config): Config => {
       linkTemplate: system.linkTemplate.trim(),
     })),
     refreshSeconds: form.refreshSeconds,
+    idleMinutes: parseIdleMinutes(form.idleMinutes),
     todayStartsAt: form.todayStartsAt,
     bots: parseBots(form.bots),
     reportsDir: form.reportsDir.trim(),
@@ -189,11 +202,15 @@ export const validateForm = (form: Form): FieldError[] => {
   if (/\s/.test(form.viewer.trim())) errors.push({ field: 'viewer', message: 'A GitHub login has no spaces; leave it empty for the gh login.' })
   form.people.forEach((person, index) => errors.push(...personErrors(person, index, form.people)))
   form.tickets.forEach((system, index) => errors.push(...ticketErrors(system, index)))
+  const idle = parseIdleMinutes(form.idleMinutes)
+  if (!(idle === 0 || (idle >= idleLimits.min && idle <= idleLimits.max))) {
+    errors.push({ field: 'idleMinutes', message: `Use 0 for never, or a whole number of minutes from ${idleLimits.min} to ${idleLimits.max}.` })
+  }
   if (form.reportsDir.trim() === '') errors.push({ field: 'reportsDir', message: 'Enter the folder review reports are written to, for example ~/agents/output.' })
   return errors
 }
 
-const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'showAgentColumn'])
+const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'showAgentColumn'])
 
 const capitalize = (text: string): string => text === '' ? text : `${text[0]!.toUpperCase()}${text.slice(1)}`
 

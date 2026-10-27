@@ -1,12 +1,13 @@
 // public/app.ts
 // the page: opens the event stream, then fetches the view, applies patches in order and draws;
-// reports visibility and pause; keeps focus, the hover card and scroll across every update
+// reports visibility, pause and idle; keeps focus, the hover card and scroll across every update
 import type { Config } from '../src/config.ts'
 import type { Patch, View } from '../src/poller.ts'
 import { byId, setText } from './dom.ts'
 import { clearFilters, cycleSort, initialControls, pressTile, setClosedRange, setFilter, setGrouped } from './filters.ts'
 import type { ClosedRangeKey, Controls, Filters } from './filters.ts'
 import { createHoverCard } from './hovercard.ts'
+import { createIdleTracker } from './idle.ts'
 import { loadInstance, showInstance } from './instance.ts'
 import { createLive } from './live.ts'
 import { render } from './render.ts'
@@ -42,12 +43,15 @@ const clientId = crypto.randomUUID()
 let feed = emptyFeed()
 // the server's clock minus ours, from the latest view or patch, so ages agree with the server
 let skewMs = 0
-let settings: Settings = { density: 'comfortable', showAgentColumn: false }
+// the shipped defaults until the config loads
+let settings: Settings = { density: 'comfortable', showAgentColumn: false, idleMinutes: 90 }
 // filters, sort, grouping and the active tile are kept in memory only: a reload starts clean
 const ui: UiState = {
   ...initialControls(),
   openGroups: new Set(),
   paused: readPaused(),
+  // never kept: a reload starts active
+  idle: false,
 }
 
 const nowMs = (): number => Date.now() + skewMs
@@ -95,10 +99,11 @@ const restore = (kept: Kept): void => {
   if (window.scrollX !== kept.x || window.scrollY !== kept.y) window.scrollTo(kept.x, kept.y)
 }
 
-// the live region speaks once per cycle start and end, and once per Pause or Resume
+// the live region speaks once per cycle start and end, once per Pause or Resume, and once on
+// entering or leaving idle
 let announcedKey: string | null = null
 const announce = (view: View): void => {
-  const status = syncStatus(view.sync, { paused: ui.paused, nowMs: nowMs() })
+  const status = syncStatus(view.sync, { paused: ui.paused, idle: ui.idle, nowMs: nowMs() })
   if (status.key === announcedKey) return
   // the first reading is what the page already shows; nothing to announce
   if (announcedKey !== null) setText(byId('sync-live'), status.text)
@@ -153,7 +158,9 @@ const loadSettings = async (): Promise<void> => {
     settings = {
       density: config.density === 'compact' ? 'compact' : 'comfortable',
       showAgentColumn: config.showAgentColumn === true,
+      idleMinutes: typeof config.idleMinutes === 'number' ? config.idleMinutes : 90,
     }
+    idleTracker.setMinutes(settings.idleMinutes)
     draw()
   } catch {
     // the defaults stand until the next view load
@@ -194,7 +201,7 @@ const onPatch = (patch: Patch): void => {
 
 const live = createLive({
   clientId,
-  state: () => ({ visible: visible(), paused: ui.paused }),
+  state: () => ({ visible: visible(), paused: ui.paused, idle: ui.idle }),
   onOpen: () => {
     // a first open and a reconnect alike start again from a fresh view
     feed = restartFeed(feed)
@@ -206,6 +213,24 @@ const live = createLive({
     feed = restartFeed(feed)
   },
 })
+
+// idle after idleMinutes with no activity; only entering and leaving it is reported, so pointer
+// moves cost a clock read and nothing more
+const idleTracker = createIdleTracker({
+  minutes: settings.idleMinutes,
+  now: () => Date.now(),
+  timers: { set: (run, ms) => setTimeout(run, ms), clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>) },
+  onChange: (idle) => {
+    ui.idle = idle
+    void live.report()
+    draw()
+  },
+})
+
+// capturing on the window also catches focus and scroll on elements, which do not bubble
+for (const name of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'scroll', 'touchstart', 'focus']) {
+  window.addEventListener(name, idleTracker.activity, { capture: true, passive: true })
+}
 
 byId('refresh').addEventListener('click', () => {
   void fetch('/api/refresh', { method: 'POST' }).catch(() => {})
@@ -226,7 +251,10 @@ byId('pause').addEventListener('click', () => {
 })
 
 document.addEventListener('visibilitychange', () => {
-  void live.report()
+  // becoming visible is activity; when it ends idle, onChange has already reported the change
+  const wasIdle = ui.idle
+  if (visible()) idleTracker.activity()
+  if (ui.idle === wasIdle) void live.report()
   // a returning page shows what it holds at once, with ages brought up to date
   if (visible()) draw()
 })

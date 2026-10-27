@@ -4,14 +4,14 @@
 // colors, and ticket samples checked against the dashboard's own derivation
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { ConfigError, defaultConfig, validateConfig } from '../src/config.ts'
+import { ConfigError, defaultConfig, idleRange, validateConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import { deriveOpenRows, groupRows, personView } from '../src/derive.ts'
 import { cycleKeys } from '../src/poller.ts'
 import type { View } from '../src/poller.ts'
 import {
   aliasOf, changeKind, colorFor, contrastWithWhite, errorId, fieldId, initialsOf, isDirty, kindDefaults, needsRefresh, newPerson, newTicket,
-  openSuggestions, parseBots, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, serverError, ticketSample, toConfig, toForm,
+  idleLimits, openSuggestions, parseBots, parseIdleMinutes, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, serverError, ticketSample, toConfig, toForm,
   validateForm,
 } from '../public/settings-form.ts'
 import type { Form, TicketForm } from '../public/settings-form.ts'
@@ -39,6 +39,7 @@ const sample = (): Config => ({
     { login: 'priya-k', alias: 'Priya', initials: 'PK', color: '#5B21B6', avatar: '~/Pictures/priya.png' },
   ],
   refreshSeconds: 120,
+  idleMinutes: 120,
   todayStartsAt: 'utc',
   bots: ['dependabot', 'renovate', 'review-helper'],
   density: 'compact',
@@ -116,6 +117,29 @@ test('only the settings the poller refreshes for start a refresh', () => {
 test('the refresh interval offers 60 seconds, 2 minutes and 5 minutes, smallest first, with 5 minutes the default', () => {
   assert.deepEqual(refreshChoices.map((choice) => [choice.value, choice.label]), [[60, '60 seconds'], [120, '2 minutes'], [300, '5 minutes (default)']])
   assert.equal(defaultConfig().refreshSeconds, 300)
+})
+
+test('idle minutes edit as text: whole minutes, 0 for never, in the range the server accepts', () => {
+  assert.deepEqual(idleLimits, idleRange)
+  const form = formOf()
+  assert.equal(form.idleMinutes, '120')
+  assert.equal(formOf(defaultConfig()).idleMinutes, '90')
+  form.idleMinutes = ' 45 '
+  assert.equal(toConfig(form, sample()).idleMinutes, 45)
+  assert.equal(isDirty(form, sample()), true)
+  for (const good of ['0', '5', '90', '1440']) {
+    form.idleMinutes = good
+    assert.deepEqual(fields(form), [], good)
+    assert.equal(validateConfig(toConfig(form, sample())).idleMinutes, Number(good))
+  }
+  for (const bad of ['', '4', '1441', '1.5', '-5', '90m', 'never']) {
+    form.idleMinutes = bad
+    assert.deepEqual(fields(form), ['idleMinutes'], bad)
+  }
+  assert.match(validateForm(form)[0]!.message, /^Use 0 for never, or a whole number of minutes from 5 to 1440\.$/)
+  assert.ok(Number.isNaN(parseIdleMinutes('ninety')))
+  // the server's refusal lands on the same field
+  assert.deepEqual(serverError(refusal({ ...sample(), idleMinutes: 3 }), form), { field: 'idleMinutes', message: 'Must be 0 (never idle) or a whole number of minutes from 5 to 1440.' })
 })
 
 test('a valid form passes the checks, and the server accepts what it sends', () => {

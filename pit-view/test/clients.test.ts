@@ -3,15 +3,18 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createClients, isActive } from '../src/clients.ts'
 
-const shown = { visible: true, paused: false }
-const hidden = { visible: false, paused: false }
-const paused = { visible: true, paused: true }
+const shown = { visible: true, paused: false, idle: false }
+const hidden = { visible: false, paused: false, idle: false }
+const paused = { visible: true, paused: true, idle: false }
+const idle = { visible: true, paused: false, idle: true }
 
-test('a client is active only while visible and not paused', () => {
+test('a client is active only while visible, not paused and not idle', () => {
   assert.equal(isActive(shown), true)
   assert.equal(isActive(hidden), false)
   assert.equal(isActive(paused), false)
-  assert.equal(isActive({ visible: false, paused: true }), false)
+  assert.equal(isActive(idle), false)
+  assert.equal(isActive({ visible: false, paused: true, idle: false }), false)
+  assert.equal(isActive({ visible: true, paused: true, idle: true }), false)
 })
 
 test('opening a stream visible and unpaused makes the client active at once', () => {
@@ -34,6 +37,18 @@ test('becoming visible or resuming makes a client active; hiding or pausing does
   assert.deepEqual(clients.update('tab-a', paused), { active: false, becameActive: false, activeCount: 0 })
   assert.deepEqual(clients.update('tab-a', shown), { active: true, becameActive: true, activeCount: 1 })
   assert.deepEqual(clients.update('tab-a', hidden), { active: false, becameActive: false, activeCount: 0 })
+})
+
+test('going idle counts as pausing, and activity after it makes the client active again', () => {
+  const clients = createClients()
+  assert.deepEqual(clients.connect('tab-a', idle).change, { active: false, becameActive: false, activeCount: 0 })
+  assert.deepEqual(clients.update('tab-a', shown), { active: true, becameActive: true, activeCount: 1 })
+  assert.deepEqual(clients.update('tab-a', idle), { active: false, becameActive: false, activeCount: 0 })
+  assert.deepEqual(clients.get('tab-a'), idle)
+  // pause wins while both hold: clearing idle alone does not make the client active
+  clients.update('tab-a', { visible: true, paused: true, idle: true })
+  assert.deepEqual(clients.update('tab-a', paused), { active: false, becameActive: false, activeCount: 0 })
+  assert.deepEqual(clients.update('tab-a', shown), { active: true, becameActive: true, activeCount: 1 })
 })
 
 test('an id with no open stream is unknown', () => {

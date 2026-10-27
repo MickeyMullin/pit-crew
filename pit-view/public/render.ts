@@ -22,14 +22,16 @@ import type { CellContext, Column, TableKey } from './tables.ts'
 export type Density = 'comfortable' | 'compact'
 
 // the parts of the config the page reads; everything else arrives in the view
-export type Settings = { density: Density, showAgentColumn: boolean }
+export type Settings = { density: Density, showAgentColumn: boolean, idleMinutes: number }
 
-// this page's own state: none of it is part of the view, and only paused outlives a reload;
-// filters, sort, grouping and the active tile live in memory (Controls in filters.ts)
+// this page's own state: none of it is part of the view, and only paused outlives a reload, idle
+// never; filters, sort, grouping and the active tile live in memory (Controls in filters.ts)
 export type UiState = Controls & {
   // collapsible groups the viewer opened, as 'mine:drafts' and 'others:bots'
   openGroups: Set<string>
   paused: boolean
+  // no user activity for idleMinutes; the server counts the page as not active
+  idle: boolean
 }
 
 export type Actions = FilterBarActions & {
@@ -51,7 +53,7 @@ const header = (frame: Frame): void => {
     { key: 'avatar', sig: JSON.stringify(view.viewer), build: () => avatar(view.viewer, 'header') },
     { key: 'login', sig: view.viewer.login, build: () => h('span', { class: 'viewer-login' }, `@${view.viewer.login}`) },
   ])
-  const status = syncStatus(view.sync, { paused: ui.paused, nowMs })
+  const status = syncStatus(view.sync, { paused: ui.paused, idle: ui.idle, nowMs })
   const text = byId('sync-status')
   setText(text, status.text)
   text.dataset.tone = status.tone

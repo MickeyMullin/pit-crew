@@ -32,6 +32,8 @@ export type Config = {
   people: Person[]
   tickets: TicketSystem[]
   refreshSeconds: 60 | 120 | 300
+  // a page with no user activity for this long stops counting as active; 0 means never
+  idleMinutes: number
   todayStartsAt: 'local' | 'utc'
   bots: string[]
   // stored with ~; expand with expandHome before use
@@ -73,6 +75,7 @@ export const defaultConfig = (): Config => ({
     },
   ],
   refreshSeconds: 300,
+  idleMinutes: 90,
   todayStartsAt: 'local',
   bots: ['dependabot', 'renovate'],
   reportsDir: '~/agents/output',
@@ -121,6 +124,18 @@ const oneOf = <T extends string | number>(obj: Record<string, unknown>, key: str
 const list = (obj: Record<string, unknown>, key: string, where: string): unknown[] =>
   Array.isArray(obj[key]) ? obj[key] : fail(`${where}.${key} must be a list`)
 
+// 0 turns idle off; otherwise from a few minutes, so reading a page is not mistaken for leaving
+// it, to a day
+export const idleRange = { min: 5, max: 1440 } as const
+
+export const isIdleMinutes = (value: unknown): value is number =>
+  Number.isInteger(value) && (value === 0 || ((value as number) >= idleRange.min && (value as number) <= idleRange.max))
+
+const idleMinutes = (obj: Record<string, unknown>, where: string): number =>
+  isIdleMinutes(obj.idleMinutes)
+    ? obj.idleMinutes
+    : fail(`${where}.idleMinutes must be 0 (never idle) or a whole number of minutes from ${idleRange.min} to ${idleRange.max}`)
+
 const onlyKeys = (obj: Record<string, unknown>, allowed: readonly string[], where: string): void => {
   const extra = Object.keys(obj).find((key) => !allowed.includes(key))
   if (extra !== undefined) fail(`${where}.${extra} is not a known setting`)
@@ -129,7 +144,7 @@ const onlyKeys = (obj: Record<string, unknown>, allowed: readonly string[], wher
 const personKeys = ['login', 'alias', 'initials', 'color', 'avatar'] as const
 const ticketKeys = ['enabled', 'kind', 'name', 'source', 'pattern', 'baseUrl', 'linkTemplate'] as const
 const configKeys = [
-  'repo', 'viewer', 'people', 'tickets', 'refreshSeconds', 'todayStartsAt',
+  'repo', 'viewer', 'people', 'tickets', 'refreshSeconds', 'idleMinutes', 'todayStartsAt',
   'bots', 'reportsDir', 'density', 'showAgentColumn', 'allowedHosts', 'notifications',
 ] as const
 
@@ -213,6 +228,7 @@ export const validateConfig = (input: unknown): Config => {
     people: list(input, 'people', 'config').map(toPerson),
     tickets: list(input, 'tickets', 'config').map(toTicketSystem),
     refreshSeconds: oneOf(input, 'refreshSeconds', [60, 120, 300], 'config'),
+    idleMinutes: idleMinutes(input, 'config'),
     todayStartsAt: oneOf(input, 'todayStartsAt', ['local', 'utc'], 'config'),
     bots: list(input, 'bots', 'config').map((bot) => typeof bot === 'string' ? bot : fail('config.bots must hold strings')),
     reportsDir: str(input, 'reportsDir', 'config'),

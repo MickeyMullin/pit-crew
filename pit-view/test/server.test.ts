@@ -216,6 +216,43 @@ test('a stream opened hidden or paused causes no cycle, and keepalives arrive ev
   }
 })
 
+test('an idle page counts as paused: no active cycle, no interval, and its first activity refreshes under the 30-second rule', async () => {
+  const h = await setup()
+  try {
+    // opened idle (a reconnect while idle), the page starts nothing
+    const stream = await openStream(h.base, 'client=tab-1&visible=true&paused=false&idle=true')
+    assert.equal(await stream.frame(), ': connected')
+    await until(() => h.server.clients.size() === 1)
+    assert.deepEqual(h.server.clients.get('tab-1'), { visible: true, paused: false, idle: true })
+    h.time.advance(60 * 60_000)
+    assert.equal(githubCalls(h.runner).length, 0)
+
+    // activity ends idle: the page is active and the active rule starts a cycle
+    assert.deepEqual((await send(`${h.base}/api/clients/tab-1`, 'POST', { visible: true, paused: false, idle: false })).body, { active: true, cycle: 1 })
+    await stream.untilCycleEnds()
+    await h.server.poller.idle()
+    assert.equal(h.time.pending(), 2, 'the keepalive and the interval timer')
+
+    // going idle while visible clears the interval timer and nextCycleAt, as pausing does
+    assert.deepEqual((await send(`${h.base}/api/clients/tab-1`, 'POST', { visible: true, paused: false, idle: true })).body, { active: false, cycle: null })
+    assert.deepEqual((await stream.patch()).sync?.ui, { activeClients: 0, nextCycleAt: null })
+    assert.equal(h.time.pending(), 1, 'only the keepalive timer is left')
+    const calls = githubCalls(h.runner).length
+    h.time.advance(3 * 60 * 60_000)
+    assert.equal(githubCalls(h.runner).length, calls)
+
+    // returning after hours refreshes once; a page that leaves idle out of its report is not idle
+    assert.deepEqual((await send(`${h.base}/api/clients/tab-1`, 'POST', { visible: true, paused: false })).body, { active: true, cycle: 2 })
+    const back = await stream.untilCycleEnds()
+    assert.equal(back[0]?.sync?.cycle?.trigger, 'active')
+    assert.equal((await send(`${h.base}/api/clients/tab-1`, 'POST', { visible: true, paused: false, idle: 'yes' })).status, 400)
+    assert.equal((await raw(h.server.port, '/api/events?client=tab-2&idle=maybe')).status, 400)
+    stream.close()
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('POST /api/refresh starts a cycle whatever the clients, or joins the running one', async () => {
   const runner = gatedRunner(fixtureRunner())
   const h = await setup({ runner })

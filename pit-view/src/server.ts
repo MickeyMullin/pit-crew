@@ -132,7 +132,7 @@ const flag = (value: string | null, fallback: boolean): boolean => {
   if (value === null) return fallback
   if (value === 'true') return true
   if (value === 'false') return false
-  throw new HttpError(400, 'visible and paused must be true or false')
+  throw new HttpError(400, 'visible, paused and idle must be true or false')
 }
 
 const staticTypes: Record<string, string> = {
@@ -267,6 +267,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     const state: ClientState = {
       visible: flag(url.searchParams.get('visible'), true),
       paused: flag(url.searchParams.get('paused'), false),
+      idle: flag(url.searchParams.get('idle'), false),
     }
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -294,9 +295,12 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   const updateClient = async (req: IncomingMessage, res: ServerResponse, id: string): Promise<void> => {
     if (!clientIdPattern.test(id)) throw new HttpError(400, 'client must be an id of letters, digits, - and _')
     const body = await readJson(req)
-    const { visible, paused } = (body ?? {}) as Record<string, unknown>
-    if (typeof visible !== 'boolean' || typeof paused !== 'boolean') throw new HttpError(400, 'send { "visible": boolean, "paused": boolean }')
-    const change = clients.update(id, { visible, paused })
+    const { visible, paused, idle = false } = (body ?? {}) as Record<string, unknown>
+    // idle may be left out, as a page loaded before idle existed leaves it
+    if (typeof visible !== 'boolean' || typeof paused !== 'boolean' || typeof idle !== 'boolean') {
+      throw new HttpError(400, 'send { "visible": boolean, "paused": boolean, "idle": boolean }')
+    }
+    const change = clients.update(id, { visible, paused, idle })
     if (change === null) return json(res, 404, { error: 'no event stream is open for this client; reopen it' })
     const cycle = poller.setActive(change.activeCount, change.becameActive)
     json(res, 200, { active: change.active, cycle })

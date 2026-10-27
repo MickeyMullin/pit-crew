@@ -1,20 +1,22 @@
 // public/status.ts
-// what the page says about freshness, from the view's sync and this page's own pause: the
+// what the page says about freshness, from the view's sync and this page's own pause and idle: the
 // header's sync status, the offline banner, row and section markers and the tables' states; pure
 import type { OpenRow, RowRefresh } from '../src/derive.ts'
 import type { Sync } from '../src/poller.ts'
 import { formatAge, formatCached, formatInterval, formatSince } from './format.ts'
 import { rowFreshness } from './state.ts'
 
-// paused is this page's own state; timeZone is named only by tests
-export type Reading = { paused: boolean, nowMs: number, timeZone?: string }
+// paused and idle are this page's own state, and pause wins when both hold; idle changes only
+// the header's status, never the banner or the row markers; timeZone is named only by tests
+export type Reading = { paused: boolean, idle?: boolean, nowMs: number, timeZone?: string }
 
 export type SyncTone = 'normal' | 'warn'
 
 export type SyncStatus = {
   text: string
   tone: SyncTone
-  // changes only when a cycle starts or ends, or the page pauses or resumes: the live region
+  // changes only when a cycle starts or ends, the page pauses or resumes, or it enters or leaves
+  // idle: the live region
   // announces on a change of key, never per patch
   key: string
 }
@@ -58,17 +60,19 @@ export const oldestFetch = (sync: Pick<Sync, 'sections'>): string | null => {
   return times.length === 0 ? null : times.reduce((oldest, at) => Date.parse(at) < Date.parse(oldest) ? at : oldest)
 }
 
-export const syncStatus = (sync: Sync, { paused, nowMs, timeZone }: Reading): SyncStatus => {
+export const syncStatus = (sync: Sync, { paused, idle = false, nowMs, timeZone }: Reading): SyncStatus => {
   const cycle = sync.cycle
-  const key = `${cycle?.id ?? 0}:${cycle?.state ?? 'none'}:${paused ? 'paused' : 'live'}`
+  const mode = paused ? 'paused' : idle ? 'idle' : 'live'
+  const key = `${cycle?.id ?? 0}:${cycle?.state ?? 'none'}:${mode}`
   if (cycle !== null && cycle.state === 'running') return { text: progress(sync), tone: 'normal', key }
-  const pausedLead = paused ? 'paused · ' : ''
+  const lead = mode === 'live' ? '' : `${mode} · `
   if (cycle !== null && failed(sync)) {
     const oldest = oldestFetch(sync)
     const cached = oldest === null ? 'nothing cached yet' : `cached ${formatCached(oldest, nowMs, timeZone)}`
-    return { text: `${pausedLead}${failureCause(cycle).word} · ${cached}`, tone: 'warn', key }
+    return { text: `${lead}${failureCause(cycle).word} · ${cached}`, tone: 'warn', key }
   }
   if (paused) return { text: `paused · ${updated(sync, nowMs)}`, tone: 'warn', key }
+  if (idle) return { text: `idle · ${updated(sync, nowMs)}`, tone: 'normal', key }
   return { text: `${updated(sync, nowMs)} · every ${formatInterval(sync.refreshSeconds)}`, tone: 'normal', key }
 }
 

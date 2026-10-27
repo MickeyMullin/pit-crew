@@ -23,6 +23,7 @@
     }
   ],
   "refreshSeconds": 300,
+  "idleMinutes": 90,
   "todayStartsAt": "local",
   "bots": [
     "dependabot",

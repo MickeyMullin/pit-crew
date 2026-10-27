@@ -1,7 +1,8 @@
 // src/clients.ts
 
-// what a page reports about itself: the Page Visibility API's state and its Pause control
-export type ClientState = { visible: boolean, paused: boolean }
+// what a page reports about itself: the Page Visibility API's state, its Pause control, and
+// whether its user has been inactive for idleMinutes
+export type ClientState = { visible: boolean, paused: boolean, idle: boolean }
 
 export type Change = {
   // whether this client counts as active after the change
@@ -24,7 +25,8 @@ export type Clients = {
   activeCount: () => number
 }
 
-export const isActive = (state: ClientState): boolean => state.visible && !state.paused
+// an idle page counts as paused: visible but not looking
+export const isActive = (state: ClientState): boolean => state.visible && !state.paused && !state.idle
 
 // in memory only: a client exists while its event stream is open
 export const createClients = (): Clients => {
@@ -45,7 +47,7 @@ export const createClients = (): Clients => {
     nextConnection += 1
     const existing = clients.get(id)
     const before = existing?.state ?? null
-    const next = { visible: state.visible, paused: state.paused }
+    const next = { visible: state.visible, paused: state.paused, idle: state.idle }
     if (existing === undefined) {
       clients.set(id, { state: next, connections: new Set([connection]) })
     } else {
@@ -59,7 +61,7 @@ export const createClients = (): Clients => {
     const existing = clients.get(id)
     if (existing === undefined) return null
     const before = existing.state
-    existing.state = { visible: state.visible, paused: state.paused }
+    existing.state = { visible: state.visible, paused: state.paused, idle: state.idle }
     return changeOf(before, existing.state)
   }
 

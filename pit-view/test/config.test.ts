@@ -43,6 +43,30 @@ test('allowedHosts holds bare host names only, lowercased and without repeats', 
   assert.throws(() => validateConfig(missing), /config\.allowedHosts must be a list/)
 })
 
+test('idleMinutes is 0 for never or a whole number of minutes from 5 to 1440, 90 by default', () => {
+  const base = defaultConfig()
+  assert.equal(base.idleMinutes, 90)
+  for (const good of [0, 5, 60, 90, 120, 1440]) assert.equal(validateConfig({ ...base, idleMinutes: good }).idleMinutes, good)
+  for (const bad of [-1, 1, 4, 1441, 90.5, '90', null, true, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(() => validateConfig({ ...base, idleMinutes: bad }), /config\.idleMinutes must be 0 \(never idle\) or a whole number of minutes from 5 to 1440/, String(bad))
+  }
+  const { idleMinutes: _idle, ...missing } = base
+  assert.throws(() => validateConfig(missing), /config\.idleMinutes/)
+})
+
+test('a stored file without idleMinutes takes the default', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const file = join(dir, 'config.json')
+    await writeFile(file, JSON.stringify({ repo: 'example-org/app', viewer: 'someone' }))
+    assert.equal((await readConfig(file)).idleMinutes, 90)
+    await writeFile(file, JSON.stringify({ repo: 'example-org/app', viewer: 'someone', idleMinutes: 0 }))
+    assert.equal((await readConfig(file)).idleMinutes, 0)
+  } finally {
+    await cleanup()
+  }
+})
+
 test('a missing file loads the defaults plus the gh login', async () => {
   const { dir, cleanup } = await tempDir()
   try {
