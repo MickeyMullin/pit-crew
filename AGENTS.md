@@ -18,9 +18,7 @@ built to prevent — it has already required one history rewrite.
 
 Files move between them **only** via scripts, never by hand:
 
-- `scripts/deploy-reviews.sh` — sources → `deploy/`, substituting `{{HOME}}` → `$HOME`.
-  Add `--install` to also install the command wrappers for every supported agent found
-  on the machine (`--install=<agent>` for a subset).
+- `scripts/deploy-reviews.sh` — sources → `deploy/`, substituting `{{HOME}}` → `$HOME`. Add `--install` to also install the command wrappers for every supported agent found on the machine (`--install=<agent>` for a subset), and to create `~/agents/prompts` and `~/agents/bin` as symlinks into `deploy/` when either is missing. It never replaces one that is already there: a symlink elsewhere, or a real file or directory, is reported with the commands that fix it, and the run exits 1 after doing everything else.
 - `scripts/sanitize.sh` — `deploy/` → sources, substituting `$HOME` → `{{HOME}}`.
 
 Both verify their own output and exit non-zero on failure. Both are idempotent. Before
@@ -28,8 +26,9 @@ overwriting anything, `deploy-reviews.sh` copies it into `backups/<timestamp>/` 
 prints the restore command; it also refuses to run when `deploy/` holds edits that never
 reached the sources, since rendering would discard them.
 
-Exit codes: `0` success, `1` error, `2` bad usage, `3` (`sanitize.sh --dry-run` only)
-pending changes exist.
+Exit codes: `0` success, `1` error, `2` bad usage, `3` (`sanitize.sh --dry-run` only) pending changes exist. For `deploy-reviews.sh --install`, `1` also covers an install left incomplete by an `~/agents` link it would not replace.
+
+`scripts/test-deploy-reviews.sh` tests `deploy-reviews.sh` against a throwaway home, touching nothing real; run it after changing that script.
 
 ## Pit View (`pit-view/`)
 
@@ -52,6 +51,9 @@ The one rule covers it too. No real home path may be committed under `pit-view/`
 | Preserve a change already made in `deploy/` | Run `scripts/sanitize.sh`, then show the user `git diff` |
 | Check whether the trees have drifted | Run `scripts/sanitize.sh --dry-run` |
 | Rebuild the deployed copy | Run `scripts/deploy-reviews.sh` |
+| Set up a fresh machine | Follow README.md's "Setting up a machine": `scripts/deploy-reviews.sh --install` renders, installs, and links `~/agents/prompts` and `~/agents/bin` |
+| `--install` exited 1 over an `~/agents` link | Show the user what it printed and let them run the fix. Never move, delete, or repoint an existing link, file, or directory there yourself: it may be another checkout's render or someone's only copy of their work |
+| Change `scripts/deploy-reviews.sh` | Edit it, then run `scripts/test-deploy-reviews.sh` and `shellcheck scripts/deploy-reviews.sh` |
 | Change Pit View | Read `pit-view/DESIGN.md` first, edit in `pit-view/`, then run `pnpm test` and `pnpm check` from `pit-view/`. Neither script is involved, and the `~/app` deployment is the owner's step (`pit-view/deploy/README.md`) |
 | Commit work | Run `git diff -- prompts commands bin` and confirm no real path appears, then commit |
 
@@ -77,7 +79,8 @@ The one rule covers it too. No real home path may be committed under `pit-view/`
 ## Before you report a change as done
 
 - `scripts/deploy-reviews.sh` exits 0, or you ran `scripts/sanitize.sh` and it exits 0.
-- `git grep -I "$HOME" -- prompts commands bin` returns nothing.
+- `git grep -I "$HOME" -- prompts commands bin scripts` returns nothing.
+- For a change to `scripts/deploy-reviews.sh`, also: `scripts/test-deploy-reviews.sh` passes.
 - For a change under `pit-view/`, also: `pnpm test` and `pnpm check` pass in `pit-view/`, and `grep -rI --exclude-dir=node_modules "$HOME" pit-view` returns nothing.
 - You showed the user the diff rather than committing silently.
 

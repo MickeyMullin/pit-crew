@@ -39,6 +39,16 @@
 # outgoing deploy/ tree and, with --install, the commands already installed.
 # backups/ is untracked and local; see "Undo" at the end of the run output.
 #
+# The installed commands find their prompts through ~/agents/prompts, and the
+# prompts find their executables through ~/agents/bin; both must be symlinks into
+# this render. --install creates either one when it is missing. It never replaces
+# anything already there: a symlink pointing elsewhere, or a real file or
+# directory in the way, is reported with the command that fixes it, and the run
+# exits 1 once everything else is done. Without --install it only reports.
+#
+# Exit codes: 0 success; 1 error, including an install left incomplete by a link
+# it would not replace; 2 bad usage.
+#
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -52,7 +62,7 @@ for arg in "$@"; do
     --install) install=1 ;;
     --install=*) install=1; install_agents="${arg#--install=}" ;;
     --force)   force=1 ;;
-    -h|--help) sed -n '2,44p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,50p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "error: unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -248,7 +258,7 @@ render_tree() {
   local root="$1" pattern="${2:-*.md}" f rel
   [[ -d "$repo_root/$root" ]] || return 0
   while IFS= read -r f; do
-    rel="${f#$repo_root/}"
+    rel="${f#"$repo_root"/}"
     mkdir -p "$stage_dir/$(dirname "$rel")"
     sed "s|{{HOME}}|$home_substitute|g" "$f" > "$stage_dir/$rel"
     [[ -x "$f" ]] && chmod 755 "$stage_dir/$rel"
@@ -288,7 +298,7 @@ fi
 manifest="$stage_dir/.manifest"
 : > "$manifest"
 while IFS= read -r f; do
-  rel="${f#$stage_dir/}"
+  rel="${f#"$stage_dir"/}"
   echo "$(hash_file "$f") $rel" >> "$manifest"
 done < <(find "$stage_dir" -type f ! -name .manifest | sort)
 
@@ -380,6 +390,98 @@ else
   done
 fi
 
+# ~/agents/prompts and ~/agents/bin are how anything finds this render: the
+# installed commands name $home_substitute/agents/prompts/... by absolute path,
+# and the prompts call $home_substitute/agents/bin/... . Each must be a symlink
+# into deploy/. With --install a missing one is created, since without it the
+# commands just installed cannot find their prompts. Nothing already there is
+# ever replaced: a symlink elsewhere may be another checkout's render, and a real
+# directory may hold the only copy of someone's work. Those are reported with the
+# command that fixes each, and fail the run once everything else is done.
+# Without --install the same states are reported and nothing is changed.
+agents_dir="$home_substitute/agents"
+link_problems=0
+links_created=""
+
+# The physical path of a directory, or nothing if it does not resolve to one.
+# Comparing these rather than link text means a link written through another
+# route to the same directory -- /var vs /private/var, say -- still counts.
+resolve_dir() {
+  (CDPATH='' cd -P "$1" 2>/dev/null && pwd -P) || true
+}
+
+# report <prefix> <line>... -- first line after the prefix, the rest aligned
+# under it, so a Note and an error carry identical wording in either mode.
+report() {
+  local prefix="$1" pad line
+  pad="$(printf '%*s' "${#prefix}" '')"
+  shift
+  echo "$prefix $1"
+  shift
+  for line in "$@"; do echo "$pad $line"; done
+}
+
+# Problems are errors on stderr with --install, where they fail the run, and
+# Notes on stdout without it, where nothing was expected to be linked yet.
+if [[ "$install" -eq 1 ]]; then
+  prefix="error:" fd=2
+else
+  prefix="Note:" fd=1
+fi
+
+for d in prompts bin; do
+  link="$agents_dir/$d"
+  want="$deploy_dir/$d"
+  [[ -d "$want" ]] || continue   # nothing rendered for it, so nothing to link
+
+  if [[ -L "$link" ]]; then
+    # Already this render's: nothing to do, and nothing worth saying.
+    if [[ "$(resolve_dir "$link")" == "$(resolve_dir "$want")" ]]; then
+      continue
+    fi
+    points_at="$(readlink "$link")"
+    if [[ -e "$link" ]]; then
+      what="$link is a symlink to $points_at, not to this render."
+    else
+      what="$link is a symlink to $points_at, which does not exist."
+    fi
+    echo >&"$fd"
+    report "$prefix" "$what" \
+      "It may belong to another checkout or render, so it was left alone." \
+      "To point it at this render instead:" \
+      "  ln -sfn $(printf '%q' "$want") $(printf '%q' "$link")" >&"$fd"
+    link_problems=$((link_problems + 1))
+  elif [[ -e "$link" ]]; then
+    # ln -sfn here would not replace it: onto a real directory it creates a link
+    # inside it. And moving or deleting it could lose work, so that is the user's.
+    kind="file"
+    if [[ -d "$link" ]]; then kind="directory"; fi
+    echo >&"$fd"
+    report "$prefix" "$link is a real $kind, not a symlink to this render." \
+      "It was left untouched. Move it aside yourself, keeping it until you are" \
+      "sure nothing in it is needed, then link it:" \
+      "  mv $(printf '%q' "$link") $(printf '%q' "$link.bak-$stamp")" \
+      "  ln -s $(printf '%q' "$want") $(printf '%q' "$link")" >&"$fd"
+    link_problems=$((link_problems + 1))
+  elif [[ "$install" -eq 0 ]]; then
+    echo
+    report "Note:" "$link does not exist; --install links it to $want."
+  elif [[ ! -d "$agents_dir" ]] && { [[ -e "$agents_dir" ]] || [[ -L "$agents_dir" ]]; }; then
+    echo >&2
+    report "error:" "$agents_dir exists but is not a directory, so $d cannot be linked there." \
+      "It was left untouched. Move it aside yourself, then rerun with --install." >&2
+    link_problems=$((link_problems + 1))
+  elif mkdir -p "$agents_dir" && ln -s "$want" "$link"; then
+    [[ -n "$links_created" ]] || echo
+    echo "linked:     $link -> $want"
+    links_created="$links_created$link"$'\n'
+  else
+    echo >&2
+    report "error:" "could not create $link -> $want (see above)." >&2
+    link_problems=$((link_problems + 1))
+  fi
+done
+
 if [[ "$backed_up" -gt 0 ]]; then
   echo
   echo "Undo: restore what this run replaced with"
@@ -389,11 +491,24 @@ if [[ "$backed_up" -gt 0 ]]; then
     echo "  cp -R $backup_dir/$a-commands/. $(agent_field "$a" 3)/"
   done
 fi
-
-for d in prompts bin; do
-  if [[ ! -L "$home_substitute/agents/$d" ]]; then
+if [[ -n "$links_created" ]]; then
+  if [[ "$backed_up" -gt 0 ]]; then
+    echo "and remove the link(s) this run created with"
+  else
     echo
-    echo "Note: $home_substitute/agents/$d is not a symlink into this render."
-    echo "  ln -sfn $deploy_dir/$d $home_substitute/agents/$d"
+    echo "Undo: remove the link(s) this run created with"
   fi
-done
+  while IFS= read -r l; do
+    if [[ -n "$l" ]]; then echo "  rm $(printf '%q' "$l")"; fi
+  done <<< "$links_created"
+fi
+
+# Without --install a problem is only a Note: nothing was asked to be linked.
+if [[ "$install" -eq 1 && "$link_problems" -gt 0 ]]; then
+  echo >&2
+  echo "error: $link_problems link(s) under $agents_dir need fixing by hand (see above)." >&2
+  echo "       Everything else was rendered and installed, but the install is NOT" >&2
+  echo "       complete: the commands cannot find what they need until these point" >&2
+  echo "       into this render. Fix them, then rerun with --install." >&2
+  exit 1
+fi

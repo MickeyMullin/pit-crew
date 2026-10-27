@@ -17,7 +17,7 @@ For actual usage, the local machine's LLM/agents refer to a deployed copy of the
 | `commands/skills/` | The same commands as `SKILL.md` skills, for Hermes and Codex. Both read the same format, so they share one tree. See [commands/README.md](commands/README.md). |
 | `bin/` | Executables the prompts call, rendered like the prompts. Today: `tandem-secondary`, which starts a tandem-mode secondary reviewer headless, read-only and offline, and installs its draft only if it validates. |
 | `pit-view/` | Pit View, a local dashboard for the pull requests in one GitHub repository. A separate Node app, outside the deploy trees; see "Pit View" below. |
-| `scripts/` | The two directions. `deploy-reviews.sh` renders sources into a runnable copy; `sanitize.sh` brings tested edits back. |
+| `scripts/` | The two directions. `deploy-reviews.sh` renders sources into a runnable copy; `sanitize.sh` brings tested edits back. `test-deploy-reviews.sh` tests the first against a throwaway home. |
 | `TODO.md` | Open decisions not yet made. |
 | `LICENSE` | MIT. |
 | `deploy/` | Generated, gitignored. The rendered output — the only place real home paths exist. |
@@ -316,23 +316,18 @@ for and which it skipped. Skipping an agent you do not have is the expected outc
 a failure. To install for specific agents only, use `--install=claude`, or any
 comma-separated subset of `claude,hermes,codex`.
 
-Expected: the run ends with `N file(s) rendered, no placeholders remaining.` and one
-`installing <agent> into <path>` block per agent. If it exits non-zero, stop and read the
-error — every failure mode it has is described in the message it prints.
+Expected: the run exits 0 after printing `N file(s) rendered, no placeholders remaining.`, one `installing <agent> into <path>` block per agent, and, on a fresh machine, a `linked:` line for each of `~/agents/prompts` and `~/agents/bin` (see step 2). If it exits non-zero, stop and read the error — every failure mode it has is described in the message it prints.
 
-**2. Point `agents/prompts` at the rendered copy.**
+**2. Check the `agents` links, and create the output directories.**
 
 ```bash
+ls -l "$HOME/agents/prompts" "$HOME/agents/bin"
 mkdir -p "$HOME/agents/output" "$HOME/agents/worktrees"
-ln -sfn "$PWD/deploy/prompts" "$HOME/agents/prompts"
 ```
 
-The command wrappers all reference `$HOME/agents/prompts/...` by absolute path, so this
-symlink is what makes them resolve. The deploy script prints this exact line with real
-paths filled in but never runs it, because it writes outside the repo. `agents/output/`
-is where the review prompts write their reports before posting anything, and
-`agents/worktrees/` is where they check out a branch you named rather than one you have
-checked out — see "Reviewing a branch you don't have checked out" below.
+The command wrappers all reference `$HOME/agents/prompts/...` by absolute path, and the prompts call `$HOME/agents/bin/...`, so both must be symlinks into this checkout's `deploy/`. `--install` creates either one when it is missing, creating `~/agents` first if needed, and prints a `linked:` line for each link it makes plus the `rm` that undoes it. It never replaces anything already there. If one is a symlink to somewhere else (another checkout, an old render, or a path that no longer exists), or a real file or directory, the run says which, leaves it alone, prints the exact commands that fix it, finishes everything else, and exits 1 so it cannot pass for a complete install. Run what it printed (for a real directory, that means moving it aside yourself first), then run `scripts/deploy-reviews.sh --install` again. Without `--install` the script only reports the state of the links and changes nothing.
+
+Expected: both `ls -l` lines end in `-> <this checkout>/deploy/prompts` and `-> <this checkout>/deploy/bin`. `agents/output/` is where the review prompts write their reports before posting anything, and `agents/worktrees/` is where they check out a branch you named rather than one you have checked out — see "Reviewing a branch you don't have checked out" below.
 
 **3. Confirm the install for your agent.** Each agent reads its commands from a different
 place, and none of them pick up a change until the file is in that place.
@@ -431,6 +426,12 @@ cp -R backups/<timestamp>/claude-commands/. ~/.claude/commands/
 cp -R backups/<timestamp>/codex-commands/. ~/.codex/skills/
 ```
 
+A link the run created under `~/agents` replaced nothing, so it has no backup; the undo lines end with the `rm` that removes it instead:
+
+```bash
+rm ~/agents/prompts
+```
+
 `backups/` is gitignored and grows on every run; prune it whenever you like. The
 committed sources are not backed up here — git already covers those.
 
@@ -467,6 +468,8 @@ These hold for anyone working in this repo, human or agent:
 | Want the PR dashboard | Open http://127.0.0.1:4791 (the deployed app), or `pnpm dev` in `pit-view/` for the development instance on 4792 (`pnpm install` once first) |
 | Need to undo a deploy | `cp -R backups/<timestamp>/deploy/. deploy/` |
 | Deploy refused: unsanitized edits | `scripts/sanitize.sh` to keep them, `--force` to discard |
+| `--install` exited 1 over an `~/agents` link | Run the commands it printed for that link, then `scripts/deploy-reviews.sh --install` again |
+| Changed `scripts/deploy-reviews.sh` | `scripts/test-deploy-reviews.sh` |
 
 Both scripts are idempotent and safe to run when nothing has changed; they report
 `0 changed` and exit successfully.
