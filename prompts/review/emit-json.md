@@ -1,4 +1,4 @@
-Machine-readable output: a review invoked with `--emit-json=<run-dir>` records its progress and its outcome as JSON files in `<run-dir>`, for the program that started the run and is watching it. This file is loaded by `review-pr.md`, `review-stack.md`, and `review-dependabot.md` when the invocation carries the flag, and by `review-dependabot-sweep.md` once that prompt references it. It adds two files and changes nothing else: everything in the calling prompt applies as written, and the human-readable report is written, printed, and posted, or not posted, exactly as it would be without the flag.
+Machine-readable output: a review invoked with `--emit-json=<run-dir>` records its progress and its outcome as JSON files in `<run-dir>`, for the program that started the run and is watching it. This file is loaded by `review-pr.md`, `review-stack.md`, `review-dependabot.md`, and `review-dependabot-sweep.md` when the invocation carries the flag. It adds two files and changes nothing else: everything in the calling prompt applies as written, and the human-readable report is written, printed, and posted, or not posted, exactly as it would be without the flag.
 
 The flag:
 
@@ -86,7 +86,7 @@ Response, `<run-dir>/result.json`:
 
 The sweep's response, `pit-crew/sweep-result@1`:
 
-- This schema applies only to `review-dependabot-sweep.md`, and only once that prompt references this file; it says which of the steps above it records. The sweep never passes `--emit-json` to its reviewers: the sweep alone writes to `<run-dir>`.
+- This schema applies only to `review-dependabot-sweep.md`, which loads this file when its invocation carries the flag. That prompt says what each of the five steps above covers in a sweep, and how each field below is filled; its step meanings replace the single-review ones above, so a sweep records `consolidate` for its synthesis across PRs rather than skipping it. The sweep never passes `--emit-json` to its reviewers: the sweep alone writes to `<run-dir>`.
 - With the flag, the sweep still writes its Markdown summary and prints it, and additionally writes the same content to `<run-dir>/result.json`, as its last act, under the rules above. Every field is always present, with null where it does not apply:
   - `schema`: `"pit-crew/sweep-result@1"`.
   - `command`: `"review-dependabot-sweep"`.
