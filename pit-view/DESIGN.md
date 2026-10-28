@@ -78,8 +78,10 @@ Pit View lives in `pit-crew/pit-view/` because it uses pit-crew's terminology an
 ### Stack
 
 - Node 26 (verified: v26.8.1 runs `.ts` files directly through built-in type stripping, `node:sqlite` works without flags, and `stripTypeScriptTypes` from `node:module` is present). Write TypeScript that type stripping accepts: no enums, no namespaces, no parameter properties; use `import type` for types; import local modules with their `.ts` extension.
-- pnpm is the package manager; Node is the runtime. pnpm runs the scripts and installs the one dev dependency; nothing pnpm installs is needed to run the app.
-- Zero runtime dependencies. HTTP via `node:http`, storage via `node:sqlite`, child processes via `node:child_process`, tests via `node:test` and `node:assert`. A dev-only `typescript` provides `tsc --noEmit` for `pnpm check`; it is not required to run.
+- pnpm is the package manager; Node is the runtime. pnpm runs the scripts and installs the dependencies listed below.
+- Built-ins first. HTTP via `node:http`, storage via `node:sqlite`, child processes via `node:child_process`, tests via `node:test` and `node:assert`. A runtime dependency is fine when it does a job the built-ins can't; each one is listed here with its reason. A dev-only `typescript` provides `tsc --noEmit` for `pnpm check`; it is not required to run.
+- Runtime dependencies:
+  - `marked`, to render Markdown (review reports, for a start) as HTML. Rendering happens on the server, so the browser never loads it, and follows the two defenses in dispatch's `client/src/markdown.ts`: a custom renderer that escapes all raw HTML, block and inline, and drops any link or image URL whose scheme is not http, https or mailto (decoding entities and stripping control characters before reading the scheme; an unsafe link keeps its text), with links opening in a new tab with `rel="noopener noreferrer nofollow"`; and display only inside a sandboxed `<iframe srcdoc>` whose document carries no script and a no-referrer policy, with the iframe granted no privileges. Report text quotes other people's PRs, so it is treated as hostile input.
 - UI: static HTML, CSS and TypeScript ES modules served by the same server. The server serves each `public/*.ts` file as JavaScript by passing it through `stripTypeScriptTypes`, cached in memory by modification time, so there is still no build step. The UI is small and table-shaped; a framework buys little and adds a toolchain.
 - Fonts: Inter and JetBrains Mono from Google Fonts, falling back to `system-ui` and `ui-monospace` when offline.
 
@@ -312,7 +314,7 @@ Grouping, filtering and sorting are done in the UI from these rows; the server o
 
 These are the owner's conventions, adapted to this app. They apply to every file under `pit-view/`, tests and fixtures included.
 
-- TypeScript everywhere (`src/`, `public/`, `test/`), ES modules only (`"type": "module"`), written for Node's type stripping as described in section 3. Runtime is Node; pnpm is only the package manager. Zero runtime dependencies stays the rule: new needs are met from Node's built-ins or not at all.
+- TypeScript everywhere (`src/`, `public/`, `test/`), ES modules only (`"type": "module"`), written for Node's type stripping as described in section 3. Runtime is Node; pnpm is only the package manager.
 - Single-quoted strings; template literals only when interpolating. JSON files keep JSON's double quotes.
 - No end-of-line semicolons. A line that would otherwise start with `(`, `[` or a template literal starts with `;` instead.
 - Single-line comments begin with a lowercase letter, except acronyms and proper nouns (`// gh returns 401 when the token expired`, `// SQLite keeps one row per PR`).
@@ -787,7 +789,7 @@ v3 starts after v1 has been in daily use. Each item below is a decision on direc
 
 ### Notifications
 
-- OS notifications on state transitions, starting with macOS, through the built-in `osascript` `display notification` so the zero-runtime-dependency rule holds. Other platforms follow later.
+- OS notifications on state transitions, starting with macOS, through the built-in `osascript` `display notification`, so no dependency is needed. Other platforms follow later.
 - A transition is a difference between a PR's previous and new cached state, so each fires once, and nothing fires for the first load, an empty cache, or rows marked stale. Candidate transitions: changes requested on yours, yours ready to merge, review requested of you, CI failing on yours, and, with phase 2, a review session finished or waiting for input.
 - Configured by the `notifications` key (`{ "enabled": false, "kinds": [...] }`), off by default, with a Notifications section in Settings. What clicking a notification does on macOS is checked at the start of the milestone.
 
