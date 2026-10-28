@@ -1,7 +1,7 @@
 // public/cells.ts
 // the small pieces rows are made of: avatars, chips, reviewer pips and icons
 import type { Issue, IssueKind, MergeStateKind, PersonView, Reviewer, ReviewerState, Ticket } from '../src/derive.ts'
-import { h, svg } from './dom.ts'
+import { h, newTab, svg } from './dom.ts'
 import type { Shape } from './dom.ts'
 
 export type Tone = 'blue' | 'red' | 'amber' | 'green' | 'purple' | 'gray' | 'none'
@@ -45,7 +45,7 @@ const issueTones: Record<IssueKind, Tone> = {
 // a failing check links to its job run, with the job name as its tooltip
 export const issueChip = (issue: Issue): HTMLElement => {
   if (issue.url === undefined) return chip(issue.label, issueTones[issue.kind])
-  return h('a', { class: `chip chip-link tone-${issueTones[issue.kind]}`, href: issue.url, title: issue.tip ?? null },
+  return h('a', { ...newTab, class: `chip chip-link tone-${issueTones[issue.kind]}`, href: issue.url, title: issue.tip ?? null },
     issue.label, svg(icons.external, { size: 10, stroke: '2.6' }))
 }
 
@@ -86,5 +86,5 @@ export const pip = (reviewer: Reviewer): HTMLSpanElement => {
 export const ticketChip = (ticket: Ticket): HTMLElement => {
   const tip = ticket.system === 'none' ? 'Description carries the no-ticket marker' : `${ticket.system} ${ticket.label}`
   if (ticket.url === undefined) return h('span', { class: 'ticket', title: tip }, ticket.label)
-  return h('a', { class: 'ticket', href: ticket.url, title: `Open ${tip}` }, ticket.label)
+  return h('a', { ...newTab, class: 'ticket', href: ticket.url, title: `Open ${tip}` }, ticket.label)
 }

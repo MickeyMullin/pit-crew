@@ -115,3 +115,16 @@ test('public modules import only each other once types are stripped', async () =
     for (const source of sources) assert.match(source, /^\.\/[a-z-]+\.ts$/, `${name} imports ${source}`)
   }
 })
+
+// every link the page builds to GitHub or a ticket system opens in a new tab; only in-page and
+// in-app links (an href starting with # or /) may open in place
+test('every link built in public/ opens in a new tab unless it stays in the app', async () => {
+  const inPlace: string[] = []
+  for (const name of (await publicFiles()).filter((file) => file.endsWith('.ts'))) {
+    for (const [attrs] of (await read(name)).matchAll(/h\('a', \{[^}]*\}/g)) {
+      if (attrs.includes('...newTab') || /href: [`'][#/]/.test(attrs)) continue
+      inPlace.push(`${name}: ${attrs}`)
+    }
+  }
+  assert.deepEqual(inPlace, [])
+})

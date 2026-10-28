@@ -5,7 +5,7 @@ import type { ClosedRange, ClosedRow, MineRow, OtherRow } from '../src/derive.ts
 import type { View } from '../src/poller.ts'
 import { avatar, icons } from './cells.ts'
 import { closedSummary, mondayNote, rangeButtons } from './closed.ts'
-import { byId, h, setText, svg, sync } from './dom.ts'
+import { byId, h, newTab, setText, svg, sync } from './dom.ts'
 import type { Part } from './dom.ts'
 import { renderFilterBar } from './filterbar.ts'
 import type { FilterBarActions, SelectModel } from './filterbar.ts'
@@ -171,9 +171,9 @@ const renderBanner = (frame: Frame): void => {
       sig: JSON.stringify([who, age, row.url, row.title, phrase]),
       build: () => h('li', { class: 'banner-entry' },
         h('span', { class: 'banner-text' },
-          h('span', { class: 'banner-lead' }, `${who} requested changes on `, h('a', { href: row.url }, `#${row.number}`), age === null ? '' : ` · ${age} ago`),
+          h('span', { class: 'banner-lead' }, `${who} requested changes on `, h('a', { ...newTab, href: row.url }, `#${row.number}`), age === null ? '' : ` · ${age} ago`),
           h('span', { class: 'banner-detail' }, `${row.title} · ${phrase}`)),
-        h('a', { class: 'button button-danger', href: row.url }, 'Open review')),
+        h('a', { ...newTab, class: 'button button-danger', href: row.url }, 'Open review')),
     }
   })
   let banner = slot.firstElementChild

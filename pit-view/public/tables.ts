@@ -4,7 +4,7 @@ import type { ClosedRange, ClosedRow, MineRow, OpenRow, OtherRow } from '../src/
 import type { View } from '../src/poller.ts'
 import { avatar, chip, icons, issueChip, mergeChip, pip, ticketChip } from './cells.ts'
 import { closedTally, hasTickets } from './closed.ts'
-import { h, svg, sync } from './dom.ts'
+import { h, newTab, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import { closedSortValues, mineSortValues, othersSortValues } from './filters.ts'
 import type { Sort, SortValue } from './filters.ts'
@@ -66,7 +66,7 @@ const refreshColumn = <R extends OpenRow>(): Column<R> => ({
 
 const prCell = <R extends { number: number, url: string }>(hover: boolean): Column<R>['cell'] => (row) => ({
   sig: [row.number, row.url, hover],
-  build: () => [h('a', { class: 'pr-link mono', href: row.url, 'data-focus': 'pr', 'data-hover': hover ? 'pr' : null }, `#${row.number}`)],
+  build: () => [h('a', { ...newTab, class: 'pr-link mono', href: row.url, 'data-focus': 'pr', 'data-hover': hover ? 'pr' : null }, `#${row.number}`)],
 })
 
 const titleCell = (row: OpenRow): { sig: unknown, build: () => Node[] } => ({

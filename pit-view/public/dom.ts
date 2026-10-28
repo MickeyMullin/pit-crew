@@ -52,6 +52,9 @@ export const svg = (shapes: readonly Shape[], { size = 16, stroke = '2', fill = 
   return icon
 }
 
+// every GitHub or ticket link opens in a new tab, so the dashboard's own tab never navigates away
+export const newTab = { target: '_blank', rel: 'noopener' } as const
+
 // a part of a parent: rebuilt only when its signature changes
 export type Part = { key: string, sig: string, build: () => Element }
 
