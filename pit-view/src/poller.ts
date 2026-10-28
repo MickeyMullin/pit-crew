@@ -234,7 +234,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       reports: reportMap,
       freshness: (number) => freshness.get(number) ?? { state: 'current', fetchedAt: iso(clock.now()) },
       refresh: (number) => rowRefreshes.get(prKey(settings.repo, number)) ?? null,
-      agent: (pr) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number)),
+      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack),
     })
     const rows = new Map<number, OpenRow>()
     for (const group of [...view.mine.groups, ...view.others.groups]) {

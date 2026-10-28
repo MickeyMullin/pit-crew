@@ -7,6 +7,7 @@ import type { Cache, Run, RunChanges, RunStatus } from './cache.ts'
 import { expandHome, tildePath } from './config.ts'
 import type { Clock, Config, RunnerName } from './config.ts'
 import { isMine, viewerReview } from './derive.ts'
+import type { Stack } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
 import type { Gh, RawOpenPr, Runner } from './github.ts'
 import type { Timers } from './poller.ts'
@@ -95,9 +96,22 @@ const checkStatus = (value: Record<string, unknown>): void => {
   if (value.status === 'failed') check(typeof value.error === 'string' && value.error !== '', 'a failed result must carry its error')
 }
 
+// result.json is written by an agent that read other people's PR text, and the page links to
+// posted.url, so the URL must be an absolute http or https one, with nothing a browser would
+// strip or decode into another scheme: no whitespace or control characters, no relative form
+export const isHttpUrl = (value: unknown): value is string => {
+  if (typeof value !== 'string' || value === '' || value !== value.trim() || /[\u0000-\u0020\u007f-\u009f]/.test(value)) return false
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' || url.protocol === 'http:'
+  } catch {
+    return false
+  }
+}
+
 const checkPosted = (posted: unknown): void => {
   if (posted === null) return
-  check(isObject(posted) && ['approve', 'requestChanges', 'comment'].includes(posted.form as string) && typeof posted.url === 'string', 'posted must be null or { form, url }')
+  check(isObject(posted) && ['approve', 'requestChanges', 'comment'].includes(posted.form as string) && isHttpUrl(posted.url), 'posted must be null or { form, url } with an http or https url')
 }
 
 const checkReview = (value: Record<string, unknown>): void => {
@@ -165,6 +179,25 @@ export const parseStepEvent = (line: string): StepEvent | null => {
   if (!stepNames.includes(value.step as StepName) || !stepStates.includes(value.state as StepState)) return null
   return { at: value.at, step: value.step as StepName, state: value.state as StepState, note: typeof value.note === 'string' ? value.note : null }
 }
+
+// the five fixed step slots of a run, in order; the latest event per step wins, so a step the
+// command records again replaces its earlier line
+export type StepSlotState = 'pending' | StepState
+export type StepSlot = { step: StepName, state: StepSlotState, at: string | null, note: string | null }
+
+export const emptySteps = (): StepSlot[] => stepNames.map((step) => ({ step, state: 'pending', at: null, note: null }))
+
+export const foldSteps = (steps: readonly StepSlot[], events: readonly StepEvent[]): StepSlot[] => {
+  const next = steps.map((slot) => ({ ...slot }))
+  for (const event of events) {
+    const slot = next.find((candidate) => candidate.step === event.step)
+    if (slot !== undefined) Object.assign(slot, { state: event.state, at: event.at, note: event.note })
+  }
+  return next
+}
+
+// a run never recorded as having stepped reads as five pending slots, never as an error
+export const stepsOf = (run: Pick<Run, 'steps'>): StepSlot[] => run.steps ?? emptySteps()
 
 // the report a done result names: the review's report, or the sweep's summary
 export const reportPath = (result: RunResultJson): string | null =>
@@ -291,6 +324,84 @@ export const defaultRun = (pr: RawOpenPr, config: Config): DefaultRun => {
   }
 }
 
+// the starts the drawer offers (section 8 of DESIGN.md, Drawer): the row's default run, the same
+// review in tandem (Claude only), and a review of the whole stack. Fix mode is P2.6
+
+export type StartKind = 'default' | 'tandem' | 'stack'
+export const startKinds: readonly StartKind[] = ['default', 'tandem', 'stack']
+
+// what a start does on GitHub, for the confirmation: the kind says how to style it, the text is
+// ready to show
+export type PostsKind = 'review' | 'nothing' | 'autoApprove' | 'offer'
+export type StartPosts = { kind: PostsKind, text: string }
+
+export type StartOption = {
+  kind: StartKind
+  // the run's own label, as the Agent cell shows it while it runs: Re-review, Tandem review, Review stack
+  label: string
+  // the drawer's Start button
+  button: string
+  command: string
+  // without --emit-json, which the launcher adds
+  args: string[]
+  // the runners this start works with; tandem is Claude only
+  runners: RunnerName[]
+  posts: StartPosts
+  // why it cannot start right now, from what the server knows without asking GitHub; null otherwise
+  unavailable: string | null
+}
+
+export const isTandemRun = (args: readonly string[]): boolean => args.includes('--tandem')
+
+// null when the kind is offered for this PR, otherwise why it is not
+export const notOffered = (kind: StartKind, pr: RawOpenPr, config: Config, stack: Stack | null): string | null => {
+  if (kind === 'tandem' && defaultRun(pr, config).command !== 'review-pr') return `Review in tandem is not offered for #${pr.number}: review-dependabot has no tandem mode`
+  if (kind === 'stack' && stack === null) return `Review stack is not offered for #${pr.number}: it is not part of a stack`
+  return null
+}
+
+const postsFor = (command: string, args: readonly string[], viewer: string): StartPosts => {
+  if (command === 'review-stack') {
+    return { kind: 'offer', text: 'Posts nothing; writes the report only. It stops to offer posting it on the top PR, and you answer in the session.' }
+  }
+  if (command === 'review-dependabot') {
+    return { kind: 'autoApprove', text: `Posts its report to the PR as @${viewer} and may approve the PR automatically.` }
+  }
+  if (args.includes('--no-post')) return { kind: 'nothing', text: 'Posts nothing; writes the report only.' }
+  return { kind: 'review', text: `Posts its report to the PR as @${viewer}: an approval, a request for changes, or a comment, per the findings.` }
+}
+
+const buttons: Readonly<Record<RunKind, string>> = { review: 'Review PR', reReview: 'Re-review PR', selfReview: 'Self-review' }
+
+// the starts a PR offers now; busy is whether a run for it is in flight
+export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null, busy: boolean): StartOption[] => {
+  const plan = defaultRun(pr, config)
+  const viewer = config.viewer
+  const unavailable = busy
+    ? `a run for #${pr.number} is already in flight`
+    : config.cloneDir === undefined ? `set cloneDir in the config to your local clone of ${config.repo} before starting a run` : null
+  const options: StartOption[] = [{
+    kind: 'default', label: plan.label, button: buttons[plan.kind], command: plan.command, args: plan.args,
+    runners: ['claude', 'codex'], posts: postsFor(plan.command, plan.args, viewer), unavailable,
+  }]
+  if (notOffered('tandem', pr, config, stack) === null) {
+    // --tandem goes before --no-post; the review-pr prompt reads either flag wherever it stands
+    const args = [String(pr.number), '--tandem', ...plan.args.slice(1)]
+    const label = plan.kind === 'selfReview' ? 'Tandem self-review' : plan.kind === 'reReview' ? 'Tandem re-review' : 'Tandem review'
+    options.push({
+      kind: 'tandem', label, button: `${buttons[plan.kind].replace(/ PR$/, '')} in tandem`, command: 'review-pr', args,
+      runners: ['claude'], posts: postsFor('review-pr', args, viewer), unavailable,
+    })
+  }
+  if (notOffered('stack', pr, config, stack) === null) {
+    options.push({
+      kind: 'stack', label: 'Review stack', button: 'Review stack', command: 'review-stack', args: [String(pr.number)],
+      runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), unavailable,
+    })
+  }
+  return options
+}
+
 // the Agent cell on a row (section 8 of DESIGN.md)
 
 export type AgentAction = { kind: RunKind, label: string, command: string, args: string[], runner: RunnerName }
@@ -312,6 +423,8 @@ export type AgentCell = {
   label: string
   // what Start does now: the row's default run with the configured runner
   action: AgentAction
+  // what the drawer's Start buttons can start now; the default is the first
+  starts: StartOption[]
   // own PRs: the self-review report's time; others': the viewer's latest review
   lastReviewAt: string | null
   // the latest run, null fields when there is none
@@ -323,6 +436,10 @@ export type AgentCell = {
   startedAt: string | null
   lastStepAt: string | null
   step: { name: string, state: string } | null
+  // the latest run's five step slots in order; all pending with no run, or one that never stepped
+  steps: StepSlot[]
+  // whether the latest run was a tandem review
+  tandem: boolean
   finishedAt: string | null
   // the done text: Changes requested, Approved, Clean · mark ready?, Failed · no result, and so on
   text: string | null
@@ -383,21 +500,23 @@ const agentResult = (result: RunResultJson | null): AgentResult | null => {
 const reviewedSha = (run: Run): string | null =>
   run.result?.schema === 'pit-crew/review-result@1' ? run.result.reviewed?.sha ?? null : null
 
-export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, report: ReportInfo | undefined): AgentCell => {
+export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null): AgentCell => {
   const mine = isMine(pr, config)
   const plan = defaultRun(pr, config)
   const action: AgentAction = { ...plan, runner: config.agent.runner }
   const lastReviewAt = mine ? report?.at ?? null : viewerReview(pr, config)?.submittedAt ?? null
   const idle: AgentCell = {
-    state: 'idle', label: plan.label, action, lastReviewAt,
+    state: 'idle', label: plan.label, action, starts: startOptions(pr, config, stack, run?.status === 'running'), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
+    steps: emptySteps(), tandem: false,
     finishedAt: null, text: null, result: null, question: null, note: null, resume: null, costUsd: null,
   }
   if (run === undefined) return idle
   const sha = reviewedSha(run)
   let state: AgentCell['state'] = 'done'
   if (run.status === 'running') state = 'running'
-  else if (sha !== null && !pr.headRefOid.toLowerCase().startsWith(sha.toLowerCase())) state = 'idle'
+  // a stack review reads the top layer, whose commit is not this PR's head
+  else if (run.command !== 'review-stack' && sha !== null && !pr.headRefOid.toLowerCase().startsWith(sha.toLowerCase())) state = 'idle'
   return {
     ...idle,
     state,
@@ -410,6 +529,8 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     startedAt: run.startedAt,
     lastStepAt: run.lastStepAt,
     step: run.step === null ? null : { name: run.step, state: run.stepState ?? 'started' },
+    steps: stepsOf(run),
+    tandem: isTandemRun(run.args),
     finishedAt: run.finishedAt,
     text: run.status === 'running' ? null : doneText(run, mine && pr.isDraft),
     result: agentResult(run.result),
@@ -419,6 +540,11 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     costUsd: run.costUsd,
   }
 }
+
+// a run as the API serves it: the row, with its five step slots always present and whether it was a tandem review
+export type RunView = Omit<Run, 'steps'> & { steps: StepSlot[], tandem: boolean }
+
+export const runView = (run: Run): RunView => ({ ...run, steps: stepsOf(run), tandem: isTandemRun(run.args) })
 
 // the runner's stream: read by event type, never by position, and never for progress or results
 
@@ -682,7 +808,7 @@ export const systemFs: LauncherFs = {
 // the launcher
 
 export type LaunchErrorCode =
-  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning'
+  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner'
 
 export class LaunchError extends Error {
   override name = 'LaunchError'
@@ -759,6 +885,8 @@ type Live = {
   child: SpawnedProcess | null
   pid: number | null
   offsets: { events: number, stream: number }
+  // the step slots folded from every events.jsonl line read so far
+  steps: StepSlot[]
   stream: StreamState
   stdinOpen: boolean
   watcher: { close: () => void } | null
@@ -865,8 +993,14 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
     if (eventsEnd >= 0) {
       entry.offsets.events += eventsEnd + 1
       // the newest line for a step is its current state; the newest line is the run's last step
-      const latest = eventsBytes.subarray(0, eventsEnd).toString('utf8').split('\n').map(parseStepEvent).filter((event) => event !== null).at(-1)
-      if (latest !== undefined) Object.assign(changes, { lastStepAt: latest.at, step: latest.step, stepState: latest.state })
+      const events = eventsBytes.subarray(0, eventsEnd).toString('utf8').split('\n').map(parseStepEvent).filter((event) => event !== null)
+      const latest = events.at(-1)
+      if (latest !== undefined) {
+        Object.assign(changes, { lastStepAt: latest.at, step: latest.step, stepState: latest.state })
+        entry.steps = foldSteps(entry.steps, events)
+        // a note or time that moved on an unchanged step still changes the row
+        if (JSON.stringify(entry.steps) !== JSON.stringify(run.steps)) changes.steps = entry.steps
+      }
     }
     const streamBytes = await fs.readFrom(join(entry.dir, 'stream.jsonl'), entry.offsets.stream)
     const streamEnd = streamBytes.lastIndexOf(0x0a)
@@ -986,6 +1120,7 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
       child,
       pid: run.pid,
       offsets: { events: 0, stream: 0 },
+      steps: emptySteps(),
       stream: emptyStream(),
       stdinOpen,
       watcher: null,
@@ -1103,6 +1238,11 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
 
   const start = async (request: StartRequest): Promise<Run> => {
     const config = options.config()
+    // a tandem primary launches its secondary in the background, which only Claude can do; the
+    // runner is the one asked for or the configured default, so no caller can get around this
+    if (isTandemRun(request.args) && (request.runner ?? config.agent.runner) !== 'claude') {
+      throw new LaunchError('tandemRunner', 'Review in tandem runs with Claude only; send runner claude or leave it out')
+    }
     const key = `${request.repo}#${request.number}`
     // one run per PR in flight, counting a start still between its checks and its row
     if (starting.has(key) || inFlight(request.repo, request.number)) {

@@ -513,3 +513,47 @@ test('a version 3 cache is rebuilt with runs, and a rebuild keeps the runs it fi
     await cleanup()
   }
 })
+
+test('a run keeps its step slots, null until the first event', () => {
+  const { cache } = memoryCache()
+  const created = cache.createRun(newRun(106), (id) => `~/runs/${id}`)
+  assert.equal(created.steps, null)
+  const steps = [
+    { step: 'resolveBase', state: 'done', at: '2026-10-26T14:01:00Z', note: null },
+    { step: 'review', state: 'started', at: '2026-10-26T14:02:00Z', note: 'primary at work' },
+    { step: 'consolidate', state: 'pending', at: null, note: null },
+    { step: 'writeReport', state: 'pending', at: null, note: null },
+    { step: 'post', state: 'pending', at: null, note: null },
+  ] as const
+  assert.deepEqual(cache.updateRun(created.id, { steps: [...steps] }).steps, steps)
+  assert.deepEqual(cache.getRun(created.id)?.steps, steps)
+  assert.equal(cache.updateRun(created.id, { steps: null }).steps, null)
+  cache.close()
+})
+
+test('a version 4 cache gains runs.steps in place: its runs stay, with no steps recorded', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const old = new DatabaseSync(path)
+    old.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    old.exec('INSERT INTO meta (key, value) VALUES (\'schemaVersion\', \'4\')')
+    old.exec('CREATE TABLE prs (repo TEXT, number INTEGER)')
+    old.exec('CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT)')
+    old.exec('INSERT INTO runs (repo, number, command, args, label, runner, cwd, dir, started_at, status, step, step_state) VALUES (\'octo-example/orbit\', 106, \'review-pr\', \'["106"]\', \'Review\', \'claude\', \'~/dev/orbit\', \'~/runs/1\', \'2026-10-26T14:00:00Z\', \'done\', \'post\', \'done\')')
+    old.close()
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.equal(count(cache, 'prs'), 0)
+    const kept = cache.getRun(1)
+    assert.deepEqual([kept?.status, kept?.step, kept?.steps], ['done', 'post', null])
+    assert.equal(cache.updateRun(1, { steps: [] }).steps?.length, 0)
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
+    cache.close()
+    // opening it again changes nothing, and a fresh file has the column from the start
+    const again = openCache({ path, clock: handClock().clock })
+    assert.equal(again.getRun(1)?.steps?.length, 0)
+    again.close()
+  } finally {
+    await cleanup()
+  }
+})

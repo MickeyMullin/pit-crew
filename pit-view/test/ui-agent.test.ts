@@ -1,11 +1,11 @@
 // test/ui-agent.test.ts
 // the Agent cell's words and requests (public/agent.ts): each state's text, the running timer, the
-// confirmation per action, the requests with the per-start token, refusals, and announcements
+// one button that opens the drawer, the requests with the per-start token, refusals, and announcements
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  announcements, cellModel, commandLine, doneTone, formatDuration, githubEffect, refusalText, runningLine, startConfirm,
-  startRequest, stepText, stopConfirm, stopRequest, tokenHeader,
+  announcements, cellModel, commandLine, doneTone, formatDuration, refusalText, runningLine, sentence,
+  startRequest, stepText, stopRequest, tokenHeader,
 } from '../public/agent.ts'
 import type { AgentCell } from '../public/agent.ts'
 import { tokenHeader as serverTokenHeader, tokenMeta } from '../src/server.ts'
@@ -21,8 +21,10 @@ const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
   state: 'idle',
   label: 'Review',
   action: { kind: 'review', label: 'Review', command: 'review-pr', args: ['101'], runner: 'claude' },
+  starts: [],
   lastReviewAt: null,
   runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
+  steps: [], tandem: false,
   finishedAt: null, text: null, result: null, question: null, note: null, resume: null, costUsd: null,
   ...patch,
 })
@@ -36,12 +38,12 @@ const done = (patch: Partial<AgentCell> = {}): AgentCell => running({
   state: 'done', status: 'done', finishedAt: ago(17 * h), text: 'Changes requested', step: { name: 'post', state: 'done' }, ...patch,
 })
 
-test('an idle cell offers its action, named with the PR, with the last review under it when there is one', () => {
-  assert.deepEqual(cellModel(idle(), 101, now), { state: 'idle', button: 'Review', name: 'Review #101', under: null })
+test('an idle cell shows its action\'s label on a button that opens the drawer, with the last review under it when there is one', () => {
+  assert.deepEqual(cellModel(idle(), 101, now), { state: 'idle', button: 'Review', name: 'Review #101: open agent', under: null })
   const again = idle({ label: 'Re-review', action: { kind: 'reReview', label: 'Re-review', command: 'review-pr', args: ['101'], runner: 'claude' }, lastReviewAt: ago(7 * d + h) })
-  assert.deepEqual(cellModel(again, 101, now), { state: 'idle', button: 'Re-review', name: 'Re-review #101', under: 'last review 7d ago' })
+  assert.deepEqual(cellModel(again, 101, now), { state: 'idle', button: 'Re-review', name: 'Re-review #101: open agent', under: 'last review 7d ago' })
   const self = idle({ action: { kind: 'selfReview', label: 'Self-review', command: 'review-pr', args: ['102', '--no-post'], runner: 'claude' }, lastReviewAt: ago(5 * s) })
-  assert.deepEqual(cellModel(self, 102, now), { state: 'idle', button: 'Self-review', name: 'Self-review #102', under: 'last review just now' })
+  assert.deepEqual(cellModel(self, 102, now), { state: 'idle', button: 'Self-review', name: 'Self-review #102: open agent', under: 'last review just now' })
 })
 
 test('the running line counts the run and the newest step, in seconds, minutes, then hours', () => {
@@ -54,9 +56,9 @@ test('the running line counts the run and the newest step, in seconds, minutes, 
   assert.equal(formatDuration(ago(-5 * s), now), '0s')
 })
 
-test('a running cell names its label, its step for screen readers and tooltips, and Stop with the PR', () => {
+test('a running cell names its label and its step for screen readers and tooltips, on a button that opens the drawer', () => {
   assert.deepEqual(cellModel(running(), 101, now), {
-    state: 'running', label: 'Review', line: 'running 3m · last step 20s ago', step: 'Step: review, started', stop: 'Stop run on #101',
+    state: 'running', label: 'Review', line: 'running 3m · last step 20s ago', step: 'Step: review, started', name: 'Open agent for #101, Review running',
   })
   assert.equal(stepText({ name: 'writeReport', state: 'done' }), 'Step: write report, done')
   assert.equal(stepText({ name: 'consolidate', state: 'skipped' }), 'Step: consolidate, skipped')
@@ -65,7 +67,9 @@ test('a running cell names its label, its step for screen readers and tooltips, 
 
 test('a done cell shows the server\'s text and when it finished, colored by what comes next', () => {
   const model = cellModel(done(), 101, now)
-  assert.deepEqual(model, { state: 'done', text: 'Changes requested', tone: 'red', line: 'finished 17h ago', tip: null, copy: null, again: null })
+  assert.deepEqual(model, {
+    state: 'done', text: 'Changes requested', tone: 'red', line: 'finished 17h ago', tip: null, name: 'Open agent for #101, Changes requested',
+  })
   const tones = (text: string, status: AgentCell['status'] = 'done') => doneTone({ status, text })
   assert.equal(tones('Approved'), 'green')
   assert.equal(tones('Clean'), 'green')
@@ -78,66 +82,43 @@ test('a done cell shows the server\'s text and when it finished, colored by what
   assert.equal(tones('Failed · no result', 'failed'), 'red')
 })
 
-test('a run waiting for an answer shows its question and offers the resume command to copy', () => {
+test('a run waiting for an answer keeps its question as the cell\'s tooltip; the drawer offers the resume command', () => {
   const waiting = done({
     status: 'needsInput', text: 'Needs your answer', question: 'The tandem draft fails its checks; consolidate anyway?',
     resume: 'cd ~/dev/orbit && claude --resume 6f1c', finishedAt: ago(30 * s),
   })
   assert.deepEqual(cellModel(waiting, 104, now), {
     state: 'done', text: 'Needs your answer', tone: 'amber', line: 'finished 30s ago',
-    tip: 'The tandem draft fails its checks; consolidate anyway?',
-    copy: { name: 'Copy resume command for #104', command: 'cd ~/dev/orbit && claude --resume 6f1c' }, again: null,
+    tip: 'The tandem draft fails its checks; consolidate anyway?', name: 'Open agent for #104, Needs your answer',
   })
-  // no session yet means nothing to copy
-  assert.equal((cellModel(done({ status: 'needsInput', text: 'Needs your answer', question: 'Post?', resume: null }), 104, now) as { copy: unknown }).copy, null)
 })
 
-test('a failed or stopped run shows why in a tooltip and offers its action again', () => {
+test('a failed run keeps its note as the tooltip; a stopped or finished one has none', () => {
   const failed = cellModel(done({ status: 'failed', text: 'Failed · no result', note: 'noResult: exited with code 1' }), 101, now)
   assert.equal(failed.state === 'done' && failed.tip, 'noResult: exited with code 1')
-  assert.deepEqual(failed.state === 'done' && failed.again, { name: 'Review #101 again' })
   const stopped = cellModel(done({ status: 'stopped', text: 'Stopped', note: null }), 101, now)
-  assert.deepEqual(stopped.state === 'done' && [stopped.tip, stopped.again], [null, { name: 'Review #101 again' }])
-  // a finished review's outcome stands until the head moves, so it offers nothing more here
-  const finished = cellModel(done(), 101, now)
-  assert.equal(finished.state === 'done' && finished.again, null)
+  assert.equal(stopped.state === 'done' && stopped.tip, null)
+  assert.equal((cellModel(done(), 101, now) as { tip: unknown }).tip, null)
+  // no cell offers Stop, Copy or Run again any more: they live in the drawer
+  for (const cell of [idle(), running(), done(), done({ status: 'failed', text: 'Failed' })]) {
+    const keys = Object.keys(cellModel(cell, 101, now))
+    assert.ok(!keys.includes('stop') && !keys.includes('copy') && !keys.includes('again'), keys.join())
+  }
 })
 
-test('the confirmation names the PR, the exact command, the runner and what happens on GitHub', () => {
-  const row = { number: 101, title: 'fix(retry): back off between attempts' }
-  assert.deepEqual(startConfirm(row, idle().action, 'claude', 'viewer'), {
-    heading: 'Review #101?',
-    title: 'fix(retry): back off between attempts',
-    command: '/review-pr 101',
-    runner: 'Claude Code',
-    effect: 'Posts its report to the PR as @viewer: an approval, a request for changes, or a comment, per the findings.',
-    confirm: 'Start review',
-  })
-  const self = { label: 'Self-review', command: 'review-pr', args: ['102', '--no-post'] }
-  assert.deepEqual(startConfirm({ number: 102, title: 'feat: x' }, self, 'codex', 'viewer'), {
-    heading: 'Self-review #102?', title: 'feat: x', command: '$review-pr 102 --no-post', runner: 'Codex',
-    effect: 'Posts nothing; writes the report only.', confirm: 'Start self-review',
-  })
-  const bump = { label: 'Re-review', command: 'review-dependabot', args: ['110'] }
-  assert.equal(startConfirm({ number: 110, title: 'chore(deps): bump x' }, bump, 'claude', 'viewer').command, '/review-dependabot 110')
-  assert.equal(githubEffect(bump, 'viewer'), 'Posts its report to the PR as @viewer and may approve the PR automatically.')
-  assert.equal(commandLine(bump, 'codex'), '$review-dependabot 110')
+test('the command line is what the runner receives: a slash for Claude, a dollar sign for Codex', () => {
+  assert.equal(commandLine({ command: 'review-pr', args: ['101'] }, 'claude'), '/review-pr 101')
+  assert.equal(commandLine({ command: 'review-pr', args: ['102', '--no-post'] }, 'codex'), '$review-pr 102 --no-post')
+  assert.equal(commandLine({ command: 'review-pr', args: ['101', '--tandem'] }, 'claude'), '/review-pr 101 --tandem')
+  assert.equal(commandLine({ command: 'review-stack', args: ['111'] }, 'claude'), '/review-stack 111')
 })
 
-test('the stop confirmation names the run, its runner and what stopping leaves behind', () => {
-  const confirm = stopConfirm({ number: 101, title: 'fix: x' }, running({ runner: 'codex' }), now)
-  assert.equal(confirm.heading, 'Stop the run on #101?')
-  assert.equal(confirm.detail, 'Review in Codex')
-  assert.equal(confirm.line, 'running 3m · last step 20s ago')
-  assert.match(confirm.effect, /already posted stays on GitHub/)
-  assert.equal(confirm.confirm, 'Stop run')
-})
-
-test('a start sends JSON with the runner and the token; a stop sends the token and no body', () => {
-  assert.deepEqual(startRequest(101, 'codex', 'tok-123'), {
+test('a start sends JSON with the kind, the runner and the token; a stop sends the token and no body', () => {
+  assert.deepEqual(startRequest(101, 'default', 'codex', 'tok-123'), {
     url: '/api/prs/101/runs',
-    init: { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok-123' }, body: '{"runner":"codex"}' },
+    init: { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok-123' }, body: '{"kind":"default","runner":"codex"}' },
   })
+  assert.equal(startRequest(111, 'stack', 'claude', 't').init.body, '{"kind":"stack","runner":"claude"}')
   assert.deepEqual(stopRequest(42, 'tok-123'), { url: '/api/runs/42/stop', init: { method: 'POST', headers: { 'X-Pit-View-Token': 'tok-123' } } })
   // the page sends the header the server reads (Node lowercases incoming header names)
   assert.equal(tokenHeader.toLowerCase(), serverTokenHeader)
@@ -155,6 +136,10 @@ test('a refusal reads as the server said it, except a token refusal, which asks 
   assert.equal(refusalText('start', 422, 'cloneDir ~/dev/orbit has no remote for octo-example/orbit'), 'cloneDir ~/dev/orbit has no remote for octo-example/orbit.')
   assert.equal(refusalText('start', 500, null), 'Pit View refused with status 500.')
   assert.equal(refusalText('start', 0, null), 'Pit View did not answer. Check that it is running, then try again.')
+  assert.equal(refusalText('start', 400, 'Review in tandem runs with Claude only; send runner claude or leave it out'),
+    'Review in tandem runs with Claude only; send runner claude or leave it out.')
+  assert.equal(sentence('a run for #101 is already in flight'), 'A run for #101 is already in flight.')
+  assert.equal(sentence('  '), '')
 })
 
 test('a run starting or finishing is announced once, never per tick, and not on the first reading', () => {

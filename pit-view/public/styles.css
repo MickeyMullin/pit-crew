@@ -40,8 +40,6 @@
   --person-fallback: light-dark(#4A4E55, #5B5F66);
   --placeholder: light-dark(#ECECE8, #2B2D31);
   --shadow: light-dark(#17181A29, #00000099);
-  /* behind the run confirmation */
-  --backdrop: light-dark(#17181A59, #000000A6);
 
   --font-ui: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -155,7 +153,9 @@ button {
 }
 
 /* header: pinned to the top of the window on both pages. Layers, lowest first: the page, the
-   header (10), the hover card (20), the skip link (30) */
+   header (10), the agent drawer (12), the report panel (13), the hover card (20), the skip link
+   (30). The panels sit under the hover card on purpose: a card from a row they do not cover may
+   overlap their edge, and it is gone as soon as the pointer leaves */
 
 .site-header {
   position: sticky;
@@ -1137,6 +1137,13 @@ button {
   gap: 12px 20px;
 }
 
+.banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 .banner-text {
   display: flex;
   flex-direction: column;
@@ -1242,6 +1249,23 @@ button {
   border-color: var(--muted);
 }
 
+/* a running or finished cell is itself the button that opens the drawer */
+button.agent {
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.agent:hover {
+  background: var(--gray-bg);
+}
+
 /* the start: dashed, in the link color, so it reads as an offer rather than a state */
 .agent-start {
   height: 26px;
@@ -1257,19 +1281,7 @@ button {
   border-color: var(--blue-fg);
 }
 
-.agent-small {
-  height: 22px;
-  padding: 0 8px;
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.agent-small:hover {
-  color: var(--ink);
-}
-
-.agent-head,
-.agent-actions {
+.agent-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1314,97 +1326,567 @@ button {
   opacity: 0;
 }
 
-/* the confirmation before a run starts or stops */
+/* the inline confirmation in the drawer before a run starts or stops */
 
-.dialog {
-  width: min(500px, calc(100vw - 32px));
-  max-height: calc(100vh - 32px);
-  padding: 20px 22px;
-  background: var(--surface);
-  color: var(--ink);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  box-shadow: 0 12px 32px var(--shadow);
+.confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line-control);
+  border-radius: 8px;
+  background: var(--ground);
 }
 
-.dialog::backdrop {
-  background: var(--backdrop);
-}
-
-.dialog-heading {
-  margin: 0 0 4px;
-  font-size: 16px;
+.confirm-heading {
+  margin: 0;
+  font-size: 14px;
   font-weight: 700;
 }
 
-.dialog-title {
-  margin: 0 0 16px;
+.confirm-title {
+  margin: 0;
   color: var(--muted);
   overflow-wrap: anywhere;
 }
 
-.dialog-facts {
+.confirm-facts {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
-  gap: 10px 16px;
-  margin: 0 0 16px;
+  gap: 8px 14px;
+  margin: 0;
 }
 
-.dialog-facts dt {
+.confirm-facts dt {
   color: var(--muted);
   font-weight: 500;
 }
 
-.dialog-facts dd {
+.confirm-facts dd {
   margin: 0;
   overflow-wrap: anywhere;
 }
 
-.dialog-command {
+.confirm-command {
+  display: inline-block;
   padding: 2px 6px;
   border-radius: 4px;
   background: var(--gray-bg);
   color: var(--gray-fg);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
-.dialog-runners {
+.confirm-runners {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 16px;
 }
 
-.dialog-runner {
+.confirm-runner {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   cursor: pointer;
 }
 
-.dialog-error {
-  margin: 0 0 16px;
+.confirm-error {
+  margin: 0;
   color: var(--red-fg);
   font-weight: 500;
 }
 
-.dialog-error:empty {
+.confirm-error:empty {
   display: none;
 }
 
-.dialog-actions {
+.confirm-actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
 }
 
+/* the agent drawer: a non-modal panel on the right, below the header at desktop widths so the
+   header's own controls (Refresh, Pause, the theme toggle) stay reachable, and over everything at
+   phone width. The report panel docks to its left, or covers it at phone width */
+
+.drawer,
+.report-panel {
+  position: fixed;
+  top: var(--header-height, 56px);
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--surface);
+  color: var(--ink);
+  border-left: 1px solid var(--line);
+  box-shadow: -8px 0 24px -12px var(--shadow);
+}
+
+.drawer {
+  right: 0;
+  z-index: 12;
+  width: min(440px, 100vw);
+  animation: panel-in 0.16s ease-out;
+}
+
+.report-panel {
+  right: min(440px, 100vw);
+  z-index: 13;
+  width: min(560px, calc(100vw - 440px));
+  animation: panel-in 0.16s ease-out;
+}
+
+.drawer[hidden],
+.report-panel[hidden] {
+  display: none;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer,
+  .report-panel {
+    animation: none;
+  }
+}
+
+.drawer-head,
+.report-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.drawer-titles,
+.report-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.drawer-heading,
+.report-heading {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.drawer-heading:focus-visible,
+.report-heading:focus-visible {
+  outline-offset: 3px;
+}
+
+.drawer-pr-title {
+  margin: 2px 0 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.drawer-pr-sub,
+.report-sub {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.drawer-close,
+.report-close {
+  flex: none;
+}
+
+.drawer-body,
+.report-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 14px 16px 28px;
+}
+
+.drawer-section {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.drawer-section > * {
+  max-width: 100%;
+}
+
+.drawer-section-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.drawer-card {
+  padding: 12px 14px;
+  border: 1px solid var(--line-control);
+  border-radius: 8px;
+  align-items: stretch;
+}
+
+.drawer-running {
+  border-color: var(--blue-fg);
+}
+
+.drawer-waiting {
+  border-color: var(--amber-edge);
+  background: var(--amber-bg);
+  color: var(--ink);
+}
+
+.drawer-gone {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--amber-bg);
+  color: var(--amber-fg);
+  font-weight: 600;
+}
+
+.drawer-starts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.drawer-start {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.drawer-reason {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.drawer-run-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.drawer-run-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--blue-fg);
+  font-size: 14px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.drawer-run-line,
+.drawer-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* the five steps: a mark and the state in words under each label, so none depends on color */
+
+.drawer-steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.drawer-step {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 6px;
+  border-top: 3px solid var(--line-control);
+  font-size: 11px;
+  min-width: 0;
+}
+
+.drawer-step-mark {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.drawer-step-label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.drawer-step-state {
+  color: var(--muted);
+}
+
+.drawer-step[data-state='done'] {
+  border-top-color: var(--green-fg);
+}
+
+.drawer-step[data-state='done'] .drawer-step-mark {
+  color: var(--green-fg);
+}
+
+.drawer-step[data-state='started'] {
+  border-top-color: var(--blue-fg);
+  border-top-style: double;
+}
+
+.drawer-step[data-state='started'] .drawer-step-mark {
+  color: var(--blue-fg);
+}
+
+.drawer-step[data-state='skipped'] {
+  border-top-style: dashed;
+  border-top-color: var(--muted);
+}
+
+.drawer-step[data-state='pending'] .drawer-step-label {
+  color: var(--muted);
+}
+
+.drawer-run-note,
+.drawer-note,
+.drawer-question {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.drawer-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.drawer-run-actions,
+.drawer-resume {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.drawer-resume .drawer-label {
+  flex-basis: 100%;
+}
+
+.drawer-command {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.button-danger-outline {
+  border-color: var(--red-button);
+  color: var(--red-fg);
+  font-weight: 600;
+}
+
+.drawer-settling {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.drawer-result-text {
+  margin: 0;
+  font-size: 14px;
+}
+
+.drawer-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 14px;
+  margin: 0;
+}
+
+.drawer-fact {
+  display: contents;
+}
+
+.drawer-fact dt {
+  color: var(--muted);
+}
+
+.drawer-fact dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.drawer-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  list-style: none;
+}
+
+.drawer-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-row);
+}
+
+.drawer-item:first-child {
+  border-top: 0;
+}
+
+.drawer-item-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.drawer-item-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.drawer-item-main .button {
+  margin-left: auto;
+}
+
+.drawer-item-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.drawer-list-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* the report panel */
+
+.report-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line-row);
+}
+
+.report-body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.report-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line-row);
+}
+
+.report-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.report-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: var(--surface);
+}
+
+.report-raw {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 14px 16px 28px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.report-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 16px;
+  color: var(--muted);
+}
+
+.report-error {
+  margin: 0;
+  color: var(--red-fg);
+  font-weight: 500;
+}
+
+/* a hidden element the report panel reads token colors from */
+.theme-probe {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+@media (max-width: 720px) {
+  /* phone width: each panel is a full-width overlay above the header, the report on top */
+  .drawer,
+  .report-panel {
+    top: 0;
+    left: 0;
+    right: 0;
+    width: auto;
+    border-left: 0;
+  }
+}
+
 @media (max-width: 480px) {
-  .dialog-facts {
+  .confirm-facts {
     grid-template-columns: minmax(0, 1fr);
     gap: 2px;
   }
 
-  .dialog-facts dd {
+  .confirm-facts dd {
     margin-bottom: 8px;
   }
 }

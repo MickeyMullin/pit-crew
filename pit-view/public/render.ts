@@ -15,6 +15,7 @@ import {
 } from './filters.ts'
 import type { Arrangement, ClosedRangeKey, Controls, TileKey } from './filters.ts'
 import { formatAge, shortSha } from './format.ts'
+import { safeHref } from './safeurl.ts'
 import { offlineBadge, offlineBanner, sectionMarker, syncStatus, tableState } from './status.ts'
 import { closedColumns, countText, mineColumns, openFreshness, othersColumns, renderTable } from './tables.ts'
 import type { CellContext, Column, TableKey } from './tables.ts'
@@ -172,9 +173,17 @@ const renderBanner = (frame: Frame): void => {
       sig: JSON.stringify([who, age, row.url, row.title, phrase]),
       build: () => h('li', { class: 'banner-entry' },
         h('span', { class: 'banner-text' },
-          h('span', { class: 'banner-lead' }, `${who} requested changes on `, h('a', { ...newTab, href: row.url }, `#${row.number}`), age === null ? '' : ` · ${age} ago`),
+          h('span', { class: 'banner-lead' }, `${who} requested changes on `, h('a', { ...newTab, href: safeHref(row.url) }, `#${row.number}`), age === null ? '' : ` · ${age} ago`),
           h('span', { class: 'banner-detail' }, `${row.title} · ${phrase}`)),
-        h('a', { ...newTab, class: 'button button-danger', href: row.url }, 'Open review')),
+        h('span', { class: 'banner-actions' },
+          h('button', {
+            type: 'button',
+            class: 'button',
+            'data-open-agent': row.number,
+            'data-focus-key': `banner-open:${row.number}`,
+            'aria-label': `Open agent for #${row.number}`,
+          }, 'Open agent'),
+          h('a', { ...newTab, class: 'button button-danger', href: safeHref(row.url) }, 'Open review'))),
     }
   })
   let banner = slot.firstElementChild

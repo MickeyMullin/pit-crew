@@ -146,7 +146,7 @@ export type DeriveContext = {
   // one-PR refreshes running or failed, from the poller; defaults to none
   refresh?: (number: number) => RowRefresh | null
   // the Agent cell, from the poller's runs; defaults to null
-  agent?: (pr: RawOpenPr) => AgentCell | null
+  agent?: (pr: RawOpenPr, stack: Stack | null) => AgentCell | null
 }
 
 const same = (a: string | null | undefined, b: string | null | undefined): boolean =>
@@ -602,7 +602,7 @@ const prBase = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, S
   lastActivity: deriveLastActivity(pr, ctx.config),
   freshness: freshnessOf(pr.number, ctx),
   refresh: ctx.refresh?.(pr.number) ?? null,
-  agent: ctx.agent?.(pr) ?? null,
+  agent: ctx.agent?.(pr, stacks.get(pr.number) ?? null) ?? null,
 })
 
 // one open PR as a Mine or Others' row; null for rows hidden in v1 (others' drafts)

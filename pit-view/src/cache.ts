@@ -5,12 +5,12 @@ import { DatabaseSync } from 'node:sqlite'
 import type { SQLInputValue, SQLOutputValue } from 'node:sqlite'
 import type { Clock, RunnerName } from './config.ts'
 import type { ClosedResult, GhErrorKind, OpenPage, RawOpenPr } from './github.ts'
-import type { RunResultJson } from './launcher.ts'
+import type { RunResultJson, StepSlot } from './launcher.ts'
 
 // bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since
 // they hold nothing GitHub cannot give back. runs is the exception: it survives a rebuild, and a
-// change to its columns needs a migration of its own (phase 4 adds columns with ALTER TABLE)
-export const schemaVersion = 4
+// change to its columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE)
+export const schemaVersion = 5
 
 export class CacheError extends Error {
   override name = 'CacheError'
@@ -114,6 +114,9 @@ export type Run = {
   lastStepAt: string | null
   step: string | null
   stepState: string | null
+  // the five step slots folded from events.jsonl, or null before the first line (and for runs
+  // from before version 5)
+  steps: StepSlot[] | null
   finishedAt: string | null
   status: RunStatus
   // result.json as parsed and checked, or null when there is none
@@ -126,7 +129,7 @@ export type Run = {
   resume: string | null
 }
 
-export type NewRun = Omit<Run, 'id' | 'dir'>
+export type NewRun = Omit<Run, 'id' | 'dir' | 'steps'>
 export type RunChanges = Partial<Omit<Run, 'id' | 'repo' | 'number'>>
 
 export type Cache = {
@@ -190,7 +193,7 @@ const schema = [
 
 // kept across rebuilds: no status CHECK, so phase 4's queued and skipped need no rebuild
 const runsSchema = [
-  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT)',
+  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT)',
   'CREATE INDEX IF NOT EXISTS runs_by_pr ON runs (repo, number, id)',
   'CREATE INDEX IF NOT EXISTS runs_by_status ON runs (status)',
 ]
@@ -210,6 +213,7 @@ const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z
 
 const toRun = (row: Row): Run => {
   const result = strOrNull(row, 'result')
+  const steps = strOrNull(row, 'steps')
   const cost = row.cost_usd
   return {
     id: int(row, 'id'),
@@ -228,6 +232,7 @@ const toRun = (row: Row): Run => {
     lastStepAt: strOrNull(row, 'last_step_at'),
     step: strOrNull(row, 'step'),
     stepState: strOrNull(row, 'step_state'),
+    steps: steps === null ? null : JSON.parse(steps) as StepSlot[],
     finishedAt: strOrNull(row, 'finished_at'),
     status: str(row, 'status') as RunStatus,
     result: result === null ? null : JSON.parse(result) as RunResultJson,
@@ -252,6 +257,7 @@ const runColumns: Record<keyof RunChanges, string> = {
   lastStepAt: 'last_step_at',
   step: 'step',
   stepState: 'step_state',
+  steps: 'steps',
   finishedAt: 'finished_at',
   status: 'status',
   result: 'result',
@@ -261,7 +267,7 @@ const runColumns: Record<keyof RunChanges, string> = {
 }
 
 const runValue = (key: keyof RunChanges, value: unknown): SQLInputValue => {
-  if (key === 'args' || key === 'result') return value === null || value === undefined ? null : JSON.stringify(value)
+  if (key === 'args' || key === 'result' || key === 'steps') return value === null || value === undefined ? null : JSON.stringify(value)
   return (value ?? null) as SQLInputValue
 }
 
@@ -356,6 +362,9 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       for (const statement of schema) db.exec(statement)
       // version 4 added runs; a newer version keeps the table it finds
       for (const statement of runsSchema) db.exec(statement)
+      // version 5 added runs.steps; a table made before it lacks the column
+      const columns = db.prepare('PRAGMA table_info(runs)').all().map((column) => String(column.name))
+      if (!columns.includes('steps')) db.exec('ALTER TABLE runs ADD COLUMN steps TEXT')
       setMeta('schemaVersion', schemaVersion)
     })
   }

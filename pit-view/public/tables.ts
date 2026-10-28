@@ -10,6 +10,7 @@ import type { Keyed, Part } from './dom.ts'
 import { closedSortValues, mineSortValues, othersSortValues } from './filters.ts'
 import type { Sort, SortValue } from './filters.ts'
 import { formatAge, formatClock, plural, shortSha } from './format.ts'
+import { safeHref } from './safeurl.ts'
 import { rowFreshness } from './state.ts'
 import { refreshButton, rowMarker } from './status.ts'
 import type { Marker, TableState } from './status.ts'
@@ -71,7 +72,7 @@ const refreshColumn = <R extends OpenRow>(): Column<R> => ({
 
 const prCell = <R extends { number: number, url: string }>(hover: boolean): Column<R>['cell'] => (row) => ({
   sig: [row.number, row.url, hover],
-  build: () => [h('a', { ...newTab, class: 'pr-link mono', href: row.url, 'data-focus': 'pr', 'data-hover': hover ? 'pr' : null }, `#${row.number}`)],
+  build: () => [h('a', { ...newTab, class: 'pr-link mono', href: safeHref(row.url), 'data-focus': 'pr', 'data-hover': hover ? 'pr' : null }, `#${row.number}`)],
 })
 
 const titleCell = (row: OpenRow): { sig: unknown, build: () => Node[] } => ({

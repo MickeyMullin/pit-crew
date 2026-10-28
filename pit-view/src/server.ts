@@ -17,10 +17,14 @@ import { cacheFile, ConfigError, configFile, expandHome, readConfig, runnerNames
 import type { Clock, Config, RunnerName } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner } from './github.ts'
-import { createLauncher, defaultRun, LaunchError, procsFrom, systemFs, systemSpawn } from './launcher.ts'
-import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Spawn } from './launcher.ts'
+import { deriveStacks } from './derive.ts'
+import { createLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn } from './launcher.ts'
+import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Spawn, StartKind } from './launcher.ts'
+import { renderMarkdown } from './markdown.ts'
 import { createPoller, systemTimers } from './poller.ts'
 import type { Patch, Poller, Timers } from './poller.ts'
+import { listPrReports, readReport, ReportReadError } from './reports.ts'
+import type { ReportReadErrorCode } from './reports.ts'
 
 export const defaultPort = 4791
 // a named instance's port when PIT_VIEW_PORT is unset; any other name must set it
@@ -184,7 +188,15 @@ const launchStatus: Readonly<Record<LaunchErrorCode, number>> = {
   identityUnknown: 502,
   busy: 409,
   unknownRun: 404,
+  tandemRunner: 400,
   notRunning: 409,
+}
+
+// why a report could not be read, as an HTTP status
+const reportStatus: Readonly<Record<ReportReadErrorCode, number>> = {
+  badName: 400,
+  notFound: 404,
+  tooLarge: 413,
 }
 
 const flag = (value: string | null, fallback: boolean): boolean => {
@@ -420,32 +432,68 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     throw error
   }
 
-  // the row's default run (section 8 of DESIGN.md), with the configured runner or the one asked for
+  // a start from the drawer (section 8 of DESIGN.md): the row's default run, the same review in
+  // tandem, or a review of its stack, with the configured runner or the one asked for
   const startRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
     requireToken(req)
     const number = prNumber(raw)
+    const usage = 'send { "kind": "default" | "tandem" | "stack", "runner": "claude" | "codex" } or no body'
     const length = Number(req.headers['content-length'] ?? 0)
     const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
-    if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, 'send { "runner": "claude" | "codex" } or no body')
-    const { runner: asked, ...rest } = body as Record<string, unknown>
-    if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; send { "runner": "claude" | "codex" } or no body`)
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
+    const { runner: asked, kind: askedKind, ...rest } = body as Record<string, unknown>
+    if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
     if (asked !== undefined && !runnerNames.includes(asked as RunnerName)) throw new HttpError(400, 'runner must be claude or codex')
+    if (askedKind !== undefined && !startKinds.includes(askedKind as StartKind)) throw new HttpError(400, 'kind must be default, tandem or stack')
+    const kind = (askedKind ?? 'default') as StartKind
+    // a tandem primary launches its secondary in the background, which only Claude can do
+    if (kind === 'tandem' && asked === 'codex') throw new HttpError(400, 'Review in tandem runs with Claude only; send runner claude or leave it out')
     const config = effective()
-    const cached = cache.readView(config.repo).open.find((row) => row.number === number)
-    if (cached === undefined) throw new HttpError(422, `#${number} is not an open PR in ${config.repo} that Pit View has fetched`)
-    const plan = defaultRun(cached.pr, config)
+    const cached = cache.readView(config.repo)
+    const row = cached.open.find((entry) => entry.number === number)
+    if (row === undefined) throw new HttpError(422, `#${number} is not an open PR in ${config.repo} that Pit View has fetched`)
+    const stack = deriveStacks(cached.open.map((entry) => entry.pr), cached.defaultBranch).get(number) ?? null
+    const refusal = notOffered(kind, row.pr, config, stack)
+    if (refusal !== null) throw new HttpError(422, refusal)
+    const option = startOptions(row.pr, config, stack, false).find((candidate) => candidate.kind === kind)
+    if (option === undefined) throw new HttpError(422, `${kind} is not offered for #${number}`)
+    // a tandem start without a runner is Claude's, whatever the configured default is
+    const runner = asked as RunnerName | undefined ?? (kind === 'tandem' ? 'claude' : undefined)
     try {
       const run = await launcher.start({
         repo: config.repo,
         number,
-        command: plan.command,
-        args: plan.args,
-        label: plan.label,
-        ...(asked === undefined ? {} : { runner: asked as RunnerName }),
+        command: option.command,
+        args: option.args,
+        label: option.label,
+        ...(runner === undefined ? {} : { runner }),
       })
-      json(res, 200, run)
+      json(res, 200, runView(run))
     } catch (error) {
       launchFailure(error)
+    }
+  }
+
+  const reportsFolder = (): string => expandHome(effective().reportsDir, home)
+
+  const listReportsFor = async (res: ServerResponse, raw: string): Promise<void> => {
+    json(res, 200, await listPrReports(reportsFolder(), prNumber(raw)))
+  }
+
+  // one report as rendered HTML and as raw Markdown; never anything outside reportsDir
+  const serveReport = async (res: ServerResponse, encoded: string): Promise<void> => {
+    let name: string
+    try {
+      name = decodeURIComponent(encoded)
+    } catch {
+      throw new HttpError(400, 'bad report name')
+    }
+    try {
+      const report = await readReport(reportsFolder(), name)
+      json(res, 200, { name: report.name, modifiedAt: report.modifiedAt, html: renderMarkdown(report.raw), raw: report.raw })
+    } catch (error) {
+      if (error instanceof ReportReadError) throw new HttpError(reportStatus[error.code], error.message)
+      throw error
     }
   }
 
@@ -590,7 +638,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'POST', pattern: /^\/api\/refresh$/, handle: (_req, res) => json(res, 200, poller.refresh('manual')) },
     { method: 'POST', pattern: /^\/api\/prs\/([^/]+)\/refresh$/, handle: (req, res, _url, match) => refreshPr(req, res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/prs\/([^/]+)\/runs$/, handle: (req, res, _url, match) => startRun(req, res, match[1] ?? '') },
-    { method: 'GET', pattern: /^\/api\/prs\/([^/]+)\/runs$/, handle: (_req, res, _url, match) => json(res, 200, cache.runsFor(effective().repo, prNumber(match[1] ?? ''))) },
+    { method: 'GET', pattern: /^\/api\/prs\/([^/]+)\/runs$/, handle: (_req, res, _url, match) => json(res, 200, cache.runsFor(effective().repo, prNumber(match[1] ?? '')).map(runView)) },
+    { method: 'GET', pattern: /^\/api\/prs\/([^/]+)\/reports$/, handle: (_req, res, _url, match) => listReportsFor(res, match[1] ?? '') },
+    { method: 'GET', pattern: /^\/api\/reports\/([^/]+)$/, handle: (_req, res, _url, match) => serveReport(res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/runs\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopRun(req, res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/instance$/, handle: (_req, res) => json(res, 200, { name: options.instance ?? '', configPath: tildePath(options.configPath, home), pid: process.pid }) },
     { method: 'GET', pattern: /^\/api\/config$/, handle: (_req, res) => json(res, 200, stored) },

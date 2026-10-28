@@ -4,8 +4,8 @@ A local dashboard for the pull requests in one GitHub repository: which PRs need
 
 ## Requirements
 
-- Node 26 or later. Node runs the TypeScript sources directly; there is no build step and no runtime dependency.
-- pnpm, only to run the scripts and install the dev-only type checker.
+- Node 26 or later. Node runs the TypeScript sources directly and there is no build step. It uses Node's built-ins plus one runtime dependency, `marked`, which renders review reports on the server (DESIGN.md, section 3).
+- pnpm, only to run the scripts and install the dependencies: the dev-only type checker and `marked`.
 - The GitHub CLI, `gh`, logged in to an account that can read the repository. Pit View asks `gh auth token` for a token at startup and never stores it.
 
 ## Running

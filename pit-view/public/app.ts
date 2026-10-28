@@ -4,17 +4,20 @@
 import type { Config } from '../src/config.ts'
 import type { Patch, View } from '../src/poller.ts'
 import { announcements } from './agent.ts'
-import { copyText, tickTimers, updateAgentCells } from './agentcell.ts'
-import { createAgentDialog, readToken } from './agentdialog.ts'
+import { tickTimers, updateAgentCells } from './agentcell.ts'
 import { byId, setText } from './dom.ts'
+import { createDrawer } from './drawer.ts'
+import { escapeApplies } from './drawerview.ts'
 import { clearFilters, cycleSort, initialControls, pressTile, setClosedRange, setFilter, setGrouped } from './filters.ts'
 import type { ClosedRangeKey, Controls, Filters } from './filters.ts'
 import { createHoverCard } from './hovercard.ts'
 import { createIdleTracker } from './idle.ts'
 import { loadInstance, showInstance } from './instance.ts'
 import { createLive } from './live.ts'
+import { createReportPanel } from './reportpanel.ts'
 import { render } from './render.ts'
 import type { Settings, UiState } from './render.ts'
+import { readToken } from './runapi.ts'
 import { emptyFeed, findOpenRow, openRows, receivePatch, receiveView, restartFeed } from './state.ts'
 import type { FeedStep } from './state.ts'
 import { lastUpdateOf, readLastUpdate, writeLastUpdate } from './schedule.ts'
@@ -138,7 +141,8 @@ const announce = (view: View): void => {
 // timer tick, and nothing for what the page already showed when it loaded
 let agentKeys: Map<number, string> | null = null
 const announceRuns = (view: View): void => {
-  if (!settings.showAgentColumn) {
+  // the drawer starts and stops runs whether or not the column is shown
+  if (!settings.showAgentColumn && !drawer.isOpen()) {
     agentKeys = null
     return
   }
@@ -147,12 +151,26 @@ const announceRuns = (view: View): void => {
   if (messages.length > 0) setText(byId('agent-live'), messages.join('. '))
 }
 
+// the first reading of the runs is what the page already shows. With the column off nothing has
+// read them yet when the drawer opens from the banner, so a run started in its first seconds would
+// be taken for the baseline and never announced: read it now
+const seedRuns = (): void => {
+  if (agentKeys === null && feed.view !== null) agentKeys = announcements(null, openRows(feed.view)).next
+}
+
 const draw = (): void => {
   const view = feed.view
   if (view === null) return
   const kept = keep()
   render({ view, ui, settings, nowMs: nowMs() }, actions)
   if (settings.showAgentColumn) updateAgentCells(document, openRows(view), nowMs())
+  // one part failing must not stop the rest of the page drawing
+  try {
+    drawer.update()
+    reportPanel.refresh()
+  } catch (error) {
+    console.error('pit-view: the agent drawer could not update', error)
+  }
   restore(kept)
   hover.refresh()
   announce(view)
@@ -285,59 +303,51 @@ document.addEventListener('click', (event) => {
   void fetch(`/api/prs/${encodeURIComponent(button.dataset.refresh ?? '')}/refresh`, { method: 'POST' }).catch(() => {})
 })
 
-// the Agent cell's buttons: Review and Run again ask before starting, Stop asks before stopping,
-// and Copy puts the resume command on the clipboard; runs carry this start's token
-const agentDialog = createAgentDialog({
-  dialog: byId<HTMLDialogElement>('agent-dialog'),
-  token: readToken(document),
-  viewer: () => feed.view?.viewer.login ?? '',
-  nowMs,
-  // the cell's own button, or its new one after a start or stop; once more after the browser
-  // has put focus back where it was before the dialog, which can land after this
-  onClosed: (number) => {
-    const focusCell = (): void => {
-      const row = document.querySelector(`tr[data-pr="${number}"]`)
-      if (row === null || row.contains(document.activeElement)) return
-      focusIn(row, 'agent-stop')?.focus({ preventScroll: true })
-    }
-    focusCell()
-    setTimeout(focusCell, 0)
-  },
-})
-
 const say = (text: string): void => {
   const live = byId('agent-live')
   // the same words twice in a row are still said again
   live.textContent = live.textContent === text ? `${text}\u00a0` : text
 }
 
+// the drawer opens from an Agent cell or the changes-requested banner, never starts anything by
+// itself, and sends runs with this start's token. The report panel sits beside it
+const reportPanel = createReportPanel({
+  root: byId('report-panel'),
+  nowMs,
+  // back to the Open button that showed the report, or the drawer's heading
+  onClosed: (key) => drawer.focusKey(key, true),
+  say,
+})
+
+const drawer = createDrawer({
+  root: byId('drawer'),
+  token: readToken(document),
+  nowMs,
+  rowOf: (number) => feed.view === null ? undefined : findOpenRow(feed.view, number),
+  say,
+  reports: reportPanel,
+})
+
 document.addEventListener('click', (event) => {
-  const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button[data-agent][data-pr]') : null
-  const view = feed.view
-  if (button === null || view === null) return
-  const number = Number(button.dataset.pr)
-  const row = findOpenRow(view, number)
-  if (row === undefined || row.agent === null) return
-  const kind = button.dataset.agent
-  if (kind === 'start' || kind === 'again') agentDialog.start(row)
-  else if (kind === 'stop') agentDialog.stop(row)
-  else if (kind === 'copy' && row.agent.resume !== null) {
-    const command = row.agent.resume
-    void copyText(command).then((copied) => {
-      if (copied) {
-        say(`Resume command for #${number} copied`)
-        if (button.isConnected) {
-          button.textContent = 'Copied'
-          setTimeout(() => {
-            if (button.isConnected) button.textContent = 'Copy resume command'
-          }, 2_000)
-        }
-      } else {
-        button.title = command
-        say(`Could not copy. The resume command for #${number} is: ${command}`)
-      }
-    })
-  }
+  const target = event.target instanceof Element ? event.target : null
+  const cell = target?.closest<HTMLButtonElement>('button[data-agent="open"][data-pr]') ?? null
+  const banner = target?.closest<HTMLButtonElement>('button[data-open-agent]') ?? null
+  if (cell !== null || banner !== null) seedRuns()
+  if (cell !== null) drawer.open(Number(cell.dataset.pr), { key: `agent-open:${cell.dataset.pr}`, number: Number(cell.dataset.pr) })
+  else if (banner !== null) drawer.open(Number(banner.dataset.openAgent), { key: `banner-open:${banner.dataset.openAgent}`, number: Number(banner.dataset.openAgent) })
+})
+
+// Escape closes what is topmost: the report panel, a confirmation in the drawer, then the drawer
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || event.defaultPrevented) return
+  const target = event.target instanceof Element ? event.target : null
+  // a text field of the page behind keeps its own Escape (a search box clears itself)
+  const applies = escapeApplies({
+    tag: target?.tagName ?? '',
+    editable: target instanceof HTMLElement && target.isContentEditable,
+    inPanel: target?.closest('#drawer, #report-panel') != null,
+  })
+  if (applies && drawer.escape()) event.preventDefault()
 })
 
 byId('pause').addEventListener('click', () => {

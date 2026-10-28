@@ -12,9 +12,10 @@ import { createGh } from '../src/github.ts'
 import type { RawOpenPr } from '../src/github.ts'
 import {
   agentCell, childEnv, claudeInvocation, codexInvocation, codexNote, createLauncher, defaultRun, descendantGroups, doneText, emptyStream,
-  foldStream, judge, LaunchError, parsePs, parseResult, parseStepEvent, remoteNamesRepo, requestText, runners, shellPath,
+  emptySteps, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, remoteNamesRepo,
+  requestText, runners, runView, shellPath, startOptions, stepsOf,
 } from '../src/launcher.ts'
-import type { LaunchSpec, RunResultJson, StartRequest } from '../src/launcher.ts'
+import type { LaunchSpec, RunResultJson, StartRequest, StepEvent } from '../src/launcher.ts'
 import { createPoller } from '../src/poller.ts'
 import type { Patch } from '../src/poller.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -40,7 +41,7 @@ const prOf = async (number: number): Promise<RawOpenPr> => {
 const runRow = (patch: Partial<Run> = {}): Run => ({
   id: 7, repo: scenario.repo, number: 106, command: 'review-pr', args: ['106'], label: 'Re-review', runner: 'claude',
   cwd: '~/dev/orbit', dir: '~/.local/state/pit-view/runs/7', sessionId: 'sess-1', pid: 4001, pidStartedAt: 'start-4001',
-  startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, finishedAt: null, status: 'running',
+  startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, steps: null, finishedAt: null, status: 'running',
   result: null, note: null, costUsd: null, resume: 'cd ~/dev/orbit && claude --resume sess-1', ...patch,
 })
 
@@ -200,6 +201,130 @@ test('Clean · mark ready? only on the viewer\'s own draft, and a moved head ret
   assert.equal(waiting.text, 'Needs your answer')
 })
 
+// the starts the drawer offers
+
+test('a PR offers its default run, the same review in tandem, and a stack review only when stacked', async () => {
+  const config = baseConfig()
+  const stacked = { position: 2, size: 3 }
+  const options = async (number: number, stack: typeof stacked | null = null) => startOptions(await prOf(number), config, stack, false)
+  const summary = (list: Awaited<ReturnType<typeof options>>) => list.map((option) => [option.kind, option.label, option.button, option.command, option.args])
+
+  assert.deepEqual(summary(await options(113)), [
+    ['default', 'Review', 'Review PR', 'review-pr', ['113']],
+    ['tandem', 'Tandem review', 'Review in tandem', 'review-pr', ['113', '--tandem']],
+  ])
+  assert.deepEqual(summary(await options(106, stacked)), [
+    ['default', 'Re-review', 'Re-review PR', 'review-pr', ['106']],
+    ['tandem', 'Tandem re-review', 'Re-review in tandem', 'review-pr', ['106', '--tandem']],
+    ['stack', 'Review stack', 'Review stack', 'review-stack', ['106']],
+  ])
+  // the viewer's own PR never posts, tandem or not
+  assert.deepEqual(summary(await options(104)), [
+    ['default', 'Self-review', 'Self-review', 'review-pr', ['104', '--no-post']],
+    ['tandem', 'Tandem self-review', 'Self-review in tandem', 'review-pr', ['104', '--tandem', '--no-post']],
+  ])
+  // review-dependabot has no tandem mode; Renovate's PRs are ordinary reviews and do
+  assert.deepEqual(summary(await options(114)), [['default', 'Review', 'Review PR', 'review-dependabot', ['114']]])
+  assert.deepEqual((await options(115)).map((option) => option.kind), ['default', 'tandem'])
+  // nothing offered is ever review-local, a fix, or an unflagged review of the viewer's own PR
+  for (const number of [101, 103, 104, 120]) {
+    for (const option of await options(number, stacked)) {
+      assert.notEqual(option.command, 'review-local')
+      if (option.command === 'review-pr') assert.ok(option.args.includes('--no-post'), `${option.kind} on #${number}`)
+    }
+  }
+})
+
+test('each start says which runners it works with and what it does on GitHub', async () => {
+  const config = baseConfig()
+  const stacked = { position: 1, size: 2 }
+  const posts = async (number: number) => Object.fromEntries(startOptions(await prOf(number), config, stacked, false).map((option) => [option.kind, [option.runners, option.posts]]))
+  const review = { kind: 'review', text: 'Posts its report to the PR as @vera-quill: an approval, a request for changes, or a comment, per the findings.' }
+  const stack = { kind: 'offer', text: 'Posts nothing; writes the report only. It stops to offer posting it on the top PR, and you answer in the session.' }
+  assert.deepEqual(await posts(113), { default: [['claude', 'codex'], review], tandem: [['claude'], review], stack: [['claude', 'codex'], stack] })
+  const nothing = { kind: 'nothing', text: 'Posts nothing; writes the report only.' }
+  assert.deepEqual(await posts(104), { default: [['claude', 'codex'], nothing], tandem: [['claude'], nothing], stack: [['claude', 'codex'], stack] })
+  assert.deepEqual((await posts(114)).default, [['claude', 'codex'], { kind: 'autoApprove', text: 'Posts its report to the PR as @vera-quill and may approve the PR automatically.' }])
+})
+
+test('a start is marked unavailable with its reason while a run is in flight or cloneDir is unset', async () => {
+  const pr = await prOf(113)
+  assert.deepEqual(startOptions(pr, baseConfig(), null, false).map((option) => option.unavailable), [null, null])
+  assert.deepEqual(startOptions(pr, baseConfig(), null, true).map((option) => option.unavailable), ['a run for #113 is already in flight', 'a run for #113 is already in flight'])
+  const { cloneDir: _cloneDir, ...unset } = baseConfig()
+  assert.match(startOptions(pr, unset as Config, null, false)[0]?.unavailable ?? '', /set cloneDir in the config to your local clone of octo-example\/orbit/)
+  // a run in flight wins the reason, since fixing the clone would not help
+  const cell = agentCell(pr, baseConfig(), runRow({ number: 113 }), undefined, null)
+  assert.ok(cell.starts.every((option) => option.unavailable?.includes('in flight')))
+  assert.ok(agentCell(pr, baseConfig(), runRow({ number: 113, status: 'done' }), undefined, null).starts.every((option) => option.unavailable === null))
+})
+
+test('why a kind is not offered is a sentence for the refusal', async () => {
+  const config = baseConfig()
+  assert.equal(notOffered('default', await prOf(114), config, null), null)
+  assert.equal(notOffered('tandem', await prOf(113), config, null), null)
+  assert.match(notOffered('tandem', await prOf(114), config, null) ?? '', /#114.*review-dependabot has no tandem mode/)
+  assert.match(notOffered('stack', await prOf(113), config, null) ?? '', /#113.*not part of a stack/)
+  assert.equal(notOffered('stack', await prOf(111), config, { position: 2, size: 3 }), null)
+})
+
+// step slots
+
+const event = (step: StepEvent['step'], state: StepEvent['state'], at: string, note: string | null = null): StepEvent => ({ step, state, at, note })
+
+test('five slots in fixed order, every one pending until its line arrives, and the latest line per step wins', () => {
+  const empty = emptySteps()
+  assert.deepEqual(empty.map((slot) => [slot.step, slot.state, slot.at, slot.note]), [
+    ['resolveBase', 'pending', null, null], ['review', 'pending', null, null], ['consolidate', 'pending', null, null],
+    ['writeReport', 'pending', null, null], ['post', 'pending', null, null],
+  ])
+  const folded = foldSteps(empty, [
+    event('resolveBase', 'started', '2026-10-28T14:00:00Z'),
+    event('resolveBase', 'done', '2026-10-28T14:00:05Z'),
+    event('review', 'started', '2026-10-28T14:00:06Z', 'primary reviewing'),
+    event('consolidate', 'skipped', '2026-10-28T14:00:07Z', 'no tandem review'),
+  ])
+  assert.deepEqual(folded.map((slot) => [slot.step, slot.state, slot.at, slot.note]), [
+    ['resolveBase', 'done', '2026-10-28T14:00:05Z', null],
+    ['review', 'started', '2026-10-28T14:00:06Z', 'primary reviewing'],
+    ['consolidate', 'skipped', '2026-10-28T14:00:07Z', 'no tandem review'],
+    ['writeReport', 'pending', null, null],
+    ['post', 'pending', null, null],
+  ])
+  // a step appended again (a re-run after a fix) replaces its earlier line, and folding never mutates its input
+  const again = foldSteps(folded, [event('review', 'started', '2026-10-28T14:09:00Z', 'second pass')])
+  assert.deepEqual([again[1]?.state, again[1]?.at, again[1]?.note], ['started', '2026-10-28T14:09:00Z', 'second pass'])
+  assert.equal(folded[1]?.note, 'primary reviewing')
+  assert.equal(empty[0]?.state, 'pending')
+})
+
+test('a run that never stepped, or whose folder is gone, has five pending slots rather than an error', () => {
+  assert.deepEqual(stepsOf(runRow()), emptySteps())
+  const stepped = foldSteps(emptySteps(), [event('post', 'done', '2026-10-28T14:00:00Z')])
+  assert.equal(stepsOf(runRow({ steps: stepped })), stepped)
+  const view = runView(runRow({ args: ['106', '--tandem'] }))
+  assert.deepEqual([view.steps.length, view.tandem, isTandemRun(['106']), isTandemRun(['106', '--tandem', '--no-post'])], [5, true, false, true])
+})
+
+test('the cell carries the latest run\'s steps and whether it was a tandem review, also once idle', async () => {
+  const config = baseConfig()
+  const steps = foldSteps(emptySteps(), [event('resolveBase', 'done', '2026-10-28T14:00:05Z'), event('review', 'started', '2026-10-28T14:00:06Z', 'secondary running')])
+  const cell = agentCell(await prOf(106), config, runRow({ args: ['106', '--tandem'], label: 'Tandem re-review', steps }), undefined)
+  assert.deepEqual(cell.steps, steps)
+  assert.equal(cell.tandem, true)
+  assert.deepEqual([agentCell(await prOf(106), config, undefined, undefined).tandem, agentCell(await prOf(106), config, undefined, undefined).steps], [false, emptySteps()])
+  // the head moved on: idle again, still carrying the run for the drawer
+  const moved = agentCell(await prOf(106), config, runRow({ args: ['106', '--tandem'], steps, status: 'done', result: reviewResult({ reviewed: { kind: 'commit', sha: '0123456789abcdef0123456789abcdef01234567' } }) as unknown as RunResultJson }), undefined)
+  assert.deepEqual([moved.state, moved.tandem, moved.steps], ['idle', true, steps])
+})
+
+test('a finished stack review stays done: it read the top layer, whose commit is not this PR\'s head', async () => {
+  const result = reviewResult({ command: 'review-stack', reviewed: { kind: 'commit', sha: '0123456789abcdef0123456789abcdef01234567' } }) as unknown as RunResultJson
+  const cell = agentCell(await prOf(111), baseConfig(), runRow({ number: 111, command: 'review-stack', args: ['111'], label: 'Review stack', status: 'done', result }), undefined, { position: 2, size: 3 })
+  assert.equal(cell.state, 'done')
+  assert.equal(cell.label, 'Review stack')
+})
+
 // the emit-json files
 
 test('result.json is checked against its schema; anything else is no result', () => {
@@ -231,6 +356,31 @@ test('an events.jsonl line is read only when it has the four fields of the contr
   assert.equal(parseStepEvent('{"at":"2026-10-28T14:03:12Z","step":"lint","state":"started","note":null}'), null)
   assert.equal(parseStepEvent('{"at":"yesterday","step":"review","state":"started","note":null}'), null)
   assert.equal(parseStepEvent('half a line'), null)
+})
+
+test('posted.url must be an absolute http or https URL, so a hostile result.json cannot plant a script link; such a run fails as noResult', () => {
+  const good = ['https://github.com/octo-example/orbit/pull/101#pullrequestreview-1', 'http://example.test/x']
+  for (const url of good) assert.equal(parseResult(JSON.stringify(reviewResult({ posted: { form: 'comment', url } }))).ok, true, url)
+  const bad = [
+    'javascript:alert(1)', 'JaVaScRiPt:alert(1)', ' javascript:alert(1)', 'java\tscript:alert(1)', 'java\nscript:alert(1)', 'javascript&colon;alert(1)',
+    'java&#115;cript:alert(1)', 'data:text/html,<script>alert(1)</script>', 'vbscript:x', '//example.test/x', '/pull/101', 'pull/101', 'mailto:a@example.test',
+    'https://example.test/x y', 'https://example.test/\u0000', '', 'https://', 42, null, { href: 'https://example.test' },
+  ]
+  for (const url of bad) {
+    const parsed = parseResult(JSON.stringify(reviewResult({ posted: { form: 'comment', url } })))
+    assert.equal(parsed.ok, false, String(url))
+    assert.match(parsed.ok ? '' : parsed.error, /posted must be null or .* http or https url/)
+    assert.equal(isHttpUrl(url), false, String(url))
+  }
+  assert.equal(isHttpUrl('https://example.test/ok'), true)
+  // the existing settle path: an invalid result is no result at all
+  const settled = judge({
+    stopped: false, restarted: false, exit: { code: 0, signal: null, error: null }, reportExists: true, denials: [], lastEvent: null,
+    parsed: parseResult(JSON.stringify(reviewResult({ posted: { form: 'comment', url: 'javascript:alert(1)' } }))),
+  })
+  assert.equal(settled.status, 'failed')
+  assert.equal(settled.result, null)
+  assert.match(settled.note ?? '', /^noResult: result.json: posted must be/)
 })
 
 // settling
@@ -389,6 +539,25 @@ test('a start checks gh\'s account, spawns Claude in cloneDir with a clean envir
   }
 })
 
+test('a tandem start is refused for Codex, asked for or configured, before anything runs', async () => {
+  const h = await harness({ config: { agent: { runner: 'codex' } } })
+  try {
+    const tandem = request(106, { args: ['106', '--tandem'], label: 'Tandem review' })
+    const refused = (error: unknown): boolean => error instanceof LaunchError && error.code === 'tandemRunner' && /tandem runs with Claude only/.test(error.message)
+    // the configured default is Codex, and no runner was asked for
+    await assert.rejects(h.launcher.start(tandem), refused)
+    await assert.rejects(h.launcher.start({ ...tandem, runner: 'codex' }), refused)
+    assert.equal(h.launch.children.length, 0)
+    assert.deepEqual(h.cache.runsFor(scenario.repo, 106), [])
+    // Claude is fine, and a start that is not a tandem is unaffected
+    const run = await h.launcher.start({ ...tandem, runner: 'claude' })
+    assert.equal(run.runner, 'claude')
+    assert.equal((await h.launcher.start(request(113, { label: 'Review' }))).runner, 'codex')
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a start is refused when gh is another account, when cloneDir is unset, and when it is not a clone of the repo', async () => {
   const other = fakeRunner((args) => args[0] === 'api' ? ok('someone-else\n') : ok('gho_fixture_token\n'))
   const mismatch = await harness({ gh: other })
@@ -472,6 +641,68 @@ test('steps come from events.jsonl, stdin closes on the right result, and the ru
     assert.equal(final.costUsd, 0.74)
     // started, the two reads that changed the row (the background tasks alone change nothing), settled
     assert.deepEqual(h.changes.map((change) => change.status), ['running', 'running', 'running', 'done'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('every events.jsonl line folds into the run\'s five step slots, and a change to only a step\'s note still changes the row', async () => {
+  const h = await harness()
+  try {
+    const run = await h.launcher.start(request(106, { args: ['106', '--tandem'], label: 'Tandem re-review' }))
+    assert.equal(run.steps, null)
+    const child = h.launch.children[0]!
+    await child.events(step('resolveBase', 'started', '2026-10-26T14:06:00Z'), step('resolveBase', 'done', '2026-10-26T14:06:10Z'), step('review', 'started', '2026-10-26T14:06:20Z', 'primary reviewing'))
+    await h.launcher.check()
+    let stored = h.cache.getRun(run.id)!
+    assert.deepEqual(stored.steps?.map((slot) => [slot.step, slot.state, slot.at, slot.note]), [
+      ['resolveBase', 'done', '2026-10-26T14:06:10Z', null],
+      ['review', 'started', '2026-10-26T14:06:20Z', 'primary reviewing'],
+      ['consolidate', 'pending', null, null],
+      ['writeReport', 'pending', null, null],
+      ['post', 'pending', null, null],
+    ])
+    const rowChanges = h.changes.length
+    // the same step and state with a new note: the row still changes, so the page gets a patch
+    await child.events(step('review', 'started', '2026-10-26T14:06:20Z', 'secondary finished'))
+    await h.launcher.check()
+    assert.equal(h.changes.length, rowChanges + 1)
+    stored = h.cache.getRun(run.id)!
+    assert.equal(stored.steps?.[1]?.note, 'secondary finished')
+    // a step appended again wins, and unknown lines are skipped
+    await child.events(step('review', 'done', '2026-10-26T14:07:00Z'), 'not json', step('review', 'started', '2026-10-26T14:08:00Z', 'second pass'), { at: 'x', step: 'merge', state: 'done' })
+    await h.launcher.check()
+    stored = h.cache.getRun(run.id)!
+    assert.deepEqual([stored.steps?.[1]?.state, stored.steps?.[1]?.at, stored.steps?.[1]?.note], ['started', '2026-10-26T14:08:00Z', 'second pass'])
+    assert.deepEqual([stored.step, stored.stepState], ['review', 'started'])
+    // a read that brings nothing new changes nothing
+    const before = h.changes.length
+    await h.launcher.check()
+    assert.equal(h.changes.length, before)
+    // the cell and the API view carry them
+    const cell = agentCell(await prOf(106), baseConfig(), stored, undefined)
+    assert.deepEqual([cell.tandem, cell.steps[1]?.note], [true, 'second pass'])
+    assert.deepEqual([runView(stored).tandem, runView(stored).steps.length], [true, 5])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a recovered run rebuilds its steps from the whole of events.jsonl', async () => {
+  const h = await harness()
+  try {
+    const run = await h.launcher.start(request())
+    const child = h.launch.children[0]!
+    await child.events(step('resolveBase', 'done', '2026-10-26T14:06:10Z'), step('review', 'started', '2026-10-26T14:06:20Z'))
+    await h.launcher.check()
+    // the server goes away and comes back with the run still alive
+    h.launcher.close()
+    h.cache.updateRun(run.id, { steps: null })
+    const again = h.make()
+    await again.recover()
+    await again.check()
+    assert.deepEqual(h.cache.getRun(run.id)!.steps?.map((slot) => slot.state), ['done', 'started', 'pending', 'pending', 'pending'])
+    again.close()
   } finally {
     await h.cleanup()
   }

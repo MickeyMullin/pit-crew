@@ -1,6 +1,6 @@
 // test/server.test.ts
 import assert from 'node:assert/strict'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -1074,6 +1074,224 @@ test('the view carries each row\'s Agent cell, and a start on the viewer\'s own 
     assert.match(h.launch.children[0]!.writes[0] ?? '', /\/review-pr 101 --no-post --emit-json=/)
     const after = rowIn((await getJson<View>(`${h.base}/api/view`)).body, 101)
     assert.deepEqual([after?.agent?.state, after?.agent?.runId, after?.agent?.label], ['running', Number(own.body.id), 'Self-review'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+const lastWrite = (h: Harness): string => h.launch.children.at(-1)?.writes[0] ?? ''
+
+test('a start takes a kind beside the runner: default, tandem (Claude only) or stack, each with its own command line and label', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', agent: { runner: 'codex' } } })
+  try {
+    await filled(h)
+    const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
+    const stop = async (run: Record<string, unknown>): Promise<void> => {
+      const settled = h.server.launcher.settled(Number(run.id))
+      await send(`${h.base}/api/runs/${run.id}/stop`, 'POST', undefined, token(h))
+      await settled
+    }
+
+    // omitted and explicit default are the same start, with the configured runner
+    const plain = await send(url(113), 'POST', { kind: 'default' }, token(h))
+    assert.equal(plain.status, 200)
+    assert.deepEqual([plain.body.runner, plain.body.label, plain.body.args, plain.body.tandem], ['codex', 'Review', ['113'], false])
+    // Codex gets its request as an argument, not on stdin
+    assert.equal(lastWrite(h), '')
+    await stop(plain.body)
+
+    // tandem with no runner is Claude's, whatever the configured default is
+    const tandem = await send(url(113), 'POST', { kind: 'tandem' }, token(h))
+    assert.equal(tandem.status, 200)
+    assert.deepEqual([tandem.body.runner, tandem.body.command, tandem.body.args, tandem.body.label, tandem.body.tandem], ['claude', 'review-pr', ['113', '--tandem'], 'Tandem review', true])
+    assert.match(lastWrite(h), /\/review-pr 113 --tandem --emit-json=/)
+    assert.equal(tandem.body.steps instanceof Array && tandem.body.steps.length, 5)
+    await stop(tandem.body)
+
+    // on the viewer's own PR a tandem review still passes --no-post
+    const own = await send(url(104), 'POST', { kind: 'tandem', runner: 'claude' }, token(h))
+    assert.deepEqual([own.status, own.body.args, own.body.label], [200, ['104', '--tandem', '--no-post'], 'Tandem self-review'])
+    assert.match(lastWrite(h), /\/review-pr 104 --tandem --no-post --emit-json=/)
+    await stop(own.body)
+
+    // a stack review starts from any layer, with either runner
+    const stack = await send(url(111), 'POST', { kind: 'stack', runner: 'claude' }, token(h))
+    assert.deepEqual([stack.status, stack.body.command, stack.body.args, stack.body.label], [200, 'review-stack', ['111'], 'Review stack'])
+    assert.match(lastWrite(h), /^\{.*\/review-stack 111 --emit-json=/)
+    await stop(stack.body)
+    const codexStack = await send(url(112), 'POST', { kind: 'stack' }, token(h))
+    assert.deepEqual([codexStack.status, codexStack.body.runner, codexStack.body.args], [200, 'codex', ['112']])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a kind that cannot start is refused before anything runs: bad kind 400, tandem with Codex 400, not offered 422, and the usual checks still apply', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
+    assert.equal((await send(url(113), 'POST', { kind: 'fix' }, token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', { kind: 7 }, token(h))).status, 400)
+    // a body that is not a plain object of known fields, or a field of the wrong type, is 400
+    assert.equal((await send(url(113), 'POST', { kind: null }, token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', { runner: null }, token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', ['tandem'], token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', 'tandem', token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', { kind: ['tandem'] }, token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', { kind: { toString: 'tandem' } }, token(h))).status, 400)
+    // an own __proto__ key (JSON.parse makes it a plain property) is an unknown field, not a prototype
+    const proto = await fetch(url(113), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: h.base, ...token(h) },
+      body: '{"__proto__":{"kind":"tandem"}}',
+    })
+    assert.equal(proto.status, 400)
+    assert.equal((await send(url(113), 'POST', { kind: 'tandem', fix: true }, token(h))).status, 400)
+    const codex = await send(url(113), 'POST', { kind: 'tandem', runner: 'codex' }, token(h))
+    assert.equal(codex.status, 400)
+    assert.match(String(codex.body.error), /tandem runs with Claude only/)
+    const dependabot = await send(url(114), 'POST', { kind: 'tandem' }, token(h))
+    assert.equal(dependabot.status, 422)
+    assert.match(String(dependabot.body.error), /#114.*no tandem mode/)
+    const flat = await send(url(113), 'POST', { kind: 'stack' }, token(h))
+    assert.equal(flat.status, 422)
+    assert.match(String(flat.body.error), /#113.*not part of a stack/)
+    assert.equal((await send(url(999), 'POST', { kind: 'tandem' }, token(h))).status, 422)
+    assert.equal((await send(url(111), 'POST', { kind: 'stack' })).status, 403)
+    assert.equal(h.launch.children.length, 0)
+    // the one-run-per-PR rule holds across kinds
+    assert.equal((await send(url(113), 'POST', { kind: 'tandem' }, token(h))).status, 200)
+    assert.equal((await send(url(113), 'POST', { kind: 'default' }, token(h))).status, 409)
+    assert.equal((await send(url(113), 'POST', { kind: 'tandem' }, token(h))).status, 409)
+    assert.equal(h.launch.children.length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the view\'s Agent cell lists the starts a row offers, and the run list carries steps and tandem', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const view = (await getJson<View>(`${h.base}/api/view`)).body
+    const kinds = (number: number): string[] => (rowIn(view, number)?.agent?.starts ?? []).map((start) => start.kind)
+    assert.deepEqual(kinds(113), ['default', 'tandem'])
+    assert.deepEqual(kinds(111), ['default', 'tandem', 'stack'])
+    assert.deepEqual(kinds(114), ['default'])
+    assert.deepEqual(rowIn(view, 111)?.agent?.starts[0], {
+      kind: 'default', label: 'Review', button: 'Review PR', command: 'review-pr', args: ['111'], runners: ['claude', 'codex'],
+      posts: { kind: 'review', text: 'Posts its report to the PR as @vera-quill: an approval, a request for changes, or a comment, per the findings.' },
+      unavailable: null,
+    })
+    assert.equal(rowIn(view, 113)?.agent?.tandem, false)
+    assert.equal(rowIn(view, 113)?.agent?.steps.length, 5)
+
+    const started = await send(`${h.base}/api/prs/113/runs`, 'POST', { kind: 'tandem' }, token(h))
+    const id = Number(started.body.id)
+    // the child writes a step, and the row's patch carries it
+    const stream = await openStream(h.base, 'client=steps&visible=true&paused=false')
+    try {
+      const child = h.launch.children[0]!
+      await child.events({ at: '2026-10-28T14:00:00Z', step: 'review', state: 'started', note: 'primary reviewing' })
+      await h.server.launcher.check()
+      let carried: Patch | null = null
+      while (carried === null) {
+        const next = await stream.patch()
+        if (next.rows.some((row) => row.number === 113 && (row as OpenRow).agent?.steps[1]?.note === 'primary reviewing')) carried = next
+      }
+      const cell = (carried.rows.find((row) => row.number === 113) as OpenRow).agent!
+      assert.deepEqual([cell.state, cell.tandem, cell.steps[1]?.state, cell.runId], ['running', true, 'started', id])
+      assert.deepEqual(cell.starts.map((start) => start.unavailable?.includes('in flight')), [true, true])
+    } finally {
+      stream.close()
+    }
+    const listed = await getJson<Record<string, unknown>[]>(`${h.base}/api/prs/113/runs`)
+    assert.deepEqual([listed.body[0]?.tandem, (listed.body[0]?.steps as { note: string }[])[1]?.note], [true, 'primary reviewing'])
+    assert.ok('sessionId' in (listed.body[0] ?? {}) && 'resume' in (listed.body[0] ?? {}) && 'costUsd' in (listed.body[0] ?? {}))
+  } finally {
+    await h.cleanup()
+  }
+})
+
+const reportBody = (priorities: string[], sha = 'abc1234'): string =>
+  `Reviewed commit: \`feat/x\` @ \`${sha}\`\n\n## Summary\n\n${priorities.length === 0 ? 'No actionable findings.' : priorities.map((priority) => `- **${priority}**\n  - Something (a.ts)`).join('\n')}\n`
+
+test('GET /api/prs/<n>/reports lists a PR\'s reports newest first, and GET /api/reports/<name> serves one as HTML and raw Markdown', async () => {
+  const hostile = '## Findings\n\n**[P1] Bad**\n\n<script>alert(1)</script>\n\n[x](javascript:alert(1)) ![y](javascript:alert(2)) [ok](https://example.test/a)\n'
+  const h = await setup({ files: {
+    'agents/output/PR-101.md': reportBody(['P1']),
+    'agents/output/PR-101-codex.md': reportBody([]),
+    'agents/output/PR-102.md': hostile,
+    'agents/output/PR-1010.md': reportBody(['P3']),
+  } })
+  try {
+    const listed = await getJson<{ name: string, modifiedAt: string, sha: string | null, verdict: string | null, tandem: boolean }[]>(`${h.base}/api/prs/101/reports`)
+    assert.equal(listed.status, 200)
+    assert.deepEqual(listed.body.map((entry) => entry.name).sort(), ['PR-101-codex.md', 'PR-101.md'])
+    const own = listed.body.find((entry) => entry.name === 'PR-101.md')!
+    assert.deepEqual([own.sha, own.verdict, own.tandem, Number.isNaN(Date.parse(own.modifiedAt))], ['abc1234', 'changesRequested', true, false])
+    assert.deepEqual(Object.keys(own).sort(), ['modifiedAt', 'name', 'sha', 'tandem', 'verdict'])
+    assert.deepEqual((await getJson<unknown[]>(`${h.base}/api/prs/103/reports`)).body, [])
+    assert.equal((await getJson<unknown>(`${h.base}/api/prs/abc/reports`)).status, 400)
+
+    const report = await getJson<{ name: string, modifiedAt: string, html: string, raw: string }>(`${h.base}/api/reports/PR-102.md`)
+    assert.equal(report.status, 200)
+    assert.deepEqual(Object.keys(report.body).sort(), ['html', 'modifiedAt', 'name', 'raw'])
+    assert.equal(report.body.raw, hostile)
+    assert.match(report.body.html, /<h2>Findings<\/h2>/)
+    assert.ok(!report.body.html.includes('<script'))
+    assert.ok(!/javascript:/i.test(report.body.html))
+    assert.match(report.body.html, /<a href="https:\/\/example\.test\/a" target="_blank" rel="noopener noreferrer nofollow">ok<\/a>/)
+    assert.equal((await getJson<unknown>(`${h.base}/api/reports/PR-103.md`)).status, 404)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the report endpoints read nothing outside reportsDir: odd names, symlinks out, directories and big files', async () => {
+  const h = await setup({ files: { 'agents/output/PR-101.md': reportBody([]), 'secret/PR-104.md': 'outside', 'agents/PR-105.md': 'parent' } })
+  try {
+    const output = join(h.home, 'agents', 'output')
+    await symlink(join(h.home, 'secret', 'PR-104.md'), join(output, 'PR-104.md'))
+    await symlink(join(h.home, 'agents', 'PR-105.md'), join(output, 'PR-105.md'))
+    await mkdir(join(output, 'PR-106.md'))
+    await writeFile(join(output, 'PR-107.md'), 'x'.repeat(1024 * 1024 + 1))
+    await writeFile(join(output, 'PR-108.md'), 'x'.repeat(1024 * 1024))
+    const get = (name: string) => raw(h.server.port, `/api/reports/${name}`)
+    assert.equal((await get('PR-101.md')).status, 200)
+    assert.equal((await get('PR-108.md')).status, 200)
+    assert.equal((await get('PR-107.md')).status, 413)
+    for (const name of ['PR-104.md', 'PR-105.md', 'PR-106.md', 'PR-999.md']) {
+      const refused = await get(name)
+      assert.equal(refused.status, 404, name)
+      assert.ok(!refused.body.includes('outside') && !refused.body.includes('parent'), name)
+    }
+    for (const name of ['..%2Fsecret%2FPR-104.md', '..%2FPR-105.md', '%2e%2e%2fPR-105.md', 'PR-1%2F..%2FPR-101.md', '%2Fetc%2Fpasswd', 'PR-101.md%00', 'PR-..md', 'notes.md', 'PR-101.txt', '%E0%A4%A']) {
+      assert.equal((await get(name)).status, 400, name)
+    }
+    for (const path of ['/api/reports/../PR-105.md', '/api/reports//PR-101.md', '/api/reports/', '/api/reports/sub/PR-101.md']) {
+      assert.ok([400, 404].includes((await raw(h.server.port, path)).status), path)
+    }
+    // the listing skips the symlinks, the directory and any file that is not this PR's
+    assert.deepEqual((await getJson<unknown[]>(`${h.base}/api/prs/104/reports`)).body, [])
+    assert.deepEqual((await getJson<unknown[]>(`${h.base}/api/prs/106/reports`)).body, [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the report endpoints are reads with no token, but the Host check applies; a missing reportsDir means no reports', async () => {
+  const h = await setup({ config: { reportsDir: '~/missing/output' }, files: { 'agents/output/PR-101.md': reportBody([]) } })
+  try {
+    assert.equal((await raw(h.server.port, '/api/prs/101/reports', { Host: 'pit-view.attacker.test' })).status, 403)
+    assert.equal((await raw(h.server.port, '/api/reports/PR-101.md', { Host: 'pit-view.attacker.test' })).status, 403)
+    assert.deepEqual((await getJson<unknown[]>(`${h.base}/api/prs/101/reports`)).body, [])
+    assert.equal((await getJson<unknown>(`${h.base}/api/reports/PR-101.md`)).status, 404)
+    assert.equal((await raw(h.server.port, '/api/reports/PR-101.md', {}, 'POST')).status, 405)
+    await send(`${h.base}/api/config`, 'PUT', { ...(await getJson<Config>(`${h.base}/api/config`)).body, reportsDir: '~/agents/output' })
+    assert.equal((await getJson<unknown[]>(`${h.base}/api/prs/101/reports`)).body.length, 1)
+    assert.equal((await getJson<unknown>(`${h.base}/api/reports/PR-101.md`)).status, 200)
   } finally {
     await h.cleanup()
   }

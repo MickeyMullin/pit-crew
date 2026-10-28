@@ -2,6 +2,7 @@
 // the small pieces rows are made of: avatars, chips, reviewer pips and icons
 import type { Issue, IssueKind, MergeStateKind, PersonView, Reviewer, ReviewerState, Ticket } from '../src/derive.ts'
 import { h, newTab, svg } from './dom.ts'
+import { safeHref, safeImage } from './safeurl.ts'
 import type { Shape } from './dom.ts'
 
 export type Tone = 'blue' | 'red' | 'amber' | 'green' | 'purple' | 'gray' | 'none'
@@ -24,8 +25,9 @@ export const avatar = (person: PersonView, size: 'row' | 'closed' | 'pip' | 'hea
   const element = h('span', { class: `avatar avatar-${size}`, 'aria-hidden': 'true' }, person.initials)
   // config data, not styling: the stylesheet reads it as --person
   if (person.color !== null) element.style.setProperty('--person', person.color)
-  if (person.avatarUrl !== null) {
-    const image = h('img', { src: person.avatarUrl, alt: '', loading: 'lazy', decoding: 'async', referrerpolicy: 'no-referrer' })
+  const source = safeImage(person.avatarUrl)
+  if (source !== null) {
+    const image = h('img', { src: source, alt: '', loading: 'lazy', decoding: 'async', referrerpolicy: 'no-referrer' })
     // a broken image falls back to the initials underneath
     image.addEventListener('error', () => image.remove(), { once: true })
     element.appendChild(image)
@@ -44,8 +46,9 @@ const issueTones: Record<IssueKind, Tone> = {
 
 // a failing check links to its job run, with the job name as its tooltip
 export const issueChip = (issue: Issue): HTMLElement => {
-  if (issue.url === undefined) return chip(issue.label, issueTones[issue.kind])
-  return h('a', { ...newTab, class: `chip chip-link tone-${issueTones[issue.kind]}`, href: issue.url, title: issue.tip ?? null },
+  const href = safeHref(issue.url)
+  if (href === null) return chip(issue.label, issueTones[issue.kind])
+  return h('a', { ...newTab, class: `chip chip-link tone-${issueTones[issue.kind]}`, href, title: issue.tip ?? null },
     issue.label, svg(icons.external, { size: 10, stroke: '2.6' }))
 }
 
@@ -85,6 +88,7 @@ export const pip = (reviewer: Reviewer): HTMLSpanElement => {
 // a ticket chip, linked when its system gives it a URL
 export const ticketChip = (ticket: Ticket): HTMLElement => {
   const tip = ticket.system === 'none' ? 'Description carries the no-ticket marker' : `${ticket.system} ${ticket.label}`
-  if (ticket.url === undefined) return h('span', { class: 'ticket', title: tip }, ticket.label)
-  return h('a', { ...newTab, class: 'ticket', href: ticket.url, title: `Open ${tip}` }, ticket.label)
+  const href = safeHref(ticket.url)
+  if (href === null) return h('span', { class: 'ticket', title: tip }, ticket.label)
+  return h('a', { ...newTab, class: 'ticket', href, title: `Open ${tip}` }, ticket.label)
 }
