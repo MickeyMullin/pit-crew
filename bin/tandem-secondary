@@ -39,7 +39,7 @@ log_dir="$agents_root/logs/tandem"
 # in place. The id is what names the draft (PR-805-<id>.md), so two entries for the
 # same agent with different models can run side by side and be compared.
 entries="\
-codex|codex|gpt-5.6-terra|high"
+codex|codex|gpt-6.1-terra|high"
 
 usage() { sed -n '2,31p' "${BASH_SOURCE[0]}"; }
 
