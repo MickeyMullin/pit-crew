@@ -6,7 +6,13 @@ Re-reviews:
 
 - **A terse request to go again repeats the prior invocation.** When the user asks to re-review, review again, or re-run in a short message that names no PR ("re-review", "pull latest and re-review", "go again"), fetch the latest remote state and repeat the most recent review invocation in this conversation: this prompt, the same PR, and the same sibling note. Explicit words in the new message win.
 - **A head SHA or an "already fetched" statement does not carry over**, since re-pulling means reviewing the new tip. If the prior invocation had either, say so in chat before starting. Never drop anything else silently.
+- **`--emit-json` does not carry over.** A repeated invocation never carries `--emit-json=<run-dir>`, because that run directory belongs to the earlier run; say so in chat before starting. A session that continues after a stop to ask, with the user answering the question, is not a repeat: it keeps its run directory (see `emit-json.md`).
 - A re-review is a full review under this prompt: re-resolve the PR, re-record the tip SHA, read the prior report, and verify each prior finding. If the PR was merged or closed since, say so and stop, as "Target" does.
+
+Machine-readable output:
+
+- If the invocation contains `--emit-json=<run-dir>`, read `{{HOME}}/agents/prompts/review/emit-json.md` in full before doing anything else, check the run directory as it says, remove the flag, and resolve what remains under "Target" below. That file says what to write to `<run-dir>` and when; it changes nothing this prompt allows or requires. Without the flag, ignore it.
+- With the flag, record each step as `emit-json.md` describes, at the points this prompt marks. Record `resolveBase` `started` before resolving the PR. This prompt has no tandem mode, so `consolidate` is always recorded as skipped.
 
 Target:
 
@@ -37,6 +43,7 @@ Scope:
 - Enumerate every version bump in the diff. A grouped update (this repo groups npm minor/patch under `npm-minor-patch`) can carry dozens of packages in one PR; a transitive-only lockfile change carries packages that appear nowhere in `package.json`. Review the direct-dependency bumps individually and the transitive ones as a set.
 - Determine the ecosystem from the branch name and the changed files, and apply the matching ecosystem checklist below. This repo runs Dependabot against `npm` (root, grouped minor/patch), `github-actions`, `docker`, and `terraform` (`infra/live/azure/{shared,dev,qa,prod}` and `infra/modules/platform`) — see `.github/dependabot.yml`.
 - Compare the branch against the latest remote base using the merge base, and review the complete branch diff (Dependabot force-pushes rebases, so the branch may have been rewritten since a prior run).
+- With `--emit-json`, record `resolveBase` `done` once that merge base is found, and `review` `started` before the usage search below.
 - Find this repo's actual usage of every directly-bumped package before judging anything. Grep for the import/module/action/provider name across `apps/`, `scripts/`, `tools/`, `tests/`, `infra/`, and `.github/workflows/`. A major bump of a package with no first-party call sites is a different risk than a minor bump of one used in a hot path.
 - Check whether the bump is one the repo has deliberately pinned or held back. `.github/dependabot.yml` ignores majors for `@eslint/js`, `@types/node`, `eslint`, `typescript`, and the `node` Docker image. A PR that moves one of those anyway — or a bump that silently defeats an intentional pin elsewhere (engines, `.nvmrc`, a Terraform `required_version`, a Dockerfile base tag) — is a finding.
 - Inspect the CI results on the PR rather than running builds or tests locally. Note which checks ran, which passed, and — importantly — which relevant checks did **not** run for this diff. A green PR whose only executed jobs are lint and typecheck is not evidence that a runtime dependency still behaves.
@@ -76,6 +83,7 @@ Ecosystem checklists:
 Output file:
 
 - After completing the review, write the full response (Summary, Findings, and closing notes, verbatim) to a file in the `{{HOME}}/agents/output/` directory, in addition to printing it in chat.
+- With `--emit-json`, record `review` `done` once the findings are final and the form of the post is chosen (see "Posting the report"), then `consolidate` as skipped, then `writeReport` `started` before this write and `done` after it.
 - Name the file after the associated GitHub PR number, e.g. `{{HOME}}/agents/output/PR-482.md`. If no PR exists, name it after the current branch, replacing any character that is not alphanumeric, `-`, or `_` with `-` and collapsing consecutive `-` into one.
 - Overwrite the file if it already exists from a prior run. Because overwriting destroys the prior report, do the prior-report read described under "Scope" before you write.
 - **No AI attribution, anywhere in the report.** Do not say that a model, agent, or tool wrote, reviewed, or found anything: no "reviewed by" line, no generated-by footer, no model or provider names. The report goes out as the user's own review.
@@ -85,6 +93,7 @@ Posting the report:
 
 - Choose the form of the post, by the rules below, before you write the report file, since its closing notes record that choice. Any wait for CI happens then too.
 - Once the file write has completed — and only then, never before it and never concurrently with it — post the report to the PR in the form chosen, passing the file that was just written. This is the one GitHub write this review performs, and it happens exactly once.
+- With `--emit-json`, choosing the form and any wait for CI belong to the `review` step, since they come before the report is written. Record `post` `started` only once the file write has completed, immediately before the post, and `done` once it lands; or record it once as `skipped` with the reason when nothing is posted (no PR exists). `emit-json.md` says what `result.json` records for each case, a failed `gh` command included.
 - **A clean bump is approved automatically.** Post the report as an approval — `gh pr review <number> --approve --body-file {{HOME}}/agents/output/PR-<number>.md` — only when every one of these holds:
   - the review has **no finding above P3**: none at all, or P3s only. A single P0, P1, or P2 means a request-changes review, not an approval;
   - the merge recommendation is `approve`;

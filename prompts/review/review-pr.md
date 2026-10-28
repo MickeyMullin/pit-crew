@@ -3,6 +3,7 @@ Perform a PR-quality code review of all commits on one pull request's branch —
 Re-reviews:
 
 - **A terse request to go again repeats the prior invocation.** When the user asks to re-review, review again, or re-run in a short message that names no target and no flags ("re-review", "pull latest and re-review", "go again"), fetch the latest remote state and repeat the most recent review invocation in this conversation: this prompt, the same target, and the same flags, including `--tandem`, `--tandem=<id>`, `--tandem=manual`, and `--tandem-secondary`. Every section below reads that repeated invocation as if the user had just typed it, so a carried tandem flag means reading `tandem.md` again; its "Re-reviews" section says what carries over.
+- **`--no-post` carries over; `--emit-json` does not.** A repeated invocation keeps `--no-post` like the tandem flags, since it is a safety flag (see `no-post.md`). It never carries `--emit-json=<run-dir>`, because that run directory belongs to the earlier run; say so in chat, as the bullets below require for any dropped flag. A session that continues after a stop to ask, with the user answering the question, is not a repeat: it keeps its run directory (see `emit-json.md`).
 - **Explicit words in the new message win.** If it adds, removes, or changes a flag or the target, follow it. "Re-review without tandem" drops tandem.
 - **Repeat it where feasible, and never drop a flag silently.** If the prior invocation cannot be repeated as written (the PR was merged or closed, the branch was deleted), say what changed and ask, or state the closest alternative, before starting. If any flag is dropped for any reason, say so in chat before the review starts, not afterward.
 - **A re-review is a full review under this prompt.** Re-resolve the target, re-record the tip SHA, read the prior report, verify each prior finding, and treat the fix commits as the highest-risk surface, per the required passes.
@@ -11,6 +12,15 @@ Re-reviews:
 Tandem mode:
 
 - If the invocation contains `--tandem` (optionally `--tandem=<id>[,<id>...]` or `--tandem=manual`) or `--tandem-secondary` (optionally `--tandem-secondary@<sha>`), read `{{HOME}}/agents/prompts/review/tandem.md` in full before doing anything else, remove the flag, and resolve what remains under "Target" below. That file decides which of this prompt's sections run and which files you write; where the two differ, it wins. Without either flag, ignore it.
+
+Machine-readable output:
+
+- If the invocation contains `--emit-json=<run-dir>`, read `{{HOME}}/agents/prompts/review/emit-json.md` in full before doing anything else, check the run directory as it says, remove the flag, and resolve what remains under "Target" below. That file says what to write to `<run-dir>` and when; it changes nothing this prompt allows or requires. Without the flag, ignore it.
+- With the flag, record each step as `emit-json.md` describes, at the points this prompt marks. Record `resolveBase` `started` before resolving the target.
+
+No-post mode:
+
+- If the invocation contains `--no-post`, read `{{HOME}}/agents/prompts/review/no-post.md` in full before doing anything else, remove the flag, and resolve what remains under "Target" below. That file removes every GitHub write, fix mode included, and relaxes nothing else; where it and this prompt differ, it wins. Without the flag, ignore it.
 
 Target:
 
@@ -54,6 +64,7 @@ Scope:
 - If the PR is part of a stack, read its position and size from the `stack` object, and read its immediate base branch from the PR's own `base.ref` (the layer directly below it, not `stack.base.ref`, which is the stack's ultimate trunk target).
 - If the PR is part of a stack, also resolve the full stack via `gh api "repos/{owner}/{repo}/stacks?pull_request={number}"` to get the ordered list of PRs bottom to top. Note the PR directly above this one (if any) and its number/branch in the closing notes — this review does not cover that PR's diff, but a consumer existing one layer up is useful context for judging whether this layer's public surface (exports, schema, API shape) is being changed in a way that's likely to break it.
 - Compare the branch against the latest remote PR base using the merge base. For a stacked PR, "PR base" means the current base branch identified above, re-resolved fresh — do not assume it is `main`/`master`, and do not reuse a base ref you resolved earlier in a prior run, since a rebase cascading down from a lower layer can move it between reviews.
+- With `--emit-json`, record `resolveBase` `done` once that base is re-resolved and its merge base found, and `review` `started` before the prior-report read below.
 - Review the complete branch diff, not only the most recent commit.
 - Inspect relevant callers, schemas, APIs, tests, workflows, and surrounding code needed to understand the changes. For a stacked PR, this includes code introduced by lower layers in the stack when it's a direct caller or dependency of this layer's changes.
 - Check whether the branch still composes cleanly with the latest base branch.
@@ -72,6 +83,7 @@ Scope:
 Output file:
 
 - After completing the review, write the full response (Summary, Findings, and closing notes, verbatim) to a file in the `{{HOME}}/agents/output/` directory, in addition to printing it in chat.
+- With `--emit-json`, record `review` `done` once the findings are final (under tandem mode, once your own draft is written), then `consolidate` as `emit-json.md` describes, then `writeReport` `started` before this write and `done` after it.
 - Name the file after the associated GitHub PR number if one exists for this branch, e.g. `{{HOME}}/agents/output/PR-482.md`. If no PR exists yet, name it after the current branch instead, e.g. `{{HOME}}/agents/output/atomic-feedback-lineage.md`.
 - When deriving the filename from the branch name, replace any character that is not alphanumeric, `-`, or `_` with `-`, and collapse consecutive `-` into one.
 - Overwrite the file if it already exists from a prior run on this branch/PR. Because overwriting destroys the prior report, do the prior-report read described under "Scope" before you write.
@@ -82,6 +94,8 @@ Output file:
 Posting the report:
 
 - Once the file write has completed — and only then, never before it and never concurrently with it — post the report to the PR, passing the file that was just written. Outside the fix mode described under "Fixing your own PR", which pushes commits to your own branch, this is the only write this review performs, and it happens exactly once.
+- With `--no-post`, `no-post.md` overrides this section: nothing is posted in any form, and the wait for CI below does not run.
+- With `--emit-json`, record `post` `started` when you begin choosing the form, the CI check and any wait included, and `done` once the post lands; or record it once as `skipped` with the reason when nothing is posted (the PR is yours, no PR exists, or `--no-post`). `emit-json.md` says what `result.json` records for each case, a failed `gh` command included.
 - **The verdict is expressed by the form of the post, not by its text.** Choose the form from the findings, using the priorities recorded in this run's report:
   - **Any P0, P1, or P2 finding: request changes.** `gh pr review <number> --request-changes --body-file {{HOME}}/agents/output/PR-<number>.md`
   - **No findings at all, or P3 findings only, and CI green: approve.** `gh pr review <number> --approve --body-file {{HOME}}/agents/output/PR-<number>.md`
@@ -101,6 +115,8 @@ Posting the report:
 Fixing your own PR:
 
 This section changes what happens at the end of a review of a PR you wrote. It never applies to anyone else's PR. **Determine authorship on every run, whether or not the review found anything** — it decides both whether findings get fixed and whether the report gets posted at all.
+
+With `--no-post`, `no-post.md` overrides this section and everything under it through "Handing off": fix mode never starts, and nothing is posted.
 
 - **Confirm authorship explicitly before anything else here applies.** Compare `gh api user --jq '.login'` against `gh pr view <number> --json author --jq '.author.login'`. Enter this mode only on an exact match. If the two differ, either lookup fails, or the PR is authored by a bot or an org account, this is not your PR: post the report as described under "Posting the report" and stop. Never infer authorship from the branch name, from `git config user.email`, or from the fact that the branch is checked out locally — a reviewer routinely has someone else's branch checked out, which is precisely when a wrong guess would push commits to a PR that is not theirs.
 - **If the review produced no findings, do not post anything either — including an approval.** Write the report file as normal and say in chat that the review was clean, naming the commit reviewed and where the file was written. GitHub will not accept an approval from the author, and a comment on your own PR saying "approve, no findings" tells you something you are already reading. The file is the durable record; the chat response is the notification. Nothing else about this section applies to a clean review.
@@ -126,6 +142,7 @@ Making the fix:
 After the fix:
 
 - Re-run this entire prompt against the updated branch: re-resolve the tip SHA, re-derive the diff, and review again from scratch. Do not merely re-check the findings you fixed — a fix can introduce a new problem, and that is the main thing this second pass exists to catch.
+- With `--emit-json`, this second pass appends its own steps after the first pass's, from `resolveBase` on, as `emit-json.md` describes. It is the same run, and `result.json` is written once, at the run's end.
 - Record `Fix attempts: 1` (or the prior value plus one) in the new report.
 - **If the second run finds nothing, you are done.** Report in chat what was found, what was fixed, and what was pushed, and confirm the second review was clean. Do not post a PR comment: the findings were resolved rather than raised, and the commits are the record.
 - **If the second run finds anything at all, stop.** Do not fix again. Report the remaining findings in chat and ask the user whether to continue attempting fixes. This limit exists to prevent an unbounded fix–review loop, so honour it even when the remaining finding looks trivial and even when it is unrelated to the first round's findings.

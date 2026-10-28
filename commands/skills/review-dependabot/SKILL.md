@@ -1,6 +1,6 @@
 ---
 name: review-dependabot
-description: Review a Dependabot dependency bump, accounting for rebases and re-bumps of the same PR. Approves automatically when the bump has nothing above P3 and green CI.
+description: Review a Dependabot dependency bump, accounting for rebases and re-bumps of the same PR. Approves automatically when the bump has nothing above P3 and green CI. Add --emit-json=<run-dir> to also write machine-readable progress and results to that directory.
 ---
 
 # Review a Dependabot bump
@@ -8,6 +8,8 @@ description: Review a Dependabot dependency bump, accounting for rebases and re-
 Follow the instructions in `{{HOME}}/agents/prompts/review/review-dependabot.md` in full. That file is the whole specification for this task — read it before doing anything else, and follow it as written rather than substituting your own review process.
 
 The invocation may name the PR to review — a PR number or a PR URL. Pass it to the prompt and follow its Target section, which reviews it in a throwaway worktree. The invocation may also carry the head SHA to pin that worktree to, a statement that the clone is already fetched, and a sibling note naming related Dependabot PRs; none of those are part of the target. If the invocation names no PR, the prompt reviews the current checkout instead; that is its default, not an error.
+
+If the invocation includes `--emit-json=<run-dir>`, that flag is not part of the target either. The prompt's Machine-readable output section covers it: remove the flag, read the shared file the section names, and resolve the rest as the target.
 
 The prompt is written to be agent-agnostic. `claude-code-notes.md` sits beside it in the same directory and is **not** part of this skill: it covers Claude Code's own execution quirks and does not apply here. Ignore any instruction in the prompt to load it unless you are in fact running as Claude Code.
 

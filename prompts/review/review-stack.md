@@ -5,6 +5,7 @@ This prompt is the companion to `review-pr.md`. Use this one to answer "does the
 Re-reviews:
 
 - **A terse request to go again repeats the prior invocation.** When the user asks to re-review, review again, or re-run in a short message that names no stack and no flags ("re-review", "pull latest and re-review", "go again"), fetch the latest remote state and repeat the most recent review invocation in this conversation: this prompt, the same stack identity, and the same flags, including `--tandem`, `--tandem=<id>`, `--tandem=manual`, and `--tandem-secondary`. Every section below reads that repeated invocation as if the user had just typed it, so a carried tandem flag means reading `tandem.md` again; its "Re-reviews" section says what carries over.
+- **`--emit-json` does not carry over.** A repeated invocation never carries `--emit-json=<run-dir>`, because that run directory belongs to the earlier run; say so in chat, as the bullets below require for any dropped flag. A session that continues after a stop to ask, with the user answering the question (the offer to post included), is not a repeat: it keeps its run directory (see `emit-json.md`).
 - **Explicit words in the new message win.** If it adds, removes, or changes a flag or the stack identity, follow it. "Re-review without tandem" drops tandem.
 - **Repeat it where feasible, and never drop a flag silently.** If the prior invocation cannot be repeated as written (the stack merged or closed, its top branch was deleted), say what changed and ask, or state the closest alternative, before starting. If any flag is dropped for any reason, say so in chat before the review starts, not afterward.
 - **A re-review is a full review under this prompt.** Re-resolve the stack, re-record the tip SHA, read the prior report, verify each prior finding, and treat the commits added to address them as the highest-risk surface, per the required passes. A yes to posting the prior report is not a yes to posting this one; offer again.
@@ -13,6 +14,12 @@ Tandem mode:
 
 - If the invocation contains `--tandem` (optionally `--tandem=<id>[,<id>...]` or `--tandem=manual`) or `--tandem-secondary` (optionally `--tandem-secondary@<sha>`), read `{{HOME}}/agents/prompts/review/tandem.md` in full before doing anything else, remove the flag, and resolve what remains under "Setup" below. That file decides which of this prompt's sections run and which files you write; where the two differ, it wins. Without either flag, ignore it.
 - Tandem mode adds nothing to what this prompt may do. It still never fixes, and the primary still posts only on the user's explicit yes.
+
+Machine-readable output:
+
+- If the invocation contains `--emit-json=<run-dir>`, read `{{HOME}}/agents/prompts/review/emit-json.md` in full before doing anything else, check the run directory as it says, remove the flag, and resolve what remains under "Setup" below. That file says what to write to `<run-dir>` and when; it changes nothing this prompt allows or requires. Without the flag, ignore it.
+- With the flag, record each step as `emit-json.md` describes, at the points this prompt marks. Record `resolveBase` `started` before resolving the stack identity.
+- The flag adds nothing to what this prompt may do either. It still never fixes, and still posts only on the user's explicit yes: with the flag, the offer to post is a stop to ask, and the run stops there.
 
 Setup:
 
@@ -43,6 +50,7 @@ git worktree add --detach {{HOME}}/agents/worktrees/<repo>-<top-branch>-<timesta
 - Verify the stack is coherent before trusting the tip as "the whole stack". For each layer's head SHA from the stack object, confirm it is an ancestor of the tip: `git merge-base --is-ancestor <layer-sha> HEAD`. If any layer is not an ancestor, the stack is mid-rebase or has diverged — stop, report exactly which layers are detached, and do not present the review as covering the stack.
 - Resolve the review base as the merge base with the stack's trunk: `git merge-base origin/<trunk-ref> HEAD`, where `<trunk-ref>` is the stack object's `base.ref`. Every diff, every gate invocation, and every "is this new?" judgment in this review uses that merge base, never an individual PR's `base.ref`.
 - Check whether the tip still composes cleanly with the latest trunk.
+- With `--emit-json`, record `resolveBase` `done` here, once the merge base is resolved and the stack verified coherent, and `review` `started` before the triage below.
 
 Triage before reading (do this first, it decides where the effort goes):
 
@@ -89,6 +97,7 @@ Scope:
 Output file:
 
 - After completing the review, write the full response (Summary, Findings, and closing notes, verbatim) to `{{HOME}}/agents/output/STACK-<number>.md`, where `<number>` is the stack's repo-scoped `number` (not its `id`), in addition to printing it in chat.
+- With `--emit-json`, record `review` `done` once the findings are final (under tandem mode, once your own draft is written), then `consolidate` as `emit-json.md` describes, then `writeReport` `started` before this write and `done` after it.
 - Overwrite the file if it already exists from a prior run. Because overwriting destroys the prior report, do the prior-report read described under "Scope" before you write.
 - **No AI attribution, anywhere in the report.** Do not say that a model, agent, or tool wrote, reviewed, or found anything: no "reviewed by" line, no per-finding credit, no generated-by footer, no model or provider names. The report goes out as the user's own review. This is unrelated to attributing each finding to the layer that introduced it, which stays required.
 - Begin the file (and the chat response) with a `Reviewed stack:` line carrying the stack number, the top layer's branch, and its short tip SHA.
@@ -107,6 +116,7 @@ Output file:
 - **An approval still carries the whole report, P3s included.** A P3 is a lower-risk quality or maintainability note, and whether it is worth fixing now or tracking separately is the author's call — so approve and let them decide. Never approve to be agreeable, and never rank a finding P3 because P3 is the rank that approves: the priority comes from the finding's risk, judged before you know which form it selects. A defect that can produce incorrect behavior for anyone is a P2 at minimum, and P2 requests changes.
 - **The form does not decide whether to post.** Which form to use, and whether to post at all, are separate questions: this bullet answers the first, and the next three answer the second.
 - **This review never posts on its own initiative, for any verdict.** Write the file as always, print the report in chat as always, then say the report was not posted, name the form it would take — an approval, a request-changes review, or a comment — and ask whether to post it to the top PR. Wait for an explicit yes, then post in that form. A general instruction to review the stack is not consent to post on it; ask each run.
+- With `--emit-json`, record `post` `started` when you begin deciding the post (the authorship check and the CI gate included). Asking whether to post is a stop to ask: write `result.json` as `needsInput`, with `notPostedReason` `awaitingAnswer`, and stop, as `emit-json.md` describes for this offer. Where this section makes no offer, record `post` `skipped` with the reason.
 - Each of the three forms has its own reason for asking, and none of them is a formality. A findings verdict means the stack is expected to change before it merges, so posting unprompted publishes a list of problems against work that is still moving and pins it to a top PR whose SHAs the fixes will invalidate. A request-changes review goes further and blocks the top PR until a human dismisses it. And an approval is not the harmless end of the scale it looks like: submitted on someone else's stack it is a real review that can satisfy a required-review gate, so it may be the thing that lets the stack merge. Deciding that on a reviewer's behalf is not this prompt's call to make.
 - Naming the form when you ask is the point of asking. "Post the report?" and "submit an approval that may unblock this stack?" are different questions, and only the second one lets the answer mean anything.
 - **Determine authorship of the top layer's PR before offering to post anything.** Compare `gh api user --jq '.login'` against `gh pr view <top-pr-number> --json author --jq '.author.login'`. The top PR is the only one this review ever posts on, so it is the only authorship that decides this. Never infer it from the branch under review: this prompt puts the top layer's head branch in a worktree as a matter of course, so having it on disk says nothing about who wrote it.
