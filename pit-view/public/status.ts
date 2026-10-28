@@ -54,6 +54,13 @@ export const failureCause = (cycle: NonNullable<Sync['cycle']>): Cause => {
   }
 }
 
+// the header's Offline badge: only while the latest cycle failed because GitHub was out of reach,
+// so it comes and goes with the banner but not for its other causes
+export const offlineBadge = (sync: Pick<Sync, 'cycle'>): boolean => {
+  const cycle = sync.cycle
+  return cycle !== null && cycle.state === 'failed' && failureCause(cycle).word === 'offline'
+}
+
 // the oldest data shown: the open section is as old as its oldest row, so the sections suffice
 export const oldestFetch = (sync: Pick<Sync, 'sections'>): string | null => {
   const times = [sync.sections.open.fetchedAt, sync.sections.closed.fetchedAt].filter((at): at is string => at !== null)

@@ -14,6 +14,7 @@ import {
   toConfig, todayChoices, toForm, validateForm,
 } from './settings-form.ts'
 import type { AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
+import { mountStickyHeader, trackHeight } from './sticky.ts'
 import { mountThemeToggle } from './theme.ts'
 
 const removeIcon: Shape[] = [['path', { d: 'M6 6l12 12' }], ['path', { d: 'M18 6L6 18' }]]
@@ -572,6 +573,8 @@ void loadInstance().then((info) => {
   showInstance(info)
   setText(byId('config-path'), info.configPath)
 })
+mountStickyHeader(byId('site-header'))
+trackHeight(byId('save-bar'), '--save-bar-height')
 mountThemeToggle(byId<HTMLButtonElement>('theme'))
 bindStatic()
 

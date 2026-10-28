@@ -16,6 +16,7 @@ import { emptyFeed, receivePatch, receiveView, restartFeed } from './state.ts'
 import type { FeedStep } from './state.ts'
 import { configChannel } from './settings-form.ts'
 import { syncStatus } from './status.ts'
+import { mountStickyHeader } from './sticky.ts'
 import type { TableKey } from './tables.ts'
 import { mountThemeToggle } from './theme.ts'
 
@@ -271,6 +272,7 @@ try {
   // without the channel the settings apply on the next stream open
 }
 
+mountStickyHeader(byId('site-header'))
 mountThemeToggle(byId<HTMLButtonElement>('theme'))
 void loadInstance().then((info) => {
   if (info !== null) showInstance(info)

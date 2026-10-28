@@ -60,6 +60,26 @@ html {
   background: var(--ground);
 }
 
+/* the sticky bars never cover a focused element or an anchor's target: everything in the main
+   content keeps a margin the header's height above it and, on Settings, the save bar's height
+   below it. A margin on the content rather than padding on the page, so focusing a control inside
+   a bar never scrolls the page. public/sticky.ts keeps both heights measured; the fallbacks are
+   their one-line heights */
+main,
+main * {
+  scroll-margin-top: calc(var(--header-height, 56px) + 8px);
+}
+
+.settings,
+.settings * {
+  scroll-margin-bottom: calc(var(--save-bar-height, 57px) + 8px);
+}
+
+.save-bar,
+.save-bar * {
+  scroll-margin: 0;
+}
+
 body {
   margin: 0;
   background: var(--ground);
@@ -121,7 +141,7 @@ button {
   position: absolute;
   left: 16px;
   top: -48px;
-  z-index: 10;
+  z-index: 30;
   padding: 8px 12px;
   background: var(--surface);
   border: 1px solid var(--line-control);
@@ -132,16 +152,36 @@ button {
   top: 8px;
 }
 
-/* header */
+/* header: pinned to the top of the window on both pages. Layers, lowest first: the page, the
+   header (10), the hover card (20), the skip link (30) */
 
 .site-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 12px 16px;
   padding: 12px 32px;
   background: var(--surface);
-  border-bottom: 1px solid var(--line);
+  transition: box-shadow 0.15s;
+}
+
+/* only once content has scrolled under it: a bottom line and a soft shadow, drawn as shadows so
+   the header's height never changes */
+.site-header[data-scrolled='true'] {
+  box-shadow: 0 1px 0 var(--line), 0 4px 12px -6px var(--shadow);
+}
+
+/* public/sticky.ts watches this leave the window to know the page has scrolled */
+.header-sentinel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
 }
 
 .brand {
@@ -167,6 +207,25 @@ button {
 }
 
 .instance-badge[hidden] {
+  display: none;
+}
+
+/* while GitHub is out of reach: a word on wide screens, the no-signal glyph alone at phone width;
+   the sync status beside the buttons says the same in words for screen readers */
+.offline-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border: 1px solid var(--amber-edge);
+  border-radius: 4px;
+  background: var(--amber-bg);
+  color: var(--amber-fg);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.offline-badge[hidden],
+.offline-glyph {
   display: none;
 }
 
@@ -233,6 +292,10 @@ button {
   #refresh[data-running] svg,
   .row-refresh[data-state='running'] svg {
     animation: none;
+  }
+
+  .site-header {
+    transition: none;
   }
 }
 
@@ -310,7 +373,8 @@ button {
   font-weight: 600;
 }
 
-/* offline banner: under the header while the latest cycle has failed */
+/* offline banner: under the header while the latest cycle has failed; it scrolls away under the
+   header, whose sync status still says offline */
 
 .offline-banner[hidden] {
   display: none;
@@ -1152,8 +1216,28 @@ button {
 /* phone width: the header and tiles wrap, the tables scroll in their boxes */
 
 @media (max-width: 720px) {
+  /* tighter, so the pinned header wraps to as few lines as it can */
   .site-header {
-    padding: 12px 16px;
+    gap: 8px;
+    padding: 10px 16px;
+  }
+
+  .site-header .spacer {
+    display: none;
+  }
+
+  .offline-badge {
+    padding: 0;
+    border: 0;
+    background: none;
+  }
+
+  .offline-glyph {
+    display: block;
+  }
+
+  .offline-word {
+    display: none;
   }
 
   .banner-offline {
@@ -1219,7 +1303,8 @@ button {
   gap: 12px;
   padding: 20px;
   overflow: visible;
-  scroll-margin-top: 16px;
+  /* a card jumped to keeps a little more room under the header than a field does */
+  scroll-margin-top: calc(var(--header-height, 56px) + 16px);
 }
 
 .card-head {
