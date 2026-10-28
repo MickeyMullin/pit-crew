@@ -10,6 +10,8 @@ export type LiveOptions = {
   clientId: string
   // read afresh at every (re)connect and report, so a reconnect restores the client exactly
   state: () => ClientState
+  // the start of the last cycle this browser saw, also read at every (re)connect; null for none
+  lastUpdate: () => string | null
   // the stream opened, the first time or after a reconnect: refetch the view
   onOpen: () => void
   onPatch: (patch: Patch) => void
@@ -33,6 +35,8 @@ export const createLive = (options: LiveOptions): Live => {
   const url = (): string => {
     const { visible, paused, idle } = options.state()
     const query = new URLSearchParams({ client: options.clientId, visible: String(visible), paused: String(paused), idle: String(idle) })
+    const lastUpdate = options.lastUpdate()
+    if (lastUpdate !== null) query.set('lastUpdate', lastUpdate)
     return `/api/events?${query.toString()}`
   }
 

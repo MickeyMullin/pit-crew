@@ -28,6 +28,15 @@ export type Clients = {
 // an idle page counts as paused: visible but not looking
 export const isActive = (state: ClientState): boolean => state.visible && !state.paused && !state.idle
 
+// a page reloaded within the interval keeps the schedule: lastUpdate is the start of the last
+// cycle its browser saw, kept in localStorage, and while that is under refreshSeconds old the
+// page's arrival is not the active trigger, so the interval timer counts on from the last start
+export const keepsSchedule = (lastUpdate: string | null, nowMs: number, refreshSeconds: number): boolean => {
+  if (lastUpdate === null) return false
+  const at = Date.parse(lastUpdate)
+  return Number.isFinite(at) && at <= nowMs && nowMs - at < refreshSeconds * 1000
+}
+
 // in memory only: a client exists while its event stream is open
 export const createClients = (): Clients => {
   // a reconnect can open the new stream before the old one closes, so a client may hold more than one
