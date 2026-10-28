@@ -257,8 +257,36 @@ test('an approved PR whose mergeability GitHub has not computed is checking, not
   const running = withContexts(approved, [checkRun('Unit tests', 'IN_PROGRESS', null)])
   assert.equal(deriveMerge(running, deriveIssues(running)).state, 'blocked')
   assert.equal((await row(113)).merge.state, 'needsReview')
-  // nothing for the viewer to do while it is checking: mine waits on review, others' on the author
-  assert.equal(deriveOpenRow(approved, ctx(), new Map())?.group, 'awaitingReview')
+})
+
+test('an approved PR GitHub is still checking groups as ready to merge, in Mine and Others\', and keeps its Checking label', async () => {
+  const unknown = { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' } as const
+  const place = (pr: RawOpenPr) => {
+    const found = deriveOpenRow(pr, ctx(), new Map())
+    assert.ok(found)
+    return { section: found.section, group: found.group, merge: found.merge, ...(found.section === 'mine' ? { stage: found.stage } : {}) }
+  }
+  const checking = { state: 'checking', label: 'Checking' }
+  // #102 is the viewer's and #110 someone else's, both approved and clean in the scenario
+  assert.deepEqual(place(variant(find(await allOpen(), 102), unknown)), { section: 'mine', group: 'readyToMerge', merge: checking, stage: 'approved' })
+  assert.deepEqual(place(variant(find(await allOpen(), 110), unknown)), { section: 'others', group: 'readyToMerge', merge: checking })
+  // the tile counts it as the table does
+  const tiles = deriveTiles([variant(find(await allOpen(), 102), unknown)].map((pr) => deriveOpenRow(pr, ctx(), new Map())!), deriveClosed([], ctx()))
+  assert.equal(tiles.mineReadyToMerge, 1)
+
+  // not approved: UNKNOWN changes nothing, since the PR never reaches checking
+  for (const number of [104, 106, 116]) {
+    const pr = find(await allOpen(), number)
+    assert.notEqual(pr.reviewDecision, 'APPROVED')
+    assert.deepEqual(place(variant(pr, unknown)), place(variant(pr, { mergeStateStatus: 'BLOCKED' })), `#${number}`)
+  }
+  // approved with an issue chip: blocked by the chip, grouped as before
+  for (const number of [102, 110]) {
+    const running = withContexts(find(await allOpen(), number), [checkRun('Unit tests', 'IN_PROGRESS', null)])
+    const placed = place(variant(running, unknown))
+    assert.notEqual(placed.group, 'readyToMerge', `#${number}`)
+    assert.deepEqual(placed, place(variant(running, { mergeStateStatus: 'BLOCKED' })), `#${number}`)
+  }
 })
 
 test('mine groups and stages', async () => {

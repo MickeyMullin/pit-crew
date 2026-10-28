@@ -281,7 +281,8 @@ type Preset = { target: TableKey, apply: (filters: Filters) => Filters, range?: 
 export const tilePresets: Record<TileKey, Preset> = {
   yourMove: { target: 'others', apply: (f) => ({ ...f, others: { ...f.others, status: 'yourMove' } }) },
   mineChangesRequested: { target: 'mine', apply: (f) => ({ ...f, mine: { ...f.mine, status: 'changesRequested' } }) },
-  mineReadyToMerge: { target: 'mine', apply: (f) => ({ ...f, mine: { ...f.mine, merge: 'ready' } }) },
+  // the group, not Merge = Ready, since an approved PR GitHub is still checking counts too
+  mineReadyToMerge: { target: 'mine', apply: (f) => ({ ...f, mine: { ...f.mine, status: 'readyToMerge' } }) },
   waitingOnAuthor: { target: 'others', apply: (f) => ({ ...f, others: { ...f.others, status: 'waitingOnAuthor' } }) },
   closedToday: { target: 'closed', apply: (f) => f, range: 'today' },
 }

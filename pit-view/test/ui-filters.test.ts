@@ -285,7 +285,7 @@ test('a tile clears every filter, opens its section alone and applies its preset
   assert.equal(changes.tile, 'mineChangesRequested')
   assert.deepEqual(changes.expanded, { mine: true, others: false, closed: false })
   assert.deepEqual(changes.filters, { ...noFilters(), mine: { ...noFilters().mine, status: 'changesRequested' } })
-  assert.deepEqual(pressTile(sorted, 'mineReadyToMerge').filters, { ...noFilters(), mine: { ...noFilters().mine, merge: 'ready' } })
+  assert.deepEqual(pressTile(sorted, 'mineReadyToMerge').filters, { ...noFilters(), mine: { ...noFilters().mine, status: 'readyToMerge' } })
   const closed = pressTile(setClosedRange(sorted, 'yesterday'), 'closedToday')
   assert.deepEqual([closed.closedRange, closed.expanded, closed.filters], ['today', { mine: false, others: false, closed: true }, noFilters()])
 
@@ -339,6 +339,18 @@ test('each tile\'s preset shows exactly the rows its count counts, and a patch m
   assert.equal(shown.matched, deriveTiles(answered, closed).mineChangesRequested)
   assert.equal(shown.matched, 0)
   assert.ok(mineRowsOf(answered).some(mineFilter({ issues: 'changesRequested' })))
+
+  // an approved PR GitHub is still checking stays in Ready to merge, so the tile and its preset
+  // keep it, though the Merge filter's Ready does not
+  const checking = rows.map((row) => row.section === 'mine' && row.group === 'readyToMerge'
+    ? { ...row, merge: { state: 'checking' as const, label: 'Checking' } }
+    : row)
+  const unconfirmed = regroup({ mine, others }, checking)
+  const ready = pressTile(initialControls(), 'mineReadyToMerge')
+  const kept = arrange<MineRow>({ table: 'mine', groups: unconfirmed.mine.groups, match: matchesMine(ready.filters.mine), sortValue: null, dir: 'asc', grouped: true, filtered: true, openGroups: new Set() })
+  assert.equal(kept.matched, deriveTiles(checking, closed).mineReadyToMerge)
+  assert.equal(kept.matched, 1)
+  assert.equal(mineRowsOf(checking).filter(mineFilter({ merge: 'ready' })).length, 0)
 
   // the controls are the page's own: regrouping after a patch never touches them
   const controls = pressTile(initialControls(), 'yourMove')

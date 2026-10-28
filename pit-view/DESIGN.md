@@ -376,15 +376,15 @@ Evaluated in this order and shown in this order:
 | ready | Ready | `mergeStateStatus == CLEAN` |
 | needsApproval | Needs approval | no issue chips, `reviewDecision` empty or `REVIEW_REQUIRED`, and at least one review exists |
 | needsReview | Needs review | no issue chips and no reviews yet |
-| checking | Checking | no issue chips and `mergeStateStatus == UNKNOWN`: GitHub has not computed mergeability yet, typically just after the base branch moved; the next cycle reads it (added in M11, where approved PRs showed Blocked for one cycle) |
+| checking | Checking | no issue chips and `mergeStateStatus == UNKNOWN`: GitHub has not computed mergeability yet, typically just after a server restart or after the base branch moved; the next cycle reads it (added in M11, where approved PRs showed Blocked for one cycle). With `reviewDecision == APPROVED` the PR still groups as Ready to merge (below), keeping this state and label so the row says the merge is not yet confirmed |
 | blocked | Blocked | anything else (any issue chip, or `BLOCKED`, `DIRTY`, `BEHIND`, `UNSTABLE`) |
 
-The rules apply top to bottom, so a PR with no reviews whose state is `UNKNOWN` still reads Needs review. Sorting puts Checking between Needs review and Blocked; the Merge filters have no Checking option (it shows under any, and as Not ready in Mine).
+The rules apply top to bottom, so a PR with no reviews whose state is `UNKNOWN` still reads Needs review, and one that is not approved never reaches Checking. Sorting puts Checking between Needs review and Blocked, so within Ready to merge an unconfirmed PR sorts after the confirmed ones; the Merge filters have no Checking option (it shows under any, and as Not ready in Mine), so Merge = Ready leaves out an approved PR that is still checking while Status = Ready to merge keeps it.
 
 ### Others' groups, in precedence order
 
 1. **Dependabot** (`bots`): bot PR. The group is labeled with the bot's alias when only one bot appears, otherwise "Bots".
-1. **Ready to merge** (`readyToMerge`): merge state `ready`. Only the author can act.
+1. **Ready to merge** (`readyToMerge`): merge state `ready`, or merge state `checking` with `reviewDecision == APPROVED` (a non-draft PR with no issue chips whose mergeability GitHub has not computed yet), so an approved PR does not drop into another group for a cycle after a restart or a base branch move. Only the author can act.
 1. **Waiting on author** (`waitingOnAuthor`): any of Conflicts, CI failing, CI not run, or Changes requested with no commits since the latest changes-requested review. A PR here still shows the Requested of you flag when it applies.
 1. **Your move** (`yourMove`): anything left that is not a draft: the viewer is requested, has never reviewed it, or it has commits since the viewer's latest review.
 1. Others' drafts are hidden in v1 (none occurred in practice); revisit if they matter.
@@ -396,7 +396,7 @@ Within a group, the default (attention) order is: flags first (Re-review, then R
 | Group | Stage | Rule |
 | --- | --- | --- |
 | Changes requested | changesRequested | not a draft, `reviewDecision == CHANGES_REQUESTED`, and not yet answered (below) |
-| Ready to merge | approved | merge state `ready` |
+| Ready to merge | approved | merge state `ready`, or merge state `checking` with `reviewDecision == APPROVED` (as in Others' Ready to merge, above); the Yours ready to merge tile counts this group |
 | Awaiting review | reReviewRequested or updatedNotRequested | not a draft, `reviewDecision == CHANGES_REQUESTED`, and answered (below) |
 | Awaiting review | awaitingReview or approved | any other non-draft PR |
 | Drafts | draft | `isDraft`; collapsed by default |
@@ -408,7 +408,7 @@ A changes request is answered once the viewer has acted on it, so it stops readi
 
 Re-review requested wins when both hold. An answered PR keeps the Changes requested issue chip, since that is still GitHub's review decision, and keeps `changesRequested` on its row; its reviewer pip shows ✗ after a push and, under the reviewer pip rule above, ○ once re-requested. It sorts with Awaiting review.
 
-The Changes requested group drives the red call-out banner above the Mine table: one line per PR, "<reviewer> requested changes on #n · <age>", the title, and the self-review state, with "Open review" (the PR's review URL) and, in phase 2, "Start a fix session". Answered PRs are not in the group, so they leave the banner, and the banner disappears when none remain.
+The Changes requested group drives the red call-out banner above the Mine table: one line per PR, "<reviewer> requested changes on #n · <age>", the title, and the self-review state, with "Open review" (the PR's review URL; both links open in a new tab, like every GitHub link, section 6) and, in phase 2, "Start a fix session". Answered PRs are not in the group, so they leave the banner, and the banner disappears when none remain.
 
 ### Self-review detection (Mine only)
 
@@ -527,7 +527,7 @@ Each section heading is a disclosure button (chevron rotates, `aria-expanded`) t
 Each table has a filter bar, a column header row, then rows (grouped or flat):
 
 - **Filter bar**: text search (title or number, a leading `#` ignored), per-table selects, a "Group by status" checkbox (Mine and Others'), a count ("12 PRs" or "3 of 12 shown"), and a Clear button when any filter is set.
-  - Mine selects: Status (any, Changes requested, Ready to merge, Awaiting review, Drafts); Issues (any, none, Changes requested, Conflicts, CI failing); Self-review (any, Current, Stale, None); Merge (any, Ready, Not ready). The Status select is what the Changes requested tile sets, since an answered PR keeps its Changes requested chip but has left that group (section 5).
+  - Mine selects: Status (any, Changes requested, Ready to merge, Awaiting review, Drafts); Issues (any, none, Changes requested, Conflicts, CI failing); Self-review (any, Current, Stale, None); Merge (any, Ready, Not ready). The Status select is what the Changes requested and Yours ready to merge tiles set: an answered PR keeps its Changes requested chip but has left that group, and an approved PR GitHub is still checking is in Ready to merge with merge state Checking, which Merge = Ready leaves out (section 5).
   - Others' selects: Status (any, Your move, Ready to merge, Waiting on author, Dependabot); Author (all, then each alias seen); Issues (any, none, Changes requested, Conflicts, CI failing, CI running); Merge (any, Ready, Needs review, Blocked).
   - Closed selects: Author (all, then each alias); Outcome (all, Merged, Closed unmerged). Closed also has a Today / Yesterday segmented control in its heading, with the range summary ("Mon Oct 26 · 10 merged, 3 closed unmerged").
 - **Sorting**: every column header is a button. First click sorts ascending (arrow ↑), second descending (↓), third returns to attention order. Sorting applies within groups when grouped, across all rows when not. Sort keys: PR number; title; author alias; review (flags first, then reviewed, then unreviewed; Mine: changes requested, then awaiting with re-review requested and updated, then approved, then draft); self-review (stale, none, current); issues (more issues first); last activity (most recent first ascending); merge (ready, needs review, blocked, draft); Closed time by `closedAt`.
@@ -542,6 +542,8 @@ Others': Author (avatar and alias) · PR · Title (plus `stack n/m` chip) · Rev
 Closed: Outcome (Merged or Closed chip) · PR · Ticket (only when any row in the range has one) · Title · Author · Closed by · When.
 
 Open PRs do not get a ticket column; their tickets appear in the title's hover. Rows in Mine's Changes requested group get the faint `red-row` background.
+
+Every link to GitHub or a ticket system opens in a new tab (`target="_blank"`, `rel="noopener"`), so the dashboard's own tab never navigates away: the PR number in all three tables, the banner's `#n` and Open review, a CI failing chip's job link, and ticket and linked-issue chips, in rows and in the hover card. As built, they spread the `newTab` attributes from `public/dom.ts`, and a static test fails on any other link the page builds unless its `href` starts with `#` or `/`. Links within the app, such as Settings and the repository button, open in place.
 
 Both open tables end with a narrow Refresh column (52px, its header named for screen readers only) holding one icon button per row, so revealing it never moves another column. The button refreshes that PR alone (`POST /api/prs/<number>/refresh`), paused or not. Its accessible name is "Refresh #<n>", or "Refreshing #<n>" with `aria-busy` while it runs. It is faded out (opacity, never `display` or `visibility`) until its row is hovered or holds focus, so it stays in the tab order and the accessibility tree; it stays shown while its PR is refreshing (the icon spins, unless reduced motion is asked for) or after a failure (amber, its tooltip naming the cause), and always on screens without hover. Focus stays on it across the patches that rebuild it, by its `data-focus` within the row. Closed rows have no button: they come from the closed search, which a one-PR refresh does not touch. The hover card is unchanged and has no refresh control.
 

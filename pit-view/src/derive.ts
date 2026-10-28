@@ -360,11 +360,17 @@ const changesRequestedBy = (pr: RawOpenPr, config: Config): ChangesRequestedBy |
   return { login, alias: aliasOf(login, config), at: review.submittedAt }
 }
 
+// ready to merge: merge state ready, or approved with no issue chips while GitHub is still checking
+// mergeability (after a restart or a base branch move), so it is not dropped for a cycle; its merge
+// state stays checking, so the row still says the merge is unconfirmed
+const groupsAsReady = (pr: RawOpenPr, merge: MergeState): boolean =>
+  merge.state === 'ready' || (merge.state === 'checking' && pr.reviewDecision === 'APPROVED')
+
 // Others' groups, in precedence order; null means hidden (others' drafts in v1)
 export const otherGroup = (pr: RawOpenPr, issues: readonly Issue[], merge: MergeState, config: Config): OtherGroup | null => {
   if (isBotLogin(pr.author?.login, config)) return 'bots'
   if (pr.isDraft) return null
-  if (merge.state === 'ready') return 'readyToMerge'
+  if (groupsAsReady(pr, merge)) return 'readyToMerge'
   const has = (kind: IssueKind): boolean => issues.some((issue) => issue.kind === kind)
   if (has('conflicts') || has('ciFailing') || has('ciNotRun')) return 'waitingOnAuthor'
   if (has('changesRequested') && !pushedSinceChangesRequest(pr)) return 'waitingOnAuthor'
@@ -381,7 +387,7 @@ export const mineGroupAndStage = (pr: RawOpenPr, merge: MergeState): { group: Mi
     const response = changesResponse(pr)
     return response === null ? { group: 'changesRequested', stage: 'changesRequested' } : { group: 'awaitingReview', stage: response }
   }
-  if (merge.state === 'ready') return { group: 'readyToMerge', stage: 'approved' }
+  if (groupsAsReady(pr, merge)) return { group: 'readyToMerge', stage: 'approved' }
   return { group: 'awaitingReview', stage: pr.reviewDecision === 'APPROVED' ? 'approved' : 'awaitingReview' }
 }
 
