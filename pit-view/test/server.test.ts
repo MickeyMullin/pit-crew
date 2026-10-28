@@ -10,6 +10,7 @@ import type { Config } from '../src/config.ts'
 import type { Patch, View } from '../src/poller.ts'
 import { hostAllowed, originAllowed, PortInUseError, resolveRuntime, startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
+import { iso } from '../src/time.ts'
 import { scenario } from './fixtures/scenario.ts'
 import type { MineRow, OpenRow } from '../src/derive.ts'
 import type { RunResult } from '../src/github.ts'
@@ -190,6 +191,51 @@ test('the event stream registers the client, starts the active cycle and streams
     await until(() => h.server.clients.size() === 0)
     assert.equal(h.time.pending(), 0, 'no client, no timers')
     assert.equal(githubCalls(h.runner).length, calls)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a reload within the interval keeps the schedule: no active cycle on arrival, and the interval cycle on time', async () => {
+  const h = await setup()
+  try {
+    const first = await openStream(h.base, 'client=load-1&visible=true&paused=false')
+    await first.untilCycleEnds()
+    await h.server.poller.idle()
+    const startedAt = h.server.cache.latestCycle(scenario.repo)?.startedAt ?? ''
+    first.close()
+    await until(() => h.server.clients.size() === 0)
+
+    // two minutes on, the page reloads carrying the start its browser stored: nothing runs
+    h.time.advance(2 * 60_000)
+    const calls = githubCalls(h.runner).length
+    const reload = await openStream(h.base, `client=load-2&visible=true&paused=false&lastUpdate=${encodeURIComponent(startedAt)}`)
+    const arrived = await reload.patch()
+    assert.deepEqual(arrived.sync?.ui, { activeClients: 1, nextCycleAt: iso(Date.parse(startedAt) + 300_000) })
+    assert.equal(githubCalls(h.runner).length, calls)
+    assert.equal(h.server.cache.latestCycle(scenario.repo)?.id, 1)
+
+    // the interval cycle comes five minutes after the first start, not five after the reload
+    h.time.advance(3 * 60_000)
+    for (;;) {
+      const next = await reload.patch()
+      if (next.sync?.cycle?.id === 2 && next.sync.cycle.state !== 'running') break
+    }
+    assert.equal(h.server.cache.latestCycle(scenario.repo)?.trigger, 'interval')
+    assert.equal(h.server.cache.latestCycle(scenario.repo)?.startedAt, iso(Date.parse(startedAt) + 300_000))
+    await h.server.poller.idle()
+    reload.close()
+    await until(() => h.server.clients.size() === 0)
+
+    // without a stored time, the same reload refreshes on arrival under the 30-second rule
+    h.time.advance(2 * 60_000)
+    const fresh = await openStream(h.base, 'client=load-3&visible=true&paused=false')
+    const patches = await fresh.untilCycleEnds()
+    assert.equal(patches.find((patch) => patch.sync?.cycle?.id === 3)?.sync?.cycle?.trigger, 'active')
+    await h.server.poller.idle()
+    fresh.close()
+
+    assert.equal((await raw(h.server.port, '/api/events?client=load-4&lastUpdate=soon')).status, 400)
   } finally {
     await h.cleanup()
   }

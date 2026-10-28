@@ -17,8 +17,11 @@ import { render } from './render.ts'
 import type { Settings, UiState } from './render.ts'
 import { emptyFeed, findOpenRow, openRows, receivePatch, receiveView, restartFeed } from './state.ts'
 import type { FeedStep } from './state.ts'
+import { lastUpdateOf, readLastUpdate, writeLastUpdate } from './schedule.ts'
+import type { ScheduleStorage } from './schedule.ts'
 import { configChannel } from './settings-form.ts'
 import { syncStatus } from './status.ts'
+import { mountStickyHeader } from './sticky.ts'
 import type { TableKey } from './tables.ts'
 import { mountThemeToggle } from './theme.ts'
 
@@ -59,6 +62,17 @@ const ui: UiState = {
 
 const nowMs = (): number => Date.now() + skewMs
 const visible = (): boolean => document.visibilityState === 'visible'
+
+// the start of the newest cycle seen, kept in localStorage so a reload keeps the refresh schedule;
+// written only when it changes
+const scheduleStorage = (): ScheduleStorage => window.localStorage
+let seenUpdate = readLastUpdate(scheduleStorage)
+const keepLastUpdate = (view: View): void => {
+  const at = lastUpdateOf(view.sync)
+  if (at === null || at === seenUpdate) return
+  seenUpdate = at
+  writeLastUpdate(scheduleStorage, at)
+}
 
 const hover = createHoverCard(byId('hovercard'), () => feed.view === null ? null : { view: feed.view, nowMs: nowMs() })
 
@@ -143,6 +157,7 @@ const draw = (): void => {
   hover.refresh()
   announce(view)
   announceRuns(view)
+  keepLastUpdate(view)
 }
 
 // a reducer from filters.ts applied to this page's controls, then a redraw
@@ -227,6 +242,8 @@ const onPatch = (patch: Patch): void => {
 const live = createLive({
   clientId,
   state: () => ({ visible: visible(), paused: ui.paused, idle: ui.idle }),
+  // read from storage each time, since another tab may have seen a newer cycle
+  lastUpdate: () => readLastUpdate(scheduleStorage),
   onOpen: () => {
     // a first open and a reconnect alike start again from a fresh view
     feed = restartFeed(feed)
@@ -357,6 +374,7 @@ try {
   // without the channel the settings apply on the next stream open
 }
 
+mountStickyHeader(byId('site-header'))
 mountThemeToggle(byId<HTMLButtonElement>('theme'))
 void loadInstance().then((info) => {
   if (info !== null) showInstance(info)

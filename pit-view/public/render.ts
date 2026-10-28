@@ -15,7 +15,7 @@ import {
 } from './filters.ts'
 import type { Arrangement, ClosedRangeKey, Controls, TileKey } from './filters.ts'
 import { formatAge, shortSha } from './format.ts'
-import { offlineBanner, sectionMarker, syncStatus, tableState } from './status.ts'
+import { offlineBadge, offlineBanner, sectionMarker, syncStatus, tableState } from './status.ts'
 import { closedColumns, countText, mineColumns, openFreshness, othersColumns, renderTable } from './tables.ts'
 import type { CellContext, Column, TableKey } from './tables.ts'
 
@@ -57,6 +57,7 @@ const header = (frame: Frame): void => {
   const text = byId('sync-status')
   setText(text, status.text)
   text.dataset.tone = status.tone
+  byId('offline-badge').hidden = !offlineBadge(view.sync)
   const running = view.sync.cycle?.state === 'running'
   const refresh = byId('refresh')
   refresh.toggleAttribute('data-running', running)

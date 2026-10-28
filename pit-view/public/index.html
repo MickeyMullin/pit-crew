@@ -30,11 +30,15 @@
 <body data-density="comfortable">
 <a class="skip-link" href="#main">Skip to the dashboard</a>
 
-<header class="site-header">
+<header id="site-header" class="site-header">
   <div class="brand">
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="6" cy="6" r="2.5"></circle><circle cx="6" cy="18" r="2.5"></circle><circle cx="18" cy="18" r="2.5"></circle><path d="M6 8.5v7"></path><path d="M18 15.5V10a4 4 0 0 0-4-4h-4"></path><path d="M12 4l-2 2 2 2"></path></svg>
     <span class="brand-name">Pit View</span>
     <span id="instance" class="instance-badge mono" title="A separate instance, with its own port, config and cache" hidden></span>
+    <span id="offline-badge" class="offline-badge" title="Can't reach GitHub; showing cached data" aria-hidden="true" hidden>
+      <svg class="offline-glyph" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M2 8.5a15 15 0 0 1 20 0"></path><path d="M5.5 12a10 10 0 0 1 13 0"></path><path d="M9 15.5a5 5 0 0 1 6 0"></path><path d="M3 3l18 18"></path></svg>
+      <span class="offline-word">Offline</span>
+    </span>
   </div>
   <a class="control repo" href="/settings.html#repository" title="Change the repository in Settings">
     <span id="repo-name">…</span>

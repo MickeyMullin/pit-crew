@@ -11,7 +11,7 @@ import { createGh } from '../src/github.ts'
 import { createPoller } from '../src/poller.ts'
 import type { Sync, View } from '../src/poller.ts'
 import { openRows } from '../public/state.ts'
-import { offlineBanner, oldestFetch, refreshButton, rowMarker, sectionMarker, syncStatus, tableState } from '../public/status.ts'
+import { offlineBadge, offlineBanner, oldestFetch, refreshButton, rowMarker, sectionMarker, syncStatus, tableState } from '../public/status.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { failed, fakeRunner, fakeTime, field, fixtureRunner } from './helpers.ts'
 
@@ -82,6 +82,7 @@ test('a cycle that cannot reach GitHub reads offline, with the banner, stale row
     lead: 'Can\'t reach GitHub. Showing cached data from 10:05 AM (3m old).',
     detail: 'Ages, CI and merge states may be out of date. Retrying every 5m.',
   })
+  assert.equal(offlineBadge(down.sync), true)
   // paused, the banner says Refresh retries once, and the header says both
   assert.equal(offlineBanner(down.sync, paused(now))?.detail, 'Ages, CI and merge states may be out of date. Updates are paused; Refresh retries once.')
   const pausedStatus = syncStatus(down.sync, paused(now))
@@ -108,6 +109,7 @@ test('a cycle that cannot reach GitHub reads offline, with the banner, stale row
   const back = await cycle()
   const later = time.clock.now()
   assert.equal(offlineBanner(back.sync, live(later)), null)
+  assert.equal(offlineBadge(back.sync), false)
   assert.equal(syncStatus(back.sync, live(later)).text, 'updated just now · every 5m')
   assert.ok(openRows(back).every((row) => rowMarker(row, back.sync, live(later)) === null))
   assert.equal(sectionMarker(back.sync.sections.open, live(later)), null)
@@ -190,9 +192,11 @@ test('the header and banner name the cause: sign-in, rate limit, an interrupted 
     gh.set(mode)
     const view = await cycle()
     const now = time.clock.now()
-    return { kind: view.sync.cycle?.errorKind, status: syncStatus(view.sync, live(now)).text, banner: offlineBanner(view.sync, live(now)) }
+    return { kind: view.sync.cycle?.errorKind, status: syncStatus(view.sync, live(now)).text, banner: offlineBanner(view.sync, live(now)), badge: offlineBadge(view.sync) }
   }
+  // only an unreachable GitHub is Offline in the header; every other cause leaves the badge off
   assert.deepEqual(await reading('auth'), {
+    badge: false,
     kind: 'auth',
     status: 'sign-in failed · cached 10:05 AM',
     banner: {
@@ -202,18 +206,22 @@ test('the header and banner name the cause: sign-in, rate limit, an interrupted 
   })
   const limited = await reading('limited')
   assert.equal(limited.kind, 'rateLimit')
+  assert.equal(limited.badge, false)
   assert.equal(limited.status, 'rate-limited · cached 10:05 AM')
   assert.equal(limited.banner?.lead, 'GitHub\'s rate limit stopped the refresh. Showing cached data from 10:05 AM (10m old).')
   const gone = await reading('gone')
   assert.equal(gone.kind, 'graphql')
+  assert.equal(gone.badge, false)
   assert.equal(gone.status, 'refresh failed · cached 10:05 AM')
   assert.equal(gone.banner?.lead, 'The refresh failed (GitHub GraphQL error: Could not resolve to a Repository). Showing cached data from 10:05 AM (10m old).')
   // a cycle cut off by the server stopping says so; one recorded without a kind reads as unreachable
   const failedSync = (await cycle()).sync
   const stopped = { ...failedSync, cycle: { ...failedSync.cycle!, errorKind: 'interrupted' as const } }
   assert.equal(syncStatus(stopped, live(time.clock.now())).text, 'interrupted · cached 10:05 AM')
+  assert.equal(offlineBadge(stopped), false)
   const unknown = { ...failedSync, cycle: { ...failedSync.cycle!, errorKind: null } }
   assert.equal(offlineBanner(unknown, live(time.clock.now()))?.lead, 'Can\'t reach GitHub. Showing cached data from 10:05 AM (10m old).')
+  assert.equal(offlineBadge(unknown), true)
 })
 
 test('a row\'s own refresh reads refreshing, or failed with its cause, ahead of what the cycles say', () => {

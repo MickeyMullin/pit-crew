@@ -11,7 +11,7 @@ import { extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openCache } from './cache.ts'
 import type { Cache } from './cache.ts'
-import { createClients } from './clients.ts'
+import { createClients, keepsSchedule } from './clients.ts'
 import type { ClientState, Clients } from './clients.ts'
 import { cacheFile, ConfigError, configFile, expandHome, readConfig, runnerNames, saveConfig, stateDir, tildePath, validateConfig } from './config.ts'
 import type { Clock, Config, RunnerName } from './config.ts'
@@ -357,6 +357,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       paused: flag(url.searchParams.get('paused'), false),
       idle: flag(url.searchParams.get('idle'), false),
     }
+    const lastUpdate = url.searchParams.get('lastUpdate')
+    if (lastUpdate !== null && !Number.isFinite(Date.parse(lastUpdate))) throw new HttpError(400, 'lastUpdate must be an ISO 8601 time')
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       // nothing between the page and the server may hold, cache or compress the stream
@@ -377,7 +379,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       const left = clients.disconnect(id, connection)
       if (left !== null) poller.setActive(left.activeCount, false)
     })
-    poller.setActive(change.activeCount, change.becameActive)
+    // a reload within the interval keeps the schedule rather than refreshing on arrival
+    const keep = keepsSchedule(lastUpdate, clock.now(), effective().refreshSeconds)
+    poller.setActive(change.activeCount, change.becameActive && !keep)
   }
 
   const updateClient = async (req: IncomingMessage, res: ServerResponse, id: string): Promise<void> => {

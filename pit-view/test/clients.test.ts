@@ -1,7 +1,7 @@
 // test/clients.test.ts
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createClients, isActive } from '../src/clients.ts'
+import { createClients, isActive, keepsSchedule } from '../src/clients.ts'
 
 const shown = { visible: true, paused: false, idle: false }
 const hidden = { visible: false, paused: false, idle: false }
@@ -74,4 +74,17 @@ test('closing the last stream drops the client; a reconnect that overlaps keeps 
   const back = clients.connect('tab-a', shown)
   assert.equal(back.change.becameActive, true)
   assert.deepEqual(clients.disconnect('tab-a', back.connection), { active: false, becameActive: false, activeCount: 0 })
+})
+
+test('a page keeps the schedule while the last update its browser saw is under the interval old', () => {
+  const now = Date.parse('2026-10-26T14:05:00Z')
+  assert.equal(keepsSchedule('2026-10-26T14:01:00Z', now, 300), true)
+  assert.equal(keepsSchedule('2026-10-26T14:05:00Z', now, 300), true)
+  // at the interval or past it the schedule is due anyway, so arriving may refresh
+  assert.equal(keepsSchedule('2026-10-26T14:00:00Z', now, 300), false)
+  assert.equal(keepsSchedule('2026-10-26T13:00:00Z', now, 300), false)
+  // nothing stored, a time not yet reached, or no time at all keeps nothing
+  assert.equal(keepsSchedule(null, now, 300), false)
+  assert.equal(keepsSchedule('2026-10-26T14:06:00Z', now, 300), false)
+  assert.equal(keepsSchedule('soon', now, 300), false)
 })
