@@ -14,6 +14,7 @@ test('the default instance is the app: port 4791 and the pit-view folders', () =
     port: 4791,
     configPath: '/home/tester/.config/pit-view/config.json',
     cachePath: '/home/tester/.local/state/pit-view/cache.sqlite',
+    stateDir: '/home/tester/.local/state/pit-view',
   })
   assert.equal(resolveRuntime({ PIT_VIEW_INSTANCE: '', PIT_VIEW_PORT: '' }, home).port, 4791)
 })
@@ -24,6 +25,7 @@ test('PIT_VIEW_INSTANCE=dev moves the port to 4792 and every folder to pit-view-
     port: 4792,
     configPath: '/home/tester/.config/pit-view-dev/config.json',
     cachePath: '/home/tester/.local/state/pit-view-dev/cache.sqlite',
+    stateDir: '/home/tester/.local/state/pit-view-dev',
   })
   assert.equal(configFile(home, 'dev'), '/home/tester/.config/pit-view-dev/config.json')
   assert.equal(cacheFile(home, 'dev'), '/home/tester/.local/state/pit-view-dev/cache.sqlite')

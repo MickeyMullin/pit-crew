@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { CacheError, openCache, schemaVersion } from '../src/cache.ts'
-import type { Cache, CacheOptions } from '../src/cache.ts'
+import type { Cache, CacheOptions, NewRun, Run } from '../src/cache.ts'
 import { createGh, fetchClosedPrs, fetchOpenPrs } from '../src/github.ts'
 import type { ClosedResult, OpenPage } from '../src/github.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -62,7 +62,7 @@ const count = (cache: Cache, table: string): number => Number(cache.db.prepare(`
 test('a new cache has the schema, its version, and nothing fetched', () => {
   const { cache } = memoryCache()
   const tables = cache.db.prepare('SELECT name FROM sqlite_master WHERE type = \'table\' AND name NOT LIKE \'sqlite_%\' ORDER BY name').all()
-  assert.deepEqual(tables.map((row) => row.name), ['cycles', 'meta', 'prs', 'snapshots'])
+  assert.deepEqual(tables.map((row) => row.name), ['cycles', 'meta', 'prs', 'runs', 'snapshots'])
   assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
 
   const view = cache.readView(scenario.repo)
@@ -442,6 +442,72 @@ test('a version 1 cache, whose cycles have no trigger, is rebuilt', async () => 
     const cache = openCache({ path, clock: handClock().clock })
     assert.equal(count(cache, 'cycles'), 0)
     assert.equal(cache.startCycle(scenario.repo, 'active').trigger, 'active')
+    cache.close()
+  } finally {
+    await cleanup()
+  }
+})
+
+// runs (phase 2)
+
+const newRun = (number: number, patch: Partial<NewRun> = {}): NewRun => ({
+  repo: scenario.repo, number, command: 'review-pr', args: [String(number)], label: 'Review', runner: 'claude', cwd: '~/dev/orbit',
+  sessionId: null, pid: null, pidStartedAt: null, startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null,
+  finishedAt: null, status: 'running', result: null, note: null, costUsd: null, resume: null, ...patch,
+})
+
+test('runs are recorded with their folder named by id, updated in place, and read per PR newest first', () => {
+  const { cache } = memoryCache()
+  const first = cache.createRun(newRun(106, { args: ['106', '--no-post'] }), (id) => `~/.local/state/pit-view/runs/${id}`)
+  assert.equal(first.id, 1)
+  assert.equal(first.dir, '~/.local/state/pit-view/runs/1')
+  assert.deepEqual(first.args, ['106', '--no-post'])
+  const result = { schema: 'pit-crew/review-result@1', status: 'done' } as unknown as NonNullable<Run['result']>
+  const done = cache.updateRun(first.id, { status: 'done', finishedAt: '2026-10-26T14:10:00Z', result, costUsd: 0.42, step: 'post', stepState: 'skipped' })
+  assert.deepEqual([done.status, done.costUsd, done.result, done.step, done.stepState], ['done', 0.42, result, 'post', 'skipped'])
+  const second = cache.createRun(newRun(106), (id) => `~/runs/${id}`)
+  const other = cache.createRun(newRun(113), (id) => `~/runs/${id}`)
+  cache.createRun(newRun(106, { repo: 'octo-example/other' }), (id) => `~/runs/${id}`)
+  assert.deepEqual(cache.runsFor(scenario.repo, 106).map((run) => run.id), [second.id, first.id])
+  assert.deepEqual([...cache.latestRuns(scenario.repo).entries()].map(([number, run]) => [number, run.id]).sort(), [[106, second.id], [113, other.id]])
+  assert.deepEqual(cache.runningRuns().map((run) => run.id), [second.id, other.id, 4])
+  assert.throws(() => cache.updateRun(99, { status: 'done' }), CacheError)
+  cache.close()
+})
+
+test('pruning keeps the newest runs and never one still running', () => {
+  const { cache } = memoryCache({ keepRuns: 2 })
+  const old = cache.createRun(newRun(101), (id) => `~/runs/${id}`)
+  const finished = cache.createRun(newRun(102, { status: 'failed' }), (id) => `~/runs/${id}`)
+  cache.createRun(newRun(103, { status: 'done' }), (id) => `~/runs/${id}`)
+  cache.createRun(newRun(104, { status: 'done' }), (id) => `~/runs/${id}`)
+  assert.deepEqual(cache.pruneRuns().map((run) => run.id), [finished.id])
+  assert.equal(cache.getRun(old.id)?.status, 'running')
+  assert.deepEqual(cache.pruneRuns(), [])
+  cache.close()
+})
+
+test('a version 3 cache is rebuilt with runs, and a rebuild keeps the runs it finds', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const old = new DatabaseSync(path)
+    old.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    old.exec('INSERT INTO meta (key, value) VALUES (\'schemaVersion\', \'3\')')
+    old.exec('CREATE TABLE prs (repo TEXT, number INTEGER)')
+    old.exec('INSERT INTO prs VALUES (\'octo-example/orbit\', 1)')
+    old.close()
+    let cache = openCache({ path, clock: handClock().clock })
+    assert.equal(count(cache, 'prs'), 0)
+    assert.equal(count(cache, 'runs'), 0)
+    const kept = cache.createRun(newRun(106), (id) => `~/runs/${id}`)
+    // a later version's rebuild drops the GitHub tables only
+    cache.db.exec('UPDATE meta SET value = \'2\' WHERE key = \'schemaVersion\'')
+    cache.close()
+    cache = openCache({ path, clock: handClock().clock })
+    assert.deepEqual(cache.runsFor(scenario.repo, 106).map((run) => run.id), [kept.id])
+    // ids are never reused, so a run folder never names two runs
+    assert.equal(cache.createRun(newRun(106), (id) => `~/runs/${id}`).id, kept.id + 1)
     cache.close()
   } finally {
     await cleanup()

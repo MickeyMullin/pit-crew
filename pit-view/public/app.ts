@@ -3,6 +3,9 @@
 // reports visibility, pause and idle; keeps focus, the hover card and scroll across every update
 import type { Config } from '../src/config.ts'
 import type { Patch, View } from '../src/poller.ts'
+import { announcements } from './agent.ts'
+import { copyText, tickTimers, updateAgentCells } from './agentcell.ts'
+import { createAgentDialog, readToken } from './agentdialog.ts'
 import { byId, setText } from './dom.ts'
 import { clearFilters, cycleSort, initialControls, pressTile, setClosedRange, setFilter, setGrouped } from './filters.ts'
 import type { ClosedRangeKey, Controls, Filters } from './filters.ts'
@@ -12,7 +15,7 @@ import { loadInstance, showInstance } from './instance.ts'
 import { createLive } from './live.ts'
 import { render } from './render.ts'
 import type { Settings, UiState } from './render.ts'
-import { emptyFeed, receivePatch, receiveView, restartFeed } from './state.ts'
+import { emptyFeed, findOpenRow, openRows, receivePatch, receiveView, restartFeed } from './state.ts'
 import type { FeedStep } from './state.ts'
 import { configChannel } from './settings-form.ts'
 import { syncStatus } from './status.ts'
@@ -84,11 +87,18 @@ const keep = (): Kept => {
   }
 }
 
+// an Agent cell changes its buttons with its state (Review becomes Stop, Stop goes away), so
+// focus on one of them moves to the cell's new button, or to the PR link when it has none
+const focusIn = (row: Element, part: string): HTMLElement | null =>
+  row.querySelector<HTMLElement>(`[data-focus="${part}"]`)
+    ?? (part.startsWith('agent') ? row.querySelector<HTMLElement>('[data-focus^="agent"]') ?? row.querySelector<HTMLElement>('[data-focus="pr"]') : null)
+
 const restore = (kept: Kept): void => {
   const lost = document.activeElement === null || document.activeElement === document.body
   if (lost && kept.focus !== null) {
     const { table, pr, part } = kept.focus
-    document.querySelector<HTMLElement>(`tr[data-table="${table}"][data-pr="${pr}"] [data-focus="${part}"]`)?.focus({ preventScroll: true })
+    const row = document.querySelector(`tr[data-table="${table}"][data-pr="${pr}"]`)
+    if (row !== null) focusIn(row, part)?.focus({ preventScroll: true })
   } else if (lost && kept.focusKey !== null) {
     document.querySelector<HTMLElement>(`[data-focus-key="${CSS.escape(kept.focusKey)}"]`)?.focus({ preventScroll: true })
   }
@@ -110,14 +120,29 @@ const announce = (view: View): void => {
   announcedKey = status.key
 }
 
+// the Agent column says politely when a run starts or finishes, once per change: never per
+// timer tick, and nothing for what the page already showed when it loaded
+let agentKeys: Map<number, string> | null = null
+const announceRuns = (view: View): void => {
+  if (!settings.showAgentColumn) {
+    agentKeys = null
+    return
+  }
+  const { next, messages } = announcements(agentKeys, openRows(view))
+  agentKeys = next
+  if (messages.length > 0) setText(byId('agent-live'), messages.join('. '))
+}
+
 const draw = (): void => {
   const view = feed.view
   if (view === null) return
   const kept = keep()
   render({ view, ui, settings, nowMs: nowMs() }, actions)
+  if (settings.showAgentColumn) updateAgentCells(document, openRows(view), nowMs())
   restore(kept)
   hover.refresh()
   announce(view)
+  announceRuns(view)
 }
 
 // a reducer from filters.ts applied to this page's controls, then a redraw
@@ -243,6 +268,61 @@ document.addEventListener('click', (event) => {
   void fetch(`/api/prs/${encodeURIComponent(button.dataset.refresh ?? '')}/refresh`, { method: 'POST' }).catch(() => {})
 })
 
+// the Agent cell's buttons: Review and Run again ask before starting, Stop asks before stopping,
+// and Copy puts the resume command on the clipboard; runs carry this start's token
+const agentDialog = createAgentDialog({
+  dialog: byId<HTMLDialogElement>('agent-dialog'),
+  token: readToken(document),
+  viewer: () => feed.view?.viewer.login ?? '',
+  nowMs,
+  // the cell's own button, or its new one after a start or stop; once more after the browser
+  // has put focus back where it was before the dialog, which can land after this
+  onClosed: (number) => {
+    const focusCell = (): void => {
+      const row = document.querySelector(`tr[data-pr="${number}"]`)
+      if (row === null || row.contains(document.activeElement)) return
+      focusIn(row, 'agent-stop')?.focus({ preventScroll: true })
+    }
+    focusCell()
+    setTimeout(focusCell, 0)
+  },
+})
+
+const say = (text: string): void => {
+  const live = byId('agent-live')
+  // the same words twice in a row are still said again
+  live.textContent = live.textContent === text ? `${text}\u00a0` : text
+}
+
+document.addEventListener('click', (event) => {
+  const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button[data-agent][data-pr]') : null
+  const view = feed.view
+  if (button === null || view === null) return
+  const number = Number(button.dataset.pr)
+  const row = findOpenRow(view, number)
+  if (row === undefined || row.agent === null) return
+  const kind = button.dataset.agent
+  if (kind === 'start' || kind === 'again') agentDialog.start(row)
+  else if (kind === 'stop') agentDialog.stop(row)
+  else if (kind === 'copy' && row.agent.resume !== null) {
+    const command = row.agent.resume
+    void copyText(command).then((copied) => {
+      if (copied) {
+        say(`Resume command for #${number} copied`)
+        if (button.isConnected) {
+          button.textContent = 'Copied'
+          setTimeout(() => {
+            if (button.isConnected) button.textContent = 'Copy resume command'
+          }, 2_000)
+        }
+      } else {
+        button.title = command
+        say(`Could not copy. The resume command for #${number} is: ${command}`)
+      }
+    })
+  }
+})
+
 byId('pause').addEventListener('click', () => {
   ui.paused = !ui.paused
   writePaused(ui.paused)
@@ -263,6 +343,12 @@ document.addEventListener('visibilitychange', () => {
 setInterval(() => {
   if (visible()) draw()
 }, 15_000)
+
+// a running cell's "running 3m · last step 20s ago" moves every second on its own, without a
+// redraw; with no run in flight there is nothing to tick
+setInterval(() => {
+  if (visible()) tickTimers(document, nowMs())
+}, 1_000)
 
 // the Settings page says when it saved, so density and the agent column follow at once
 try {

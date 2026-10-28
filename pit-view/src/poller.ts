@@ -6,6 +6,7 @@ import { deriveView, isMine } from './derive.ts'
 import type { ClosedView, Counts, DerivedView, Freshness, MineSection, OpenRow, OthersSection, PersonView, RowRefresh, Tiles } from './derive.ts'
 import { fetchClosedPrs, fetchOpenPrs, fetchPr, GhError } from './github.ts'
 import type { Gh, RawOpenPr } from './github.ts'
+import { agentCell } from './launcher.ts'
 import { scanReports } from './reports.ts'
 import type { ReportInfo, ReportTarget } from './reports.ts'
 import { closedSearchWindow, iso } from './time.ts'
@@ -90,6 +91,8 @@ export type Poller = {
   setActive: (activeCount: number, becameActive: boolean) => number | null
   // a saved config replaced `before`; emits the recomputed rows and starts a config cycle when needed
   configChanged: (before: Config) => Promise<void>
+  // a run of this PR started, stepped or settled: one patch upserting its row
+  runChanged: (repo: string, number: number) => void
   // resolves once no cycle is running, including any follow-up cycle
   idle: () => Promise<void>
   // clears the timer and fails a running cycle; nothing starts afterward
@@ -218,6 +221,7 @@ export const createPoller = (options: PollerOptions): Poller => {
 
   const snapshot = (settings: Config, reportMap: ReadonlyMap<number, ReportInfo>): Snapshot => {
     const cached = cache.readView(settings.repo)
+    const runs = cache.latestRuns(settings.repo)
     const freshness = new Map<number, Freshness>(cached.open.map((row) => [row.number, { state: row.freshness.state, fetchedAt: row.freshness.fetchedAt }]))
     const view = deriveView({
       open: cached.open.map((row) => row.pr),
@@ -230,6 +234,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       reports: reportMap,
       freshness: (number) => freshness.get(number) ?? { state: 'current', fetchedAt: iso(clock.now()) },
       refresh: (number) => rowRefreshes.get(prKey(settings.repo, number)) ?? null,
+      agent: (pr) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number)),
     })
     const rows = new Map<number, OpenRow>()
     for (const group of [...view.mine.groups, ...view.others.groups]) {
@@ -515,6 +520,12 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
+  const runChanged = (repo: string, number: number): void => {
+    if (stopped || config().repo !== repo) return
+    const row = snapshot(config(), reports).rows.get(number)
+    if (row !== undefined) patch({ rows: [row] })
+  }
+
   const view = async (): Promise<View> => {
     if (scanned === null) await rescan(config())
     // read and derive in one synchronous step, so version matches what the view holds
@@ -554,5 +565,5 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
-  return { view, refresh, refreshPr, setActive, configChanged, idle, stop, version: () => version }
+  return { view, refresh, refreshPr, setActive, configChanged, runChanged, idle, stop, version: () => version }
 }

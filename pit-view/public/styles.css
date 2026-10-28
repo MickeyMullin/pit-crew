@@ -40,6 +40,8 @@
   --person-fallback: light-dark(#4A4E55, #5B5F66);
   --placeholder: light-dark(#ECECE8, #2B2D31);
   --shadow: light-dark(#17181A29, #00000099);
+  /* behind the run confirmation */
+  --backdrop: light-dark(#17181A59, #000000A6);
 
   --font-ui: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1147,6 +1149,200 @@ button {
   color: var(--amber-fg);
   font-size: 12px;
   font-weight: 600;
+}
+
+/* the Agent cell: an idle dashed button, a running dot and timer, or the finished result */
+
+.agent {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
+}
+
+.agent-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-control);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 500 12px var(--font-ui);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.agent-button:hover {
+  border-color: var(--muted);
+}
+
+/* the start: dashed, in the link color, so it reads as an offer rather than a state */
+.agent-start {
+  height: 26px;
+  padding: 0 12px;
+  border-style: dashed;
+  border-color: var(--blue-fg);
+  color: var(--blue-fg);
+  font-weight: 600;
+}
+
+.agent-start:hover {
+  background: var(--blue-bg);
+  border-color: var(--blue-fg);
+}
+
+.agent-small {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.agent-small:hover {
+  color: var(--ink);
+}
+
+.agent-head,
+.agent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--blue-fg);
+}
+
+.agent-label,
+.agent-text {
+  font-weight: 600;
+}
+
+.agent-label {
+  color: var(--blue-fg);
+}
+
+.agent-line {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tone-text-red {
+  color: var(--red-fg);
+}
+
+.tone-text-amber {
+  color: var(--amber-fg);
+}
+
+/* the textarea copyText selects when the clipboard is refused; never seen */
+.copy-buffer {
+  position: fixed;
+  top: 0;
+  left: -9999px;
+  opacity: 0;
+}
+
+/* the confirmation before a run starts or stops */
+
+.dialog {
+  width: min(500px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 20px 22px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px var(--shadow);
+}
+
+.dialog::backdrop {
+  background: var(--backdrop);
+}
+
+.dialog-heading {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.dialog-title {
+  margin: 0 0 16px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.dialog-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 10px 16px;
+  margin: 0 0 16px;
+}
+
+.dialog-facts dt {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.dialog-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.dialog-command {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--gray-bg);
+  color: var(--gray-fg);
+  font-size: 12px;
+}
+
+.dialog-runners {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
+.dialog-runner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.dialog-error {
+  margin: 0 0 16px;
+  color: var(--red-fg);
+  font-weight: 500;
+}
+
+.dialog-error:empty {
+  display: none;
+}
+
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 480px) {
+  .dialog-facts {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .dialog-facts dd {
+    margin-bottom: 8px;
+  }
 }
 
 /* phone width: the header and tiles wrap, the tables scroll in their boxes */

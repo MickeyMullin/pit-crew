@@ -25,6 +25,17 @@ export type TicketSystem = {
 
 export type Notifications = { enabled: boolean, kinds: string[] }
 
+// the agents Pit View can drive for a review session (section 8 of DESIGN.md, Launching runs)
+export type RunnerName = 'claude' | 'codex'
+export const runnerNames: readonly RunnerName[] = ['claude', 'codex']
+
+export type AgentSettings = {
+  // the default runner; a single run may pick the other
+  runner: RunnerName
+  // passed to Codex as -m when set; Codex otherwise uses its own configured model
+  codexModel?: string
+}
+
 export type Config = {
   repo: string
   // empty means the gh login, filled in by loadConfig
@@ -42,6 +53,10 @@ export type Config = {
   showAgentColumn: boolean
   // host names a reverse proxy may reach the server by, besides its loopback names
   allowedHosts: string[]
+  // the owner's local clone of repo, stored with ~; manual runs work in it. Whether it is a
+  // clone of repo is checked when a run starts, not on save
+  cloneDir?: string
+  agent: AgentSettings
   notifications?: Notifications
 }
 
@@ -82,6 +97,7 @@ export const defaultConfig = (): Config => ({
   density: 'comfortable',
   showAgentColumn: false,
   allowedHosts: [],
+  agent: { runner: 'claude' },
 })
 
 // the default instance ('') is the deployed app; a named one, such as dev, keeps folders of its own
@@ -145,7 +161,7 @@ const personKeys = ['login', 'alias', 'initials', 'color', 'avatar'] as const
 const ticketKeys = ['enabled', 'kind', 'name', 'source', 'pattern', 'baseUrl', 'linkTemplate'] as const
 const configKeys = [
   'repo', 'viewer', 'people', 'tickets', 'refreshSeconds', 'idleMinutes', 'todayStartsAt',
-  'bots', 'reportsDir', 'density', 'showAgentColumn', 'allowedHosts', 'notifications',
+  'bots', 'reportsDir', 'density', 'showAgentColumn', 'allowedHosts', 'cloneDir', 'agent', 'notifications',
 ] as const
 
 // a bare DNS name: dot-separated labels of letters, digits and inner hyphens, with no scheme,
@@ -216,12 +232,42 @@ const toNotifications = (value: unknown): Notifications => {
   }
 }
 
+// an absolute path or one under ~; an empty value means unset
+const toCloneDir = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return fail('config.cloneDir must be a string path, such as ~/dev/orbit')
+  const path = value.trim()
+  if (path === '') return undefined
+  if (path !== '~' && !path.startsWith('~/') && !path.startsWith('/')) fail('config.cloneDir must be an absolute path or a path under ~, such as ~/dev/orbit')
+  if (path.includes('\0')) fail('config.cloneDir must not contain a NUL character')
+  return path
+}
+
+// a model name as Codex takes it after -m; never a flag, never whitespace
+const codexModelPattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/
+
+// absent means the default runner, so a config written before phase 2 still validates
+const toAgent = (value: unknown): AgentSettings => {
+  if (value === undefined) return { runner: 'claude' }
+  if (!isObject(value)) return fail('config.agent must be an object such as { "runner": "claude" }')
+  onlyKeys(value, ['runner', 'codexModel'], 'agent')
+  const agent: AgentSettings = { runner: oneOf(value, 'runner', runnerNames, 'agent') }
+  if (value.codexModel !== undefined) {
+    const model = str(value, 'codexModel', 'agent').trim()
+    if (model !== '') {
+      if (!codexModelPattern.test(model)) fail('agent.codexModel must be a model name such as gpt-6.1-terra, with no spaces')
+      agent.codexModel = model
+    }
+  }
+  return agent
+}
+
 // checks a whole config (as PUT /api/config sends it) and returns a clean copy
 export const validateConfig = (input: unknown): Config => {
   if (!isObject(input)) return fail('config must be a JSON object')
   onlyKeys(input, configKeys, 'config')
   const repo = str(input, 'repo', 'config')
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) fail('config.repo must look like owner/name')
+  const cloneDir = input.cloneDir === undefined ? undefined : toCloneDir(input.cloneDir)
   const config: Config = {
     repo,
     viewer: str(input, 'viewer', 'config').trim(),
@@ -235,6 +281,9 @@ export const validateConfig = (input: unknown): Config => {
     density: oneOf(input, 'density', ['comfortable', 'compact'], 'config'),
     showAgentColumn: bool(input, 'showAgentColumn', 'config'),
     allowedHosts: toAllowedHosts(list(input, 'allowedHosts', 'config')),
+    // absent and empty both mean unset, and an unset cloneDir is left out of the file
+    ...(cloneDir === undefined ? {} : { cloneDir }),
+    agent: toAgent(input.agent),
   }
   if (input.notifications !== undefined) config.notifications = toNotifications(input.notifications)
   return config

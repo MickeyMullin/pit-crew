@@ -90,7 +90,7 @@ export const parseIdleMinutes = (text: string): number => {
 }
 
 // the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit
-// (allowedHosts, notifications) are carried over from the config it loaded
+// (allowedHosts, cloneDir, agent, notifications) are carried over from the config it loaded
 export const toConfig = (form: Form, base: Config): Config => {
   const config: Config = {
     repo: form.repo.trim(),
@@ -117,6 +117,8 @@ export const toConfig = (form: Form, base: Config): Config => {
     density: form.density,
     showAgentColumn: form.showAgentColumn,
     allowedHosts: base.allowedHosts,
+    ...(base.cloneDir === undefined ? {} : { cloneDir: base.cloneDir }),
+    agent: base.agent,
   }
   if (base.notifications !== undefined) config.notifications = base.notifications
   return config

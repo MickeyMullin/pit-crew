@@ -74,8 +74,15 @@ const textPairs: [string, string][] = [
   ['link-hover', 'surface'], ['on-person', 'person-fallback'],
   // the pressed Today / Yesterday button
   ['surface', 'ink'],
-  // the Settings page's Save button
+  // the Settings page's Save button, and the run confirmation's Start
   ['surface', 'blue-fg'],
+  // the Agent cell's own pairs, some also listed above: the dashed start and its hover, the
+  // running label and timer, the done texts on surface and on Mine's changes-requested rows, the
+  // confirmation's command and refusal, and its Stop button
+  ['blue-fg', 'surface'], ['blue-fg', 'blue-bg'], ['blue-fg', 'red-row'], ['muted', 'surface'], ['muted', 'red-row'],
+  ['red-fg', 'surface'], ['amber-fg', 'surface'], ['green-fg', 'surface'], ['gray-fg', 'surface'],
+  ['red-fg', 'red-row'], ['amber-fg', 'red-row'], ['green-fg', 'red-row'], ['gray-fg', 'red-row'],
+  ['gray-fg', 'gray-bg'], ['on-red-button', 'red-button'],
 ]
 
 test('text meets 4.5:1 contrast in both color schemes', async () => {

@@ -3,12 +3,14 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { SQLInputValue, SQLOutputValue } from 'node:sqlite'
-import type { Clock } from './config.ts'
+import type { Clock, RunnerName } from './config.ts'
 import type { ClosedResult, GhErrorKind, OpenPage, RawOpenPr } from './github.ts'
+import type { RunResultJson } from './launcher.ts'
 
-// bump on any schema change; an older cache file is dropped and rebuilt, since it holds
-// nothing GitHub cannot give back
-export const schemaVersion = 3
+// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since
+// they hold nothing GitHub cannot give back. runs is the exception: it survives a rebuild, and a
+// change to its columns needs a migration of its own (phase 4 adds columns with ALTER TABLE)
+export const schemaVersion = 4
 
 export class CacheError extends Error {
   override name = 'CacheError'
@@ -84,6 +86,49 @@ export type FinishResult = {
   stale: CachedPr[]
 }
 
+// a review session's state; phase 4 adds queued and skipped
+export type RunStatus = 'running' | 'done' | 'failed' | 'needsInput' | 'stopped'
+export const runStatuses: readonly RunStatus[] = ['running', 'done', 'failed', 'needsInput', 'stopped']
+
+// one review session Pit View started (section 8 of DESIGN.md, Launching runs)
+export type Run = {
+  id: number
+  repo: string
+  number: number
+  // the pit-crew command, such as review-pr, and its arguments without --emit-json
+  command: string
+  args: string[]
+  // what the Agent cell calls it: Review, Re-review, Self-review
+  label: string
+  runner: RunnerName
+  // the session's working directory and the run directory, both written with ~
+  cwd: string
+  dir: string
+  // Claude's is known at start; Codex's arrives with its first event
+  sessionId: string | null
+  pid: number | null
+  // the process's start time as ps prints it, so a reused pid is never mistaken for the run
+  pidStartedAt: string | null
+  startedAt: string
+  // the newest events.jsonl line: its time, step and state
+  lastStepAt: string | null
+  step: string | null
+  stepState: string | null
+  finishedAt: string | null
+  status: RunStatus
+  // result.json as parsed and checked, or null when there is none
+  result: RunResultJson | null
+  // why it failed or stopped: a kind such as noResult, optionally followed by ': ' and detail
+  note: string | null
+  // Claude's latest total_cost_usd; Codex reports none
+  costUsd: number | null
+  // the command that resumes the session, once its id is known
+  resume: string | null
+}
+
+export type NewRun = Omit<Run, 'id' | 'dir'>
+export type RunChanges = Partial<Omit<Run, 'id' | 'repo' | 'number'>>
+
 export type Cache = {
   // starts a cycle; only one may run at a time across all repos
   startCycle: (repo: string, trigger: Trigger) => Cycle
@@ -105,6 +150,18 @@ export type Cache = {
   latestCycle: (repo: string) => Cycle | null
   runningCycle: () => Cycle | null
   prune: () => void
+  // runs: the row is written first, so its id names the run directory dirOf returns
+  createRun: (run: NewRun, dirOf: (id: number) => string) => Run
+  updateRun: (id: number, changes: RunChanges) => Run
+  getRun: (id: number) => Run | null
+  // one PR's runs, newest first
+  runsFor: (repo: string, number: number, limit?: number) => Run[]
+  // the newest run of each PR in a repo
+  latestRuns: (repo: string) => Map<number, Run>
+  // every run still recorded as running, in any repo
+  runningRuns: () => Run[]
+  // deletes all but the newest keepRuns finished runs and returns them, so their folders can go
+  pruneRuns: () => Run[]
   close: () => void
   // the open handle, for tests and diagnostics
   db: DatabaseSync
@@ -116,6 +173,7 @@ export type CacheOptions = {
   clock: Clock
   keepCycles?: number
   keepSnapshotCycles?: number
+  keepRuns?: number
 }
 
 const schema = [
@@ -130,6 +188,13 @@ const schema = [
   'CREATE INDEX prs_by_state ON prs (repo, state)',
 ]
 
+// kept across rebuilds: no status CHECK, so phase 4's queued and skipped need no rebuild
+const runsSchema = [
+  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT)',
+  'CREATE INDEX IF NOT EXISTS runs_by_pr ON runs (repo, number, id)',
+  'CREATE INDEX IF NOT EXISTS runs_by_status ON runs (status)',
+]
+
 const tables = ['meta', 'cycles', 'snapshots', 'prs']
 
 type Row = Record<string, SQLOutputValue>
@@ -142,6 +207,63 @@ const intOrNull = (row: Row, key: string): number | null => row[key] === null ||
 
 // GitHub's form: second precision, Z suffix
 const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
+
+const toRun = (row: Row): Run => {
+  const result = strOrNull(row, 'result')
+  const cost = row.cost_usd
+  return {
+    id: int(row, 'id'),
+    repo: str(row, 'repo'),
+    number: int(row, 'number'),
+    command: str(row, 'command'),
+    args: JSON.parse(str(row, 'args')) as string[],
+    label: str(row, 'label'),
+    runner: str(row, 'runner') as RunnerName,
+    cwd: str(row, 'cwd'),
+    dir: str(row, 'dir'),
+    sessionId: strOrNull(row, 'session_id'),
+    pid: intOrNull(row, 'pid'),
+    pidStartedAt: strOrNull(row, 'pid_started_at'),
+    startedAt: str(row, 'started_at'),
+    lastStepAt: strOrNull(row, 'last_step_at'),
+    step: strOrNull(row, 'step'),
+    stepState: strOrNull(row, 'step_state'),
+    finishedAt: strOrNull(row, 'finished_at'),
+    status: str(row, 'status') as RunStatus,
+    result: result === null ? null : JSON.parse(result) as RunResultJson,
+    note: strOrNull(row, 'note'),
+    costUsd: cost === null || cost === undefined ? null : Number(cost),
+    resume: strOrNull(row, 'resume'),
+  }
+}
+
+// a Run's fields to their columns; JSON columns are stored as text
+const runColumns: Record<keyof RunChanges, string> = {
+  command: 'command',
+  args: 'args',
+  label: 'label',
+  runner: 'runner',
+  cwd: 'cwd',
+  dir: 'dir',
+  sessionId: 'session_id',
+  pid: 'pid',
+  pidStartedAt: 'pid_started_at',
+  startedAt: 'started_at',
+  lastStepAt: 'last_step_at',
+  step: 'step',
+  stepState: 'step_state',
+  finishedAt: 'finished_at',
+  status: 'status',
+  result: 'result',
+  note: 'note',
+  costUsd: 'cost_usd',
+  resume: 'resume',
+}
+
+const runValue = (key: keyof RunChanges, value: unknown): SQLInputValue => {
+  if (key === 'args' || key === 'result') return value === null || value === undefined ? null : JSON.stringify(value)
+  return (value ?? null) as SQLInputValue
+}
 
 const toCycle = (row: Row): Cycle => {
   const finishedAt = strOrNull(row, 'finished_at')
@@ -189,7 +311,7 @@ type LastSuccess = { cycle: number, startedAt: string, finishedAt: string }
 const metaKey = (name: string, repo: string): string => `${name}:${repo}`
 
 // the Pit View SQLite cache: open rows per PR, raw responses per cycle, and cycle history
-export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 50 }: CacheOptions): Cache => {
+export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 50, keepRuns = 200 }: CacheOptions): Cache => {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
   const db = new DatabaseSync(path, { timeout: 5000 })
   if (path !== ':memory:') {
@@ -232,6 +354,8 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     transaction(() => {
       for (const table of tables) db.exec(`DROP TABLE IF EXISTS ${table}`)
       for (const statement of schema) db.exec(statement)
+      // version 4 added runs; a newer version keeps the table it finds
+      for (const statement of runsSchema) db.exec(statement)
       setMeta('schemaVersion', schemaVersion)
     })
   }
@@ -465,6 +589,62 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     }
   }
 
+  const getRun = (id: number): Run | null => {
+    const row = get('SELECT * FROM runs WHERE id = $id', { id })
+    return row === undefined ? null : toRun(row)
+  }
+
+  const mustRun = (id: number): Run => {
+    const found = getRun(id)
+    if (found === null) throw new CacheError(`run ${id} does not exist`)
+    return found
+  }
+
+  const createRun = (input: NewRun, dirOf: (id: number) => string): Run => transaction(() => {
+    const id = Number(db.prepare('INSERT INTO runs (repo, number, command, args, label, runner, cwd, dir, started_at, status) VALUES ($repo, $number, $command, $args, $label, $runner, $cwd, \'\', $startedAt, $status)').run({
+      repo: input.repo,
+      number: input.number,
+      command: input.command,
+      args: JSON.stringify(input.args),
+      label: input.label,
+      runner: input.runner,
+      cwd: input.cwd,
+      startedAt: input.startedAt,
+      status: input.status,
+    }).lastInsertRowid)
+    const { repo: _repo, number: _number, ...rest } = input
+    return updateRun(id, { ...rest, dir: dirOf(id) })
+  })
+
+  const updateRun = (id: number, changes: RunChanges): Run => {
+    const keys = (Object.keys(changes) as (keyof RunChanges)[]).filter((key) => key in runColumns)
+    if (keys.length > 0) {
+      const params: Params = { id }
+      const sets = keys.map((key) => {
+        params[key] = runValue(key, changes[key])
+        return `${runColumns[key]} = $${key}`
+      })
+      if (run(`UPDATE runs SET ${sets.join(', ')} WHERE id = $id`, params) === 0) throw new CacheError(`run ${id} does not exist`)
+    }
+    return mustRun(id)
+  }
+
+  const runsFor = (repo: string, number: number, limit = keepRuns): Run[] =>
+    all('SELECT * FROM runs WHERE repo = $repo AND number = $number ORDER BY id DESC LIMIT $limit', { repo, number, limit }).map(toRun)
+
+  const latestRuns = (repo: string): Map<number, Run> =>
+    new Map(all('SELECT * FROM runs WHERE id IN (SELECT max(id) FROM runs WHERE repo = $repo GROUP BY number)', { repo })
+      .map((row) => [int(row, 'number'), toRun(row)]))
+
+  const runningRuns = (): Run[] => all('SELECT * FROM runs WHERE status = \'running\' ORDER BY id').map(toRun)
+
+  // a run still in flight is never pruned, however old
+  const pruneRuns = (): Run[] => transaction(() => {
+    const doomed = all('SELECT * FROM runs WHERE status != \'running\' AND id NOT IN (SELECT id FROM runs ORDER BY id DESC LIMIT $keep) ORDER BY id', { keep: keepRuns }).map(toRun)
+    for (const gone of doomed) run('DELETE FROM runs WHERE id = $id', { id: gone.id })
+    return doomed
+  })
+
   migrate()
   closeInterrupted()
 
@@ -481,6 +661,13 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     latestCycle,
     runningCycle,
     prune,
+    createRun,
+    updateRun,
+    getRun,
+    runsFor,
+    latestRuns,
+    runningRuns,
+    pruneRuns,
     close: () => db.close(),
     db,
   }

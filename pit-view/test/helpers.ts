@@ -1,10 +1,13 @@
 // test/helpers.ts
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Clock } from '../src/config.ts'
 import type { RawClosedResponse, RawOpenPr, RawOpenResponse, RawPrState, RawSingleResponse, Runner, RunOptions, RunResult } from '../src/github.ts'
+import { systemFs } from '../src/launcher.ts'
+import type { Exit, LauncherFs, ProcessEntry, SpawnRequest } from '../src/launcher.ts'
 import type { Timers } from '../src/poller.ts'
+import type { LaunchDeps } from '../src/server.ts'
 import { scenario } from './fixtures/scenario.ts'
 
 const fixtures = join(import.meta.dirname, 'fixtures')
@@ -137,3 +140,162 @@ export const gatedRunner = (base: FakeRunner): GatedRunner => {
 
 // the gh api calls a runner has answered: every one of them reached GitHub
 export const githubCalls = (fake: FakeRunner): Call[] => fake.calls.filter((call) => call.args[0] === 'api')
+
+// launching runs with nothing real behind it: no runner, no ps, no signals reach a process
+
+export type FakeChild = {
+  request: SpawnRequest
+  pid: number
+  // what the launcher wrote to stdin, and whether it closed it
+  writes: string[]
+  stdinEnded: boolean
+  // the --emit-json folder the request names
+  runDir: string
+  // lines the runner prints (stream.jsonl) and the command appends (events.jsonl)
+  stream: (...events: unknown[]) => Promise<void>
+  events: (...events: unknown[]) => Promise<void>
+  // writes result.json as the command's last act
+  result: (value: unknown) => Promise<void>
+  exit: (code?: number | null, signal?: string | null) => void
+}
+
+export type Kill = { pid: number, signal: NodeJS.Signals | 0 }
+
+export type FakeLaunch = {
+  deps: LaunchDeps
+  children: FakeChild[]
+  // signals sent, signal 0 (liveness checks) left out
+  kills: Kill[]
+  // what the fake ps lists, and which pids are alive
+  processes: ProcessEntry[]
+  alive: Set<number>
+  // runners that ignore SIGTERM, so a stop has to escalate
+  ignoreTerm: Set<number>
+  gitCalls: string[][]
+  removed: string[]
+  // spawn throws this when set
+  spawnError: Error | null
+}
+
+export const fakeRemotes = (repo: string): string =>
+  `origin\tgit@github.com:${repo}.git (fetch)\norigin\tgit@github.com:${repo}.git (push)\n`
+
+// the run folder a request names, from Claude's stdin line or Codex's prompt argument
+const runDirOf = (text: string): string => /--emit-json=(\S+?)(?:\\n|"|\s|$)/.exec(text)?.[1] ?? ''
+
+export const fakeLaunch = ({ remotes = fakeRemotes('octo-example/orbit'), fs = {} }: { remotes?: string | null, fs?: Partial<LauncherFs> } = {}): FakeLaunch => {
+  let nextPid = 4000
+  const fake: FakeLaunch = {
+    deps: undefined as unknown as LaunchDeps,
+    children: [],
+    kills: [],
+    processes: [],
+    alive: new Set(),
+    ignoreTerm: new Set(),
+    gitCalls: [],
+    removed: [],
+    spawnError: null,
+  }
+  const lines = (values: unknown[]): string => values.map((value) => `${typeof value === 'string' ? value : JSON.stringify(value)}\n`).join('')
+  const deps: LaunchDeps = {
+    spawn: (request) => {
+      if (fake.spawnError !== null) throw fake.spawnError
+      nextPid += 1
+      const pid = nextPid
+      let finish: (exit: Exit) => void = () => {}
+      const exited = new Promise<Exit>((resolve) => {
+        finish = resolve
+      })
+      const writes: string[] = []
+      const child: FakeChild = {
+        request,
+        pid,
+        writes,
+        stdinEnded: false,
+        runDir: runDirOf(request.stdin === 'pipe' ? '' : request.args.at(-1) ?? ''),
+        stream: (...events) => appendFile(request.stdoutPath, lines(events)),
+        events: (...events) => appendFile(join(child.runDir, 'events.jsonl'), lines(events)),
+        result: (value) => writeFile(join(child.runDir, 'result.json'), typeof value === 'string' ? value : JSON.stringify(value)),
+        exit: (code = 0, signal = null) => {
+          fake.alive.delete(pid)
+          finish({ code, signal, error: null })
+        },
+      }
+      fake.alive.add(pid)
+      fake.processes.push({ pid, ppid: 1, pgid: pid })
+      fake.children.push(child)
+      return {
+        pid,
+        stdin: request.stdin === 'pipe'
+          ? {
+              write: (text) => {
+                writes.push(text)
+                if (child.runDir === '') child.runDir = runDirOf(text)
+              },
+              end: () => {
+                child.stdinEnded = true
+              },
+            }
+          : null,
+        exited,
+      }
+    },
+    fs: {
+      ...systemFs,
+      // tests read the files when they say so, through launcher.check
+      watch: () => ({ close: () => {} }),
+      rm: async (path) => {
+        fake.removed.push(path)
+        await systemFs.rm(path)
+      },
+      ...fs,
+    },
+    kill: (pid, signal) => {
+      if (signal === 0) {
+        if (!fake.alive.has(pid)) throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
+        return
+      }
+      fake.kills.push({ pid, signal })
+      // a negative pid is a process group
+      const group = pid < 0 ? fake.processes.filter((entry) => entry.pgid === -pid).map((entry) => entry.pid) : [pid]
+      for (const member of group) {
+        if (signal === 'SIGTERM' && fake.ignoreTerm.has(member)) continue
+        fake.alive.delete(member)
+        fake.children.find((child) => child.pid === member)?.exit(null, signal)
+      }
+    },
+    procs: {
+      list: async () => fake.processes,
+      startTime: async (pid) => fake.alive.has(pid) ? `start-${pid}` : null,
+    },
+    git: async (args) => {
+      fake.gitCalls.push(args)
+      if (remotes === null) return failed('fatal: not a git repository (or any of the parent directories): .git')
+      return ok(remotes)
+    },
+    env: { PATH: '/usr/bin:/bin', USER: 'tester', LANG: 'en_US.UTF-8', CLAUDE_CODE_ENTRYPOINT: 'desktop', ANTHROPIC_API_KEY: 'sk-fake' },
+    newSessionId: () => '00000000-0000-4000-8000-000000000001',
+  }
+  fake.deps = deps
+  return fake
+}
+
+// a review-result@1 as the commands write it, changed by patch
+export const reviewResult = (patch: Record<string, unknown> = {}): Record<string, unknown> => ({
+  schema: 'pit-crew/review-result@1',
+  command: 'review-pr',
+  status: 'done',
+  target: { repo: 'octo-example/orbit', pr: 106 },
+  reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' },
+  verdict: 'changesRequested',
+  recommendation: null,
+  findings: [{ priority: 'P1', summary: 'Retry loop never backs off', files: ['src/retry.ts'] }],
+  ci: 'green',
+  fixAttempts: 0,
+  posted: { form: 'requestChanges', url: 'https://github.com/octo-example/orbit/pull/106#pullrequestreview-1' },
+  notPostedReason: null,
+  report: '~/agents/output/PR-106.md',
+  question: null,
+  error: null,
+  ...patch,
+})

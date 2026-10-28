@@ -13,14 +13,15 @@ import type { PitServer } from '../src/server.ts'
 import { scenario } from './fixtures/scenario.ts'
 import type { MineRow, OpenRow } from '../src/derive.ts'
 import type { RunResult } from '../src/github.ts'
-import { failed, fakeRunner, fakeTime, field, fixtureRunner, gatedRunner, githubCalls, ok, singlePr, tempDir } from './helpers.ts'
-import type { FakeRunner, FakeTime } from './helpers.ts'
+import { failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, gatedRunner, githubCalls, ok, singlePr, tempDir } from './helpers.ts'
+import type { FakeLaunch, FakeRunner, FakeTime } from './helpers.ts'
 
-type Harness = { server: PitServer, time: FakeTime, runner: FakeRunner, home: string, configPath: string, base: string, cleanup: () => Promise<void> }
+type Harness = { server: PitServer, time: FakeTime, runner: FakeRunner, launch: FakeLaunch, home: string, configPath: string, base: string, cleanup: () => Promise<void> }
 
-const setup = async ({ config = {}, runner = fixtureRunner(), files = {} }: {
+const setup = async ({ config = {}, runner = fixtureRunner(), files = {}, launch = fakeLaunch() }: {
   config?: Partial<Config>
   runner?: FakeRunner
+  launch?: FakeLaunch
   // files under the temp home, path to contents
   files?: Record<string, string | Buffer>
 } = {}): Promise<Harness> => {
@@ -42,7 +43,9 @@ const setup = async ({ config = {}, runner = fixtureRunner(), files = {} }: {
     timeZone: scenario.timeZone,
     configPath,
     cachePath: join(home, '.local', 'state', 'pit-view', 'cache.sqlite'),
+    stateDir: join(home, '.local', 'state', 'pit-view'),
     publicDir: join(home, 'public'),
+    launch: launch.deps,
     log: () => {},
     pageSize: scenario.pageSize,
   })
@@ -50,7 +53,7 @@ const setup = async ({ config = {}, runner = fixtureRunner(), files = {} }: {
     await server.close()
     await removeHome()
   }
-  return { server, time, runner, home, configPath, base: server.url, cleanup }
+  return { server, time, runner, launch, home, configPath, base: server.url, cleanup }
 }
 
 const getJson = async <T>(url: string): Promise<{ status: number, body: T }> => {
@@ -580,7 +583,9 @@ test('a port already in use is an error naming the port, and the running server\
       timeZone: scenario.timeZone,
       configPath: h.configPath,
       cachePath: join(h.home, '.local', 'state', 'pit-view', 'cache.sqlite'),
+      stateDir: join(h.home, '.local', 'state', 'pit-view'),
       publicDir: join(h.home, 'public'),
+      launch: fakeLaunch().deps,
       log: () => {},
     }), (error: unknown) => error instanceof PortInUseError && error.message.includes(String(h.server.port)))
     assert.equal(h.server.cache.cycle(cycle!)?.state, 'running')
@@ -618,7 +623,9 @@ test('a dev instance runs beside the app with its own config and cache, sharing 
     timeZone: scenario.timeZone,
     configPath: dev.configPath,
     cachePath: dev.cachePath,
+    stateDir: dev.stateDir,
     publicDir: join(h.home, 'public'),
+    launch: fakeLaunch().deps,
     log: () => {},
     pageSize: scenario.pageSize,
   })
@@ -883,6 +890,144 @@ test('a one-PR refresh passes the Host, Origin and content-type checks for write
     assert.equal((await send(`${h.base}/api/prs/101/refresh`, 'POST', undefined, { Origin: h.base })).status, 200)
     assert.equal((await send(`${h.base}/api/prs/101/refresh`, 'POST', {})).status, 200)
     assert.equal(singleCalls(h.runner).length, 2)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// phase 2: starting and stopping review runs
+
+const page = (title: string): string => `<!-- public/${title}.html -->\n<!doctype html>\n<html>\n<head>\n<meta charset="utf-8">\n<title>${title}</title>\n</head>\n<body></body>\n</html>\n`
+
+test('each served page carries this start\'s token in a meta tag, added at serve time and never written to disk', async () => {
+  const files = { 'public/index.html': page('index'), 'public/settings.html': page('settings'), 'public/app.ts': '// public/app.ts\nexport const x = 1\n' }
+  const h = await setup({ files })
+  try {
+    assert.match(h.server.token, /^[A-Za-z0-9_-]{43}$/)
+    const tag = `<meta name="pit-view-token" content="${h.server.token}">\n</head>`
+    for (const [path, name] of [['/', 'index'], ['/settings.html', 'settings']] as const) {
+      const response = await fetch(`${h.base}${path}`)
+      const body = await response.text()
+      assert.ok(body.includes(tag), `${path} carries the token`)
+      assert.equal(body.split('pit-view-token').length, 2)
+      // a stored copy would hold a token the next start no longer accepts
+      assert.equal(response.headers.get('cache-control'), 'no-store')
+      assert.equal(await readFile(join(h.home, 'public', `${name}.html`), 'utf8'), page(name))
+    }
+    assert.ok(!(await (await fetch(`${h.base}/app.ts`)).text()).includes(h.server.token))
+  } finally {
+    await h.cleanup()
+  }
+})
+
+const token = (h: Harness): Record<string, string> => ({ 'X-Pit-View-Token': h.server.token })
+
+test('starting and stopping a run need the token as well as the Host and Origin checks; one run per PR', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const url = `${h.base}/api/prs/106/runs`
+    assert.equal((await send(url, 'POST')).status, 403)
+    assert.match(String((await send(url, 'POST', undefined, { 'X-Pit-View-Token': 'not-the-token' })).body.error), /token/)
+    assert.equal((await send(url, 'POST', undefined, { ...token(h), Origin: 'http://attacker.test' })).status, 403)
+    assert.equal((await raw(h.server.port, '/api/prs/106/runs', { ...token(h), Host: 'pit-view.attacker.test' }, 'POST')).status, 403)
+    assert.equal(h.launch.children.length, 0)
+
+    const started = await send(url, 'POST', undefined, { ...token(h), Origin: h.base })
+    assert.equal(started.status, 200)
+    assert.equal(started.body.status, 'running')
+    assert.equal(started.body.command, 'review-pr')
+    assert.deepEqual(started.body.args, ['106'])
+    assert.equal(started.body.label, 'Re-review')
+    assert.equal(started.body.runner, 'claude')
+    assert.equal(started.body.cwd, '~/dev/orbit')
+    assert.equal(h.launch.children.length, 1)
+    const busy = await send(url, 'POST', {}, token(h))
+    assert.equal(busy.status, 409)
+    assert.match(String(busy.body.error), /already in flight/)
+
+    const id = Number(started.body.id)
+    const listed = await getJson<Record<string, unknown>[]>(url)
+    assert.equal(listed.status, 200)
+    assert.deepEqual(listed.body.map((run) => run.id), [id])
+    assert.deepEqual((await getJson<unknown[]>(`${h.base}/api/prs/113/runs`)).body, [])
+
+    const stopUrl = `${h.base}/api/runs/${id}/stop`
+    assert.equal((await send(stopUrl, 'POST')).status, 403)
+    const settled = h.server.launcher.settled(id)
+    const stopping = await send(stopUrl, 'POST', undefined, token(h))
+    assert.equal(stopping.status, 200)
+    assert.equal((await settled).status, 'stopped')
+    assert.deepEqual(h.launch.kills, [{ pid: -h.launch.children[0]!.pid, signal: 'SIGTERM' }])
+    assert.equal((await send(stopUrl, 'POST', undefined, token(h))).status, 409)
+    assert.equal((await send(`${h.base}/api/runs/999/stop`, 'POST', undefined, token(h))).status, 404)
+    assert.equal((await send(`${h.base}/api/runs/abc/stop`, 'POST', undefined, token(h))).status, 400)
+    assert.equal((await getJson<Record<string, unknown>[]>(url)).body[0]?.status, 'stopped')
+
+    // stopped, the PR may start again, with the other runner for this one run
+    const codex = await send(url, 'POST', { runner: 'codex' }, token(h))
+    assert.equal(codex.status, 200)
+    assert.equal(codex.body.runner, 'codex')
+    assert.deepEqual((await getJson<Record<string, unknown>[]>(url)).body.map((run) => run.id), [Number(codex.body.id), id])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a start is refused with a clear error: unknown PR, no cloneDir, another gh account, a bad body', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const unknown = await send(`${h.base}/api/prs/999/runs`, 'POST', undefined, token(h))
+    assert.equal(unknown.status, 422)
+    assert.match(String(unknown.body.error), /#999 is not an open PR/)
+    assert.equal((await send(`${h.base}/api/prs/abc/runs`, 'POST', undefined, token(h))).status, 400)
+    assert.equal((await send(`${h.base}/api/prs/106/runs`, 'POST', { runner: 'hermes' }, token(h))).status, 400)
+    assert.equal((await send(`${h.base}/api/prs/106/runs`, 'POST', { runner: 'claude', tandem: true }, token(h))).status, 400)
+    assert.equal((await send(`${h.base}/api/prs/106/runs`, 'POST', 'runner=codex', { ...token(h), 'Content-Type': 'text/plain' })).status, 415)
+    assert.equal(h.launch.children.length, 0)
+  } finally {
+    await h.cleanup()
+  }
+  const unset = await setup()
+  try {
+    await filled(unset)
+    const refused = await send(`${unset.base}/api/prs/106/runs`, 'POST', undefined, token(unset))
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /set cloneDir/)
+  } finally {
+    await unset.cleanup()
+  }
+  const fixtures = fixtureRunner()
+  const other = fakeRunner((args) => args[0] === 'api' && args[1] === 'user' ? ok('someone-else\n') : fixtures.runner(args))
+  const mismatch = await setup({ runner: other, config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(mismatch)
+    const refused = await send(`${mismatch.base}/api/prs/106/runs`, 'POST', undefined, token(mismatch))
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /gh is signed in as someone-else, but the viewer is vera-quill/)
+    assert.equal(mismatch.launch.children.length, 0)
+  } finally {
+    await mismatch.cleanup()
+  }
+})
+
+test('the view carries each row\'s Agent cell, and a start on the viewer\'s own PR passes --no-post', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const view = (await getJson<View>(`${h.base}/api/view`)).body
+    assert.deepEqual([rowIn(view, 106)?.agent?.state, rowIn(view, 106)?.agent?.action.label], ['idle', 'Re-review'])
+    assert.deepEqual(rowIn(view, 113)?.agent?.action, { kind: 'review', label: 'Review', command: 'review-pr', args: ['113'], runner: 'claude' })
+    assert.deepEqual(rowIn(view, 101)?.agent?.action.args, ['101', '--no-post'])
+    assert.equal(rowIn(view, 114)?.agent?.action.command, 'review-dependabot')
+    const own = await send(`${h.base}/api/prs/101/runs`, 'POST', undefined, token(h))
+    assert.equal(own.status, 200)
+    assert.deepEqual(own.body.args, ['101', '--no-post'])
+    assert.equal(own.body.label, 'Self-review')
+    assert.match(h.launch.children[0]!.writes[0] ?? '', /\/review-pr 101 --no-post --emit-json=/)
+    const after = rowIn((await getJson<View>(`${h.base}/api/view`)).body, 101)
+    assert.deepEqual([after?.agent?.state, after?.agent?.runId, after?.agent?.label], ['running', Number(own.body.id), 'Self-review'])
   } finally {
     await h.cleanup()
   }

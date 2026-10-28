@@ -44,6 +44,9 @@ const sample = (): Config => ({
   bots: ['dependabot', 'renovate', 'review-helper'],
   density: 'compact',
   showAgentColumn: true,
+  // not on the page yet (P2.5 or later), so a save must carry them over
+  cloneDir: '~/dev/orbit',
+  agent: { runner: 'codex', codexModel: 'gpt-6.1-terra' },
   notifications: { enabled: false, kinds: ['mineReady'] },
 })
 

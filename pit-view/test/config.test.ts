@@ -43,6 +43,48 @@ test('allowedHosts holds bare host names only, lowercased and without repeats', 
   assert.throws(() => validateConfig(missing), /config\.allowedHosts must be a list/)
 })
 
+test('cloneDir is optional: an absolute path or one under ~, trimmed, and left out when empty', () => {
+  const base = defaultConfig()
+  assert.equal('cloneDir' in validateConfig(base), false)
+  assert.equal(validateConfig({ ...base, cloneDir: ' ~/dev/orbit ' }).cloneDir, '~/dev/orbit')
+  assert.equal(validateConfig({ ...base, cloneDir: '/srv/clones/orbit' }).cloneDir, '/srv/clones/orbit')
+  assert.equal('cloneDir' in validateConfig({ ...base, cloneDir: '  ' }), false)
+  // whether it is a clone of repo is checked when a run starts, not here
+  assert.equal(validateConfig({ ...base, cloneDir: '~/no/such/folder' }).cloneDir, '~/no/such/folder')
+  assert.throws(() => validateConfig({ ...base, cloneDir: 'dev/orbit' }), /config\.cloneDir must be an absolute path or a path under ~/)
+  assert.throws(() => validateConfig({ ...base, cloneDir: 42 }), /config\.cloneDir must be a string path/)
+  // the saved file keeps the keys in the documented order
+  assert.deepEqual(Object.keys(validateConfig({ ...base, cloneDir: '~/dev/orbit' })).slice(-3), ['allowedHosts', 'cloneDir', 'agent'])
+})
+
+test('agent names the default runner, claude unless set, and an optional Codex model', () => {
+  const base = defaultConfig()
+  assert.deepEqual(base.agent, { runner: 'claude' })
+  assert.deepEqual(validateConfig({ ...base, agent: { runner: 'codex' } }).agent, { runner: 'codex' })
+  assert.deepEqual(validateConfig({ ...base, agent: { runner: 'codex', codexModel: ' gpt-6.1-terra ' } }).agent, { runner: 'codex', codexModel: 'gpt-6.1-terra' })
+  assert.deepEqual(validateConfig({ ...base, agent: { runner: 'claude', codexModel: '' } }).agent, { runner: 'claude' })
+  // a config written before phase 2 has none
+  const { agent: _agent, ...older } = base
+  assert.deepEqual(validateConfig(older).agent, { runner: 'claude' })
+  assert.throws(() => validateConfig({ ...base, agent: { runner: 'hermes' } }), /agent\.runner must be one of claude, codex/)
+  assert.throws(() => validateConfig({ ...base, agent: 'claude' }), /config\.agent must be an object/)
+  assert.throws(() => validateConfig({ ...base, agent: { runner: 'codex', codexModel: '--dangerously-bypass' } }), /agent\.codexModel must be a model name/)
+  assert.throws(() => validateConfig({ ...base, agent: { runner: 'codex', codexModel: 'gpt 6' } }), /agent\.codexModel/)
+  assert.throws(() => validateConfig({ ...base, agent: { runner: 'codex', tandem: true } }), /agent\.tandem is not a known setting/)
+})
+
+test('a stored cloneDir and agent survive a save and a read', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const file = join(dir, 'config.json')
+    const config = { ...defaultConfig(), cloneDir: '~/dev/orbit', agent: { runner: 'codex' as const, codexModel: 'gpt-6.1-terra' } }
+    await saveConfig(file, config)
+    assert.deepEqual(await readConfig(file), config)
+  } finally {
+    await cleanup()
+  }
+})
+
 test('idleMinutes is 0 for never or a whole number of minutes from 5 to 1440, 90 by default', () => {
   const base = defaultConfig()
   assert.equal(base.idleMinutes, 90)

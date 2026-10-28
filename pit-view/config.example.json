@@ -32,5 +32,8 @@
   "reportsDir": "~/agents/output",
   "density": "comfortable",
   "showAgentColumn": false,
-  "allowedHosts": []
+  "allowedHosts": [],
+  "agent": {
+    "runner": "claude"
+  }
 }

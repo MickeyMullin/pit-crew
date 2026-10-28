@@ -1,4 +1,5 @@
 // src/server.ts
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { Stats } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
@@ -12,10 +13,12 @@ import { openCache } from './cache.ts'
 import type { Cache } from './cache.ts'
 import { createClients } from './clients.ts'
 import type { ClientState, Clients } from './clients.ts'
-import { cacheFile, ConfigError, configFile, expandHome, readConfig, saveConfig, tildePath, validateConfig } from './config.ts'
-import type { Clock, Config } from './config.ts'
+import { cacheFile, ConfigError, configFile, expandHome, readConfig, runnerNames, saveConfig, stateDir, tildePath, validateConfig } from './config.ts'
+import type { Clock, Config, RunnerName } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner } from './github.ts'
+import { createLauncher, defaultRun, LaunchError, procsFrom, systemFs, systemSpawn } from './launcher.ts'
+import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Spawn } from './launcher.ts'
 import { createPoller, systemTimers } from './poller.ts'
 import type { Patch, Poller, Timers } from './poller.ts'
 
@@ -25,6 +28,23 @@ export const instancePorts: ReadonlyMap<string, number> = new Map([['', defaultP
 export const instancePattern = /^[a-z][a-z0-9-]{0,31}$/
 // loopback only, in every hosting mode
 export const host = '127.0.0.1'
+
+// what starting review runs needs from the outside world; main passes the real ones, and tests
+// pass fakes, so no test ever starts a real runner
+export type LaunchDeps = {
+  spawn: Spawn
+  fs: LauncherFs
+  kill: Kill
+  procs: Procs
+  // git, for the clone check
+  git: Runner
+  // the environment the child's few variables are picked from
+  env: Readonly<Record<string, string | undefined>>
+  newSessionId: () => string
+  pollMs?: number
+  watchedPollMs?: number
+  stopGraceMs?: number
+}
 
 export type ServerOptions = {
   home: string
@@ -36,7 +56,12 @@ export type ServerOptions = {
   timeZone: string
   configPath: string
   cachePath: string
+  // the instance's state folder: runs live in its runs/ folder
+  stateDir: string
   publicDir: string
+  launch: LaunchDeps
+  // the per-start token the pages carry on run writes; random when left out
+  token?: string
   log: (line: string) => void
   // '' for the default instance (the deployed app), or a name such as dev
   instance?: string
@@ -50,7 +75,11 @@ export type PitServer = {
   poller: Poller
   clients: Clients
   cache: Cache
-  // closes the streams, fails a running cycle, stops listening and closes the cache
+  launcher: Launcher
+  // the token this start injected into its pages
+  token: string
+  // closes the streams, fails a running cycle, stops watching runs (which keep going), stops
+  // listening and closes the cache
   close: () => Promise<void>
 }
 
@@ -128,6 +157,36 @@ export const originAllowed = (origin: string, port: number, allowed: readonly st
 
 const clientIdPattern = /^[A-Za-z0-9_-]{1,100}$/
 
+// the header a page sends its per-start token in, and the meta tag it reads it from
+export const tokenHeader = 'x-pit-view-token'
+export const tokenMeta = 'pit-view-token'
+
+// a constant-time comparison, so the token cannot be guessed a character at a time
+export const tokenMatches = (sent: string | string[] | undefined, token: string): boolean => {
+  if (typeof sent !== 'string') return false
+  const a = Buffer.from(sent)
+  const b = Buffer.from(token)
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+// the token goes into each served page at serve time and is never written to disk
+export const injectToken = (html: string, token: string): string => {
+  const tag = `<meta name="${tokenMeta}" content="${token}">\n`
+  const at = html.search(/<\/head>/i)
+  return at < 0 ? html : `${html.slice(0, at)}${tag}${html.slice(at)}`
+}
+
+// why a start or stop was refused, as an HTTP status
+const launchStatus: Readonly<Record<LaunchErrorCode, number>> = {
+  noClone: 422,
+  notAClone: 422,
+  identityMismatch: 422,
+  identityUnknown: 502,
+  busy: 409,
+  unknownRun: 404,
+  notRunning: 409,
+}
+
 const flag = (value: string | null, fallback: boolean): boolean => {
   if (value === null) return fallback
   if (value === 'true') return true
@@ -194,6 +253,7 @@ type Route = { method: string, pattern: RegExp, handle: (req: IncomingMessage, r
 
 export const startServer = async (options: ServerOptions): Promise<PitServer> => {
   const { home, runner, clock, timers, log } = options
+  const token = options.token ?? randomBytes(32).toString('base64url')
   const keepaliveMs = options.keepaliveMs ?? 30_000
   const publicDir = resolve(options.publicDir)
   const gh = createGh(runner)
@@ -246,6 +306,34 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       if (effective().viewer === '') ghLogin = await fetchViewerLogin(gh)
     },
   })
+
+  const launcher = createLauncher({
+    cache,
+    gh,
+    git: options.launch.git,
+    spawn: options.launch.spawn,
+    fs: options.launch.fs,
+    kill: options.launch.kill,
+    procs: options.launch.procs,
+    clock,
+    timers,
+    config: effective,
+    home,
+    stateDir: options.stateDir,
+    env: options.launch.env,
+    newSessionId: options.launch.newSessionId,
+    onChange: (run) => poller.runChanged(run.repo, run.number),
+    log,
+    pollMs: options.launch.pollMs,
+    watchedPollMs: options.launch.watchedPollMs,
+    stopGraceMs: options.launch.stopGraceMs,
+  })
+  // runs that outlived the last server: watched again, or settled; local only, no GitHub call
+  try {
+    await launcher.recover()
+  } catch (error) {
+    log(`runs: recovery failed: ${messageOf(error)}`)
+  }
 
   // one keepalive timer while any stream is open; local only, never a GitHub call
   let keepaliveTimer: unknown = null
@@ -311,6 +399,61 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (!/^[1-9]\d{0,8}$/.test(raw)) throw new HttpError(400, 'the PR number must be a positive integer')
     await noBody(req)
     json(res, 200, await poller.refreshPr(Number(raw)))
+  }
+
+  // run writes need the token from a page this start served, besides the Host and Origin checks
+  const requireToken = (req: IncomingMessage): void => {
+    if (!tokenMatches(req.headers[tokenHeader], token)) throw new HttpError(403, 'missing or wrong Pit View token; reload the page')
+  }
+
+  const prNumber = (raw: string): number => {
+    if (!/^[1-9]\d{0,8}$/.test(raw)) throw new HttpError(400, 'the PR number must be a positive integer')
+    return Number(raw)
+  }
+
+  const launchFailure = (error: unknown): never => {
+    if (error instanceof LaunchError) throw new HttpError(launchStatus[error.code], error.message)
+    throw error
+  }
+
+  // the row's default run (section 8 of DESIGN.md), with the configured runner or the one asked for
+  const startRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
+    requireToken(req)
+    const number = prNumber(raw)
+    const length = Number(req.headers['content-length'] ?? 0)
+    const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, 'send { "runner": "claude" | "codex" } or no body')
+    const { runner: asked, ...rest } = body as Record<string, unknown>
+    if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; send { "runner": "claude" | "codex" } or no body`)
+    if (asked !== undefined && !runnerNames.includes(asked as RunnerName)) throw new HttpError(400, 'runner must be claude or codex')
+    const config = effective()
+    const cached = cache.readView(config.repo).open.find((row) => row.number === number)
+    if (cached === undefined) throw new HttpError(422, `#${number} is not an open PR in ${config.repo} that Pit View has fetched`)
+    const plan = defaultRun(cached.pr, config)
+    try {
+      const run = await launcher.start({
+        repo: config.repo,
+        number,
+        command: plan.command,
+        args: plan.args,
+        label: plan.label,
+        ...(asked === undefined ? {} : { runner: asked as RunnerName }),
+      })
+      json(res, 200, run)
+    } catch (error) {
+      launchFailure(error)
+    }
+  }
+
+  const stopRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
+    requireToken(req)
+    if (!/^[1-9]\d{0,9}$/.test(raw)) throw new HttpError(400, 'the run id must be a positive integer')
+    await noBody(req)
+    try {
+      json(res, 200, launcher.stop(Number(raw)))
+    } catch (error) {
+      launchFailure(error)
+    }
   }
 
   const putConfig = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -408,7 +551,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (!info.isFile()) throw new HttpError(404, 'not found')
     const extension = extname(file).toLowerCase()
     let body: Buffer | string
-    if (extension === '.ts') {
+    if (extension === '.html') {
+      body = injectToken(await readFile(file, 'utf8'), token)
+    } else if (extension === '.ts') {
       const hit = stripped.get(file)
       if (hit !== undefined && hit.mtimeMs === info.mtimeMs) {
         body = hit.code
@@ -427,7 +572,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     res.writeHead(200, {
       'Content-Type': staticTypes[extension] ?? 'application/octet-stream',
       'Content-Length': Buffer.byteLength(body),
-      'Cache-Control': 'no-cache',
+      // a page carries this start's token, so a stored copy would be stale after a restart
+      'Cache-Control': extension === '.html' ? 'no-store' : 'no-cache',
       'X-Content-Type-Options': 'nosniff',
     })
     res.end(body)
@@ -439,6 +585,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'POST', pattern: /^\/api\/clients\/([^/]+)$/, handle: (req, res, _url, match) => updateClient(req, res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/refresh$/, handle: (_req, res) => json(res, 200, poller.refresh('manual')) },
     { method: 'POST', pattern: /^\/api\/prs\/([^/]+)\/refresh$/, handle: (req, res, _url, match) => refreshPr(req, res, match[1] ?? '') },
+    { method: 'POST', pattern: /^\/api\/prs\/([^/]+)\/runs$/, handle: (req, res, _url, match) => startRun(req, res, match[1] ?? '') },
+    { method: 'GET', pattern: /^\/api\/prs\/([^/]+)\/runs$/, handle: (_req, res, _url, match) => json(res, 200, cache.runsFor(effective().repo, prNumber(match[1] ?? ''))) },
+    { method: 'POST', pattern: /^\/api\/runs\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopRun(req, res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/instance$/, handle: (_req, res) => json(res, 200, { name: options.instance ?? '', configPath: tildePath(options.configPath, home), pid: process.pid }) },
     { method: 'GET', pattern: /^\/api\/config$/, handle: (_req, res) => json(res, 200, stored) },
     { method: 'PUT', pattern: /^\/api\/config$/, handle: (req, res) => putConfig(req, res) },
@@ -481,6 +630,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
 
   const close = async (): Promise<void> => {
     poller.stop()
+    launcher.close()
     for (const stream of streams) stream.end()
     streams.clear()
     syncKeepalive()
@@ -491,10 +641,10 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     cache.close()
   }
 
-  return { port, url: `http://${host}:${port}`, poller, clients, cache, close }
+  return { port, url: `http://${host}:${port}`, poller, clients, cache, launcher, token, close }
 }
 
-export type Runtime = { instance: string, port: number, configPath: string, cachePath: string }
+export type Runtime = { instance: string, port: number, configPath: string, cachePath: string, stateDir: string }
 
 // PIT_VIEW_INSTANCE picks the instance (unset for the app, dev for development) and with it the
 // config and state folders and the default port; PIT_VIEW_PORT still overrides the port
@@ -510,7 +660,7 @@ export const resolveRuntime = (env: Record<string, string | undefined>, home: st
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`PIT_VIEW_PORT must be a port number, got ${value}`)
   }
   if (port === undefined) throw new Error(`PIT_VIEW_INSTANCE=${instance} has no default port; set PIT_VIEW_PORT too`)
-  return { instance, port, configPath: configFile(home, instance), cachePath: cacheFile(home, instance) }
+  return { instance, port, configPath: configFile(home, instance), cachePath: cacheFile(home, instance), stateDir: stateDir(home, instance) }
 }
 
 // the real defaults, resolved here and nowhere else; no path depends on the working directory
@@ -531,7 +681,18 @@ export const main = async (): Promise<void> => {
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       configPath: runtime.configPath,
       cachePath: runtime.cachePath,
+      stateDir: runtime.stateDir,
       publicDir: fileURLToPath(new URL('../public', import.meta.url)),
+      launch: {
+        spawn: systemSpawn,
+        fs: systemFs,
+        kill: (pid, signal) => process.kill(pid, signal),
+        procs: procsFrom(commandRunner('ps')),
+        git: commandRunner('git'),
+        // under the launch agent, PATH is the one captured at install
+        env: process.env,
+        newSessionId: randomUUID,
+      },
       log,
     })
   } catch (error) {

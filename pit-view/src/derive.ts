@@ -3,6 +3,7 @@ import type { Clock, Config, Person, TicketSystem } from './config.ts'
 import type {
   GhErrorKind, RawCheckContext, RawClosedPr, RawIssueRef, RawOpenPr, RawReview, RawReviewer, RawTimelineItem,
 } from './github.ts'
+import type { AgentCell } from './launcher.ts'
 import type { ReportInfo } from './reports.ts'
 import { closedRanges, iso } from './time.ts'
 import type { Range } from './time.ts'
@@ -61,8 +62,8 @@ export type PrBase = {
   lastActivity: LastActivity
   freshness: Freshness
   refresh: RowRefresh | null
-  // phase 2
-  agent: null
+  // phase 2: the Agent cell (section 8 of DESIGN.md); null when the derivation has no runs to read
+  agent: AgentCell | null
 }
 
 export type Flag =
@@ -144,6 +145,8 @@ export type DeriveContext = {
   freshness?: (number: number) => Freshness
   // one-PR refreshes running or failed, from the poller; defaults to none
   refresh?: (number: number) => RowRefresh | null
+  // the Agent cell, from the poller's runs; defaults to null
+  agent?: (pr: RawOpenPr) => AgentCell | null
 }
 
 const same = (a: string | null | undefined, b: string | null | undefined): boolean =>
@@ -599,7 +602,7 @@ const prBase = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, S
   lastActivity: deriveLastActivity(pr, ctx.config),
   freshness: freshnessOf(pr.number, ctx),
   refresh: ctx.refresh?.(pr.number) ?? null,
-  agent: null,
+  agent: ctx.agent?.(pr) ?? null,
 })
 
 // one open PR as a Mine or Others' row; null for rows hidden in v1 (others' drafts)

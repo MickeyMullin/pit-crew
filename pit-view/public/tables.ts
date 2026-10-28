@@ -2,6 +2,7 @@
 // the three tables: column definitions, the arrangement of rows into groups, and keyed rendering
 import type { ClosedRange, ClosedRow, MineRow, OpenRow, OtherRow } from '../src/derive.ts'
 import type { View } from '../src/poller.ts'
+import { agentCellNodes, agentCellSig } from './agentcell.ts'
 import { avatar, chip, icons, issueChip, mergeChip, pip, ticketChip } from './cells.ts'
 import { closedTally, hasTickets } from './closed.ts'
 import { h, newTab, svg, sync } from './dom.ts'
@@ -30,12 +31,16 @@ export type Column<R> = {
   hideLabel?: true
 }
 
-// the agent column exists from phase 2; config.showAgentColumn turns it on
-const agentColumn = <R>(): Column<R> => ({
+// the Agent cell (section 8 of DESIGN.md), shown while config.showAgentColumn is on; app.ts
+// handles its buttons, and a running cell's timer moves without rebuilding it (agentcell.ts)
+const agentColumn = <R extends OpenRow>(): Column<R> => ({
   key: 'agent',
   label: 'Agent',
-  width: '168px',
-  cell: () => ({ sig: null, build: () => [h('span', { class: 'muted' }, '—')] }),
+  width: '196px',
+  cell: (row, { nowMs }) => ({
+    sig: agentCellSig(row.agent, row.number, nowMs),
+    build: () => agentCellNodes(row.agent, row.number, nowMs),
+  }),
 })
 
 // the row's own refresh, last and fixed-width so showing it never moves a column; app.ts
