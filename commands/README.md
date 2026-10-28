@@ -40,6 +40,8 @@ scripts/deploy-reviews.sh --install=claude,codex
 
 Naming an agent that is not installed here is an error rather than a skip: you asked for it explicitly, so a silent no-op would be the wrong answer.
 
+`--install` also links `~/agents/prompts` and `~/agents/bin` into `deploy/` when they are missing, since the wrappers find their prompts through them. It never replaces a link or directory already there; it reports it with the commands that fix it and exits 1. The root README's "Setting up a machine" covers that case.
+
 Without `--install` the wrappers are rendered but **not** installed, and the run says so. This is the step people forget. Prompts take effect the moment they are rendered, because `agents/prompts` points into `deploy/`. Commands do not — each agent reads them from its own directory, so a command change stays invisible until it is installed.
 
 If your directories are somewhere else, override the target per agent:
