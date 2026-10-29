@@ -152,7 +152,7 @@ test('the command line is what the runner receives: a slash for Claude, a dollar
   assert.equal(commandLine({ command: 'review-stack', args: ['111'] }, 'claude'), '/review-stack 111')
 })
 
-test('a start sends JSON with the kind, the runner, the repository and viewer it showed, and the token; a stop sends the token and no body', () => {
+test('a start sends JSON with the kind, the runner, the repository, the viewer, and the token; a stop sends the token and no body', () => {
   assert.deepEqual(startRequest(101, 'default', 'codex', 'octo-example/orbit', 'vera-quill', 'tok-123'), {
     url: '/api/prs/101/runs',
     init: { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok-123' }, body: '{"kind":"default","runner":"codex","repo":"octo-example/orbit","viewer":"vera-quill"}' },

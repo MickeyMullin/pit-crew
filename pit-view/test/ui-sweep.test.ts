@@ -114,7 +114,7 @@ test('the confirmation names the repository, says it runs one PR at a time, and 
   assert.equal(sweepStartOf(config({ agent: { runner: 'codex' } }), false).runner, 'codex')
 })
 
-test('a sweep is started and stopped with the token, a runner, and the repository and viewer the confirmation showed, and nothing else', () => {
+test('a sweep is started and stopped with the token, a runner, the repository, and the viewer, the last two as the confirmation showed them, and nothing else', () => {
   const start = sweepStartRequest('codex', scenario.repo, scenario.viewer, 'tok-1')
   assert.equal(start.url, '/api/sweeps')
   assert.deepEqual(start.init.headers, { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok-1' })

@@ -566,7 +566,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     }
   }
 
-  // the Dependabot sweep (section 8 of DESIGN.md, Sweeps): the repository's sweep, started with the same token, Host, Origin, and content-type rules as a run; the body may name the runner, and the repository and viewer the confirmation showed, and nothing else
+  // the Dependabot sweep (section 8 of DESIGN.md, Sweeps): the repository's sweep, started with the same token, Host, Origin, and content-type rules as a run; the body may name the runner, the repository, and the viewer, the last two as the confirmation showed them, and nothing else
   const startSweep = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     requireToken(req)
     const usage = 'send { "runner": "claude" | "codex", "repo": "owner/name", "viewer": "login" } or no body'
