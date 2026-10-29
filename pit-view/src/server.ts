@@ -515,7 +515,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     cache,
     gh,
     config: effective,
-    refreshPr: (number) => poller.refreshPrAfterWrite(number),
+    refreshPr: (repo, number) => poller.refreshPrAfterWrite(repo, number),
     log,
   })
 

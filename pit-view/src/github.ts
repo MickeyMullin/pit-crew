@@ -393,8 +393,10 @@ export type Gh = {
   // a GitHub write as the expected account: reads one token, confirms with it that gh is signed in
   // as that account, then runs the write with the same token. It runs at most once: a failure of
   // the lookup or the write, a 401 included, is never retried and never meets another token. A
-  // mismatch or an unreadable account throws WriteIdentityError before anything is written
-  write: (args: string[], expected: string) => Promise<string>
+  // mismatch or an unreadable account throws WriteIdentityError before anything is written. The
+  // optional check runs after the account is confirmed and before the write, reading through the
+  // same token; if it throws, nothing is written and its error propagates unchanged
+  write: (args: string[], expected: string, check?: (read: (args: string[]) => Promise<string>) => Promise<void>) => Promise<string>
 }
 
 // holds the token in memory only; it is read once and again after any 401
@@ -450,7 +452,7 @@ export const createGh = (runner: Runner): Gh => {
     return result.stdout
   }
 
-  const write = async (args: string[], expected: string): Promise<string> => {
+  const write = async (args: string[], expected: string, check?: (read: (args: string[]) => Promise<string>) => Promise<void>): Promise<string> => {
     const reading = token ??= readToken()
     let value: string
     try {
@@ -477,6 +479,15 @@ export const createGh = (runner: Runner): Gh => {
     const login = lookup.stdout.trim()
     if (login.toLowerCase() !== expected.toLowerCase()) {
       throw new WriteIdentityError(`gh is signed in as ${login || 'nobody'}, but the viewer is ${expected}; switch with gh auth switch before acting`, login)
+    }
+    if (check !== undefined) {
+      // read-only, with the token that was just verified; a 401 here is not retried either
+      await check(async (readArgs) => {
+        const read = await spawnSafe(readArgs, { env })
+        forget(read)
+        if (read.code !== 0) throw new GhError(classify(read.stderr), `gh ${readArgs[0]} failed: ${firstLine(read.stderr)}`, read.stderr)
+        return read.stdout
+      })
     }
     const result = await spawnSafe(args, { env })
     forget(result)

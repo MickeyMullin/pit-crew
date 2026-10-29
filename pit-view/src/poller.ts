@@ -88,10 +88,10 @@ export type Poller = {
   // manual, config and autoReview one-shots; joins a running cycle
   refresh: (trigger: Exclude<Trigger, 'active' | 'interval'>) => RefreshResult
   // fetches one PR and patches its row, outside any cycle; joins a refresh of that PR in flight
-  refreshPr: (number: number) => Promise<PrRefreshResult>
+  refreshPr: (number: number, repo?: string) => Promise<PrRefreshResult>
   // the refresh that follows a GitHub write: starts after the write settled, so an earlier one in
   // flight, which may have read before the write, is followed by exactly one more
-  refreshPrAfterWrite: (number: number) => Promise<PrRefreshResult>
+  refreshPrAfterWrite: (repo: string, number: number) => Promise<PrRefreshResult>
   // the clients changed; returns the cycle started or joined under the active rule, or null
   setActive: (activeCount: number, becameActive: boolean) => number | null
   // a saved config replaced `before`; emits the recomputed rows and starts a config cycle when needed
@@ -479,22 +479,24 @@ export const createPoller = (options: PollerOptions): Poller => {
   // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that
   // row and any other its change moved (stacks), or its removal once closed; a failure stays on
   // the row and never touches the cycles, so the board does not read offline
-  const runPrRefresh = async (number: number): Promise<PrRefreshResult> => {
+  // repo is the repository the caller meant (a write's), not whatever the configuration says now:
+  // when Settings has moved on, the cache of that repository is still refreshed, but nothing of it
+  // reaches the board, the baseline, or a notification
+  const runPrRefresh = async (number: number, repo: string): Promise<PrRefreshResult> => {
     const settings = config()
-    const { repo } = settings
     const key = prKey(repo, number)
     const shown = (): boolean => !stopped && config().repo === repo
-    const before = snapshot(settings, reports)
-    ensureBaseline(settings)
+    const before = shown() ? snapshot(settings, reports) : null
+    if (shown()) ensureBaseline(settings)
     rowRefreshes.set(key, { state: 'running', startedAt: iso(clock.now()) })
-    const started = snapshot(settings, reports).rows.get(number)
+    const started = shown() ? snapshot(settings, reports).rows.get(number) : undefined
     if (started !== undefined) patch({ rows: [started] })
     let outcome: PrRefreshResult['outcome'] = 'failed'
     let failure: Extract<RowRefresh, { state: 'failed' }> | null = null
     try {
       const found = await fetchPr(gh, repo, number)
       if (!stopped && found.state === 'OPEN') {
-        await scanNew([found.pr], config(), true)
+        if (shown()) await scanNew([found.pr], config(), true)
         cache.writePr(repo, found.pr, found.defaultBranch)
         outcome = 'open'
       } else if (!stopped) {
@@ -508,7 +510,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       rowRefreshes.set(key, failure)
       log(`PR #${number}: refresh failed: ${failure.error}`)
     }
-    if (shown()) {
+    if (before !== null && shown()) {
       const next = snapshot(config(), reports)
       const rows = [...next.rows.values()].filter((row) => row.number === number || !same(row, before.rows.get(row.number)))
       const removed = [...before.rows.keys()].filter((known) => !next.rows.has(known))
@@ -519,11 +521,11 @@ export const createPoller = (options: PollerOptions): Poller => {
     return { number, outcome, joined: false, error: failure?.error ?? null, errorKind: failure?.errorKind ?? null }
   }
 
-  const refreshPr = (number: number): Promise<PrRefreshResult> => {
-    const key = prKey(config().repo, number)
+  const refreshPr = (number: number, repo: string = config().repo): Promise<PrRefreshResult> => {
+    const key = prKey(repo, number)
     const running = prJobs.get(key)
     if (running !== undefined) return running.then((result) => ({ ...result, joined: true }))
-    const job = runPrRefresh(number).finally(() => prJobs.delete(key))
+    const job = runPrRefresh(number, repo).finally(() => prJobs.delete(key))
     prJobs.set(key, job)
     return job
   }
@@ -531,15 +533,15 @@ export const createPoller = (options: PollerOptions): Poller => {
   // a refresh in flight may have read GitHub before the write, so joining it could show the old
   // state; one more starts when it ends, and any number of asks meanwhile share that one
   const afterWrite = new Map<string, Promise<PrRefreshResult>>()
-  const refreshPrAfterWrite = (number: number): Promise<PrRefreshResult> => {
-    const key = prKey(config().repo, number)
+  const refreshPrAfterWrite = (repo: string, number: number): Promise<PrRefreshResult> => {
+    const key = prKey(repo, number)
     const running = prJobs.get(key)
-    if (running === undefined) return refreshPr(number)
+    if (running === undefined) return refreshPr(number, repo)
     const queued = afterWrite.get(key)
     if (queued !== undefined) return queued
     const next = running.catch(() => undefined).then(() => {
       afterWrite.delete(key)
-      return refreshPr(number)
+      return refreshPr(number, repo)
     })
     afterWrite.set(key, next)
     return next

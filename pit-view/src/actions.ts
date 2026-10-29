@@ -60,13 +60,26 @@ export const parseAction = (body: unknown): ActionRequest => {
 // exactly what gh is asked for each action. Merge uses GitHub's REST merge endpoint rather than
 // `gh pr merge`: that endpoint refuses when branch rules require a queue, so one click cannot
 // silently enable auto-merge or enqueue anything. The method is fixed to squash.
-export const ghArgs = (repo: string, number: number, request: ActionRequest): string[] => {
+// The merge carries the head SHA the viewer saw as GitHub's `sha` precondition, so a push after
+// that is refused by GitHub (409) instead of merged.
+export const ghArgs = (repo: string, number: number, request: ActionRequest, headSha = ''): string[] => {
   switch (request.action) {
-    case 'merge': return ['api', '--method', 'PUT', `repos/${repo}/pulls/${number}/merge`, '-f', 'merge_method=squash']
+    case 'merge': return ['api', '--method', 'PUT', `repos/${repo}/pulls/${number}/merge`, '-f', 'merge_method=squash', '-f', `sha=${headSha}`]
     case 'markReady': return ['pr', 'ready', String(number), '--repo', repo]
     case 'convertToDraft': return ['pr', 'ready', String(number), '--undo', '--repo', repo]
     case 'requestReview': return ['api', '--method', 'POST', `repos/${repo}/pulls/${number}/requested_reviewers`, '-f', `reviewers[]=${request.reviewer}`]
   }
+}
+
+// the one PR read live just before a merge, read-only, through the token the write then uses
+type LivePr = { state?: string, draft?: boolean, merged?: boolean, mergeable?: boolean | null, mergeable_state?: string, base?: { ref?: string }, head?: { sha?: string } }
+
+const refuseIfMoved = (number: number, live: LivePr, base: string, headSha: string): void => {
+  if (live.state !== 'open' || live.merged === true) throw new ActionError('notAllowed', `#${number} is no longer open; nothing was merged`)
+  if (live.base?.ref !== base) throw new ActionError('notAllowed', `#${number} now targets ${live.base?.ref ?? 'another branch'}, not ${base} as you saw; nothing was merged`)
+  if (live.head?.sha !== headSha) throw new ActionError('notAllowed', `#${number} has new commits since you saw it; nothing was merged`)
+  if (live.draft === true) throw new ActionError('notAllowed', `#${number} is a draft now; nothing was merged`)
+  if (live.mergeable !== true || live.mergeable_state !== 'clean') throw new ActionError('notAllowed', `#${number} is not mergeable right now (${live.mergeable_state ?? 'unknown'}); nothing was merged`)
 }
 
 const sameLogin = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
@@ -76,9 +89,9 @@ export type ActionsOptions = {
   gh: Gh
   // the config in effect, read afresh at every action
   config: () => Config
-  // starts the targeted refresh of one PR that is certain to start after the write (the poller's
-  // refreshPrAfterWrite); not awaited
-  refreshPr: (number: number) => Promise<unknown>
+  // starts the targeted refresh of one PR, in the repository the write used, that is certain to
+  // start after the write (the poller's refreshPrAfterWrite); not awaited
+  refreshPr: (repo: string, number: number) => Promise<unknown>
   log: (line: string) => void
 }
 
@@ -92,8 +105,8 @@ export const createActions = (options: ActionsOptions): Actions => {
   // one action per PR in flight, so a double click writes once
   const inFlight = new Set<string>()
 
-  const refresh = (number: number): void => {
-    options.refreshPr(number).catch((error: unknown) => log(`PR #${number}: refresh after an action failed: ${messageOf(error)}`))
+  const refresh = (repo: string, number: number): void => {
+    options.refreshPr(repo, number).catch((error: unknown) => log(`PR #${number}: refresh after an action failed: ${messageOf(error)}`))
   }
 
   const run = async (number: number, body: unknown): Promise<ActionResult> => {
@@ -106,6 +119,7 @@ export const createActions = (options: ActionsOptions): Actions => {
     const author = row.pr.author?.login ?? ''
     if (viewer === '' || !sameLogin(author, viewer)) throw new ActionError('notYours', `#${number} is not your PR; direct actions apply to your own PRs only`)
     let reviewer: string | undefined
+    let merging: { base: string, headSha: string } | undefined
     if (request.action === 'merge') {
       // the state the row shows, derived again from the cached PR rather than taken from the page
       const merge = deriveMerge(row.pr, deriveIssues(row.pr))
@@ -115,6 +129,7 @@ export const createActions = (options: ActionsOptions): Actions => {
       if (!isPrimaryBase(base, cached.defaultBranch)) {
         throw new ActionError('notAllowed', `#${number} targets ${base}, not the primary branch (${cached.defaultBranch ?? 'master or main'}); Pit View merges only into the primary branch`)
       }
+      merging = { base, headSha: row.pr.headRefOid }
     }
     if (request.action === 'markReady' && !row.pr.isDraft) throw new ActionError('notAllowed', `#${number} is not a draft`)
     if (request.action === 'convertToDraft' && row.pr.isDraft) throw new ActionError('notAllowed', `#${number} is already a draft`)
@@ -132,18 +147,39 @@ export const createActions = (options: ActionsOptions): Actions => {
       // the write confirms the account with the token it then writes with, and runs once
       const checked: ActionRequest = reviewer === undefined ? request : { action: 'requestReview', reviewer }
       try {
-        await gh.write(ghArgs(repo, number, checked), viewer)
+        const check = merging === undefined ? undefined : async (read: (args: string[]) => Promise<string>): Promise<void> => {
+          // the confirmation named the cached base and head; the PR is read once more, live, and
+          // anything that differs refuses before a write is made
+          let live: LivePr
+          try {
+            live = JSON.parse(await read(['api', `repos/${repo}/pulls/${number}`])) as LivePr
+          } catch (error) {
+            if (error instanceof GhError) throw error
+            throw new ActionError('ghFailed', `cannot read #${number} before merging: ${messageOf(error)}; nothing was merged`)
+          }
+          refuseIfMoved(number, live, merging!.base, merging!.headSha)
+        }
+        await gh.write(ghArgs(repo, number, checked, merging?.headSha), viewer, check)
       } catch (error) {
+        if (error instanceof ActionError) {
+          // the live read disagreed with the cache: nothing was written, and the row is read again
+          refresh(repo, number)
+          throw error
+        }
         if (error instanceof WriteIdentityError) {
           if (error.login === null) throw new ActionError('identityUnknown', error.message, error.errorKind)
           throw new ActionError('identityMismatch', error.message)
         }
         // the cache may be what is wrong, so the row is read again before the refusal is shown
-        refresh(number)
+        refresh(repo, number)
+        // GitHub answers 409 when the head is no longer the sha the merge named
+        if (request.action === 'merge' && error instanceof GhError && /HTTP 409/.test(error.stderr)) {
+          throw new ActionError('ghFailed', `GitHub refused: #${number} changed since you saw it (HTTP 409); nothing was merged`, error.kind)
+        }
         throw new ActionError('ghFailed', messageOf(error), error instanceof GhError ? error.kind : null)
       }
       log(`PR #${number}: ${request.action}${reviewer === undefined ? '' : ` ${reviewer}`}`)
-      refresh(number)
+      refresh(repo, number)
       return { number, action: request.action, done: true, ...(reviewer === undefined ? {} : { reviewer }) }
     } finally {
       inFlight.delete(key)

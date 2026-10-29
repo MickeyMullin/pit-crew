@@ -579,3 +579,44 @@ test('a version 5 cache lacks latestOpinionatedReviews, so its cached PRs are dr
     await cleanup()
   }
 })
+
+test('a page fetched before a one-PR refresh does not overwrite what that refresh wrote, and a later cycle still updates the row', async () => {
+  const { pages, closed } = await fetched()
+  const { cache, tick } = memoryCache()
+  fullCycle(cache, tick, pages, closed)
+  tick(second)
+  const stale = cache.startCycle(scenario.repo, 'manual')
+  tick(second)
+  // the action finished and its refresh wrote the post-action state while that cycle was running
+  const target = pages[0]!.prs[0]!
+  const after = { ...target, title: 'after the action', headRefOid: 'f'.repeat(40) }
+  cache.writePr(scenario.repo, after, null)
+  // a PR merged by the action leaves the open table
+  const merged = pages[0]!.prs[1]!
+  cache.closePr(scenario.repo, merged.number)
+  tick(second)
+  // the page was read before the action, so it still says the old state
+  cache.writeOpenPage(stale.id, pages[0]!)
+  const open = cache.readView(scenario.repo).open
+  assert.equal(open.find((row) => row.number === target.number)?.pr.title, 'after the action')
+  assert.equal(open.find((row) => row.number === merged.number), undefined)
+  assert.equal(cache.finishCycle(stale.id).cycle.state, 'finished')
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === merged.number), undefined)
+
+  // a cycle that starts afterwards fetches newer state and wins as usual
+  tick(second)
+  fullCycle(cache, tick, pages, closed)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, target.title)
+})
+
+test('a PR on two pages of one cycle still ends as its later copy', async () => {
+  const { pages } = await fetched()
+  const { cache, tick } = memoryCache()
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  tick(second)
+  const target = pages[0]!.prs[0]!
+  cache.writeOpenPage(cycle.id, pages[0]!)
+  tick(second)
+  cache.writeOpenPage(cycle.id, { ...pages[1]!, prs: [{ ...target, title: 'later copy' }] })
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'later copy')
+})

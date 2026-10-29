@@ -450,14 +450,26 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     return requireRunning(id)
   }
 
+  // the rows this server's pages wrote in the running cycle, so a PR that moves between pages
+  // mid-pagination is still overwritten by its later copy; a row written any other way (a one-PR
+  // refresh) is not in it
+  let pageRows = { cycle: 0, keys: new Set<string>() }
+
   const writeOpenPage = (cycleId: number, page: OpenPage): CachedPr[] => transaction(() => {
-    const { repo } = requireRunning(cycleId)
+    const { repo, startedAt } = requireRunning(cycleId)
     const at = now()
+    if (pageRows.cycle !== cycleId) pageRows = { cycle: cycleId, keys: new Set() }
     insertSnapshot({ cycle: cycleId, repo, kind: 'open-page', page: page.page, at, error: null, payload: JSON.stringify(page.raw) })
     const upsert = db.prepare('INSERT INTO prs (repo, number, state, updated_at, head_oid, fetched_at, cycle, last_seen_at, data) VALUES ($repo, $number, \'open\', $updatedAt, $headOid, $at, $cycle, $at, $data) ON CONFLICT (repo, number) DO UPDATE SET state = \'open\', updated_at = excluded.updated_at, head_oid = excluded.head_oid, fetched_at = excluded.fetched_at, cycle = excluded.cycle, last_seen_at = excluded.last_seen_at, data = excluded.data')
     // a PR updated mid-pagination can appear on two pages; the later copy wins
     const written = new Map<number, CachedPr>()
     for (const pr of page.prs) {
+      // a page was fetched after its cycle started and no later than it was written. A row a
+      // one-PR refresh wrote after the cycle started holds newer state than this page can have
+      // (even a merge that closed it), so the page does not overwrite it
+      const existing = get('SELECT fetched_at FROM prs WHERE repo = $repo AND number = $number', { repo, number: pr.number })
+      if (existing !== undefined && str(existing, 'fetched_at') > startedAt && !pageRows.keys.has(`${repo}#${pr.number}`)) continue
+      pageRows.keys.add(`${repo}#${pr.number}`)
       upsert.run({ repo, number: pr.number, updatedAt: pr.updatedAt, headOid: pr.headRefOid, at, cycle: cycleId, data: JSON.stringify(pr) })
       written.set(pr.number, {
         repo,
