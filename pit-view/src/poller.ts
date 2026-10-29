@@ -11,6 +11,8 @@ import { baselineOf, compareRows, runEvent } from './notify.ts'
 import type { NotifyEvent, RowBaseline } from './notify.ts'
 import { scanReports } from './reports.ts'
 import type { ReportInfo, ReportTarget } from './reports.ts'
+import { createSweepMemory, sweepsView } from './sweeps.ts'
+import type { SweepMemory, SweepsView } from './sweeps.ts'
 import { closedSearchWindow, iso } from './time.ts'
 
 export type { Trigger } from './cache.ts'
@@ -50,6 +52,8 @@ export type View = {
   mine: MineSection
   others: OthersSection
   closed: ClosedView
+  // Dependabot sweeps are their own concept, held beside the rows and not in their Agent cells
+  sweeps: SweepsView
 }
 
 // rows and removed are keyed by PR number, and closed, when not null, replaces the Closed
@@ -64,6 +68,9 @@ export type Patch = {
   tiles?: Tiles
   counts?: Counts
   sync?: Sync
+  // the sweeps as they now stand, replacing the page's: sent whole whenever a sweep, the repository
+  // or the start text's config changed
+  sweeps?: SweepsView
   repo?: string
   viewer?: PersonView
 }
@@ -98,6 +105,8 @@ export type Poller = {
   runWatched: (run: { id: number, repo: string, number: number }) => void
   // a run of this PR started, stepped or settled: one patch upserting its row
   runChanged: (repo: string, number: number) => void
+  // a sweep of this repo started, stepped or settled: one patch carrying the sweeps whole
+  sweepsChanged: (repo: string) => void
   // resolves once no cycle is running, including any follow-up cycle
   idle: () => Promise<void>
   // clears the timer and fails a running cycle; nothing starts afterward
@@ -123,6 +132,8 @@ export type PollerOptions = {
   pageSize?: number
   // the active trigger's floor: no cycle when the last one started this recently
   activeFloorMs?: number
+  // the sweeps held in memory; none when left out
+  sweeps?: SweepMemory
   // receives the notification events a transition produces (section 9); the notifier decides
   // whether the config wants them
   notify?: (events: NotifyEvent[]) => void
@@ -179,6 +190,7 @@ export const createPoller = (options: PollerOptions): Poller => {
   })()
 
   const notify = options.notify ?? (() => {})
+  const sweeps = options.sweeps ?? createSweepMemory(cache)
   // notifications (section 9): the rows as last compared, and the runs this process is
   // responsible for watching, by run id, until each settles
   let baseline: RowBaseline | null = null
@@ -553,6 +565,10 @@ export const createPoller = (options: PollerOptions): Poller => {
       counts: next.view.counts,
       sync: syncOf(next.cached, after),
     }
+    // the repository, the viewer and cloneDir all show in the sweep's start text
+    const sweepsBefore = sweepsView(before, sweeps)
+    const sweepsAfter = sweepsView(after, sweeps)
+    if (!same(sweepsBefore, sweepsAfter)) body.sweeps = sweepsAfter
     if (changed('repo')) body.repo = after.repo
     if (!same(previous.view.viewer, next.view.viewer)) body.viewer = next.view.viewer
     patch(body)
@@ -589,6 +605,12 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
+  const sweepsChanged = (repo: string): void => {
+    if (stopped) return
+    const settings = config()
+    if (settings.repo === repo) patch({ sweeps: sweepsView(settings, sweeps) })
+  }
+
   const view = async (): Promise<View> => {
     if (scanned === null) await rescan(config())
     // read and derive in one synchronous step, so version matches what the view holds
@@ -606,6 +628,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       mine: snap.view.mine,
       others: snap.view.others,
       closed: snap.view.closed,
+      sweeps: sweepsView(settings, sweeps),
     }
   }
 
@@ -628,5 +651,5 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
-  return { view, refresh, refreshPr, setActive, configChanged, runWatched, runChanged, idle, stop, version: () => version }
+  return { view, refresh, refreshPr, setActive, configChanged, runWatched, runChanged, sweepsChanged, idle, stop, version: () => version }
 }

@@ -18,7 +18,7 @@ import type { Clock, Config, RunnerName } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner } from './github.ts'
 import { deriveStacks, latestReviewsOf } from './derive.ts'
-import { createLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn } from './launcher.ts'
+import { createLauncher, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Spawn, StartKind } from './launcher.ts'
 import { renderMarkdown } from './markdown.ts'
 import { createNotifier, noDeliver, systemDeliver, systemExec } from './notify.ts'
@@ -27,6 +27,9 @@ import { createPoller, systemTimers } from './poller.ts'
 import type { Patch, Poller, Timers } from './poller.ts'
 import { listPrReports, readReport, ReportReadError } from './reports.ts'
 import type { ReportReadErrorCode } from './reports.ts'
+import { createSweepMemory, sweepRequest, sweepView } from './sweeps.ts'
+import type { SweepMemory } from './sweeps.ts'
+import type { Sweep } from './cache.ts'
 
 export const defaultPort = 4791
 // a named instance's port when PIT_VIEW_PORT is unset; any other name must set it
@@ -85,6 +88,9 @@ export type PitServer = {
   clients: Clients
   cache: Cache
   launcher: Launcher
+  // sweeps are their own concept: a launcher over the sweeps table, and the sweeps held in memory
+  sweepLauncher: Launcher<Sweep>
+  sweeps: SweepMemory
   // the token this start injected into its pages
   token: string
   // closes the streams, fails a running cycle, stops watching runs (which keep going), stops
@@ -309,8 +315,12 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   }
 
   const notifier = createNotifier({ config: effective, deliver: options.deliver ?? noDeliver, log })
+  // the sweeps' own memory state, beside the runs: read from the cache here, then kept current by
+  // the sweep launcher's changes (recovery included)
+  const sweeps = createSweepMemory(cache)
   const poller = createPoller({
     cache,
+    sweeps,
     notify: notifier.send,
     gh,
     clock,
@@ -354,6 +364,40 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     await launcher.recover()
   } catch (error) {
     log(`runs: recovery failed: ${messageOf(error)}`)
+  }
+
+  // the same for sweeps, from their own table; memory is loaded first and each change that recovery
+  // makes lands in it
+  const sweepLauncher = createSweepLauncher({
+    cache,
+    gh,
+    git: options.launch.git,
+    spawn: options.launch.spawn,
+    fs: options.launch.fs,
+    kill: options.launch.kill,
+    procs: options.launch.procs,
+    clock,
+    timers,
+    config: effective,
+    home,
+    stateDir: options.stateDir,
+    env: options.launch.env,
+    newSessionId: options.launch.newSessionId,
+    onWatch: (sweep) => sweeps.set(sweep),
+    onChange: (sweep) => {
+      sweeps.set(sweep)
+      poller.sweepsChanged(sweep.repo)
+    },
+    log,
+    pollMs: options.launch.pollMs,
+    watchedPollMs: options.launch.watchedPollMs,
+    stopGraceMs: options.launch.stopGraceMs,
+  })
+  try {
+    sweeps.load(effective().repo)
+    await sweepLauncher.recover()
+  } catch (error) {
+    log(`sweeps: recovery failed: ${messageOf(error)}`)
   }
 
   // one keepalive timer while any stream is open; local only, never a GitHub call
@@ -508,6 +552,36 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     }
   }
 
+  // the Dependabot sweep (section 8 of DESIGN.md, Sweeps): the repository's sweep, started with the
+  // same token, Host, Origin and content-type rules as a run; the body may name the runner and nothing else
+  const startSweep = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    requireToken(req)
+    const usage = 'send { "runner": "claude" | "codex" } or no body'
+    const length = Number(req.headers['content-length'] ?? 0)
+    const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
+    const { runner: asked, ...rest } = body as Record<string, unknown>
+    if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
+    if (asked !== undefined && !runnerNames.includes(asked as RunnerName)) throw new HttpError(400, 'runner must be claude or codex')
+    try {
+      json(res, 200, sweepView(await sweepLauncher.start(sweepRequest(effective().repo, asked as RunnerName | undefined))))
+    } catch (error) {
+      launchFailure(error)
+    }
+  }
+
+  // identical to a run's stop; a sweep has ids of its own, so it has a path of its own
+  const stopSweep = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
+    requireToken(req)
+    if (!/^[1-9]\d{0,9}$/.test(raw)) throw new HttpError(400, 'the sweep id must be a positive integer')
+    await noBody(req)
+    try {
+      json(res, 200, sweepView(sweepLauncher.stop(Number(raw))))
+    } catch (error) {
+      launchFailure(error)
+    }
+  }
+
   const stopRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
     requireToken(req)
     if (!/^[1-9]\d{0,9}$/.test(raw)) throw new HttpError(400, 'the run id must be a positive integer')
@@ -653,6 +727,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'GET', pattern: /^\/api\/prs\/([^/]+)\/reports$/, handle: (_req, res, _url, match) => listReportsFor(res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/reports\/([^/]+)$/, handle: (_req, res, _url, match) => serveReport(res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/runs\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopRun(req, res, match[1] ?? '') },
+    { method: 'POST', pattern: /^\/api\/sweeps$/, handle: (req, res) => startSweep(req, res) },
+    { method: 'GET', pattern: /^\/api\/sweeps$/, handle: (_req, res) => json(res, 200, sweeps.list(effective().repo)) },
+    { method: 'POST', pattern: /^\/api\/sweeps\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopSweep(req, res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/instance$/, handle: (_req, res) => json(res, 200, { name: options.instance ?? '', configPath: tildePath(options.configPath, home), pid: process.pid }) },
     { method: 'GET', pattern: /^\/api\/config$/, handle: (_req, res) => json(res, 200, stored) },
     { method: 'PUT', pattern: /^\/api\/config$/, handle: (req, res) => putConfig(req, res) },
@@ -696,6 +773,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   const close = async (): Promise<void> => {
     poller.stop()
     launcher.close()
+    sweepLauncher.close()
     for (const stream of streams) stream.end()
     streams.clear()
     syncKeepalive()
@@ -706,7 +784,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     cache.close()
   }
 
-  return { port, url: `http://${host}:${port}`, poller, clients, cache, launcher, token, close }
+  return { port, url: `http://${host}:${port}`, poller, clients, cache, launcher, sweepLauncher, sweeps, token, close }
 }
 
 export type Runtime = { instance: string, port: number, configPath: string, cachePath: string, stateDir: string }

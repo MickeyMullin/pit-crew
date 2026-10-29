@@ -14,7 +14,7 @@ import { iso } from '../src/time.ts'
 import { scenario } from './fixtures/scenario.ts'
 import type { MineRow, OpenRow } from '../src/derive.ts'
 import type { RunResult } from '../src/github.ts'
-import { failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, gatedRunner, githubCalls, ok, singlePr, tempDir } from './helpers.ts'
+import { emptySweepResult, failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, gatedRunner, githubCalls, ok, singlePr, sweepResult, tempDir } from './helpers.ts'
 import type { FakeLaunch, FakeRunner, FakeTime } from './helpers.ts'
 
 type Harness = { server: PitServer, time: FakeTime, runner: FakeRunner, launch: FakeLaunch, home: string, configPath: string, base: string, cleanup: () => Promise<void> }
@@ -50,11 +50,13 @@ const setup = async ({ config = {}, runner = fixtureRunner(), files = {}, launch
     log: () => {},
     pageSize: scenario.pageSize,
   })
+  // closes the server the harness holds now, which a restart may have replaced
   const cleanup = async (): Promise<void> => {
-    await server.close()
+    await harness.server.close()
     await removeHome()
   }
-  return { server, time, runner, launch, home, configPath, base: server.url, cleanup }
+  const harness: Harness = { server, time, runner, launch, home, configPath, base: server.url, cleanup }
+  return harness
 }
 
 const getJson = async <T>(url: string): Promise<{ status: number, body: T }> => {
@@ -1391,4 +1393,246 @@ test('the report endpoints are reads with no token, but the Host check applies; 
   } finally {
     await h.cleanup()
   }
+})
+
+// Dependabot sweeps: their own endpoints, view and live feed (section 8, Sweeps)
+
+const sweepsUrl = (h: Harness): string => `${h.base}/api/sweeps`
+
+const writeSweepSummary = (h: Harness): Promise<void> =>
+  mkdir(join(h.home, 'agents', 'output'), { recursive: true }).then(() => writeFile(join(h.home, 'agents', 'output', 'dependabot-sweep-octo-example-orbit-2026-10-26.md'), '# sweep\n'))
+
+test('starting a sweep needs the token and the Host, Origin and content-type checks, takes only a runner, and is one per repository', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    const url = sweepsUrl(h)
+    assert.equal((await send(url, 'POST')).status, 403)
+    assert.match(String((await send(url, 'POST', undefined, { 'X-Pit-View-Token': 'not-the-token' })).body.error), /token/)
+    assert.equal((await send(url, 'POST', undefined, { ...token(h), Origin: 'http://attacker.test' })).status, 403)
+    assert.equal((await raw(h.server.port, '/api/sweeps', { ...token(h), Host: 'pit-view.attacker.test' }, 'POST')).status, 403)
+    assert.equal((await send(url, 'POST', 'runner=codex', { ...token(h), 'Content-Type': 'text/plain' })).status, 415)
+    // the body may carry the runner and nothing else: no --no-post, no arguments
+    assert.equal((await send(url, 'POST', { runner: 'hermes' }, token(h))).status, 400)
+    assert.equal((await send(url, 'POST', { noPost: true }, token(h))).status, 400)
+    assert.equal((await send(url, 'POST', { args: ['--no-post'] }, token(h))).status, 400)
+    assert.equal((await send(url, 'POST', ['codex'], token(h))).status, 400)
+    assert.equal(h.launch.children.length, 0)
+
+    const started = await send(url, 'POST', undefined, { ...token(h), Origin: h.base })
+    assert.equal(started.status, 200)
+    assert.deepEqual([started.body.status, started.body.command, started.body.args, started.body.label, started.body.runner, started.body.cwd],
+      ['running', 'review-dependabot-sweep', [scenario.repo, '--parallel', '1'], 'Dependabot sweep', 'claude', '~/dev/orbit'])
+    assert.equal('number' in started.body, false)
+    const line = lastWrite(h)
+    assert.match(line, /\/review-dependabot-sweep octo-example\/orbit --parallel 1 --emit-json=.*\/sweeps\/1/)
+    assert.doesNotMatch(line, /--no-post/)
+    // the start's one GitHub call is the identity check
+    assert.equal(githubCalls(h.runner).filter((call) => call.args[0] === 'api' && call.args[1] === 'user').length, 1)
+
+    const busy = await send(url, 'POST', {}, token(h))
+    assert.equal(busy.status, 409)
+    assert.match(String(busy.body.error), /sweep for octo-example\/orbit is already in flight/)
+    assert.equal(h.launch.children.length, 1)
+    // a sweep does not hold up a PR's own run, and its record is not in that PR's runs
+    await filled(h)
+    const run = await send(`${h.base}/api/prs/106/runs`, 'POST', undefined, token(h))
+    assert.equal(run.status, 200)
+    assert.deepEqual((await getJson<Record<string, unknown>[]>(`${h.base}/api/prs/106/runs`)).body.map((entry) => entry.command), ['review-pr'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a sweep start is refused with a clear error: no cloneDir, a folder that is not the clone, another gh account', async () => {
+  const unset = await setup()
+  try {
+    const refused = await send(sweepsUrl(unset), 'POST', undefined, token(unset))
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /set cloneDir/)
+    assert.equal(unset.launch.children.length, 0)
+  } finally {
+    await unset.cleanup()
+  }
+  const notClone = await setup({ config: { cloneDir: '~/dev/orbit' }, launch: fakeLaunch({ remotes: 'origin\thttps://github.com/octo-example/other (fetch)\n' }) })
+  try {
+    const refused = await send(sweepsUrl(notClone), 'POST', undefined, token(notClone))
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /no remote for octo-example\/orbit/)
+  } finally {
+    await notClone.cleanup()
+  }
+  const fixtures = fixtureRunner()
+  const other = fakeRunner((args) => args[0] === 'api' && args[1] === 'user' ? ok('someone-else\n') : fixtures.runner(args))
+  const mismatch = await setup({ runner: other, config: { cloneDir: '~/dev/orbit' } })
+  try {
+    const refused = await send(sweepsUrl(mismatch), 'POST', undefined, token(mismatch))
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /gh is signed in as someone-else, but the viewer is vera-quill/)
+    assert.equal(mismatch.launch.children.length, 0)
+  } finally {
+    await mismatch.cleanup()
+  }
+})
+
+test('GET /api/sweeps lists the repository\'s sweeps newest first with the parsed result, and a sweep stops at its own path with the same rules', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    assert.deepEqual((await getJson<unknown[]>(sweepsUrl(h))).body, [])
+    await writeSweepSummary(h)
+    const first = await send(sweepsUrl(h), 'POST', undefined, token(h))
+    const child = h.launch.children[0]!
+    await child.result(sweepResult())
+    const settled = h.server.sweepLauncher.settled(Number(first.body.id))
+    child.exit(0)
+    await settled
+    const second = await send(sweepsUrl(h), 'POST', undefined, token(h))
+    const listed = await getJson<Record<string, any>[]>(sweepsUrl(h))
+    assert.equal(listed.status, 200)
+    assert.deepEqual(listed.body.map((sweep) => [sweep.id, sweep.status]), [[second.body.id, 'running'], [first.body.id, 'done']])
+    assert.equal(listed.body[1]?.text, 'Done · 2 swept')
+    assert.deepEqual(listed.body[1]?.result.counts, { swept: 2, fresh: 1, reused: 1, failed: 0 })
+    assert.deepEqual(listed.body[1]?.result.rows.map((row: Record<string, unknown>) => row.number), [201, 202])
+    assert.equal(listed.body[1]?.result.summary, '~/agents/output/dependabot-sweep-octo-example-orbit-2026-10-26.md')
+    assert.equal('result' in (listed.body[0] ?? {}) && listed.body[0]?.result, null)
+
+    // why stop has a path of its own: sweeps and runs count their ids apart
+    const stopUrl = `${h.base}/api/sweeps/${second.body.id}/stop`
+    assert.equal((await send(stopUrl, 'POST')).status, 403)
+    assert.equal((await send(stopUrl, 'POST', undefined, { ...token(h), Origin: 'http://attacker.test' })).status, 403)
+    assert.equal((await send(`${h.base}/api/sweeps/abc/stop`, 'POST', undefined, token(h))).status, 400)
+    assert.equal((await send(`${h.base}/api/sweeps/999/stop`, 'POST', undefined, token(h))).status, 404)
+    const stopping = h.server.sweepLauncher.settled(Number(second.body.id))
+    const stopped = await send(stopUrl, 'POST', undefined, token(h))
+    assert.equal(stopped.status, 200)
+    assert.equal(stopped.body.status, 'running')
+    assert.equal((await stopping).status, 'stopped')
+    assert.deepEqual(h.launch.kills, [{ pid: -h.launch.children[1]!.pid, signal: 'SIGTERM' }])
+    assert.equal((await send(stopUrl, 'POST', undefined, token(h))).status, 409)
+    // a run's stop path does not reach a sweep
+    assert.equal((await send(`${h.base}/api/runs/${first.body.id}/stop`, 'POST', undefined, token(h))).status, 404)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the view carries the sweeps and how to start one, and the live feed sends them whole when a sweep starts, steps and settles', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const before = (await getJson<View>(`${h.base}/api/view`)).body
+    assert.deepEqual(before.sweeps.items, [])
+    assert.match(before.sweeps.start.heading, /octo-example\/orbit/)
+    assert.equal(before.sweeps.start.unavailable, null)
+    assert.match(before.sweeps.start.posts, /@vera-quill/)
+    const stream = await openStream(h.base, 'client=tab-1&visible=false&paused=false')
+
+    const started = await send(sweepsUrl(h), 'POST', undefined, token(h))
+    const first = await stream.patch()
+    assert.deepEqual(first.rows, [])
+    assert.deepEqual(first.sweeps?.items.map((sweep) => [sweep.id, sweep.status]), [[started.body.id, 'running']])
+    assert.match(first.sweeps?.start.unavailable ?? '', /already in flight/)
+
+    const child = h.launch.children[0]!
+    await child.events({ at: '2026-10-26T14:06:00Z', step: 'resolveBase', state: 'done', note: null })
+    await h.server.sweepLauncher.check()
+    const stepped = await stream.patch()
+    assert.equal(stepped.sweeps?.items[0]?.step, 'resolveBase')
+    assert.equal(stepped.version, first.version + 1)
+
+    await writeSweepSummary(h)
+    await child.result(sweepResult())
+    const settled = h.server.sweepLauncher.settled(Number(started.body.id))
+    child.exit(0)
+    await settled
+    const done = await stream.patch()
+    assert.deepEqual([done.sweeps?.items[0]?.status, done.sweeps?.items[0]?.text, done.sweeps?.start.unavailable], ['done', 'Done · 2 swept', null])
+    assert.equal(done.sweeps?.items[0]?.result?.rows.length, 2)
+    // sweeps are not an Agent cell: no row of the view mentions them
+    const after = (await getJson<View>(`${h.base}/api/view`)).body
+    assert.equal(after.sweeps.items[0]?.id, started.body.id)
+    assert.equal(JSON.stringify([...after.mine.groups, ...after.others.groups]).includes('sweep'), false)
+    stream.close()
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a sweep with nothing to sweep settles done with zero counts, and the feed shows it so', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    const started = await send(sweepsUrl(h), 'POST', undefined, token(h))
+    const child = h.launch.children[0]!
+    await child.result(emptySweepResult())
+    const settled = h.server.sweepLauncher.settled(Number(started.body.id))
+    child.exit(0)
+    await settled
+    const listed = (await getJson<Record<string, any>[]>(sweepsUrl(h))).body[0]
+    assert.deepEqual([listed?.status, listed?.note, listed?.text], ['done', null, 'Done · nothing to sweep'])
+    assert.deepEqual([listed?.result.counts, listed?.result.rows, listed?.result.summary], [{ swept: 0, fresh: 0, reused: 0, failed: 0 }, [], null])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// a second start over the same home, cache and state folder: what a restart of the server is
+const restart = async (h: Harness): Promise<PitServer> => {
+  await h.server.close()
+  h.server = await startServer(restartOptions(h))
+  return h.server
+}
+
+test('sweeps survive a restart: one still running is watched again, one whose process is gone settles from its result or fails as serverRestarted', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await writeSweepSummary(h)
+    const live = await send(sweepsUrl(h), 'POST', undefined, token(h))
+    const liveChild = h.launch.children[0]!
+    let again = await restart(h)
+    // memory is rebuilt at startup: the sweep is there, running, and its process is watched
+    assert.deepEqual(again.sweeps.list(scenario.repo).map((sweep) => [sweep.id, sweep.status]), [[live.body.id, 'running']])
+    const view = await (await fetch(`${again.url}/api/view`)).json() as View
+    assert.deepEqual(view.sweeps.items.map((sweep) => sweep.status), ['running'])
+    assert.match(view.sweeps.start.unavailable ?? '', /already in flight/)
+    await liveChild.result(sweepResult())
+    const settled = again.sweepLauncher.settled(Number(live.body.id))
+    liveChild.exit(0)
+    h.time.advance(20_000)
+    assert.equal((await settled).status, 'done')
+    assert.equal(again.sweeps.get(Number(live.body.id))?.text, 'Done · 2 swept')
+
+    // a second sweep is lost while the server is down: with a result on disk it settles from it
+    const withResult = await fetch(`${again.url}/api/sweeps`, { method: 'POST', headers: { 'X-Pit-View-Token': again.token } }).then((response) => response.json()) as Record<string, unknown>
+    const child = h.launch.children[1]!
+    await child.result(emptySweepResult())
+    h.launch.alive.delete(child.pid)
+    again = await restart(h)
+    assert.deepEqual(again.sweeps.get(Number(withResult.id))?.text, 'Done · nothing to sweep')
+
+    // and without one it fails as serverRestarted
+    const lost = await fetch(`${again.url}/api/sweeps`, { method: 'POST', headers: { 'X-Pit-View-Token': again.token } }).then((response) => response.json()) as Record<string, unknown>
+    h.launch.alive.delete(h.launch.children[2]!.pid)
+    again = await restart(h)
+    const failed = again.sweeps.get(Number(lost.id))
+    assert.deepEqual([failed?.status, failed?.note, failed?.text], ['failed', 'serverRestarted', 'Failed · server restarted'])
+    // the runs table never held any of them
+    assert.deepEqual(again.cache.runningRuns(), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+const restartOptions = (h: Harness) => ({
+  home: h.home,
+  port: 0,
+  runner: h.runner.runner,
+  clock: h.time.clock,
+  timers: h.time.timers,
+  timeZone: scenario.timeZone,
+  configPath: h.configPath,
+  cachePath: join(h.home, '.local', 'state', 'pit-view', 'cache.sqlite'),
+  stateDir: join(h.home, '.local', 'state', 'pit-view'),
+  publicDir: join(h.home, 'public'),
+  launch: h.launch.deps,
+  log: () => {},
+  pageSize: scenario.pageSize,
 })
