@@ -7,12 +7,17 @@ Re-reviews:
 - **A terse request to go again repeats the prior invocation.** When the user asks to re-review, review again, or re-run in a short message that names no PR ("re-review", "pull latest and re-review", "go again"), fetch the latest remote state and repeat the most recent review invocation in this conversation: this prompt, the same PR, and the same sibling note. Explicit words in the new message win.
 - **A head SHA or an "already fetched" statement does not carry over**, since re-pulling means reviewing the new tip. If the prior invocation had either, say so in chat before starting. Never drop anything else silently.
 - **`--emit-json` does not carry over.** A repeated invocation never carries `--emit-json=<run-dir>`, because that run directory belongs to the earlier run; say so in chat before starting. A session that continues after a stop to ask, with the user answering the question, is not a repeat: it keeps its run directory (see `emit-json.md`).
+- **`--no-post` carries over.** A repeated invocation keeps `--no-post` like the sibling note, since it is a safety flag (see `no-post.md`): a terse request is never a reason to start posting to GitHub. Only explicit words in the new message drop it, and then say so in chat before the review starts.
 - A re-review is a full review under this prompt: re-resolve the PR, re-record the tip SHA, read the prior report, and verify each prior finding. If the PR was merged or closed since, say so and stop, as "Target" does.
 
 Machine-readable output:
 
 - If the invocation contains `--emit-json=<run-dir>`, read `{{HOME}}/agents/prompts/review/emit-json.md` in full before doing anything else, check the run directory as it says, remove the flag, and resolve what remains under "Target" below. That file says what to write to `<run-dir>` and when; it changes nothing this prompt allows or requires. Without the flag, ignore it.
 - With the flag, record each step as `emit-json.md` describes, at the points this prompt marks. Record `resolveBase` `started` before resolving the PR. This prompt has no tandem mode, so `consolidate` is always recorded as skipped.
+
+No-post mode:
+
+- If the invocation contains `--no-post`, read `{{HOME}}/agents/prompts/review/no-post.md` in full before doing anything else, remove the flag, and resolve what remains under "Target" below. That file removes every GitHub write, and relaxes nothing else; where it and this prompt differ, it wins. This prompt has no fix mode, so the flag removes the post alone. Without the flag, ignore it.
 
 Target:
 
@@ -92,8 +97,10 @@ Output file:
 Posting the report:
 
 - Choose the form of the post, by the rules below, before you write the report file, since its closing notes record that choice. Any wait for CI happens then too.
+- With `--no-post`, `no-post.md` overrides this section: nothing is posted in any form, an automatic approval included, and the wait for CI below (`gh pr checks <number> --watch --interval 60`) does not run. The closing notes name the form the findings would select, with CI as last read, and record that nothing was posted because the run carried `--no-post`.
 - Once the file write has completed — and only then, never before it and never concurrently with it — post the report to the PR in the form chosen, passing the file that was just written. This is the one GitHub write this review performs, and it happens exactly once.
 - With `--emit-json`, choosing the form and any wait for CI belong to the `review` step, since they come before the report is written. Record `post` `started` only once the file write has completed, immediately before the post, and `done` once it lands; or record it once as `skipped` with the reason when nothing is posted (no PR exists). `emit-json.md` says what `result.json` records for each case, a failed `gh` command included.
+- With `--no-post` and `--emit-json`, record `post` once as `skipped` with the note `run with --no-post`; `result.json` carries `"posted": null` and `"notPostedReason": "noPost"`, which wins over every other reason (see `no-post.md`).
 - **A clean bump is approved automatically.** Post the report as an approval — `gh pr review <number> --approve --body-file {{HOME}}/agents/output/PR-<number>.md` — only when every one of these holds:
   - the review has **no finding above P3**: none at all, or P3s only. A single P0, P1, or P2 means a request-changes review, not an approval;
   - the merge recommendation is `approve`;

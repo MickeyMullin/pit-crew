@@ -25,3 +25,9 @@ With `--emit-json`:
 
 - Record the `post` step once, as `skipped` with the note `run with --no-post`.
 - `result.json` carries `"posted": null` and `"notPostedReason": "noPost"`, which wins over `"ownPr"` and every other reason, and `ci` as last read without waiting.
+
+In the Dependabot commands:
+
+- `review-dependabot.md` and `review-dependabot-sweep.md` list `--no-post` among their flags. Neither has a fix mode, so the flag removes the post alone: the approval the clean-bump gate would select, the request-changes review, the plain comment, the stale-approval request-changes form, and the wait for CI (`gh pr checks <number> --watch --interval 60`) that exists only to choose among them.
+- `review-dependabot-sweep.md` passes `--no-post` to every reviewer it starts, escalated re-runs included, and carries it forward on a terse request to go again. While the flag is set, its skip-unchanged rule omits only the condition that a clean report requires an approval already on the head. Every other reuse condition stays, and a sweep run without the flag applies the full rule again.
+- A reviewer started by a sweep with this flag takes it from its brief, as it would from an invocation, and its return says `Posted: not posted: run with --no-post`.
