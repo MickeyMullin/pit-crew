@@ -21,6 +21,8 @@ import { deriveStacks } from './derive.ts'
 import { createLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Spawn, StartKind } from './launcher.ts'
 import { renderMarkdown } from './markdown.ts'
+import { createNotifier, noDeliver, systemDeliver, systemExec } from './notify.ts'
+import type { Deliver } from './notify.ts'
 import { createPoller, systemTimers } from './poller.ts'
 import type { Patch, Poller, Timers } from './poller.ts'
 import { listPrReports, readReport, ReportReadError } from './reports.ts'
@@ -64,6 +66,9 @@ export type ServerOptions = {
   stateDir: string
   publicDir: string
   launch: LaunchDeps
+  // how a notification reaches the OS; nothing is delivered when left out, so a test never
+  // fires a real one
+  deliver?: Deliver
   // the per-start token the pages carry on run writes; random when left out
   token?: string
   log: (line: string) => void
@@ -303,8 +308,10 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     for (const stream of streams) stream.write(frame)
   }
 
+  const notifier = createNotifier({ config: effective, deliver: options.deliver ?? noDeliver, log })
   const poller = createPoller({
     cache,
+    notify: notifier.send,
     gh,
     clock,
     timers,
@@ -750,6 +757,7 @@ export const main = async (): Promise<void> => {
         env: process.env,
         newSessionId: randomUUID,
       },
+      deliver: systemDeliver(process.platform, systemExec),
       log,
     })
   } catch (error) {

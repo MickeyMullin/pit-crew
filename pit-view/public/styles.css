@@ -2187,6 +2187,25 @@ select.input {
   accent-color: var(--blue-fg);
 }
 
+/* the Notifications card's kinds: a fieldset without the browser's frame */
+
+.kinds {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.kinds-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.kind .hint {
+  margin: 0 0 0 24px;
+}
+
 /* the error summary above the form after a refused save */
 
 .form-errors {

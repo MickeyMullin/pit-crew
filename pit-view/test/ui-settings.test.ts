@@ -7,11 +7,12 @@ import { test } from 'node:test'
 import { ConfigError, defaultConfig, idleRange, validateConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import { deriveOpenRows, groupRows, personView } from '../src/derive.ts'
+import { notificationKinds } from '../src/notify.ts'
 import { cycleKeys } from '../src/poller.ts'
 import type { View } from '../src/poller.ts'
 import {
   aliasOf, changeKind, colorFor, contrastWithWhite, errorId, fieldId, initialsOf, isDirty, kindDefaults, needsRefresh, newPerson, newTicket,
-  idleLimits, openSuggestions, parseBots, parseIdleMinutes, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, serverError, ticketSample, toConfig, toForm,
+  idleLimits, notifyChoices, openSuggestions, parseBots, parseIdleMinutes, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, serverError, ticketSample, toConfig, toForm,
   validateForm,
 } from '../public/settings-form.ts'
 import type { Form, TicketForm } from '../public/settings-form.ts'
@@ -47,7 +48,7 @@ const sample = (): Config => ({
   // not on the page yet (P2.5 or later), so a save must carry them over
   cloneDir: '~/dev/orbit',
   agent: { runner: 'codex', codexModel: 'gpt-6.1-terra' },
-  notifications: { enabled: false, kinds: ['mineReady'] },
+  notifications: { enabled: false, kinds: ['readyToMerge'] },
 })
 
 const formOf = (config: Config = sample()): Form => toForm(config, ids())
@@ -320,4 +321,26 @@ test('ticket samples fall back to closed PR titles when no open PR carries a key
   assert.deepEqual(texts.at(-1), { text: closedRow.title, where: 'the title of #90, closed' })
   const jira = toForm(config, ids()).tickets[0]!
   assert.deepEqual(ticketSample({ ...jira, pattern: '\\bzed-\\d+\\b' }, config.repo, texts), { label: 'ZED-314', url: null, where: 'the title of #90, closed' })
+})
+
+test('the page lists exactly the notification kinds the server knows, in the same order', () => {
+  assert.deepEqual(notifyChoices.map((choice) => choice.kind), notificationKinds)
+})
+
+test('notifications round-trip: absent stays absent until the form leaves its default, a saved key stays', () => {
+  const config = defaultConfig()
+  assert.equal('notifications' in toConfig(formOf(config), config), false)
+  const form = formOf(config)
+  assert.deepEqual([form.notifyEnabled, form.notifyKinds], [false, [...notificationKinds]])
+  form.notifyEnabled = true
+  form.notifyKinds = ['ciFailing', 'readyToMerge']
+  // saved in the page's order, not the order they were ticked
+  assert.deepEqual(toConfig(form, config).notifications, { enabled: true, kinds: ['readyToMerge', 'ciFailing'] })
+  assert.equal(isDirty(form, config), true)
+  // off with every kind is the default; a config that had the key keeps it
+  const off = { ...config, notifications: { enabled: false, kinds: [...notificationKinds] } }
+  assert.deepEqual(toConfig(formOf(off), off).notifications, off.notifications)
+  assert.equal(isDirty(formOf(off), off), false)
+  // the server accepts what the page sends
+  assert.deepEqual(validateConfig(toConfig(form, config)).notifications, { enabled: true, kinds: ['readyToMerge', 'ciFailing'] })
 })

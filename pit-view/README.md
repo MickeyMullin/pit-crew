@@ -26,7 +26,7 @@ The deployed app is a clone of `master` at `~/app/pit-crew`, kept running from l
 
 ## Configuration
 
-Settings live in `~/.config/pit-view/config.json` (`~/.config/pit-view-dev/config.json` for `pnpm dev`). Without that file Pit View uses the defaults in [config.example.json](config.example.json) and your `gh` login as the viewer; an empty `viewer` also means the `gh` login. Copy the example to start your own, and keep your real Jira site URL and key pattern there rather than in this repository. Every key is described in section 1 of DESIGN.md. The Settings page edits the same file and checks it before saving.
+Settings live in `~/.config/pit-view/config.json` (`~/.config/pit-view-dev/config.json` for `pnpm dev`). Without that file Pit View uses the defaults in [config.example.json](config.example.json) and your `gh` login as the viewer; an empty `viewer` also means the `gh` login. Copy the example to start your own, and keep your real Jira site URL and key pattern there rather than in this repository. Every key is described in section 1 of DESIGN.md. The Settings page edits the same file and checks it before saving. Desktop notifications for state changes are off until the Notifications card in Settings (the `notifications` key) turns them on; they work on macOS only, and clicking one does not open anything (section 9 of DESIGN.md).
 
 A person entry looks like this; `avatar` is `initials`, `github`, or an image path under `~`:
 

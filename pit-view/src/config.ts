@@ -1,6 +1,8 @@
 // src/config.ts
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { isNotificationKind, notificationKinds } from './notify.ts'
+import type { NotificationKind } from './notify.ts'
 
 export type Clock = { now: () => number }
 
@@ -23,7 +25,8 @@ export type TicketSystem = {
   linkTemplate: string
 }
 
-export type Notifications = { enabled: boolean, kinds: string[] }
+// absent means off; kinds lists the transitions to notify about (section 9 of DESIGN.md)
+export type Notifications = { enabled: boolean, kinds: NotificationKind[] }
 
 // the agents Pit View can drive for a review session (section 8 of DESIGN.md, Launching runs)
 export type RunnerName = 'claude' | 'codex'
@@ -226,10 +229,12 @@ const toNotifications = (value: unknown): Notifications => {
   if (!isObject(value)) return fail('config.notifications must be an object')
   onlyKeys(value, ['enabled', 'kinds'], 'notifications')
   const kinds = list(value, 'kinds', 'notifications')
-  return {
-    enabled: bool(value, 'enabled', 'notifications'),
-    kinds: kinds.map((kind) => typeof kind === 'string' ? kind : fail('notifications.kinds must hold strings')),
+  const known: NotificationKind[] = []
+  for (const kind of kinds) {
+    if (!isNotificationKind(kind)) fail(`notifications.kinds must hold only ${notificationKinds.join(', ')}; got ${typeof kind === 'string' ? kind : typeof kind}`)
+    else if (!known.includes(kind)) known.push(kind)
   }
+  return { enabled: bool(value, 'enabled', 'notifications'), kinds: known }
 }
 
 // an absolute path or one under ~; an empty value means unset

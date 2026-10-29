@@ -7,6 +7,8 @@ import type { ClosedView, Counts, DerivedView, Freshness, MineSection, OpenRow, 
 import { fetchClosedPrs, fetchOpenPrs, fetchPr, GhError } from './github.ts'
 import type { Gh, RawOpenPr } from './github.ts'
 import { agentCell } from './launcher.ts'
+import { baselineOf, compareRows, runEvent } from './notify.ts'
+import type { NotifyEvent, RowBaseline, RunSeen } from './notify.ts'
 import { scanReports } from './reports.ts'
 import type { ReportInfo, ReportTarget } from './reports.ts'
 import { closedSearchWindow, iso } from './time.ts'
@@ -118,6 +120,9 @@ export type PollerOptions = {
   pageSize?: number
   // the active trigger's floor: no cycle when the last one started this recently
   activeFloorMs?: number
+  // receives the notification events a transition produces (section 9); the notifier decides
+  // whether the config wants them
+  notify?: (events: NotifyEvent[]) => void
 }
 
 // thrown from the page callback to stop pagination once the cycle has failed
@@ -169,6 +174,21 @@ export const createPoller = (options: PollerOptions): Poller => {
     const latest = cache.latestCycle(config().repo)
     return latest === null ? null : Date.parse(latest.startedAt)
   })()
+
+  const notify = options.notify ?? (() => {})
+  // notifications (section 9): the rows as last compared, and each PR's latest run as last seen
+  let baseline: RowBaseline | null = null
+  let runsSeen: { repo: string, byNumber: Map<number, RunSeen> } | null = null
+
+  const seenRuns = (repo: string): Map<number, RunSeen> => {
+    if (runsSeen === null || runsSeen.repo !== repo) {
+      const byNumber = new Map<number, RunSeen>()
+      for (const [number, run] of cache.latestRuns(repo)) byNumber.set(number, { runId: run.id, status: run.status })
+      runsSeen = { repo, byNumber }
+    }
+    return runsSeen.byNumber
+  }
+  seenRuns(config().repo)
 
   // self-review reports for the viewer's PRs, and the head branch each was looked up for
   let reports = new Map<number, ReportInfo>()
@@ -241,6 +261,16 @@ export const createPoller = (options: PollerOptions): Poller => {
       for (const row of group.rows) rows.set(row.number, row)
     }
     return { cached, view, rows }
+  }
+
+  // the previous state transitions are compared against, taken from the cache before a fetch
+  // changes it; the first load (nothing ever fetched, or no rows) fires nothing
+  const ensureBaseline = (settings: Config): RowBaseline => {
+    if (baseline === null || baseline.repo !== settings.repo) {
+      const snap = snapshot(settings, reports)
+      baseline = baselineOf(settings.repo, [...snap.rows.values()], snap.cached.lastSuccessAt !== null)
+    }
+    return baseline
   }
 
   // the next interval cycle: refreshSeconds after the last start of any trigger, only while a client is active
@@ -330,6 +360,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     let failureKind: CycleErrorKind | null = null
     let pagesDone = 0
     const sent = new Map<number, string>()
+    if (!stopped && config().repo === repo) ensureBaseline(config())
     const live = (): boolean => !stopped && failure === null
     // a cycle for a repo the config has since left still fills the cache but patches nothing
     const shown = (): boolean => config().repo === repo
@@ -385,6 +416,12 @@ export const createPoller = (options: PollerOptions): Poller => {
     const finished = cache.finishCycle(cycle.id, failure, failureKind)
     log(`cycle ${cycle.id} (${cycle.trigger}) ${failure === null ? `finished: ${finished.cycle.prsUpdated} PRs, ${finished.removed.length} removed` : `failed: ${failure}`}`)
     if (shown()) applyFinish(finished, sent)
+    // only a finished cycle compares; after a failed one the next success compares against the
+    // same baseline, so a transition is neither lost nor fired from stale rows
+    if (failure === null && shown()) {
+      const current = config()
+      if (baseline?.repo === current.repo) notify(compareRows(baseline, snapshot(current, reports).rows))
+    }
   }
 
   const settle = (cycle: Cycle): void => {
@@ -439,6 +476,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     const key = prKey(repo, number)
     const shown = (): boolean => !stopped && config().repo === repo
     const before = snapshot(settings, reports)
+    ensureBaseline(settings)
     rowRefreshes.set(key, { state: 'running', startedAt: iso(clock.now()) })
     const started = snapshot(settings, reports).rows.get(number)
     if (started !== undefined) patch({ rows: [started] })
@@ -466,6 +504,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       const rows = [...next.rows.values()].filter((row) => row.number === number || !same(row, before.rows.get(row.number)))
       const removed = [...before.rows.keys()].filter((known) => !next.rows.has(known))
       patch({ rows, removed, tiles: next.view.tiles, counts: next.view.counts })
+      if (failure === null && baseline?.repo === repo) notify(compareRows(baseline, next.rows, number))
     }
     return { number, outcome, joined: false, error: failure?.error ?? null, errorKind: failure?.errorKind ?? null }
   }
@@ -524,6 +563,13 @@ export const createPoller = (options: PollerOptions): Poller => {
     if (stopped || config().repo !== repo) return
     const row = snapshot(config(), reports).rows.get(number)
     if (row !== undefined) patch({ rows: [row] })
+    const seen = seenRuns(repo)
+    const run = row?.agent
+    if (row === undefined || run == null || run.runId === null || run.status === null) return
+    const now = { runId: run.runId, status: run.status }
+    const event = runEvent(repo, row, seen.get(number), now)
+    seen.set(number, now)
+    if (event !== null) notify([event])
   }
 
   const view = async (): Promise<View> => {

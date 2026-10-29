@@ -2,6 +2,7 @@
 // the Settings page's pure logic: config to form and back, the checks made before saving, the
 // server's refusals placed on their fields, people suggestions, and ticket samples
 import type { Config, Person, TicketSystem } from '../src/config.ts'
+import type { NotificationKind } from '../src/notify.ts'
 import type { View } from '../src/poller.ts'
 
 // the page posts here after a save, so an open dashboard rereads density and the agent column
@@ -40,7 +41,23 @@ export type Form = {
   reportsDir: string
   density: Config['density']
   showAgentColumn: boolean
+  notifyEnabled: boolean
+  notifyKinds: NotificationKind[]
 }
+
+// the notification kinds in the order the page lists them; the same names as notificationKinds in
+// src/notify.ts, which a test keeps in step (the page cannot import that module's code)
+export const notifyChoices: readonly { kind: NotificationKind, label: string, hint: string }[] = [
+  { kind: 'changesRequested', label: 'Changes requested on your PR', hint: 'A PR of yours moves to Changes requested.' },
+  { kind: 'readyToMerge', label: 'Your PR is ready to merge', hint: 'A PR of yours reaches the Ready to merge state.' },
+  { kind: 'reviewRequested', label: 'Review requested of you', hint: 'Someone else\'s PR newly asks for your review.' },
+  { kind: 'ciFailing', label: 'CI failing on your PR', hint: 'A PR of yours starts failing checks.' },
+  { kind: 'runFinished', label: 'Review session finished', hint: 'A review session started from the Agent column finishes or fails.' },
+  { kind: 'runNeedsInput', label: 'Review session waiting for input', hint: 'A review session stops with a question for you.' },
+]
+
+// turning notifications on starts with every kind selected
+const allKinds: NotificationKind[] = notifyChoices.map((choice) => choice.kind)
 
 export type MakeId = () => string
 
@@ -56,6 +73,8 @@ export const toForm = (config: Config, makeId: MakeId): Form => ({
   reportsDir: config.reportsDir,
   density: config.density,
   showAgentColumn: config.showAgentColumn,
+  notifyEnabled: config.notifications?.enabled ?? false,
+  notifyKinds: config.notifications?.kinds ?? allKinds,
 })
 
 const personForm = (person: Person, id: string): PersonForm => {
@@ -90,7 +109,7 @@ export const parseIdleMinutes = (text: string): number => {
 }
 
 // the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit
-// (allowedHosts, cloneDir, agent, notifications) are carried over from the config it loaded
+// (allowedHosts, cloneDir, agent) are carried over from the config it loaded
 export const toConfig = (form: Form, base: Config): Config => {
   const config: Config = {
     repo: form.repo.trim(),
@@ -120,7 +139,11 @@ export const toConfig = (form: Form, base: Config): Config => {
     ...(base.cloneDir === undefined ? {} : { cloneDir: base.cloneDir }),
     agent: base.agent,
   }
-  if (base.notifications !== undefined) config.notifications = base.notifications
+  // absent means off, so a config that never had the key and a form still at that default
+  // leave it out
+  const kinds = allKinds.filter((kind) => form.notifyKinds.includes(kind))
+  const untouched = !form.notifyEnabled && kinds.length === allKinds.length
+  if (base.notifications !== undefined || !untouched) config.notifications = { enabled: form.notifyEnabled, kinds }
   return config
 }
 
@@ -212,7 +235,7 @@ export const validateForm = (form: Form): FieldError[] => {
   return errors
 }
 
-const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'showAgentColumn'])
+const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'showAgentColumn', 'notifyEnabled'])
 
 const capitalize = (text: string): string => text === '' ? text : `${text[0]!.toUpperCase()}${text.slice(1)}`
 

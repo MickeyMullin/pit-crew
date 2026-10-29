@@ -242,3 +242,17 @@ test('readConfig keeps an empty viewer, as the file stores it', async () => {
     await cleanup()
   }
 })
+
+test('notifications validate their kinds, drop repeats and are optional', () => {
+  const base = defaultConfig()
+  assert.equal('notifications' in validateConfig(base), false)
+  const all = ['changesRequested', 'readyToMerge', 'reviewRequested', 'ciFailing', 'runFinished', 'runNeedsInput']
+  assert.deepEqual(validateConfig({ ...base, notifications: { enabled: true, kinds: [...all, 'ciFailing'] } }).notifications, { enabled: true, kinds: all })
+  assert.deepEqual(validateConfig({ ...base, notifications: { enabled: true, kinds: [] } }).notifications, { enabled: true, kinds: [] })
+  assert.throws(() => validateConfig({ ...base, notifications: { enabled: true, kinds: ['mineReady'] } }), /notifications\.kinds must hold only changesRequested.*got mineReady/)
+  assert.throws(() => validateConfig({ ...base, notifications: { enabled: true, kinds: [3] } }), /got number/)
+  assert.throws(() => validateConfig({ ...base, notifications: { enabled: 'yes', kinds: [] } }), /notifications\.enabled must be true or false/)
+  assert.throws(() => validateConfig({ ...base, notifications: { kinds: [] } }), /notifications\.enabled/)
+  assert.throws(() => validateConfig({ ...base, notifications: { enabled: true, kinds: [], sound: true } }), /notifications\.sound is not a known setting/)
+  assert.throws(() => validateConfig({ ...base, notifications: true }), /config\.notifications must be an object/)
+})

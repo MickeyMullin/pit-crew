@@ -154,6 +154,25 @@
       </div>
     </section>
 
+    <section id="notifications" class="card settings-card" aria-labelledby="notifications-heading">
+      <h2 id="notifications-heading" class="card-title">Notifications</h2>
+      <div class="field-grid">
+        <div class="field">
+          <span class="field-label">Desktop notifications</span>
+          <label class="check">
+            <input id="f-notifyEnabled" type="checkbox" aria-describedby="f-notifyEnabled-hint">
+            Notify me when a PR changes state
+          </label>
+          <p id="f-notifyEnabled-hint" class="hint">Off by default. Delivered on macOS through the built-in notification command; other systems show nothing yet. A notification names the PR but clicking it does not open Pit View or the PR.</p>
+          <p id="f-notifyEnabled-error" class="field-error" hidden></p>
+        </div>
+        <fieldset id="f-notifyKinds" class="field kinds">
+          <legend class="field-label">Notify about</legend>
+          <div id="notify-kinds" class="kinds-list"></div>
+        </fieldset>
+      </div>
+    </section>
+
     <div id="save-bar" class="save-bar">
       <p id="save-status" class="save-status" role="status"></p>
       <div class="spacer"></div>

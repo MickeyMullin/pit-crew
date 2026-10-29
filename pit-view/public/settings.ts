@@ -10,7 +10,7 @@ import { formatClock } from './format.ts'
 import { loadInstance, showInstance } from './instance.ts'
 import {
   avatarChoices, changeKind, configChannel, configPathText, densityChoices, errorId, fieldId, isDirty, kindChoices, needsRefresh,
-  newPerson, newTicket, openSuggestions, previewPerson, refreshChoices, sampleTextsFrom, serverError, sourceChoices, ticketSample,
+  newPerson, newTicket, notifyChoices, openSuggestions, previewPerson, refreshChoices, sampleTextsFrom, serverError, sourceChoices, ticketSample,
   toConfig, todayChoices, toForm, validateForm,
 } from './settings-form.ts'
 import type { AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
@@ -311,6 +311,19 @@ const fillStatic = (): void => {
   options(byId<HTMLSelectElement>(fieldId('todayStartsAt')), todayChoices(Intl.DateTimeFormat().resolvedOptions().timeZone), form.todayStartsAt)
   options(byId<HTMLSelectElement>(fieldId('density')), densityChoices, form.density)
   byId<HTMLInputElement>(fieldId('showAgentColumn')).checked = form.showAgentColumn
+  byId<HTMLInputElement>(fieldId('notifyEnabled')).checked = form.notifyEnabled
+  byId('notify-kinds').replaceChildren(...notifyChoices.map((choice) => {
+    const id = fieldId(`notifyKind.${choice.kind}`)
+    const box = h('input', { id, type: 'checkbox', 'aria-describedby': `${id}-hint` })
+    box.checked = form.notifyKinds.includes(choice.kind)
+    box.addEventListener('change', () => {
+      if (page === null) return
+      const without = page.form.notifyKinds.filter((kind) => kind !== choice.kind)
+      page.form.notifyKinds = box.checked ? [...without, choice.kind] : without
+      changed()
+    })
+    return h('div', { class: 'kind' }, h('label', { class: 'check' }, box, choice.label), h('p', { id: `${id}-hint`, class: 'hint' }, choice.hint))
+  }))
 }
 
 const bindStatic = (): void => {
@@ -340,6 +353,12 @@ const bindStatic = (): void => {
   density.addEventListener('change', () => {
     if (page === null) return
     page.form.density = density.value === 'compact' ? 'compact' : 'comfortable'
+    changed()
+  })
+  const notify = byId<HTMLInputElement>(fieldId('notifyEnabled'))
+  notify.addEventListener('change', () => {
+    if (page === null) return
+    page.form.notifyEnabled = notify.checked
     changed()
   })
   const agent = byId<HTMLInputElement>(fieldId('showAgentColumn'))
