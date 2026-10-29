@@ -344,7 +344,7 @@ test('a sweep with an unreadable spawn fails as spawnFailed and the repository m
   }
 })
 
-// the view, the start text and the memory
+// the view, the start text, and the memory
 
 test('the confirmation names the repository, says the sweep is serial and that the reviewers may post as the viewer', () => {
   const start = sweepStartOf(baseConfig(), false)

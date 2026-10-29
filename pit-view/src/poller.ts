@@ -564,7 +564,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       counts: next.view.counts,
       sync: syncOf(next.cached, after),
     }
-    // the repository, the viewer and cloneDir all show in the sweep's start text
+    // the repository, the viewer, and cloneDir all show in the sweep's start text
     const sweepsBefore = sweepsView(before, sweeps)
     const sweepsAfter = sweepsView(after, sweeps)
     if (!same(sweepsBefore, sweepsAfter)) body.sweeps = sweepsAfter

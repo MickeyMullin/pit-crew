@@ -128,7 +128,7 @@ test('a sweep is started and stopped with the token, a runner and the repository
 
 // the drawer
 
-test('the drawer shows the whole result: counts, a card per PR, the merge order and the summary path', () => {
+test('the drawer shows the whole result: counts, a card per PR, the merge order, and the summary path', () => {
   const sweep = settled(sweepResult())
   const model = sweepResultModel(sweep)
   assert.deepEqual([model.text, model.tone, model.empty], ['Done · 2 swept', 'green', false])
@@ -156,7 +156,7 @@ test('a report that is not a PR report is shown as a path and never offered to t
   assert.equal(sweepRowModel({ ...settled(sweepResult()).result!.rows[0]!, report: '~/agents/output/../../x/PR-1.md' }).report?.name, 'PR-1.md')
 })
 
-test('a sweep with nothing to sweep renders as done with zero counts, no rows and no summary, and says so', () => {
+test('a sweep with nothing to sweep renders as done with zero counts, no rows, and no summary, and says so', () => {
   const model = sweepResultModel(settled(emptySweepResult()))
   assert.deepEqual([model.text, model.tone, model.empty, model.note], ['Done · nothing to sweep', 'gray', true, null])
   assert.deepEqual(model.counts?.map((count) => count.value), [0, 0, 0, 0])
@@ -274,7 +274,7 @@ test('the bot group header, the broom and the PR drawer are wired to the sweep m
 
 // the confirmation re-renders whenever anything it displays changes
 
-test('the start confirmation\'s signature changes with the repository, the viewer, the effect text, the command and the availability, and with nothing else', () => {
+test('the start confirmation\'s signature changes with the repository, the viewer, the effect text, the command, and the availability, and with nothing else', () => {
   const base = config()
   const sig = (cfg: Config, runner: 'claude' | 'codex' = 'claude', busy = false) => sweepConfirmSignature(sweepStartOf(cfg, busy), runner)
   const reference = sig(base)
@@ -312,9 +312,19 @@ test('a confirmation built before a viewer change keeps naming the old viewer, a
   assert.equal(JSON.parse(sweepStartRequest('claude', switched.repo, switched.viewer, 't').init.body ?? '').viewer, 'someone-else')
 })
 
+test('every report path in a sweep row has a Copy control named for its PR, the same copyButton the summary path uses', async () => {
+  const source = await readFile(join(import.meta.dirname, '..', 'public', 'sweepdrawer.ts'), 'utf8')
+  assert.match(source, /copyButton\(`Copy the report path for #\$\{row\.number\}`, row\.report\.path, `Report path for #\$\{row\.number\} copied`, `copy-report-\$\{row\.number\}`\)/)
+  // the path is shown in both forms (a PR report with its button, any other as text), and the Copy follows it in both
+  const report = source.slice(source.indexOf("class: 'sweep-row-report'"), source.indexOf('const resultCard'))
+  assert.equal(report.match(/copyButton\(/g)?.length, 1)
+  assert.match(report, /h\('code', \{ class: 'mono' \}, row\.report\.path\)/)
+  assert.match(report, /sweep-report-path/)
+})
+
 // a settled sweep shows the whole result it carries
 
-test('a failed sweep with counts shows them with its rows, merge order and the error, and a failed one with null counts shows none and no zeros', () => {
+test('a failed sweep with counts shows them with its rows, merge order, and the error, and a failed one with null counts shows none and no zeros', () => {
   const withCounts = settled(sweepResult({ status: 'failed', error: 'the summary could not be written', summary: null }), { status: 'failed', note: 'the summary could not be written' })
   const model = sweepResultModel(withCounts)
   assert.deepEqual(model.counts?.map((count) => [count.label, count.value]), [['Swept', 2], ['Fresh', 1], ['Reused', 1], ['Failed', 0]])

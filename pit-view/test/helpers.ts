@@ -385,5 +385,5 @@ export const sweepResult = (patch: Record<string, unknown> = {}): Record<string,
   ...patch,
 })
 
-// a sweep with nothing to sweep: done, every count zero, no rows and no summary
+// a sweep with nothing to sweep: done, every count zero, no rows, and no summary
 export const emptySweepResult = (): Record<string, unknown> => sweepResult({ counts: { swept: 0, fresh: 0, reused: 0, failed: 0 }, rows: [], mergeOrder: [], summary: null })

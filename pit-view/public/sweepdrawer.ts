@@ -1,5 +1,5 @@
 // public/sweepdrawer.ts
-// the Dependabot sweep drawer: a non-modal panel on the right for the repository's sweeps, not for one PR. It starts a sweep behind an inline confirmation, shows the running, waiting and finished card of the sweep it is on (the whole sweep-result@1: counts, one card per PR, the merge order and the summary's path), and lists the earlier sweeps. It reads the sweeps from the page's feed on every draw, so a patch updates it in place. sweepview.ts says what every part reads; this file makes the elements, keeps the confirmation's state, and moves focus
+// the Dependabot sweep drawer: a non-modal panel on the right for the repository's sweeps, not for one PR. It starts a sweep behind an inline confirmation, shows the running, waiting, and finished card of the sweep it is on (the whole sweep-result@1: counts, one card per PR, the merge order, and the summary's path), and lists the earlier sweeps. It reads the sweeps from the page's feed on every draw, so a patch updates it in place. sweepview.ts says what every part reads; this file makes the elements, keeps the confirmation's state, and moves focus
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
@@ -163,7 +163,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
       confirmActions(stop.confirm, 'danger', () => void doStop()))
   }
 
-  // the parts that change without a rebuild: the command for the chosen runner, the error line and the buttons while a request is on its way
+  // the parts that change without a rebuild: the command for the chosen runner, the error line, and the buttons while a request is on its way
   const paintConfirm = (): void => {
     const view = sweeps()
     const command = root.querySelector<HTMLElement>('[data-confirm="command"]')
@@ -282,7 +282,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
 
   const startPart = (view: SweepsView, latest: SweepView | null): Part => ({
     key: 'start',
-    // a start confirmation is rebuilt whenever anything it displays changes, so it never shows a repository, viewer or command that is not the one a start would use
+    // a start confirmation is rebuilt whenever anything it displays changes, so it never shows a repository, viewer, or command that is not the one a start would use
     sig: JSON.stringify([view.start.unavailable, confirm === null ? null : confirm.type, confirm?.type === 'start' ? sweepConfirmSignature(view.start, confirm.runner) : null, latest?.status === 'running']),
     build: () => {
       if (confirm?.type === 'start') return section('start', 'Start', startConfirmBlock(view, confirm))
@@ -407,7 +407,8 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
         row.report.name === null
           ? h('code', { class: 'mono' }, row.report.path)
           : reportButton(row.report.name, `Open the report for #${row.number}`),
-        row.report.name === null ? null : h('code', { class: 'mono sweep-report-path' }, row.report.path)))
+        row.report.name === null ? null : h('code', { class: 'mono sweep-report-path' }, row.report.path),
+        copyButton(`Copy the report path for #${row.number}`, row.report.path, `Report path for #${row.number} copied`, `copy-report-${row.number}`)))
   }
 
   const resultCard = (sweep: SweepView): Part => ({

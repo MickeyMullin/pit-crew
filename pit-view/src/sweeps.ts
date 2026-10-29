@@ -142,7 +142,7 @@ export const sweepSummary = (result: SweepResult): SweepSummary => ({
 const sweepResultOf = (sweep: Pick<Sweep, 'result'>): SweepResult | null =>
   sweep.result?.schema === 'pit-crew/sweep-result@1' ? sweep.result : null
 
-// the sweep as the page and GET /api/sweeps see it: the record, its steps, the parsed result and the words for how it ended
+// the sweep as the page and GET /api/sweeps see it: the record, its steps, the parsed result, and the words for how it ended
 export type SweepView = Omit<Sweep, 'result' | 'steps'> & {
   steps: StepSlot[]
   // null while it runs

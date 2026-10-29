@@ -1,5 +1,5 @@
 // public/sweepview.ts
-// the Dependabot sweep's words and shapes, as pure functions of the sweeps the view carries: the bot group header's control, the confirmation, the group-level sweep drawer, the broom link on a PR's row and the link in that PR's own drawer. Sweeps are their own concept (section 8 of DESIGN.md, Sweeps), so nothing here reads a row's Agent cell; sweepdrawer.ts turns the models into elements. Nothing here reads the DOM or the clock: every time is passed in
+// the Dependabot sweep's words and shapes, as pure functions of the sweeps the view carries: the bot group header's control, the confirmation, the group-level sweep drawer, the broom link on a PR's row, and the link in that PR's own drawer. Sweeps are their own concept (section 8 of DESIGN.md, Sweeps), so nothing here reads a row's Agent cell; sweepdrawer.ts turns the models into elements. Nothing here reads the DOM or the clock: every time is passed in
 import type { SweepRow, SweepStart, SweepView, SweepsView } from '../src/sweeps.ts'
 import { formatDuration, runnerLabels, sentence, tokenHeader } from './agent.ts'
 import type { DoneTone, RunnerName, RunRequest } from './agent.ts'
@@ -129,7 +129,7 @@ export const sweepConfirmModel = (start: SweepStart, runner: RunnerName): SweepC
   busy: 'Starting sweep…',
 })
 
-// everything the confirmation displays, as one string: the confirmation is rebuilt whenever it changes, so a change of repository, viewer, effect text, command or availability never leaves the old text on screen
+// everything the confirmation displays, as one string: the confirmation is rebuilt whenever it changes, so a change of repository, viewer, effect text, command, or availability never leaves the old text on screen
 export const sweepConfirmSignature = (start: SweepStart, runner: RunnerName): string => {
   const model = sweepConfirmModel(start, runner)
   return JSON.stringify([model.heading, model.repo, model.viewer, model.command, model.serial, model.effect, model.runners.map((choice) => choice.name), start.unavailable])
@@ -217,7 +217,7 @@ export type SweepResultModel = {
   runnerLabel: string
   cost: string | null
   note: string | null
-  // a sweep with nothing to sweep: done, every count zero, no rows and no summary
+  // a sweep with nothing to sweep: done, every count zero, no rows, and no summary
   empty: boolean
   // null when the result has none (no result, or a failed or waiting sweep that stopped before it had them): no counts are shown, never zeros
   counts: CountModel[] | null
@@ -262,7 +262,7 @@ export const sweepWaitingModel = (sweep: SweepView): { question: string, resume:
 
 export type SweepCard = 'running' | 'waiting' | 'result'
 
-// a settled sweep shows the whole result it carries, whatever its status: counts, rows, merge order and summary. A waiting sweep shows its question first and the result it has so far below it
+// a settled sweep shows the whole result it carries, whatever its status: counts, rows, merge order, and summary. A waiting sweep shows its question first and the result it has so far below it
 export const sweepHasResult = (sweep: Pick<SweepView, 'result'>): boolean => {
   const result = sweep.result
   return result !== null && (result.counts !== null || result.rows.length > 0 || result.mergeOrder.length > 0 || result.summary !== null)
