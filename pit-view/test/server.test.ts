@@ -1399,7 +1399,7 @@ test('the report endpoints are reads with no token, but the Host check applies; 
   }
 })
 
-// Dependabot sweeps: their own endpoints, view and live feed (section 8, Sweeps)
+// Dependabot sweeps: their own endpoints, view, and live feed (section 8, Sweeps)
 
 const sweepsUrl = (h: Harness): string => `${h.base}/api/sweeps`
 
