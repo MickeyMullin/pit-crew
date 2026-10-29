@@ -72,8 +72,9 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
   let scrollPending = false
   let confirm: Confirm | null = null
   let confirmFrom: string | null = null
-  // the repository the start confirmation on screen names, which the start request carries
+  // the repository and viewer the start confirmation on screen names, which the start request carries
   let confirmedRepo: string | null = null
+  let confirmedViewer: string | null = null
   let busy = false
   let error = ''
   // a stop was accepted and the sweep has not settled yet
@@ -125,6 +126,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
   const startConfirmBlock = (view: SweepsView, asked: Extract<Confirm, { type: 'start' }>): HTMLElement => {
     const model = sweepConfirmModel(view.start, asked.runner)
     confirmedRepo = model.repo
+    confirmedViewer = model.viewer
     const runner: Node | string = model.runners.length === 1
       ? model.runnerLabel
       : h('span', { class: 'confirm-runners', role: 'radiogroup', 'aria-labelledby': 'sweep-runner-term' },
@@ -214,11 +216,11 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
   const doStart = async (): Promise<void> => {
     if (busy || confirm?.type !== 'start') return
     const asked = confirm
-    if (confirmedRepo === null) return
+    if (confirmedRepo === null || confirmedViewer === null) return
     busy = true
     error = ''
     paintConfirm()
-    const answer = await sendRun(sweepStartRequest(asked.runner, confirmedRepo, options.token))
+    const answer = await sendRun(sweepStartRequest(asked.runner, confirmedRepo, confirmedViewer, options.token))
     busy = false
     if (answer.ok) {
       confirm = null

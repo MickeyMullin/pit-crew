@@ -479,6 +479,8 @@ export type StartOption = {
   // the runners this start works with; tandem and fix are Claude only
   runners: RunnerName[]
   posts: StartPosts
+  // the viewer the posts text names, which the start request carries back so the server refuses it when that is no longer the viewer in effect
+  viewer: string
   // why it cannot start right now, from what the server knows without asking GitHub; null otherwise
   unavailable: string | null
 }
@@ -522,7 +524,7 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
     : config.cloneDir === undefined ? `set cloneDir in the config to your local clone of ${config.repo} before starting a run` : null
   const options: StartOption[] = [{
     kind: 'default', label: plan.label, button: buttons[plan.kind], command: plan.command, args: plan.args,
-    runners: ['claude', 'codex'], posts: postsFor(plan.command, plan.args, viewer), unavailable,
+    runners: ['claude', 'codex'], posts: postsFor(plan.command, plan.args, viewer), viewer, unavailable,
   }]
   if (notOffered('tandem', pr, config, stack) === null) {
     // --tandem goes before --no-post; the review-pr prompt reads either flag wherever it stands
@@ -530,13 +532,13 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
     const label = plan.kind === 'selfReview' ? 'Tandem self-review' : plan.kind === 'reReview' ? 'Tandem re-review' : 'Tandem review'
     options.push({
       kind: 'tandem', label, button: `${buttons[plan.kind].replace(/ PR$/, '')} in tandem`, command: 'review-pr', args,
-      runners: ['claude'], posts: postsFor('review-pr', args, viewer), unavailable,
+      runners: ['claude'], posts: postsFor('review-pr', args, viewer), viewer, unavailable,
     })
   }
   if (notOffered('stack', pr, config, stack) === null) {
     options.push({
       kind: 'stack', label: 'Review stack', button: 'Review stack', command: 'review-stack', args: [String(pr.number)],
-      runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), unavailable,
+      runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), viewer, unavailable,
     })
   }
   // never --no-post: the push is what it is for
@@ -547,6 +549,7 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
         kind: 'push',
         text: `Pushes new commits to ${pr.headRefName} on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.`,
       },
+      viewer,
       unavailable,
     })
   }

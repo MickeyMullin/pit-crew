@@ -1184,6 +1184,7 @@ test('the view\'s Agent cell lists the starts a row offers, and the run list car
     assert.deepEqual(rowIn(view, 111)?.agent?.starts[0], {
       kind: 'default', label: 'Review', button: 'Review PR', command: 'review-pr', args: ['111'], runners: ['claude', 'codex'],
       posts: { kind: 'review', text: 'Posts its report to the PR as @vera-quill: an approval, a request for changes, or a comment, per the findings.' },
+      viewer: 'vera-quill',
       unavailable: null,
     })
     assert.equal(rowIn(view, 113)?.agent?.tandem, false)
@@ -1228,6 +1229,7 @@ test('a fix session starts only on the viewer\'s own PR: fix-pr with Claude, nev
     assert.deepEqual(rowIn(view, 101)?.agent?.starts.find((start) => start.kind === 'fix'), {
       kind: 'fix', label: 'Fix session', button: 'Fix requested changes', command: 'fix-pr', args: ['101'], runners: ['claude'],
       posts: { kind: 'push', text: 'Pushes new commits to fix/webhook-retry on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.' },
+      viewer: 'vera-quill',
       unavailable: null,
     })
     assert.deepEqual([rowIn(view, 101)?.agent?.action.kind, rowIn(view, 101)?.agent?.action.args], ['selfReview', ['101', '--no-post']])
@@ -1460,6 +1462,62 @@ test('a sweep start naming a repository that is no longer the one in effect is r
     assert.equal(moved.status, 409)
     assert.equal(h.launch.children.length, 0)
     assert.deepEqual((await getJson<unknown[]>(url)).body, [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// the viewer and the gh account change together while a confirmation is open: the server's configuration has moved on, and the page still shows the old account until its feed patch arrives
+const switchedAccount = async (): Promise<{ h: Harness, switchTo: (login: string) => Promise<void> }> => {
+  let login: string = scenario.viewer
+  const fixtures = fixtureRunner()
+  const runner = fakeRunner((args) => args[0] === 'api' && args[1] === 'user' ? ok(`${login}\n`) : fixtures.runner(args))
+  const h = await setup({ runner, config: { cloneDir: '~/dev/orbit' } })
+  const switchTo = async (next: string): Promise<void> => {
+    login = next
+    const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
+    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, viewer: next })).status, 200)
+  }
+  return { h, switchTo }
+}
+
+test('a sweep start naming a viewer that is no longer the one in effect is refused with 409 and starts nothing', async () => {
+  const { h, switchTo } = await switchedAccount()
+  try {
+    const url = sweepsUrl(h)
+    assert.equal((await send(url, 'POST', { viewer: 7 }, token(h))).status, 400)
+    await switchTo('new-account')
+    const stale = await send(url, 'POST', { runner: 'claude', repo: scenario.repo, viewer: scenario.viewer }, token(h))
+    assert.equal(stale.status, 409)
+    assert.match(String(stale.body.error), /new-account/)
+    assert.match(String(stale.body.error), new RegExp(scenario.viewer))
+    assert.equal(h.launch.children.length, 0)
+    assert.deepEqual((await getJson<unknown[]>(url)).body, [])
+    // the confirmation named the viewer now in effect, in any letter case, so it starts
+    const current = await send(url, 'POST', { runner: 'claude', repo: scenario.repo, viewer: 'NEW-ACCOUNT' }, token(h))
+    assert.equal(current.status, 200)
+    assert.equal(h.launch.children.length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a run start naming a viewer that is no longer the one in effect is refused with 409 and starts nothing', async () => {
+  const { h, switchTo } = await switchedAccount()
+  try {
+    await filled(h)
+    const url = `${h.base}/api/prs/106/runs`
+    assert.equal((await send(url, 'POST', { viewer: 7 }, token(h))).status, 400)
+    await switchTo('new-account')
+    const stale = await send(url, 'POST', { kind: 'default', runner: 'claude', viewer: scenario.viewer }, token(h))
+    assert.equal(stale.status, 409)
+    assert.match(String(stale.body.error), /new-account/)
+    assert.equal(h.launch.children.length, 0)
+    assert.deepEqual((await getJson<unknown[]>(url)).body, [])
+    // the confirmation named the viewer now in effect, in any letter case, so it starts
+    const current = await send(url, 'POST', { kind: 'default', runner: 'claude', viewer: 'NEW-ACCOUNT' }, token(h))
+    assert.equal(current.status, 200)
+    assert.equal(h.launch.children.length, 1)
   } finally {
     await h.cleanup()
   }

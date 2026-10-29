@@ -11,13 +11,13 @@ export type { SweepRow, SweepStart, SweepView, SweepsView }
 
 export type Tone = DoneTone | 'blue'
 
-// the requests carry the per-start token, like a run's. A start also names the repository the confirmation showed, so the server refuses it when that is no longer the repository in effect
-export const sweepStartRequest = (runner: RunnerName, repo: string, token: string): RunRequest => ({
+// the requests carry the per-start token, like a run's. A start also names the repository and the viewer the confirmation showed, so the server refuses it when either is no longer the one in effect
+export const sweepStartRequest = (runner: RunnerName, repo: string, viewer: string, token: string): RunRequest => ({
   url: '/api/sweeps',
   init: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', [tokenHeader]: token },
-    body: JSON.stringify({ runner, repo }),
+    body: JSON.stringify({ runner, repo, viewer }),
   },
 })
 
@@ -100,6 +100,7 @@ export const sweepRunningText = runningText
 export type SweepConfirmModel = {
   heading: string
   repo: string
+  viewer: string
   command: string
   serial: string
   effect: string
@@ -117,6 +118,7 @@ export const defaultSweepRunner = (start: Pick<SweepStart, 'runners'>, configure
 export const sweepConfirmModel = (start: SweepStart, runner: RunnerName): SweepConfirmModel => ({
   heading: start.heading,
   repo: start.repo,
+  viewer: start.viewer,
   command: `${runner === 'codex' ? '$' : '/'}${start.command}`,
   serial: start.serial,
   effect: start.posts,
@@ -130,7 +132,7 @@ export const sweepConfirmModel = (start: SweepStart, runner: RunnerName): SweepC
 // everything the confirmation displays, as one string: the confirmation is rebuilt whenever it changes, so a change of repository, viewer, effect text, command or availability never leaves the old text on screen
 export const sweepConfirmSignature = (start: SweepStart, runner: RunnerName): string => {
   const model = sweepConfirmModel(start, runner)
-  return JSON.stringify([model.heading, model.repo, model.command, model.serial, model.effect, model.runners.map((choice) => choice.name), start.unavailable])
+  return JSON.stringify([model.heading, model.repo, model.viewer, model.command, model.serial, model.effect, model.runners.map((choice) => choice.name), start.unavailable])
 }
 
 export const sweepStopModel = (sweep: Pick<SweepView, 'repo' | 'runner'>) => ({

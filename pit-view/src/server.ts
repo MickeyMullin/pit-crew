@@ -488,18 +488,24 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     throw error
   }
 
+  // the viewer the confirmation named must still be the one in effect, compared as the identity check does: a run posts or pushes on GitHub as the viewer, and the page learns of a change of viewer only when its feed patch arrives
+  const staleViewer = (confirmed: string | undefined, viewer: string): void => {
+    if (confirmed !== undefined && confirmed.toLowerCase() !== viewer.toLowerCase()) throw new HttpError(409, `the viewer is now ${viewer}, not ${confirmed}; the confirmation was for ${confirmed}, so nothing was started`)
+  }
+
   // a start from the drawer (section 8 of DESIGN.md): the row's default run, the same review in
   // tandem, a review of its stack, or a fix session on the viewer's own PR, with the configured
   // runner or the one asked for
   const startRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
     requireToken(req)
     const number = prNumber(raw)
-    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex" } or no body'
+    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex", "viewer": "login" } or no body'
     const length = Number(req.headers['content-length'] ?? 0)
     const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
-    const { runner: asked, kind: askedKind, ...rest } = body as Record<string, unknown>
+    const { runner: asked, kind: askedKind, viewer: confirmed, ...rest } = body as Record<string, unknown>
     if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
+    if (confirmed !== undefined && typeof confirmed !== 'string') throw new HttpError(400, 'viewer must be a string')
     if (asked !== undefined && !runnerNames.includes(asked as RunnerName)) throw new HttpError(400, 'runner must be claude or codex')
     if (askedKind !== undefined && !startKinds.includes(askedKind as StartKind)) throw new HttpError(400, 'kind must be default, tandem, stack or fix')
     const kind = (askedKind ?? 'default') as StartKind
@@ -507,6 +513,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (kind === 'tandem' && asked === 'codex') throw new HttpError(400, 'Review in tandem runs with Claude only; send runner claude or leave it out')
     if (kind === 'fix' && asked === 'codex') throw new HttpError(400, 'Fix session runs with Claude only; send runner claude or leave it out')
     const config = effective()
+    staleViewer(confirmed, config.viewer)
     const cached = cache.readView(config.repo)
     const row = cached.open.find((entry) => entry.number === number)
     if (row === undefined) throw new HttpError(422, `#${number} is not an open PR in ${config.repo} that Pit View has fetched`)
@@ -555,20 +562,22 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     }
   }
 
-  // the Dependabot sweep (section 8 of DESIGN.md, Sweeps): the repository's sweep, started with the same token, Host, Origin and content-type rules as a run; the body may name the runner and nothing else
+  // the Dependabot sweep (section 8 of DESIGN.md, Sweeps): the repository's sweep, started with the same token, Host, Origin and content-type rules as a run; the body may name the runner, and the repository and viewer the confirmation showed, and nothing else
   const startSweep = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     requireToken(req)
-    const usage = 'send { "runner": "claude" | "codex", "repo": "owner/name" } or no body'
+    const usage = 'send { "runner": "claude" | "codex", "repo": "owner/name", "viewer": "login" } or no body'
     const length = Number(req.headers['content-length'] ?? 0)
     const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
-    const { runner: asked, repo: confirmed, ...rest } = body as Record<string, unknown>
+    const { runner: asked, repo: confirmed, viewer: confirmedViewer, ...rest } = body as Record<string, unknown>
     if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
     if (asked !== undefined && !runnerNames.includes(asked as RunnerName)) throw new HttpError(400, 'runner must be claude or codex')
     if (confirmed !== undefined && typeof confirmed !== 'string') throw new HttpError(400, 'repo must be a string')
-    const { repo } = effective()
+    if (confirmedViewer !== undefined && typeof confirmedViewer !== 'string') throw new HttpError(400, 'viewer must be a string')
+    const { repo, viewer } = effective()
     // the repository the viewer confirmed must still be the one in effect: a sweep posts on GitHub, so it never starts for another
     if (confirmed !== undefined && confirmed !== repo) throw new HttpError(409, `the repository is now ${repo}, not ${confirmed}; the confirmation was for ${confirmed}, so nothing was started`)
+    staleViewer(confirmedViewer, viewer)
     try {
       json(res, 200, sweepView(await sweepLauncher.start(sweepRequest(repo, asked as RunnerName | undefined))))
     } catch (error) {

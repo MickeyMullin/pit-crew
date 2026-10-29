@@ -3,12 +3,14 @@
 // buttons and their confirmation, the step bar, the lists, what is refetched and when, where focus
 // goes and what Escape closes
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
 import type { AgentCell, RunView, StartOption, StepSlot } from '../public/agent.ts'
 import {
-  cardKind, cellFromRun, confirmHolds, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, quoteAttr, refetchKeys,
+  cardKind, cellFromRun, confirmHolds, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
   reportName, reportRows, resumeReadyText, returnSelector, runRows, runText, startConfirmModel, startsModel, stepModels, stepsName, stopModel, summaryOf,
 } from '../public/drawerview.ts'
 import type { DrawerInput, Loadable } from '../public/drawerview.ts'
@@ -23,16 +25,19 @@ const options = (patch: Partial<Record<string, Partial<StartOption>>> = {}): Sta
   {
     kind: 'default', label: 'Re-review', button: 'Re-review PR', command: 'review-pr', args: ['101'], runners: ['claude', 'codex'],
     posts: { kind: 'review', text: 'Posts its report to the PR as @viewer: an approval, a request for changes, or a comment, per the findings.' },
+    viewer: 'viewer',
     unavailable: null, ...patch.default,
   },
   {
     kind: 'tandem', label: 'Tandem re-review', button: 'Re-review in tandem', command: 'review-pr', args: ['101', '--tandem'], runners: ['claude'],
     posts: { kind: 'review', text: 'Posts its report to the PR as @viewer: an approval, a request for changes, or a comment, per the findings.' },
+    viewer: 'viewer',
     unavailable: null, ...patch.tandem,
   },
   {
     kind: 'stack', label: 'Review stack', button: 'Review stack', command: 'review-stack', args: ['101'], runners: ['claude', 'codex'],
     posts: { kind: 'offer', text: 'Posts nothing; writes the report only. It stops to offer posting it on the top PR, and you answer in the session.' },
+    viewer: 'viewer',
     unavailable: null, ...patch.stack,
   },
 ]
@@ -474,6 +479,7 @@ test('a focus key goes into a quoted attribute selector with its quote and backs
 const fixOption: StartOption = {
   kind: 'fix', label: 'Fix session', button: 'Fix requested changes', command: 'fix-pr', args: ['101'], runners: ['claude'],
   posts: { kind: 'push', text: 'Pushes new commits to fix/retry on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.' },
+  viewer: 'viewer',
   unavailable: null,
 }
 
@@ -481,7 +487,7 @@ const own = (patch: Partial<AgentCell> = {}): AgentCell => idle({
   label: 'Self-review',
   action: { kind: 'selfReview', label: 'Self-review', command: 'review-pr', args: ['101', '--no-post'], runner: 'codex' },
   starts: [
-    { kind: 'default', label: 'Self-review', button: 'Self-review', command: 'review-pr', args: ['101', '--no-post'], runners: ['claude', 'codex'], posts: { kind: 'nothing', text: 'Posts nothing.' }, unavailable: null },
+    { kind: 'default', label: 'Self-review', button: 'Self-review', command: 'review-pr', args: ['101', '--no-post'], runners: ['claude', 'codex'], posts: { kind: 'nothing', text: 'Posts nothing.' }, viewer: 'viewer', unavailable: null },
     fixOption,
   ],
   ...patch,
@@ -683,4 +689,15 @@ test('a Fix session\'s report on disk carries a Fix tag and no verdict chip or T
   assert.deepEqual(rows[1]?.verdict, { text: 'Clean', tone: 'green' })
   // a fix listing never shows a verdict, whatever it carries
   assert.equal(reportRows([{ name: 'FIX-101.md', kind: 'fix', modifiedAt: ago(m), sha: null, verdict: 'clean', tandem: true }])[0]?.verdict, null)
+})
+
+test('a run start names the viewer of the option the confirmation shows, and the confirmation is rebuilt when that option changes', async () => {
+  const shown = idle({ starts: options({ default: { viewer: 'vera-quill' } }) })
+  assert.equal(optionOf(shown, 'default')?.viewer, 'vera-quill')
+  const confirmation = (cell: AgentCell) => ({ ...startConfirmModel(row(cell), cell, 'default', 'claude'), runner: '', command: '' })
+  // the viewer is part of the posts text the confirmation displays, so a change of viewer changes what the page rebuilds on
+  const switched = idle({ starts: options({ default: { viewer: 'someone-else', posts: { kind: 'review', text: 'Posts its report to the PR as @someone-else: an approval, a request for changes, or a comment, per the findings.' } } }) })
+  assert.notDeepEqual(confirmation(shown), confirmation(switched))
+  const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
+  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, viewer, options\.token\)/)
 })

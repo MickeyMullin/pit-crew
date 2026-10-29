@@ -26,6 +26,8 @@ export const sweepRequest = (repo: string, runner?: RunnerName): StartRequest =>
 export type SweepStart = {
   heading: string
   repo: string
+  // the viewer the reviewers post as, which the start request carries back so the server refuses it when that is no longer the viewer in effect
+  viewer: string
   // the command as the runner receives it (Pit View adds --emit-json): a slash for Claude, a dollar sign for Codex
   command: string
   serial: string
@@ -40,6 +42,7 @@ export type SweepStart = {
 export const sweepStartOf = (config: Config, busy: boolean): SweepStart => ({
   heading: `Sweep the open Dependabot PRs in ${config.repo}?`,
   repo: config.repo,
+  viewer: config.viewer,
   command: [sweepCommand, ...sweepArgs(config.repo)].join(' '),
   serial: 'It reviews one PR at a time (--parallel 1), then writes one summary with a merge order.',
   posts: `Its reviewers post on GitHub as @${config.viewer}: each may approve a clean bump, request changes, or comment, one post per PR. It never merges or pushes.`,

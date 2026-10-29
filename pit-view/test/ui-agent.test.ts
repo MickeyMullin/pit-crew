@@ -109,6 +109,7 @@ test('the banner offers a Fix session while the row offers one, available or not
   const fix: StartOption = {
     kind: 'fix', label: 'Fix session', button: 'Fix requested changes', command: 'fix-pr', args: ['101'], runners: ['claude'],
     posts: { kind: 'push', text: 'Pushes new commits to fix/retry on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.' },
+    viewer: 'viewer',
     unavailable: null,
   }
   const review: StartOption = { ...fix, kind: 'default', label: 'Self-review', button: 'Self-review', command: 'review-pr', args: ['101', '--no-post'], runners: ['claude', 'codex'], posts: { kind: 'nothing', text: 'Posts nothing.' } }
@@ -150,14 +151,14 @@ test('the command line is what the runner receives: a slash for Claude, a dollar
   assert.equal(commandLine({ command: 'review-stack', args: ['111'] }, 'claude'), '/review-stack 111')
 })
 
-test('a start sends JSON with the kind, the runner and the token; a stop sends the token and no body', () => {
-  assert.deepEqual(startRequest(101, 'default', 'codex', 'tok-123'), {
+test('a start sends JSON with the kind, the runner, the viewer it showed and the token; a stop sends the token and no body', () => {
+  assert.deepEqual(startRequest(101, 'default', 'codex', 'vera-quill', 'tok-123'), {
     url: '/api/prs/101/runs',
-    init: { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok-123' }, body: '{"kind":"default","runner":"codex"}' },
+    init: { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok-123' }, body: '{"kind":"default","runner":"codex","viewer":"vera-quill"}' },
   })
-  assert.equal(startRequest(111, 'stack', 'claude', 't').init.body, '{"kind":"stack","runner":"claude"}')
-  // a Fix session names no runner: the server runs it with Claude
-  assert.equal(startRequest(101, 'fix', 'codex', 't').init.body, '{"kind":"fix"}')
+  assert.equal(startRequest(111, 'stack', 'claude', 'vera-quill', 't').init.body, '{"kind":"stack","runner":"claude","viewer":"vera-quill"}')
+  // a Fix session names no runner: the server runs it with Claude; it still names the viewer the confirmation showed
+  assert.equal(startRequest(101, 'fix', 'codex', 'vera-quill', 't').init.body, '{"kind":"fix","viewer":"vera-quill"}')
   assert.deepEqual(stopRequest(42, 'tok-123'), { url: '/api/runs/42/stop', init: { method: 'POST', headers: { 'X-Pit-View-Token': 'tok-123' } } })
   // the page sends the header the server reads (Node lowercases incoming header names)
   assert.equal(tokenHeader.toLowerCase(), serverTokenHeader)

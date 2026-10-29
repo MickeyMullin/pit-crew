@@ -146,13 +146,13 @@ export const tokenHeader = 'X-Pit-View-Token'
 
 export type RunRequest = { url: string, init: { method: 'POST', headers: Record<string, string>, body?: string } }
 
-// a Fix session names no runner: it runs with Claude only, which the server picks
-export const startRequest = (number: number, kind: StartKind, runner: RunnerName, token: string): RunRequest => ({
+// a Fix session names no runner: it runs with Claude only, which the server picks. A start also names the viewer the confirmation showed, so the server refuses it when that is no longer the viewer in effect
+export const startRequest = (number: number, kind: StartKind, runner: RunnerName, viewer: string, token: string): RunRequest => ({
   url: `/api/prs/${number}/runs`,
   init: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', [tokenHeader]: token },
-    body: JSON.stringify(kind === 'fix' ? { kind } : { kind, runner }),
+    body: JSON.stringify(kind === 'fix' ? { kind, viewer } : { kind, runner, viewer }),
   },
 })
 

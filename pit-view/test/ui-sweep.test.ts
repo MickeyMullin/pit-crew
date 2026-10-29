@@ -114,11 +114,11 @@ test('the confirmation names the repository, says it runs one PR at a time, and 
   assert.equal(sweepStartOf(config({ agent: { runner: 'codex' } }), false).runner, 'codex')
 })
 
-test('a sweep is started and stopped with the token, a runner and the repository the confirmation showed, and nothing else', () => {
-  const start = sweepStartRequest('codex', scenario.repo, 'tok-1')
+test('a sweep is started and stopped with the token, a runner and the repository and viewer the confirmation showed, and nothing else', () => {
+  const start = sweepStartRequest('codex', scenario.repo, scenario.viewer, 'tok-1')
   assert.equal(start.url, '/api/sweeps')
   assert.deepEqual(start.init.headers, { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok-1' })
-  assert.deepEqual(JSON.parse(start.init.body ?? ''), { runner: 'codex', repo: scenario.repo })
+  assert.deepEqual(JSON.parse(start.init.body ?? ''), { runner: 'codex', repo: scenario.repo, viewer: scenario.viewer })
   const stop = sweepStopRequest(7, 'tok-1')
   assert.equal(stop.url, '/api/sweeps/7/stop')
   assert.deepEqual(stop.init.headers, { 'X-Pit-View-Token': 'tok-1' })
@@ -292,14 +292,24 @@ test('the confirmation\'s heading, repository and effect text follow the configu
   const other = sweepConfirmModel(sweepStartOf(config({ repo: 'octo-example/other', viewer: 'someone-else' }), false), 'claude')
   assert.match(other.heading, /octo-example\/other/)
   assert.equal(other.repo, 'octo-example/other')
+  assert.equal(other.viewer, 'someone-else')
   assert.match(other.effect, /@someone-else/)
   assert.match(other.command, /octo-example\/other/)
 })
 
-test('the drawer\'s start part keys its rebuild on that signature, and the request carries the repository on screen', async () => {
+test('the drawer\'s start part keys its rebuild on that signature, and the request carries the repository and viewer on screen', async () => {
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'sweepdrawer.ts'), 'utf8')
   assert.match(source, /sweepConfirmSignature\(view\.start, confirm\.runner\)/)
-  assert.match(source, /sweepStartRequest\(asked\.runner, confirmedRepo, options\.token\)/)
+  assert.match(source, /sweepStartRequest\(asked\.runner, confirmedRepo, confirmedViewer, options\.token\)/)
+})
+
+test('a confirmation built before a viewer change keeps naming the old viewer, and its request carries that viewer, not the new one', () => {
+  const shown = sweepConfirmModel(sweepStartOf(config(), false), 'claude')
+  const switched = sweepConfirmModel(sweepStartOf(config({ viewer: 'someone-else' }), false), 'claude')
+  assert.equal(shown.viewer, scenario.viewer)
+  assert.match(shown.effect, new RegExp(`@${scenario.viewer}`))
+  assert.deepEqual(JSON.parse(sweepStartRequest('claude', shown.repo, shown.viewer, 't').init.body ?? ''), { runner: 'claude', repo: scenario.repo, viewer: scenario.viewer })
+  assert.equal(JSON.parse(sweepStartRequest('claude', switched.repo, switched.viewer, 't').init.body ?? '').viewer, 'someone-else')
 })
 
 // a settled sweep shows the whole result it carries
