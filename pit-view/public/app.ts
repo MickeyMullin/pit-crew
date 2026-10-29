@@ -24,6 +24,8 @@ import { lastUpdateOf, readLastUpdate, writeLastUpdate } from './schedule.ts'
 import type { ScheduleStorage } from './schedule.ts'
 import { configChannel } from './settings-form.ts'
 import { syncStatus } from './status.ts'
+import { createSweepDrawer, updateSweepAges } from './sweepdrawer.ts'
+import { sweepAnnounceKey, sweepAnnouncement, sweepLinkFor } from './sweepview.ts'
 import { mountStickyHeader } from './sticky.ts'
 import type { TableKey } from './tables.ts'
 import { mountThemeToggle } from './theme.ts'
@@ -158,15 +160,32 @@ const seedRuns = (): void => {
   if (agentKeys === null && feed.view !== null) agentKeys = announcements(null, openRows(feed.view)).next
 }
 
+// the bot group's sweep status, and the drawer's sweeps, say politely when the newest sweep starts or
+// finishes: once per change of its status, never per timer tick, and nothing for what the page
+// showed when it loaded
+let sweepKey: string | null = null
+const announceSweeps = (view: View): void => {
+  const key = sweepAnnounceKey(view.sweeps.items)
+  if (key === sweepKey) return
+  const first = sweepKey === null
+  sweepKey = key
+  const message = sweepAnnouncement(view.sweeps.items)
+  if (!first && message !== null) setText(byId('agent-live'), message)
+}
+
 const draw = (): void => {
   const view = feed.view
   if (view === null) return
   const kept = keep()
   render({ view, ui, settings, nowMs: nowMs() }, actions)
   if (settings.showAgentColumn) updateAgentCells(document, openRows(view), nowMs())
+  // the bot group header's sweep status: its running line and finish age move in place
+  tickTimers(document, nowMs())
+  updateSweepAges(document, nowMs())
   // one part failing must not stop the rest of the page drawing
   try {
     drawer.update()
+    sweepDrawer.update()
     reportPanel.refresh()
   } catch (error) {
     console.error('pit-view: the agent drawer could not update', error)
@@ -175,6 +194,7 @@ const draw = (): void => {
   hover.refresh()
   announce(view)
   announceRuns(view)
+  announceSweeps(view)
   keepLastUpdate(view)
 }
 
@@ -314,8 +334,8 @@ const say = (text: string): void => {
 const reportPanel = createReportPanel({
   root: byId('report-panel'),
   nowMs,
-  // back to the Open button that showed the report, or the drawer's heading
-  onClosed: (key) => drawer.focusKey(key, true),
+  // back to the Open button that showed the report, or the heading of the drawer it was opened from
+  onClosed: (key) => (sweepDrawer.isOpen() ? sweepDrawer : drawer).focusKey(key, true),
   say,
 })
 
@@ -326,6 +346,44 @@ const drawer = createDrawer({
   rowOf: (number) => feed.view === null ? undefined : findOpenRow(feed.view, number),
   say,
   reports: reportPanel,
+  // a PR in a settled sweep at its current head links to it; one in none shows nothing
+  sweepLink: (number) => {
+    const row = feed.view === null ? undefined : findOpenRow(feed.view, number)
+    return feed.view === null || row === undefined ? null : sweepLinkFor(feed.view.sweeps.items, number, row.headOid)
+  },
+  openSweep: (link) => {
+    drawer.close()
+    sweepDrawer.open({ key: `sweep-link:${link.number}` }, { sweepId: link.sweepId, pr: link.number })
+  },
+})
+
+// the sweep drawer is the repository's, not one PR's: the bot group's Run sweep and status open it,
+// and so does the broom beside a Dependabot PR's agent button. It and the PR drawer never show together
+const sweepDrawer = createSweepDrawer({
+  root: byId('sweep-drawer'),
+  token: readToken(document),
+  nowMs,
+  sweeps: () => feed.view === null ? null : feed.view.sweeps,
+  say,
+  reports: reportPanel,
+})
+
+document.addEventListener('click', (event) => {
+  const target = event.target instanceof Element ? event.target : null
+  const sweep = target?.closest<HTMLButtonElement>('button[data-sweep]') ?? null
+  if (sweep === null) return
+  const pr = sweep.dataset.sweepPr
+  const id = sweep.dataset.sweepId
+  drawer.close()
+  if (sweep.dataset.sweep === 'start') {
+    // a start that cannot run now still opens the drawer, which says why
+    sweepDrawer.open({ key: 'sweep-start' }, { ask: sweep.getAttribute('aria-disabled') !== 'true' })
+  } else {
+    sweepDrawer.open({ key: pr === undefined ? 'sweep-status' : `sweep-link:${pr}` }, {
+      ...(id === undefined ? {} : { sweepId: Number(id) }),
+      ...(pr === undefined ? {} : { pr: Number(pr) }),
+    })
+  }
 })
 
 document.addEventListener('click', (event) => {
@@ -334,7 +392,11 @@ document.addEventListener('click', (event) => {
   const banner = target?.closest<HTMLButtonElement>('button[data-open-agent]') ?? null
   // the banner's Fix session opens the drawer with that start's confirmation already asked
   const fix = target?.closest<HTMLButtonElement>('button[data-fix-session]') ?? null
-  if (cell !== null || banner !== null || fix !== null) seedRuns()
+  if (cell !== null || banner !== null || fix !== null) {
+    seedRuns()
+    // the PR drawer and the sweep drawer never show together
+    sweepDrawer.close()
+  }
   if (cell !== null) drawer.open(Number(cell.dataset.pr), { key: `agent-open:${cell.dataset.pr}`, number: Number(cell.dataset.pr) })
   else if (banner !== null) drawer.open(Number(banner.dataset.openAgent), { key: `banner-open:${banner.dataset.openAgent}`, number: Number(banner.dataset.openAgent) })
   else if (fix !== null) drawer.open(Number(fix.dataset.fixSession), { key: `banner-fix:${fix.dataset.fixSession}`, number: Number(fix.dataset.fixSession) }, 'fix')
@@ -348,9 +410,9 @@ document.addEventListener('keydown', (event) => {
   const applies = escapeApplies({
     tag: target?.tagName ?? '',
     editable: target instanceof HTMLElement && target.isContentEditable,
-    inPanel: target?.closest('#drawer, #report-panel') != null,
+    inPanel: target?.closest('#drawer, #sweep-drawer, #report-panel') != null,
   })
-  if (applies && drawer.escape()) event.preventDefault()
+  if (applies && (drawer.escape() || sweepDrawer.escape())) event.preventDefault()
 })
 
 byId('pause').addEventListener('click', () => {

@@ -16,6 +16,8 @@ export const icons = {
   refresh: [['path', { d: 'M20 12a8 8 0 1 1-2.3-5.6' }], ['path', { d: 'M20 4v5h-5' }]],
   pause: [['rect', { x: '6', y: '4.5', width: '4', height: '15', rx: '1' }], ['rect', { x: '14', y: '4.5', width: '4', height: '15', rx: '1' }]],
   play: [['path', { d: 'M7 4.5v15l12-7.5z' }]],
+  // a broom: the handle, then the bristles; it marks the sweep a Dependabot PR belongs to
+  broom: [['path', { d: 'M19.5 3.5l-7 7' }], ['path', { d: 'M13.5 9.5l1 1' }], ['path', { d: 'M12 10c-3-.5-6 1.5-7 5l-1.5 5.5L9 19c3-1 5-4 4.5-7' }], ['path', { d: 'M7.5 15.5l1.5 3' }]],
   alert: [['circle', { cx: '12', cy: '12', r: '9' }], ['path', { d: 'M12 7.5v5.5' }], ['path', { d: 'M12 16.5v.01' }]],
   offline: [['path', { d: 'M2 8.5a15 15 0 0 1 20 0' }], ['path', { d: 'M5.5 12a10 10 0 0 1 13 0' }], ['path', { d: 'M9 15.5a5 5 0 0 1 6 0' }], ['path', { d: 'M3 3l18 18' }]],
 } satisfies Record<string, Shape[]>

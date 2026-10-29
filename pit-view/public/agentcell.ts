@@ -67,7 +67,9 @@ export const tickTimers = (root: ParentNode, nowMs: number): void => {
   for (const element of root.querySelectorAll<HTMLElement>('[data-agent-timer]')) {
     const line = runningLine({ startedAt: element.dataset.started ?? null, lastStepAt: element.dataset.stepAt ?? null }, nowMs)
     const suffix = element.dataset.suffix
-    setText(element, suffix === undefined ? line : `${line} · ${suffix}`)
+    // the bot group's sweep status leads with its own word
+    const prefix = element.dataset.prefix ?? ''
+    setText(element, `${prefix}${suffix === undefined ? line : `${line} · ${suffix}`}`)
   }
 }
 

@@ -12,6 +12,8 @@ import type { Sort, SortValue } from './filters.ts'
 import { formatAge, formatClock, plural, shortSha } from './format.ts'
 import { safeHref } from './safeurl.ts'
 import { rowFreshness } from './state.ts'
+import { sweepLinkFor } from './sweepview.ts'
+import type { SweepHeaderModel } from './sweepview.ts'
 import { refreshButton, rowMarker } from './status.ts'
 import type { Marker, TableState } from './status.ts'
 
@@ -38,10 +40,30 @@ const agentColumn = <R extends OpenRow>(): Column<R> => ({
   key: 'agent',
   label: 'Agent',
   width: '196px',
-  cell: (row, { nowMs }) => ({
-    sig: agentCellSig(row.agent, row.number, nowMs),
-    build: () => agentCellNodes(row.agent, row.number, nowMs),
-  }),
+  cell: (row, { view, nowMs }) => {
+    // a Dependabot PR that a settled sweep reviewed at this head gets a broom beside the cell's
+    // button; the link is read from the sweeps' rows, never from the Agent cell
+    const link = sweepLinkFor(view.sweeps.items, row.number, row.headOid)
+    return {
+      sig: [agentCellSig(row.agent, row.number, nowMs), link],
+      build: () => {
+        const nodes = agentCellNodes(row.agent, row.number, nowMs)
+        if (link === null) return nodes
+        return [h('span', { class: 'agent-with-sweep' }, nodes,
+          h('button', {
+            type: 'button',
+            class: 'sweep-link',
+            'data-sweep': 'open',
+            'data-sweep-id': link.sweepId,
+            'data-sweep-pr': row.number,
+            'aria-label': link.name,
+            title: link.tip,
+            'data-focus': 'agent-sweep',
+            'data-focus-key': `sweep-link:${row.number}`,
+          }, svg(icons.broom, { size: 14, stroke: '2.2' })))]
+      },
+    }
+  },
 })
 
 // the row's own refresh, last and fixed-width so showing it never moves a column; app.ts
@@ -314,15 +336,53 @@ export type TableModel<R> = {
   rowClass: (row: R) => string
   freshnessOf: (row: R) => string | null
   onToggleGroup: (key: string) => void
+  // the bot group's sweep controls (Others' only); app.ts handles their clicks
+  sweep?: SweepHeaderModel | null
   sort: Sort
   onSort: (key: string) => void
 }
 
+// Run sweep, and the latest sweep's state beside it. The status leaves out the running timer and the
+// finish age, which updateSweepStatus and tickTimers set in place
+const sweepControls = (sweep: SweepHeaderModel): HTMLElement => {
+  const run = h('button', {
+    type: 'button',
+    class: 'button button-small',
+    'data-sweep': 'start',
+    'data-focus-key': 'sweep-start',
+    'aria-label': sweep.start.name,
+    // a start that cannot run now says why, and stays focusable
+    'aria-disabled': sweep.start.disabled ? 'true' : null,
+    'aria-describedby': sweep.start.reason === null ? null : 'sweep-start-reason',
+    title: sweep.start.reason,
+  }, sweep.start.label)
+  const status = sweep.status
+  return h('span', { class: 'sweep-controls' },
+    run,
+    sweep.start.reason === null ? null : h('span', { id: 'sweep-start-reason', class: 'sr-only' }, sweep.start.reason),
+    status === null ? null : h('button', {
+      type: 'button',
+      class: 'sweep-status',
+      'data-sweep': 'open',
+      'data-sweep-id': status.sweepId,
+      'data-focus-key': 'sweep-status',
+      'aria-label': status.name,
+      title: status.tip,
+    },
+    h('span', { class: `tone-text-${status.tone}` }, status.label),
+    status.running
+      ? h('span', { 'data-agent-timer': '', 'data-started': status.startedAt, 'data-step-at': status.lastStepAt, 'data-prefix': ' ', class: 'sweep-status-line' }, '')
+      : status.finishedAt === null ? null : h('span', { 'data-sweep-age': status.finishedAt, class: 'sweep-status-line' }, '')))
+}
+
 const groupHead = <R>(model: TableModel<R>, group: ShownGroup<R>, bodyId: string): Part => {
   const tone = groupTone[`${model.table}:${group.key}`] ?? 'ink'
+  const sweep = model.table === 'others' && group.key === 'bots' ? model.sweep ?? null : null
+  // the status's moving text is not in the signature
+  const sweepSig = sweep === null ? null : { ...sweep, status: sweep.status === null ? null : { ...sweep.status, text: '' } }
   return {
     key: 'head',
-    sig: JSON.stringify([group.label, group.sub, group.rows.length, group.collapsible, group.open, model.columns.length, tone]),
+    sig: JSON.stringify([group.label, group.sub, group.rows.length, group.collapsible, group.open, model.columns.length, tone, sweepSig]),
     build: () => {
       const toggle = group.collapsible
         ? h('button', { type: 'button', class: 'button button-small', 'aria-expanded': String(group.open), 'aria-controls': bodyId, 'data-focus-key': `group:${model.table}:${group.key}` },
@@ -336,6 +396,7 @@ const groupHead = <R>(model: TableModel<R>, group: ShownGroup<R>, bodyId: string
             h('span', { class: 'group-count mono' }, String(group.rows.length)),
             h('span', { class: 'group-sub' }, group.sub),
             h('span', { class: 'spacer' }),
+            sweep === null ? null : sweepControls(sweep),
             toggle)))
     },
   }

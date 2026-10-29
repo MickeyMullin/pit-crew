@@ -20,6 +20,7 @@ import { formatSince } from './format.ts'
 import type { ReportPanel } from './reportpanel.ts'
 import { getJson, sendRun } from './runapi.ts'
 import { safeHref } from './safeurl.ts'
+import type { SweepLink } from './sweepview.ts'
 
 export type DrawerOptions = {
   root: HTMLElement
@@ -31,6 +32,11 @@ export type DrawerOptions = {
   // the page's polite live region
   say: (text: string) => void
   reports: ReportPanel
+  // the Dependabot sweep this PR is in at its current head, read from the sweeps' rows; null for a
+  // PR in none, which shows no link
+  sweepLink: (number: number) => SweepLink | null
+  // opens the sweep drawer on that sweep, at this PR's card; this drawer closes
+  openSweep: (link: SweepLink) => void
 }
 
 export type Drawer = {
@@ -487,6 +493,21 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     return h('div', { class: 'drawer-list-error' }, h('p', { class: 'confirm-error', role: 'alert' }, message ?? ''), again)
   }
 
+  // the PR's link to its sweep: the sweep's report is the group-level one, beside this PR's own
+  const sweepPart = (link: SweepLink): Part => ({
+    key: 'sweep',
+    sig: JSON.stringify(link),
+    build: () => {
+      const open = h('button', { type: 'button', class: 'button button-small', 'aria-label': link.name, title: link.tip, 'data-focus-key': 'sweep-open' },
+        svg([['path', { d: 'M19.5 3.5l-7 7' }], ['path', { d: 'M13.5 9.5l1 1' }], ['path', { d: 'M12 10c-3-.5-6 1.5-7 5l-1.5 5.5L9 19c3-1 5-4 4.5-7' }], ['path', { d: 'M7.5 15.5l1.5 3' }]], { size: 14, stroke: '2.2' }),
+        ' Open the sweep')
+      open.addEventListener('click', () => options.openSweep(link))
+      return section('sweep', 'Dependabot sweep',
+        h('p', {}, `#${link.number} was reviewed in the ${link.tip.charAt(0).toLowerCase()}${link.tip.slice(1)}, which has its own report beside this one.`),
+        open)
+    },
+  })
+
   const runsPart = (model: DrawerModel): Part => ({
     key: 'runs',
     sig: JSON.stringify([model.runs.state, model.runs.message, model.runs.rows.map((row) => ({ ...row, startedAt: '' }))]),
@@ -561,6 +582,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     if (model.card === 'running') items.push(runningCard(model, row))
     else if (model.card === 'waiting') items.push(waitingCard(model, number))
     else if (model.card === 'result') items.push(resultCard(model, number))
+    const sweepLink = options.sweepLink(number)
+    if (sweepLink !== null) items.push(sweepPart(sweepLink))
     items.push(runsPart(model), reportsPart(model))
     sync(body, items)
 

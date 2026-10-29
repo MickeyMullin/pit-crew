@@ -35,6 +35,8 @@ export type SweepStart = {
   serial: string
   posts: string
   runners: RunnerName[]
+  // the configured default, which the confirmation offers first
+  runner: RunnerName
   // why it cannot start right now; null otherwise
   unavailable: string | null
 }
@@ -46,6 +48,7 @@ export const sweepStartOf = (config: Config, busy: boolean): SweepStart => ({
   serial: 'It reviews one PR at a time (--parallel 1), then writes one summary with a merge order.',
   posts: `Its reviewers post on GitHub as @${config.viewer}: each may approve a clean bump, request changes, or comment, one post per PR. It never merges or pushes.`,
   runners: ['claude', 'codex'],
+  runner: config.agent.runner,
   unavailable: busy
     ? `a sweep for ${config.repo} is already in flight`
     : config.cloneDir === undefined ? `set cloneDir in the config to your local clone of ${config.repo} before starting a sweep` : null,

@@ -90,6 +90,9 @@ const textPairs: [string, string][] = [
   // note is amber on amber-bg; the report panel's code is ink on gray-bg (also the iframe's)
   ['red-fg', 'ground'], ['ink', 'ground'], ['muted', 'ground'], ['ink', 'amber-bg'], ['muted', 'amber-bg'], ['amber-fg', 'amber-bg'],
   ['ink', 'gray-bg'], ['red-fg', 'surface'], ['green-fg', 'green-bg'], ['blue-fg', 'blue-bg'],
+  // the sweep drawer's card a PR's link opened it at (ink, muted and the chips' own pairs on blue-bg),
+  // and the bot group header's sweep status in each tone on ground
+  ['ink', 'blue-bg'], ['muted', 'blue-bg'], ['amber-fg', 'ground'],
 ]
 
 test('text meets 4.5:1 contrast in both color schemes', async () => {

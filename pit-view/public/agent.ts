@@ -34,9 +34,19 @@ const fixTitles: Readonly<Record<string, string>> = {
   post: 'Push',
 }
 
+// the sweep records the same five slots too (section 8, the Dependabot sweep): it enumerates, reviews
+// every PR, works out the merge order, writes its summary, and posts nothing itself
+const sweepTitles: Readonly<Record<string, string>> = {
+  resolveBase: 'Enumerate',
+  review: 'Review PRs',
+  consolidate: 'Merge order',
+  writeReport: 'Write summary',
+  post: 'Post',
+}
+
 // a step's label for a run of this command
 export const stepTitle = (command: string | null, step: string): string =>
-  (command === 'fix-pr' ? fixTitles : reviewTitles)[step] ?? step
+  (command === 'fix-pr' ? fixTitles : command === 'review-dependabot-sweep' ? sweepTitles : reviewTitles)[step] ?? step
 
 // how long a run has gone: seconds under a minute, minutes under an hour, then hours and minutes
 export const formatDuration = (fromIso: string, nowMs: number): string => {

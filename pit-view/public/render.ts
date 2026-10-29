@@ -17,6 +17,7 @@ import {
 import type { Arrangement, ClosedRangeKey, Controls, TileKey } from './filters.ts'
 import { formatAge, shortSha } from './format.ts'
 import { safeHref } from './safeurl.ts'
+import { sweepHeaderModel } from './sweepview.ts'
 import { offlineBadge, offlineBanner, sectionMarker, syncStatus, tableState } from './status.ts'
 import { closedColumns, countText, mineColumns, openFreshness, othersColumns, renderTable } from './tables.ts'
 import type { CellContext, Column, TableKey } from './tables.ts'
@@ -353,6 +354,8 @@ export const render = (frame: Frame, actions: Actions): void => {
     rowClass: () => 'row',
     freshnessOf: freshness,
     onToggleGroup: (key) => actions.toggleGroup('others', key),
+    // Run sweep and the latest sweep's state, in the bot group's header
+    sweep: sweepHeaderModel(view.sweeps, nowMs),
     sort: ui.sort.others,
     onSort: (key) => actions.sortBy('others', key),
   })

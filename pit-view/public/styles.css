@@ -1885,6 +1885,209 @@ button.agent:hover {
   gap: 8px;
 }
 
+/* Dependabot sweeps: the bot group's controls, the broom beside a PR's agent button, and the sweep
+   drawer, which shares the agent drawer's panel and its confirmation */
+
+.sweep-controls {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+
+.sweep-controls .button[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.sweep-status {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sweep-status:hover {
+  background: var(--gray-bg);
+}
+
+.sweep-status-line {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.agent-with-sweep {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sweep-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line-control);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.sweep-link:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--blue-fg);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.link-button:hover {
+  color: var(--link-hover);
+}
+
+.sweep-counts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.sweep-count {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-row);
+  border-radius: 6px;
+}
+
+.sweep-count dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sweep-count dd {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.sweep-summary,
+.sweep-merge,
+.sweep-rows {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sweep-rows,
+.sweep-row-list {
+  width: 100%;
+}
+
+.sweep-order {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.sweep-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line-row);
+  scroll-margin-top: 8px;
+}
+
+.sweep-row:first-child {
+  border-top: 0;
+}
+
+/* the card a link from a PR opened the drawer at: marked by a bar and a background, and by
+   aria-current for screen readers, never by color alone */
+.sweep-row-target {
+  padding-left: 10px;
+  border-left: 3px solid var(--blue-fg);
+  background: var(--blue-bg);
+  border-radius: 4px;
+}
+
+.sweep-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.sweep-row-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.sweep-row-head-sha {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sweep-row-bump,
+.sweep-row-note,
+.sweep-row-chips,
+.sweep-row-report {
+  margin: 0;
+}
+
+.sweep-row-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+}
+
+.sweep-row-report {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.sweep-report-path {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.sweep-findings {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sweep-findings li {
+  padding: 1px 0;
+}
+
 /* the report panel */
 
 .report-bar {
