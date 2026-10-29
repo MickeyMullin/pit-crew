@@ -1591,7 +1591,7 @@ test('the sweeps the cache prunes leave memory, the list, and the feed with the 
   }
 })
 
-test('a sweep start is refused with a clear error: no cloneDir, a folder that is not the clone, another gh account', async () => {
+test('a sweep start is refused with a clear error: no cloneDir, a folder that is not the clone, or another gh account', async () => {
   const unset = await setup()
   try {
     const refused = await send(sweepsUrl(unset), 'POST', undefined, token(unset))

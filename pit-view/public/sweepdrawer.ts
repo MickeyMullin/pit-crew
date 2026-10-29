@@ -521,7 +521,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     }
   }
 
-  // a confirmation outlives nothing: a start must still be available, a stop's sweep still running
+  // a confirmation outlives nothing: a start's confirmation needs the start to still be available, and a stop's confirmation needs its sweep to still be running
   const dropStaleConfirm = (view: SweepsView): void => {
     if (confirm === null || busy) return
     const stillAsked = confirm.type === 'start'
