@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { CacheError, openCache, schemaVersion } from '../src/cache.ts'
-import type { Cache, CacheOptions, NewRun, Run } from '../src/cache.ts'
+import type { Cache, CacheOptions, NewRun, NewSweep, Run } from '../src/cache.ts'
 import { createGh, fetchClosedPrs, fetchOpenPrs } from '../src/github.ts'
 import type { ClosedResult, OpenPage } from '../src/github.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -62,7 +62,7 @@ const count = (cache: Cache, table: string): number => Number(cache.db.prepare(`
 test('a new cache has the schema, its version, and nothing fetched', () => {
   const { cache } = memoryCache()
   const tables = cache.db.prepare('SELECT name FROM sqlite_master WHERE type = \'table\' AND name NOT LIKE \'sqlite_%\' ORDER BY name').all()
-  assert.deepEqual(tables.map((row) => row.name), ['cycles', 'meta', 'prs', 'runs', 'snapshots'])
+  assert.deepEqual(tables.map((row) => row.name), ['cycles', 'meta', 'prs', 'runs', 'snapshots', 'sweeps'])
   assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
 
   const view = cache.readView(scenario.repo)
@@ -578,4 +578,94 @@ test('a version 5 cache lacks latestOpinionatedReviews, so its cached PRs are dr
   } finally {
     await cleanup()
   }
+})
+
+const newSweep = (patch: Partial<NewSweep> = {}): NewSweep => ({
+  repo: scenario.repo, command: 'review-dependabot-sweep', args: [scenario.repo, '--parallel', '1'], label: 'Dependabot sweep', runner: 'claude', cwd: '~/dev/orbit',
+  sessionId: null, pid: null, pidStartedAt: null, startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null,
+  finishedAt: null, status: 'running', result: null, note: null, costUsd: null, resume: null, ...patch,
+})
+
+const sweepResult = { schema: 'pit-crew/sweep-result@1', status: 'done' } as unknown as NonNullable<Run['result']>
+
+test('a version 6 cache gains sweeps in place: its GitHub tables and its runs are all kept', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const created = first.createRun(newRun(106), (id) => `~/runs/${id}`)
+    first.close()
+    // what version 6 left behind: no sweeps table, a cached PR, a run
+    const old = new DatabaseSync(path)
+    old.exec('DROP TABLE sweeps')
+    old.exec('INSERT INTO prs (repo, number, state, updated_at, head_oid, fetched_at, cycle, last_seen_at, data) VALUES (\'octo-example/orbit\', 106, \'open\', \'2026-10-26T12:00:00Z\', \'abc\', \'2026-10-26T12:00:00Z\', 1, \'2026-10-26T12:00:00Z\', \'{"number":106}\')')
+    old.exec('UPDATE meta SET value = \'6\' WHERE key = \'schemaVersion\'')
+    old.close()
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.equal(count(cache, 'prs'), 1)
+    assert.equal(cache.getRun(created.id)?.id, created.id)
+    assert.equal(count(cache, 'sweeps'), 0)
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, '7')
+    // a sweep is no run: runs.number stays NOT NULL, and a sweep row has no number at all
+    const columns = cache.db.prepare('PRAGMA table_info(runs)').all()
+    assert.equal(columns.find((column) => column.name === 'number')?.notnull, 1)
+    assert.equal(cache.db.prepare('PRAGMA table_info(sweeps)').all().some((column) => column.name === 'number'), false)
+    assert.equal(count(cache, 'runs'), 1)
+    cache.close()
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a rebuild of the GitHub tables keeps the sweeps it finds, as it keeps the runs', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const kept = first.createSweep(newSweep(), (id) => `~/sweeps/${id}`)
+    first.db.exec('UPDATE meta SET value = \'5\' WHERE key = \'schemaVersion\'')
+    first.close()
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.deepEqual(cache.sweepsFor(scenario.repo).map((sweep) => sweep.id), [kept.id])
+    // ids are never reused, so a sweep folder never names two sweeps
+    assert.equal(cache.createSweep(newSweep(), (id) => `~/sweeps/${id}`).id, kept.id + 1)
+    cache.close()
+  } finally {
+    await cleanup()
+  }
+})
+
+test('sweeps are recorded in a table of their own, with ids of their own, updated in place and read newest first', () => {
+  const { cache } = memoryCache()
+  const run = cache.createRun(newRun(106), (id) => `~/runs/${id}`)
+  const first = cache.createSweep(newSweep(), (id) => `~/.local/state/pit-view/sweeps/${id}`)
+  assert.equal(first.id, 1)
+  assert.equal(run.id, 1)
+  assert.equal(first.dir, '~/.local/state/pit-view/sweeps/1')
+  assert.deepEqual(first.args, [scenario.repo, '--parallel', '1'])
+  assert.equal('number' in first, false)
+  const done = cache.updateSweep(first.id, { status: 'done', finishedAt: '2026-10-26T14:10:00Z', result: sweepResult, costUsd: 1.5, steps: [] })
+  assert.deepEqual([done.status, done.costUsd, done.result, done.steps], ['done', 1.5, sweepResult, []])
+  const second = cache.createSweep(newSweep(), (id) => `~/sweeps/${id}`)
+  cache.createSweep(newSweep({ repo: 'octo-example/other' }), (id) => `~/sweeps/${id}`)
+  assert.deepEqual(cache.sweepsFor(scenario.repo).map((sweep) => sweep.id), [second.id, first.id])
+  assert.deepEqual(cache.sweepsFor(scenario.repo, 1).map((sweep) => sweep.id), [second.id])
+  assert.deepEqual(cache.runningSweeps().map((sweep) => sweep.id), [second.id, 3])
+  // the runs table saw none of it
+  assert.deepEqual(cache.runningRuns().map((row) => row.id), [run.id])
+  assert.throws(() => cache.updateSweep(99, { status: 'done' }), CacheError)
+  assert.equal(cache.getSweep(99), null)
+  cache.close()
+})
+
+test('pruning keeps the newest sweeps and never one still running', () => {
+  const { cache } = memoryCache({ keepSweeps: 2 })
+  const old = cache.createSweep(newSweep(), (id) => `~/sweeps/${id}`)
+  const finished = cache.createSweep(newSweep({ status: 'failed' }), (id) => `~/sweeps/${id}`)
+  cache.createSweep(newSweep({ status: 'done' }), (id) => `~/sweeps/${id}`)
+  cache.createSweep(newSweep({ status: 'done' }), (id) => `~/sweeps/${id}`)
+  assert.deepEqual(cache.pruneSweeps().map((sweep) => sweep.id), [finished.id])
+  assert.deepEqual(cache.sweepsFor(scenario.repo).map((sweep) => sweep.id).sort(), [3, 4])
+  assert.equal(cache.getSweep(old.id)?.id, old.id)
+  cache.close()
 })

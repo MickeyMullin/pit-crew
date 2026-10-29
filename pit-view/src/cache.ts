@@ -8,11 +8,16 @@ import type { ClosedResult, GhErrorKind, OpenPage, RawOpenPr } from './github.ts
 import type { RunResultJson, StepSlot } from './launcher.ts'
 
 // bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since
-// they hold nothing GitHub cannot give back. runs is the exception: it survives a rebuild, and a
-// change to its columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE).
-// Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks
-// the field, and the rebuild empties prs so no such row is derived
-export const schemaVersion = 6
+// they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a
+// rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps
+// with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row
+// written before it lacks the field, and the rebuild empties prs so no such row is derived.
+// Version 7 added the sweeps table and changed no GitHub table
+export const schemaVersion = 7
+
+// the last version that changed what the GitHub tables hold; a cache at this version or later keeps
+// them through a bump, since a bump after it only adds tables
+export const githubTablesVersion = 6
 
 export class CacheError extends Error {
   override name = 'CacheError'
@@ -92,11 +97,10 @@ export type FinishResult = {
 export type RunStatus = 'running' | 'done' | 'failed' | 'needsInput' | 'stopped'
 export const runStatuses: readonly RunStatus[] = ['running', 'done', 'failed', 'needsInput', 'stopped']
 
-// one review session Pit View started (section 8 of DESIGN.md, Launching runs)
-export type Run = {
+// what a review session and a sweep share: Pit View's record of one launched process
+export type Session = {
   id: number
   repo: string
-  number: number
   // the pit-crew command, such as review-pr, and its arguments without --emit-json
   command: string
   args: string[]
@@ -131,8 +135,15 @@ export type Run = {
   resume: string | null
 }
 
+// one review session Pit View started (section 8 of DESIGN.md, Launching runs)
+export type Run = Session & { number: number }
+
+// one Dependabot sweep Pit View started (section 8, Sweeps): a record of its own with no PR number
+export type Sweep = Session
+
 export type NewRun = Omit<Run, 'id' | 'dir' | 'steps'>
-export type RunChanges = Partial<Omit<Run, 'id' | 'repo' | 'number'>>
+export type NewSweep = Omit<Sweep, 'id' | 'dir' | 'steps'>
+export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>>
 
 export type Cache = {
   // starts a cycle; only one may run at a time across all repos
@@ -167,6 +178,16 @@ export type Cache = {
   runningRuns: () => Run[]
   // deletes all but the newest keepRuns finished runs and returns them, so their folders can go
   pruneRuns: () => Run[]
+  // sweeps: the same, in a table of their own with ids of their own
+  createSweep: (sweep: NewSweep, dirOf: (id: number) => string) => Sweep
+  updateSweep: (id: number, changes: RunChanges) => Sweep
+  getSweep: (id: number) => Sweep | null
+  // a repo's sweeps, newest first
+  sweepsFor: (repo: string, limit?: number) => Sweep[]
+  // every sweep still recorded as running, in any repo
+  runningSweeps: () => Sweep[]
+  // deletes all but the newest keepSweeps finished sweeps and returns them, so their folders can go
+  pruneSweeps: () => Sweep[]
   close: () => void
   // the open handle, for tests and diagnostics
   db: DatabaseSync
@@ -179,6 +200,7 @@ export type CacheOptions = {
   keepCycles?: number
   keepSnapshotCycles?: number
   keepRuns?: number
+  keepSweeps?: number
 }
 
 const schema = [
@@ -200,6 +222,15 @@ const runsSchema = [
   'CREATE INDEX IF NOT EXISTS runs_by_status ON runs (status)',
 ]
 
+// kept across rebuilds like runs: a sweep is a record of its own, with the columns of a run except
+// the PR number. Created when missing (version 7), never altered by a bump that only rebuilds the
+// GitHub tables
+const sweepsSchema = [
+  'CREATE TABLE IF NOT EXISTS sweeps (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT)',
+  'CREATE INDEX IF NOT EXISTS sweeps_by_repo ON sweeps (repo, id)',
+  'CREATE INDEX IF NOT EXISTS sweeps_by_status ON sweeps (status)',
+]
+
 const tables = ['meta', 'cycles', 'snapshots', 'prs']
 
 type Row = Record<string, SQLOutputValue>
@@ -213,14 +244,13 @@ const intOrNull = (row: Row, key: string): number | null => row[key] === null ||
 // GitHub's form: second precision, Z suffix
 const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
 
-const toRun = (row: Row): Run => {
+const toSession = (row: Row): Session => {
   const result = strOrNull(row, 'result')
   const steps = strOrNull(row, 'steps')
   const cost = row.cost_usd
   return {
     id: int(row, 'id'),
     repo: str(row, 'repo'),
-    number: int(row, 'number'),
     command: str(row, 'command'),
     args: JSON.parse(str(row, 'args')) as string[],
     label: str(row, 'label'),
@@ -243,6 +273,8 @@ const toRun = (row: Row): Run => {
     resume: strOrNull(row, 'resume'),
   }
 }
+
+const toRun = (row: Row): Run => ({ ...toSession(row), number: int(row, 'number') })
 
 // a Run's fields to their columns; JSON columns are stored as text
 const runColumns: Record<keyof RunChanges, string> = {
@@ -319,7 +351,7 @@ type LastSuccess = { cycle: number, startedAt: string, finishedAt: string }
 const metaKey = (name: string, repo: string): string => `${name}:${repo}`
 
 // the Pit View SQLite cache: open rows per PR, raw responses per cycle, and cycle history
-export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 50, keepRuns = 200 }: CacheOptions): Cache => {
+export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 50, keepRuns = 200, keepSweeps = 50 }: CacheOptions): Cache => {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
   const db = new DatabaseSync(path, { timeout: 5000 })
   if (path !== ':memory:') {
@@ -358,15 +390,22 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
 
   const migrate = (): void => {
     const hasMeta = get('SELECT 1 AS found FROM sqlite_master WHERE type = \'table\' AND name = \'meta\'') !== undefined
-    if (hasMeta && getMeta<number>('schemaVersion') === schemaVersion) return
+    const stored = hasMeta ? getMeta<number>('schemaVersion') : null
+    if (stored === schemaVersion) return
     transaction(() => {
-      for (const table of tables) db.exec(`DROP TABLE IF EXISTS ${table}`)
-      for (const statement of schema) db.exec(statement)
+      // a cache from before the last change to the GitHub tables has them rebuilt; a later one
+      // (version 6, on its way to 7) keeps every table it has and only gains the new ones
+      if (stored === null || stored < githubTablesVersion) {
+        for (const table of tables) db.exec(`DROP TABLE IF EXISTS ${table}`)
+        for (const statement of schema) db.exec(statement)
+      }
       // version 4 added runs; a newer version keeps the table it finds
       for (const statement of runsSchema) db.exec(statement)
       // version 5 added runs.steps; a table made before it lacks the column
       const columns = db.prepare('PRAGMA table_info(runs)').all().map((column) => String(column.name))
       if (!columns.includes('steps')) db.exec('ALTER TABLE runs ADD COLUMN steps TEXT')
+      // version 7 added sweeps
+      for (const statement of sweepsSchema) db.exec(statement)
       setMeta('schemaVersion', schemaVersion)
     })
   }
@@ -656,6 +695,57 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     return doomed
   })
 
+  const getSweep = (id: number): Sweep | null => {
+    const row = get('SELECT * FROM sweeps WHERE id = $id', { id })
+    return row === undefined ? null : toSession(row)
+  }
+
+  const mustSweep = (id: number): Sweep => {
+    const found = getSweep(id)
+    if (found === null) throw new CacheError(`sweep ${id} does not exist`)
+    return found
+  }
+
+  const createSweep = (input: NewSweep, dirOf: (id: number) => string): Sweep => transaction(() => {
+    const id = Number(db.prepare('INSERT INTO sweeps (repo, command, args, label, runner, cwd, dir, started_at, status) VALUES ($repo, $command, $args, $label, $runner, $cwd, \'\', $startedAt, $status)').run({
+      repo: input.repo,
+      command: input.command,
+      args: JSON.stringify(input.args),
+      label: input.label,
+      runner: input.runner,
+      cwd: input.cwd,
+      startedAt: input.startedAt,
+      status: input.status,
+    }).lastInsertRowid)
+    const { repo: _repo, ...rest } = input
+    return updateSweep(id, { ...rest, dir: dirOf(id) })
+  })
+
+  const updateSweep = (id: number, changes: RunChanges): Sweep => {
+    const keys = (Object.keys(changes) as (keyof RunChanges)[]).filter((key) => key in runColumns)
+    if (keys.length > 0) {
+      const params: Params = { id }
+      const sets = keys.map((key) => {
+        params[key] = runValue(key, changes[key])
+        return `${runColumns[key]} = $${key}`
+      })
+      if (run(`UPDATE sweeps SET ${sets.join(', ')} WHERE id = $id`, params) === 0) throw new CacheError(`sweep ${id} does not exist`)
+    }
+    return mustSweep(id)
+  }
+
+  const sweepsFor = (repo: string, limit = keepSweeps): Sweep[] =>
+    all('SELECT * FROM sweeps WHERE repo = $repo ORDER BY id DESC LIMIT $limit', { repo, limit }).map(toSession)
+
+  const runningSweeps = (): Sweep[] => all('SELECT * FROM sweeps WHERE status = \'running\' ORDER BY id').map(toSession)
+
+  // a sweep still in flight is never pruned, however old
+  const pruneSweeps = (): Sweep[] => transaction(() => {
+    const doomed = all('SELECT * FROM sweeps WHERE status != \'running\' AND id NOT IN (SELECT id FROM sweeps ORDER BY id DESC LIMIT $keep) ORDER BY id', { keep: keepSweeps }).map(toSession)
+    for (const gone of doomed) run('DELETE FROM sweeps WHERE id = $id', { id: gone.id })
+    return doomed
+  })
+
   migrate()
   closeInterrupted()
 
@@ -679,6 +769,12 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     latestRuns,
     runningRuns,
     pruneRuns,
+    createSweep,
+    updateSweep,
+    getSweep,
+    sweepsFor,
+    runningSweeps,
+    pruneSweeps,
     close: () => db.close(),
     db,
   }
