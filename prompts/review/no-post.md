@@ -24,7 +24,7 @@ What it keeps:
 With `--emit-json`:
 
 - Record the `post` step once, as `skipped` with the note `run with --no-post`.
-- `result.json` carries `"posted": null` and `"notPostedReason": "noPost"`, which wins over `"ownPr"` and every other reason, and `ci` as last read without waiting.
+- `result.json` carries `"posted": null` and `"notPostedReason": "noPost"`, which wins over `"ownPr"` and every other reason, and `ci` as last read without waiting. A sweep's `result.json` has no top-level `posted`: it carries `"notPostedReason": "noPost"`, and each row's own `posted`, which is null for every row that is not `reused` (see `review-dependabot-sweep.md`).
 
 In the Dependabot commands:
 
