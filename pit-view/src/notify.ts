@@ -37,19 +37,22 @@ export const rowEvents = (repo: string, before: RowState | null, after: OpenRow)
   return rowKinds.filter((kind) => now[kind] && !before[kind]).map((kind) => ({ kind, number: after.number, title: after.title, repo }))
 }
 
-// the previous states of a repo's rows, advanced as transitions are compared; `firstLoad` holds
-// until a nonempty baseline has been recorded
-export type RowBaseline = { repo: string, rows: Map<number, RowState>, firstLoad: boolean }
+// the previous states of a repo's rows for one viewer, advanced as transitions are compared. There
+// is no flag for the first load: a baseline with no rows, at the start or after every row has been
+// removed, is the first load, and the next comparison that finds open rows only records them.
+export type RowBaseline = { repo: string, viewer: string, rows: Map<number, RowState> }
 
-export const baselineOf = (repo: string, rows: readonly OpenRow[], loaded: boolean): RowBaseline =>
-  ({ repo, rows: new Map(rows.map((row) => [row.number, rowState(row)])), firstLoad: !loaded || rows.length === 0 })
+// `loaded` is whether the repo has a successful cycle recorded; without one the cache holds no
+// confirmed rows, so the baseline starts empty
+export const baselineOf = (repo: string, viewer: string, rows: readonly OpenRow[], loaded: boolean): RowBaseline =>
+  ({ repo, viewer, rows: new Map(loaded ? rows.map((row) => [row.number, rowState(row)]) : []) })
 
 // compares the baseline with the rows now (or with one row, when `only` is a PR number),
-// advancing the baseline. Nothing fires while the baseline is the first load, which ends with
-// the first comparison that finds open rows. A stale row neither fires nor moves its baseline.
+// advancing the baseline. Nothing fires while the baseline is empty; the first comparison that
+// finds open rows records them as the baseline. A stale row neither fires nor moves its baseline.
 // A row with no previous state is recorded and fires nothing.
 export const compareRows = (baseline: RowBaseline, rows: ReadonlyMap<number, OpenRow>, only?: number): NotifyEvent[] => {
-  const silent = baseline.firstLoad
+  const silent = baseline.rows.size === 0
   // a single row cannot settle the first load: the cycle that finishes it does
   if (silent && only !== undefined) return []
   const events: NotifyEvent[] = []
@@ -64,7 +67,6 @@ export const compareRows = (baseline: RowBaseline, rows: ReadonlyMap<number, Ope
     if (!silent) events.push(...rowEvents(baseline.repo, baseline.rows.get(number) ?? null, row))
     baseline.rows.set(number, rowState(row))
   }
-  if (only === undefined && rows.size > 0) baseline.firstLoad = false
   return events
 }
 

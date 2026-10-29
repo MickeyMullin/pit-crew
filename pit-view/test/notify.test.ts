@@ -56,7 +56,8 @@ const harness = async (config: Partial<Config> = {}) => {
   })
   const settings = { current: { ...defaultConfig(), repo: scenario.repo, viewer: scenario.viewer, ...config } }
   const patches: Patch[] = []
-  const poller = createPoller({
+  // a poller over the shared cache; a second one stands for a restarted server
+  const build = (beforeCycle?: () => Promise<void>) => createPoller({
     cache,
     gh: createGh(runner.runner),
     clock: time.clock,
@@ -67,7 +68,9 @@ const harness = async (config: Partial<Config> = {}) => {
     emit: (patch) => patches.push(patch),
     pageSize: scenario.pageSize,
     notify: (found) => events.push(...found),
+    beforeCycle,
   })
+  const poller = build()
   // one finished cycle; the clock moves on so the next is its own
   const cycle = async (): Promise<NotifyEvent[]> => {
     const before = events.length
@@ -76,7 +79,14 @@ const harness = async (config: Partial<Config> = {}) => {
     time.advance(60_000)
     return events.slice(before)
   }
-  return { poller, cache, state, events, cycle, settings, time }
+  const cycleOf = async (other: ReturnType<typeof build>): Promise<NotifyEvent[]> => {
+    const before = events.length
+    other.refresh('manual')
+    await other.idle()
+    time.advance(60_000)
+    return events.slice(before)
+  }
+  return { poller, build, cycleOf, cache, state, events, cycle, settings, time }
 }
 
 // 104 is mine and awaiting review; these turn it into each watched state
@@ -198,7 +208,7 @@ test('a PR with no previous state has no transition, and later changes to it fir
   const rows = new Map([...view.mine.groups, ...view.others.groups].flatMap((group) => group.rows.map((row) => [row.number, row] as const)))
   const requested = rows.get(109)! as OtherRow
   const others = [...rows.values()].filter((row) => row.number !== 109)
-  const baseline = baselineOf(scenario.repo, others, true)
+  const baseline = baselineOf(scenario.repo, scenario.viewer, others, true)
   // 109 already requests a review but has no previous state: nothing fires, and its state is recorded
   assert.deepEqual(compareRows(baseline, rows), [])
   assert.deepEqual(compareRows(baseline, rows), [])
@@ -214,7 +224,7 @@ test('an empty baseline stays silent until a nonempty one has been recorded', as
   await poller.idle()
   const view = await poller.view()
   const rows = new Map([...view.mine.groups, ...view.others.groups].flatMap((group) => group.rows.map((row) => [row.number, row] as const)))
-  const baseline = baselineOf(scenario.repo, [], true)
+  const baseline = baselineOf(scenario.repo, scenario.viewer, [], true)
   assert.deepEqual(compareRows(baseline, new Map()), [])
   assert.deepEqual(compareRows(baseline, new Map()), [])
   // the first nonempty cycle is the baseline, and fires nothing
@@ -222,6 +232,48 @@ test('an empty baseline stays silent until a nonempty one has been recorded', as
   const requested = rows.get(113)! as OtherRow
   const asked = { ...requested, flags: [{ kind: 'requestedOfYou' as const, label: 'Requested of you' }] }
   assert.deepEqual(only(compareRows(baseline, new Map([...rows, [113, asked]]))), [['reviewRequested', 113]])
+  poller.stop()
+})
+
+test('a baseline that becomes empty again is silent: a one-PR refresh fires nothing, and the next nonempty comparison is a baseline', async () => {
+  const { poller } = await harness()
+  poller.refresh('manual')
+  await poller.idle()
+  const view = await poller.view()
+  const rows = new Map([...view.mine.groups, ...view.others.groups].flatMap((group) => group.rows.map((row) => [row.number, row] as const)))
+  const baseline = baselineOf(scenario.repo, scenario.viewer, [...rows.values()], true)
+  assert.deepEqual(compareRows(baseline, rows), [])
+  // every row removed: the baseline is empty again
+  assert.deepEqual(compareRows(baseline, new Map()), [])
+  const unasked = rows.get(113)! as OtherRow
+  assert.deepEqual(compareRows(baseline, new Map([[113, unasked]]), 113), [])
+  const asked = { ...unasked, flags: [{ kind: 'requestedOfYou' as const, label: 'Requested of you' }] }
+  assert.deepEqual(compareRows(baseline, new Map([...rows, [113, asked]])), [])
+  assert.deepEqual(only(compareRows(baseline, new Map([...rows, [113, unasked]]))), [])
+  assert.deepEqual(only(compareRows(baseline, new Map([...rows, [113, asked]]))), [['reviewRequested', 113]])
+  poller.stop()
+})
+
+test('while the viewer is unresolved nothing compares, and the first comparison after resolution is a baseline', async () => {
+  const { poller, build, cycleOf, cycle, settings, state } = await harness()
+  await cycle()
+  poller.stop()
+  // a restarted server whose viewer is still unknown, and which learns it in beforeCycle
+  settings.current = { ...settings.current, viewer: '' }
+  const restarted = build(async () => { settings.current = { ...settings.current, viewer: scenario.viewer } })
+  assert.deepEqual(await cycleOf(restarted), [])
+  state.edits.set(113, asRequested)
+  assert.deepEqual(only(await cycleOf(restarted)), [['reviewRequested', 113]])
+  restarted.stop()
+})
+
+test('a viewer change rebuilds the baseline silently', async () => {
+  const { poller, cycle, settings } = await harness({ viewer: 'someone-else' })
+  await cycle()
+  const before = settings.current
+  settings.current = { ...before, viewer: scenario.viewer }
+  await poller.configChanged(before)
+  assert.deepEqual(await cycle(), [])
   poller.stop()
 })
 

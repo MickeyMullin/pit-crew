@@ -258,14 +258,21 @@ export const createPoller = (options: PollerOptions): Poller => {
   }
 
   // the previous state transitions are compared against, taken from the cache before a fetch
-  // changes it; the first load (nothing ever fetched, or no rows) fires nothing
-  const ensureBaseline = (settings: Config): RowBaseline => {
-    if (baseline === null || baseline.repo !== settings.repo) {
+  // changes it; the first load (nothing ever fetched, or no rows) fires nothing. It is kept for
+  // one repo and viewer: a change of either rebuilds it silently, and while the viewer is still
+  // unresolved (empty) there is none, so nothing compares.
+  const ensureBaseline = (settings: Config): void => {
+    if (settings.viewer === '') {
+      baseline = null
+    } else if (baseline === null || baseline.repo !== settings.repo || baseline.viewer !== settings.viewer) {
       const snap = snapshot(settings, reports)
-      baseline = baselineOf(settings.repo, [...snap.rows.values()], snap.cached.lastSuccessAt !== null)
+      baseline = baselineOf(settings.repo, settings.viewer, [...snap.rows.values()], snap.cached.lastSuccessAt !== null)
     }
-    return baseline
   }
+
+  // the baseline, if it is for the repo and viewer in effect
+  const baselineFor = (settings: Config): RowBaseline | null =>
+    baseline !== null && baseline.repo === settings.repo && baseline.viewer === settings.viewer ? baseline : null
 
   // the next interval cycle: refreshSeconds after the last start of any trigger, only while a client is active
   const nextDue = (): number | null => {
@@ -379,6 +386,10 @@ export const createPoller = (options: PollerOptions): Poller => {
     } catch (error) {
       fail('open-page', 1, error)
     }
+    // a viewer that was unresolved at the start is known now: its first comparison is a baseline
+    if (live() && !stopped && config().repo === repo && baselineFor(config()) === null && config().viewer !== '') {
+      baseline = baselineOf(repo, config().viewer, [], false)
+    }
     if (live()) await rescan(config())
 
     if (live()) {
@@ -414,7 +425,8 @@ export const createPoller = (options: PollerOptions): Poller => {
     // same baseline, so a transition is neither lost nor fired from stale rows
     if (failure === null && shown()) {
       const current = config()
-      if (baseline?.repo === current.repo) notify(compareRows(baseline, snapshot(current, reports).rows))
+      const known = baselineFor(current)
+      if (known !== null) notify(compareRows(known, snapshot(current, reports).rows))
     }
   }
 
@@ -498,7 +510,8 @@ export const createPoller = (options: PollerOptions): Poller => {
       const rows = [...next.rows.values()].filter((row) => row.number === number || !same(row, before.rows.get(row.number)))
       const removed = [...before.rows.keys()].filter((known) => !next.rows.has(known))
       patch({ rows, removed, tiles: next.view.tiles, counts: next.view.counts })
-      if (failure === null && baseline?.repo === repo) notify(compareRows(baseline, next.rows, number))
+      const known = baselineFor(config())
+      if (failure === null && known !== null) notify(compareRows(known, next.rows, number))
     }
     return { number, outcome, joined: false, error: failure?.error ?? null, errorKind: failure?.errorKind ?? null }
   }
