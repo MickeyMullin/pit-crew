@@ -1,20 +1,19 @@
 // src/actions.ts
 import type { Cache } from './cache.ts'
 import type { Config } from './config.ts'
+import { deriveIssues, deriveMerge } from './derive.ts'
 import { fetchViewerLogin, GhError } from './github.ts'
 import type { Gh, GhErrorKind } from './github.ts'
 
 // direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs,
 // each through gh with the viewer's own token. This module decides whether an action is allowed
 // and what gh is asked; it never trusts the page, so every rule is checked here again.
-// merge is a known action name that is not offered yet: its merge method is undecided
+// merge is always a squash into the PR's base branch; the method is fixed, not a setting
 export const actionNames = ['merge', 'markReady', 'convertToDraft', 'requestReview'] as const
 export type ActionName = typeof actionNames[number]
 
-// the actions this build performs
-export const offeredActions: readonly ActionName[] = ['markReady', 'convertToDraft', 'requestReview']
-
 export type ActionRequest =
+  | { action: 'merge' }
   | { action: 'markReady' }
   | { action: 'convertToDraft' }
   | { action: 'requestReview', reviewer: string }
@@ -22,7 +21,7 @@ export type ActionRequest =
 export type ActionResult = { number: number, action: ActionName, done: true, reviewer?: string }
 
 export type ActionErrorCode =
-  | 'badRequest' | 'notOpen' | 'notYours' | 'notAllowed' | 'unavailable' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'ghFailed'
+  | 'badRequest' | 'notOpen' | 'notYours' | 'notAllowed' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'ghFailed'
 
 export class ActionError extends Error {
   override name = 'ActionError'
@@ -36,7 +35,7 @@ export class ActionError extends Error {
   }
 }
 
-const usage = 'send { "action": "markReady" | "convertToDraft" } or { "action": "requestReview", "reviewer": "<login from people>" }'
+const usage = 'send { "action": "merge" | "markReady" | "convertToDraft" } or { "action": "requestReview", "reviewer": "<login from people>" }'
 
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
@@ -47,7 +46,6 @@ export const parseAction = (body: unknown): ActionRequest => {
   if (typeof action !== 'string' || !actionNames.includes(action as ActionName)) {
     throw new ActionError('badRequest', `action must be one of ${actionNames.join(', ')}; ${usage}`)
   }
-  if (action === 'merge') throw new ActionError('unavailable', 'merge is not offered yet: its merge method is undecided')
   const extra = Object.keys(rest)[0]
   if (extra !== undefined) throw new ActionError('badRequest', `unknown field ${extra}; ${usage}`)
   if (action === 'requestReview') {
@@ -55,13 +53,15 @@ export const parseAction = (body: unknown): ActionRequest => {
     return { action, reviewer }
   }
   if (reviewer !== undefined) throw new ActionError('badRequest', `${action} takes no reviewer; ${usage}`)
-  return { action: action as 'markReady' | 'convertToDraft' }
+  return { action: action as 'merge' | 'markReady' | 'convertToDraft' }
 }
 
-// exactly what gh is asked for each action. A review request goes through gh api because
-// gh pr edit also reads the PR's projects, which needs a token scope the others do not
+// exactly what gh is asked for each action. A merge is a squash into the PR's base branch, with no
+// branch deletion, admin override, auto-merge or message override. A review request goes through
+// gh api for being one REST call with a fixed argument list, not because of any token scope
 export const ghArgs = (repo: string, number: number, request: ActionRequest): string[] => {
   switch (request.action) {
+    case 'merge': return ['pr', 'merge', String(number), '--squash', '--repo', repo]
     case 'markReady': return ['pr', 'ready', String(number), '--repo', repo]
     case 'convertToDraft': return ['pr', 'ready', String(number), '--undo', '--repo', repo]
     case 'requestReview': return ['api', '--method', 'POST', `repos/${repo}/pulls/${number}/requested_reviewers`, '-f', `reviewers[]=${request.reviewer}`]
@@ -103,6 +103,12 @@ export const createActions = (options: ActionsOptions): Actions => {
     const author = row.pr.author?.login ?? ''
     if (viewer === '' || !sameLogin(author, viewer)) throw new ActionError('notYours', `#${number} is not your PR; direct actions apply to your own PRs only`)
     let reviewer: string | undefined
+    if (request.action === 'merge') {
+      // the state the row shows, derived again from the cached PR rather than taken from the page
+      const merge = deriveMerge(row.pr, deriveIssues(row.pr))
+      if (merge.state === 'draft') throw new ActionError('notAllowed', `#${number} is a draft; mark it ready for review before merging`)
+      if (merge.state !== 'ready') throw new ActionError('notAllowed', `#${number} is not ready to merge: its merge state is ${merge.label}`)
+    }
     if (request.action === 'markReady' && !row.pr.isDraft) throw new ActionError('notAllowed', `#${number} is not a draft`)
     if (request.action === 'convertToDraft' && row.pr.isDraft) throw new ActionError('notAllowed', `#${number} is already a draft`)
     if (request.action === 'requestReview') {

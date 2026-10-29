@@ -37,7 +37,7 @@ type Behavior = {
 }
 
 const isWrite = (args: string[]): boolean =>
-  (args[0] === 'pr' && args[1] === 'ready') || (args[0] === 'api' && args.includes('--method'))
+  (args[0] === 'pr' && (args[1] === 'ready' || args[1] === 'merge')) || (args[0] === 'api' && args.includes('--method'))
 
 const writesOf = (runner: FakeRunner): Call[] => runner.calls.filter((call) => isWrite(call.args))
 const singleCallsOf = (runner: FakeRunner): Call[] =>
@@ -252,18 +252,194 @@ test('the viewer must be known: with no viewer configured and none from gh, ever
   }
 })
 
-test('merge is a known action that is not offered: it is refused before gh is asked anything', async () => {
+// the scenario's merge states for the viewer's own PRs: 102 is ready (approved, CLEAN), 101 and 120
+// are blocked, 104 needs review, 103 is a draft; 110 is ready but someone else's, and 100 was merged
+const refusedWithoutGh = async (h: Harness, number: number | string, body: unknown, status: number, error: RegExp): Promise<void> => {
+  const before = h.runner.calls.length
+  const refused = await act(h, number, body)
+  assert.equal(refused.status, status, `#${number}`)
+  assert.match(String(refused.body.error), error, `#${number}`)
+  // not even the account lookup: the refusal came before gh was asked anything
+  assert.equal(h.runner.calls.length, before, `#${number} asked gh nothing`)
+  assert.equal(writesOf(h.runner).length, 0)
+}
+
+test('merge squashes a ready PR of the viewer\'s own into its base: exactly gh pr merge --squash, with the viewer\'s token', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    const row = (await rowOf(h, 102))!
+    assert.equal(row.merge.state, 'ready')
+    assert.equal(row.section, 'mine')
+    const done = await act(h, 102, { action: 'merge' })
+    assert.equal(done.status, 200)
+    assert.deepEqual(done.body, { number: 102, action: 'merge', done: true })
+    assert.deepEqual(writesOf(h.runner).map((call) => call.args), [['pr', 'merge', '102', '--squash', '--repo', scenario.repo]])
+    assert.equal(writesOf(h.runner)[0]?.options?.env?.GH_TOKEN, 'gho_fixture_token')
+    // the account was confirmed before the write
+    const lookup = h.runner.calls.findIndex((call) => call.args[0] === 'api' && call.args[1] === 'user')
+    assert.ok(lookup >= 0 && lookup < h.runner.calls.indexOf(writesOf(h.runner)[0]!))
+    await until(() => singleCallsOf(h.runner).length === 1)
+    assert.equal(field(singleCallsOf(h.runner)[0]!.args, 'number'), '102')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('merge is refused unless the cached merge state is ready, and gh is not asked anything', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    for (const [number, state] of [[101, 'blocked'], [104, 'needsReview'], [120, 'blocked']] as const) {
+      assert.equal((await rowOf(h, number))?.merge.state, state)
+      await refusedWithoutGh(h, number, { action: 'merge' }, 422, /not ready to merge/)
+    }
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('merge is refused for a draft, and gh is not asked anything', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    assert.equal((await rowOf(h, 103))?.merge.state, 'draft')
+    await refusedWithoutGh(h, 103, { action: 'merge' }, 422, /is a draft/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('merge is refused for other people\'s PRs, even a ready one, and gh is not asked anything', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    assert.equal((await rowOf(h, 110))?.merge.state, 'ready')
+    await refusedWithoutGh(h, 110, { action: 'merge' }, 422, /not your PR/)
+    await refusedWithoutGh(h, 106, { action: 'merge' }, 422, /not your PR/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('merge is refused for a PR that is not open, and gh is not asked anything', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    // 100 is the viewer's own PR, already merged; 999 was never fetched
+    await refusedWithoutGh(h, 100, { action: 'merge' }, 422, /not an open PR/)
+    await refusedWithoutGh(h, 999, { action: 'merge' }, 422, /not an open PR/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('merge takes no other field: a method, a branch deletion, admin or auto flag, or a message is refused before gh is asked', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    for (const extra of [{ method: 'merge' }, { deleteBranch: true }, { admin: true }, { auto: true }, { subject: 'x' }, { body: 'x' }, { reviewer: 'sam-tran' }]) {
+      await refusedWithoutGh(h, 102, { action: 'merge', ...extra }, 400, /unknown field|takes no reviewer/)
+    }
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('merge needs the same Origin and token as every action, and a refusal reaches neither gh nor GitHub', async () => {
   const h = await setup()
   try {
     await filled(h)
     const before = h.runner.calls.length
-    for (const number of [102, 101, 106]) {
-      const refused = await act(h, number, { action: 'merge' })
-      assert.equal(refused.status, 422)
-      assert.match(String(refused.body.error), /merge is not offered/)
-    }
+    assert.equal((await act(h, 102, { action: 'merge' }, { Origin: 'http://attacker.test' })).status, 403)
+    assert.equal((await act(h, 102, { action: 'merge' }, { Origin: '' })).status, 403)
+    assert.equal((await act(h, 102, { action: 'merge' }, { 'X-Pit-View-Token': 'not-the-token' })).status, 403)
+    const noToken = await fetch(`${h.base}/api/prs/102/actions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: h.base },
+      body: JSON.stringify({ action: 'merge' }),
+    })
+    assert.equal(noToken.status, 403)
     assert.equal(h.runner.calls.length, before)
   } finally {
+    await h.cleanup()
+  }
+})
+
+test('merge is refused while gh is signed in as another account than the viewer, before any write', async () => {
+  const h = await setup({ runner: ghWorld({ account: 'someone-else' }) })
+  try {
+    await filled(h)
+    const refused = await act(h, 102, { action: 'merge' })
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /someone-else/)
+    assert.equal(writesOf(h.runner).length, 0)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a merge GitHub refuses is a 502 with the reason and claims nothing: no done, no state change, and the row is read again', async () => {
+  const h = await setup({ runner: ghWorld({ writeError: 'X Pull request is not mergeable: the base branch policy prohibits the merge' }) })
+  try {
+    await filled(h)
+    const refused = await act(h, 102, { action: 'merge' })
+    assert.equal(refused.status, 502)
+    assert.match(String(refused.body.error), /base branch policy/)
+    assert.equal(refused.body.errorKind, 'command')
+    assert.equal(refused.body.done, undefined)
+    assert.equal(writesOf(h.runner).length, 1)
+    // the cache was not touched by the refusal: the PR is still an open, ready row
+    await until(() => singleCallsOf(h.runner).length === 1)
+    assert.equal((await rowOf(h, 102))?.merge.state, 'ready')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('after a merge the PR is refreshed on its own and its row leaves the open tables as a patch', async () => {
+  const h = await setup({
+    runner: ghWorld({
+      // GitHub now says the PR is merged
+      single: async (number) => singlePr(number, { state: 'MERGED' }),
+    }),
+  })
+  try {
+    await filled(h)
+    const stream = await collectPatches(h.base)
+    const cyclesBefore = (await (await fetch(`${h.base}/api/view`)).json() as View).sync.cycle?.id
+    const done = await act(h, 102, { action: 'merge' })
+    assert.equal(done.status, 200)
+    await until(() => stream.patches.some((patch) => patch.removed.includes(102)))
+    const mine = stream.patches.filter((patch) => patch.rows.some((row) => row.number === 102) || patch.removed.includes(102))
+    assert.equal(mine[0]?.rows.find((row) => row.number === 102)?.refresh?.state, 'running')
+    assert.equal(await rowOf(h, 102), undefined)
+    // no cycle ran
+    assert.equal((await (await fetch(`${h.base}/api/view`)).json() as View).sync.cycle?.id, cyclesBefore)
+    assert.ok(stream.patches.every((patch) => patch.sync === undefined))
+    stream.close()
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a second click while a merge is in flight writes once', async () => {
+  let release: () => void = () => {}
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const h = await setup({ runner: ghWorld({ gate }) })
+  try {
+    await filled(h)
+    const first = act(h, 102, { action: 'merge' })
+    await until(() => writesOf(h.runner).length === 1)
+    const second = await act(h, 102, { action: 'merge' })
+    assert.equal(second.status, 409)
+    release()
+    assert.equal((await first).status, 200)
+    assert.equal(writesOf(h.runner).length, 1)
+  } finally {
+    release()
     await h.cleanup()
   }
 })
@@ -435,7 +611,10 @@ test('the pure parts: parseAction names what it refuses, and ghArgs is exactly w
   assert.deepEqual(parseAction({ action: 'markReady' }), { action: 'markReady' })
   assert.deepEqual(parseAction({ action: 'requestReview', reviewer: 'sam-tran' }), { action: 'requestReview', reviewer: 'sam-tran' })
   assert.throws(() => parseAction(null), /send \{/)
-  assert.throws(() => parseAction({ action: 'merge' }), /not offered/)
+  assert.deepEqual(parseAction({ action: 'merge' }), { action: 'merge' })
+  assert.throws(() => parseAction({ action: 'merge', method: 'rebase' }), /unknown field method/)
+  assert.throws(() => parseAction({ action: 'merge', reviewer: 'sam-tran' }), /takes no reviewer/)
+  assert.deepEqual(ghArgs('o/r', 7, { action: 'merge' }), ['pr', 'merge', '7', '--squash', '--repo', 'o/r'])
   assert.deepEqual(ghArgs('o/r', 7, { action: 'markReady' }), ['pr', 'ready', '7', '--repo', 'o/r'])
   assert.deepEqual(ghArgs('o/r', 7, { action: 'convertToDraft' }), ['pr', 'ready', '7', '--undo', '--repo', 'o/r'])
 })

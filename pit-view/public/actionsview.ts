@@ -7,10 +7,10 @@ import type { OpenRow } from '../src/derive.ts'
 import { sentence, tokenHeader } from './agent.ts'
 import type { RunRequest } from './agent.ts'
 
-// the actions this page offers; merge is not among them yet
-export type ActionKind = 'markReady' | 'convertToDraft' | 'requestReview'
+// the actions this page offers; merge is always a squash into the PR's base branch
+export type ActionKind = 'merge' | 'markReady' | 'convertToDraft' | 'requestReview'
 
-export const actionKinds: readonly ActionKind[] = ['markReady', 'convertToDraft', 'requestReview']
+export const actionKinds: readonly ActionKind[] = ['merge', 'markReady', 'convertToDraft', 'requestReview']
 
 // a person the config lists, as far as a reviewer choice needs
 export type PersonChoice = { login: string, alias: string }
@@ -20,11 +20,13 @@ export type ActionConfirm = { type: 'action', action: ActionKind, reviewer: stri
 export type ActionOffer = { action: ActionKind, text: string }
 
 // the actions a row offers: only the viewer's own PRs (Mine rows) have any, and a PR that has left
-// the open tables has none. The server decides again whatever this says
+// the open tables has none. Merge is offered only while the merge state is ready. The server
+// decides again whatever this says
 export const actionOffers = (row: Pick<OpenRow, 'section' | 'merge'>, open: boolean): ActionOffer[] => {
   if (!open || row.section !== 'mine') return []
   const draft = row.merge.state === 'draft'
   return [
+    ...row.merge.state === 'ready' ? [{ action: 'merge', text: 'Squash and merge' } as const] : [],
     draft ? { action: 'markReady', text: 'Mark ready for review' } : { action: 'convertToDraft', text: 'Convert to draft' },
     { action: 'requestReview', text: 'Request review' },
   ]
@@ -54,12 +56,24 @@ const aliasOf = (people: readonly PersonChoice[], login: string): string =>
 // null when the row no longer offers that action. The chosen reviewer is kept when still listed,
 // otherwise the first choice
 export const actionConfirmModel = (
-  row: Pick<OpenRow, 'number' | 'title' | 'author' | 'section' | 'merge'>,
+  row: Pick<OpenRow, 'number' | 'title' | 'author' | 'section' | 'merge' | 'baseRef'>,
   ask: ActionConfirm,
   people: readonly PersonChoice[],
 ): ActionConfirmModel | null => {
   if (!actionOffers(row, true).some((offer) => offer.action === ask.action)) return null
   const n = row.number
+  if (ask.action === 'merge') {
+    return {
+      action: ask.action,
+      heading: `Squash and merge #${n} into ${row.baseRef}?`,
+      title: row.title,
+      effect: `Squashes the PR into one commit on ${row.baseRef} under your account. The head branch is not deleted. The merge cannot be undone from Pit View.`,
+      reviewers: null,
+      reviewer: '',
+      confirm: 'Squash and merge',
+      busy: 'Merging…',
+    }
+  }
   if (ask.action === 'markReady') {
     return {
       action: ask.action,
@@ -125,10 +139,12 @@ export const actionRefusalText = (status: number, error: string | null): string 
 
 // what the live region says, and the note shown in the drawer, once GitHub has accepted the action
 export const actionDoneText = (number: number, ask: ActionConfirm, people: readonly PersonChoice[]): string => {
-  const done = ask.action === 'markReady'
-    ? 'marked ready for review'
-    : ask.action === 'convertToDraft'
-      ? 'converted to a draft'
-      : `review requested from ${aliasOf(people, ask.reviewer)}`
+  const done = ask.action === 'merge'
+    ? 'squash merged'
+    : ask.action === 'markReady'
+      ? 'marked ready for review'
+      : ask.action === 'convertToDraft'
+        ? 'converted to a draft'
+        : `review requested from ${aliasOf(people, ask.reviewer)}`
   return `#${number}: ${done}. The row is refreshing.`
 }
