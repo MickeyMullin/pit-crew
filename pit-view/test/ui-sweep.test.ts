@@ -51,7 +51,7 @@ test('the bot group header offers Run sweep, named for the repository, and no st
   assert.equal(model.status, null)
 })
 
-test('Run sweep says why it cannot start: a sweep in flight, or no clone configured', () => {
+test('Run sweep says why it cannot start: a sweep in flight or no clone configured', () => {
   const running = sweepView(record())
   const busy = sweepHeaderModel(viewOf([running]), now)
   assert.equal(busy.start.disabled, true)
@@ -94,7 +94,7 @@ test('the status follows the newest sweep, and a sweep with nothing to sweep is 
 
 // the confirmation
 
-test('the confirmation names the repository, says it runs one PR at a time, and that the reviewers may post as the viewer', () => {
+test('the confirmation names the repository, says it runs one PR at a time, and says the reviewers may post as the viewer', () => {
   const start = sweepStartOf(config(), false)
   const model = sweepConfirmModel(start, 'claude')
   assert.match(model.heading, new RegExp(scenario.repo))
@@ -114,7 +114,7 @@ test('the confirmation names the repository, says it runs one PR at a time, and 
   assert.equal(sweepStartOf(config({ agent: { runner: 'codex', claudeModel: 'sonnet' } }), false).runner, 'codex')
 })
 
-test('a sweep is started and stopped with the token, a runner, the repository, and the viewer, the last two as the confirmation showed them, and nothing else', () => {
+test('a sweep is started and stopped with the token, a runner, and the repository and viewer as the confirmation showed them, and nothing else', () => {
   const start = sweepStartRequest('codex', scenario.repo, scenario.viewer, 'tok-1')
   assert.equal(start.url, '/api/sweeps')
   assert.deepEqual(start.init.headers, { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok-1' })
@@ -143,7 +143,7 @@ test('the drawer shows the whole result: counts, a card per PR, the merge order,
     'build(deps): bump right-pad from 2.0.0 to 3.0.0', { text: 'Hold', tone: 'amber' }, { text: 'CI failed', tone: 'red' }, { text: 'Not posted', url: null }, true,
     'a major version of a runtime dependency', [{ priority: 'P1', summary: 'Drops the callback form the importer still uses', tone: 'red' }], 'CI failed in the importer tests; unchanged since Oct 25',
   ])
-  // the report opens in the panel when it is a PR report, and always keeps its path
+  // the report opens in the panel when it is a PR report and always keeps its path
   assert.deepEqual(first?.report, { name: 'PR-201.md', path: '~/agents/output/PR-201.md' })
   assert.deepEqual(model.order, [{ index: 1, action: 'Merge #201', prs: [201] }, { index: 2, action: 'Hold #202 until the importer moves off the callback form', prs: [202] }])
   assert.equal(model.summaryPath, '~/agents/output/dependabot-sweep-octo-example-orbit-2026-10-26.md')
@@ -156,7 +156,7 @@ test('a report that is not a PR report is shown as a path and never offered to t
   assert.equal(sweepRowModel({ ...settled(sweepResult()).result!.rows[0]!, report: '~/agents/output/../../x/PR-1.md' }).report?.name, 'PR-1.md')
 })
 
-test('a sweep with nothing to sweep renders as done with zero counts, no rows, and no summary, and says so', () => {
+test('a sweep with nothing to sweep renders as done with zero counts, no rows, and no summary and says so', () => {
   const model = sweepResultModel(settled(emptySweepResult()))
   assert.deepEqual([model.text, model.tone, model.empty, model.note], ['Done · nothing to sweep', 'gray', true, null])
   assert.deepEqual(model.counts?.map((count) => count.value), [0, 0, 0, 0])
@@ -176,7 +176,7 @@ test('a failed sweep shows its note as a sentence, a stopped one says so, and a 
   assert.deepEqual(sweepWaitingModel(waiting), { question: 'Close #202 first? (yes / no)', resume: 'cd ~/dev/orbit && claude --resume s-1' })
 })
 
-test('a running sweep shows the sweep\'s five steps under its own names, and the newest note', () => {
+test('a running sweep shows the sweep\'s five steps under its own names and the newest note', () => {
   const steps = [
     { step: 'resolveBase', state: 'done', at: '2026-10-26T17:41:00Z', note: null },
     { step: 'review', state: 'started', at: '2026-10-26T17:42:00Z', note: '3 of 7 reviewed' },
@@ -193,7 +193,7 @@ test('a running sweep shows the sweep\'s five steps under its own names, and the
   assert.equal(stepTitle('review-pr', 'resolveBase'), 'Resolve base')
 })
 
-test('the drawer shows the sweep asked for, otherwise the newest, and lists the earlier ones', () => {
+test('the drawer shows the sweep asked for or else the newest and lists the earlier ones', () => {
   const newest = settled(sweepResult(), { id: 3 })
   const older = settled(emptySweepResult(), { id: 2 })
   assert.equal(shownSweep([newest, older], null)?.id, 3)
@@ -274,7 +274,7 @@ test('the bot group header, the broom, and the PR drawer are wired to the sweep 
 
 // the confirmation re-renders whenever anything it displays changes
 
-test('the start confirmation\'s signature changes with the repository, the viewer, the effect text, the command, and the availability, and with nothing else', () => {
+test('the start confirmation\'s signature changes with the repository, the viewer, the effect text, the command, and the availability and with nothing else', () => {
   const base = config()
   const sig = (cfg: Config, runner: 'claude' | 'codex' = 'claude', busy = false) => sweepConfirmSignature(sweepStartOf(cfg, busy), runner)
   const reference = sig(base)

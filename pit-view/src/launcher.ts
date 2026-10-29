@@ -1181,7 +1181,7 @@ export const runStore = (cache: Cache): SessionStore<Run> => ({
   schema: null,
 })
 
-// the sweeps table's store: one sweep in flight per repository, and a result.json that must carry the sweep result schema
+// the sweeps table's store: one sweep in flight per repository and a result.json that must carry the sweep result schema
 export const sweepStore = (cache: Cache): SessionStore<Sweep> => ({
   folder: 'sweeps',
   noun: 'sweep',

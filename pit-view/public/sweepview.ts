@@ -88,7 +88,7 @@ export const sweepHeaderModel = (sweeps: SweepsView, nowMs: number, timeZone?: s
   }
 }
 
-// "running 3m · last step 20s ago", or "running 12s · starting" before the first step
+// "running 3m · last step 20s ago" or "running 12s · starting" before the first step
 const runningText = (sweep: Pick<SweepView, 'startedAt' | 'lastStepAt'>, nowMs: number): string => {
   const running = `running ${formatDuration(sweep.startedAt, nowMs)}`
   return sweep.lastStepAt === null ? `${running} · starting` : `${running} · last step ${formatSince(sweep.lastStepAt, nowMs)}`
@@ -219,7 +219,7 @@ export type SweepResultModel = {
   note: string | null
   // a sweep with nothing to sweep: done, every count zero, no rows, and no summary
   empty: boolean
-  // null when the result has none (no result, or a failed or waiting sweep that stopped before it had them): no counts are shown, never zeros
+  // null when the result has none (no result or a failed or waiting sweep that stopped before it had them): no counts are shown, never zeros
   counts: CountModel[] | null
   // the question of a waiting sweep, which its own card shows
   question: string | null

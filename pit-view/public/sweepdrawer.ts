@@ -17,7 +17,7 @@ import type { RunnerName } from './agent.ts'
 
 export type SweepOpener = { key: string }
 
-// what the drawer is asking about: a start waiting for its Start, or a stop waiting for its Stop
+// what the drawer is asking about: a start waiting for its Start or a stop waiting for its Stop
 type Confirm = { type: 'start', runner: RunnerName } | { type: 'stop', id: number }
 
 export type SweepDrawerOptions = {

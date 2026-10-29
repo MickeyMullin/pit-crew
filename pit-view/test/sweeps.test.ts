@@ -283,7 +283,7 @@ test('a stop signals the sweep\'s group and settles it stopped; stopping an unkn
   }
 })
 
-test('after a restart a sweep whose process lives is watched again, and settles from its files', async () => {
+test('after a restart a sweep whose process lives is watched again and settles from its files', async () => {
   const h = await harness()
   try {
     const sweep = await h.launcher.start(start())
@@ -304,7 +304,7 @@ test('after a restart a sweep whose process lives is watched again, and settles 
   }
 })
 
-test('after a restart a sweep whose process is gone settles from its result.json, and otherwise fails as serverRestarted', async () => {
+test('after a restart a sweep whose process is gone settles from its result.json and otherwise fails as serverRestarted', async () => {
   const h = await harness()
   try {
     const withResult = await h.launcher.start(start())
@@ -346,7 +346,7 @@ test('a sweep with an unreadable spawn fails as spawnFailed and the repository m
 
 // the view, the start text, and the memory
 
-test('the confirmation names the repository, says the sweep is serial and that the reviewers may post as the viewer', () => {
+test('the confirmation names the repository, says the sweep is serial, and says the reviewers may post as the viewer', () => {
   const start = sweepStartOf(baseConfig(), false)
   assert.match(start.heading, /octo-example\/orbit/)
   assert.equal(start.repo, scenario.repo)
