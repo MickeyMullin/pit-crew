@@ -341,7 +341,7 @@ export type TableModel<R> = {
   onSort: (key: string) => void
 }
 
-// Run sweep, and the latest sweep's state beside it. The status leaves out the running timer and the finish age, which updateSweepStatus and tickTimers set in place
+// Run sweep and the latest sweep's state beside it. The status leaves out the running timer and the finish age, which updateSweepStatus and tickTimers set in place
 const sweepControls = (sweep: SweepHeaderModel): HTMLElement => {
   const run = h('button', {
     type: 'button',

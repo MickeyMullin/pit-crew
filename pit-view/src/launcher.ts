@@ -1117,7 +1117,7 @@ export type LauncherOptions<T extends Session = Run> = {
 
 // where a launcher keeps what it launches. Review runs live in the runs table, one in flight per PR; sweeps in the sweeps table, one in flight per repository. Everything else about launching is shared
 export type SessionStore<T extends Session> = {
-  // the folder under the state folder, and the word the logs and messages use
+  // the folder under the state folder and the word the logs and messages use
   folder: 'runs' | 'sweeps'
   noun: 'run' | 'sweep'
   create: (request: StartRequest, fields: NewSweep, dirOf: (id: number) => string) => T
@@ -1125,7 +1125,7 @@ export type SessionStore<T extends Session> = {
   update: (id: number, changes: RunChanges) => T
   running: () => T[]
   prune: () => T[]
-  // what holds a start to one in flight: the PR for a run, the repository for a sweep
+  // what holds a start to one in flight: the PR for a run and the repository for a sweep
   key: (request: StartRequest) => string
   inFlight: (request: StartRequest) => boolean
   busyText: (request: StartRequest) => string
@@ -1181,7 +1181,7 @@ export const runStore = (cache: Cache): SessionStore<Run> => ({
   schema: null,
 })
 
-// the sweeps table's store: one sweep in flight per repository, and a result that is a sweep's
+// the sweeps table's store: one sweep in flight per repository, and a result.json that must carry the sweep result schema
 export const sweepStore = (cache: Cache): SessionStore<Sweep> => ({
   folder: 'sweeps',
   noun: 'sweep',

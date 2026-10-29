@@ -332,7 +332,7 @@ const say = (text: string): void => {
 const reportPanel = createReportPanel({
   root: byId('report-panel'),
   nowMs,
-  // back to the Open button that showed the report, or the heading of the drawer it was opened from
+  // back to the Open button that showed the report or the heading of the drawer it was opened from
   onClosed: (key) => (sweepDrawer.isOpen() ? sweepDrawer : drawer).focusKey(key, true),
   say,
 })

@@ -595,7 +595,7 @@ test('a version 6 cache gains sweeps in place: its GitHub tables and its runs ar
     const first = openCache({ path, clock: handClock().clock })
     const created = first.createRun(newRun(106), (id) => `~/runs/${id}`)
     first.close()
-    // what version 6 left behind: no sweeps table, a cached PR, a run
+    // what version 6 left behind: no sweeps table, a cached PR, and a run
     const old = new DatabaseSync(path)
     old.exec('DROP TABLE sweeps')
     old.exec('INSERT INTO prs (repo, number, state, updated_at, head_oid, fetched_at, cycle, last_seen_at, data) VALUES (\'octo-example/orbit\', 106, \'open\', \'2026-10-26T12:00:00Z\', \'abc\', \'2026-10-26T12:00:00Z\', 1, \'2026-10-26T12:00:00Z\', \'{"number":106}\')')

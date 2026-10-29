@@ -69,7 +69,7 @@ test('a sweep launches review-dependabot-sweep for the repo with --parallel 1 an
     const sweep = await h.launcher.start(start())
     const runDir = join(h.stateDir, 'sweeps', String(sweep.id))
     const child = h.launch.children[0]!
-    // the argv Claude receives, and the one stdin line that carries the request
+    // the argv Claude receives and the one stdin line that carries the request
     assert.equal(child.request.command, 'claude')
     assert.equal(child.request.cwd, join(h.home, 'dev', 'orbit'))
     const content = (JSON.parse(child.writes[0] ?? '{}') as { message: { content: string } }).message.content
@@ -85,7 +85,7 @@ test('a sweep launches review-dependabot-sweep for the repo with --parallel 1 an
     assert.deepEqual(h.cache.runningRuns(), [])
     const recorded = JSON.parse(await readFile(join(runDir, 'request.json'), 'utf8'))
     assert.deepEqual([recorded.command, recorded.args, recorded.pid], ['review-dependabot-sweep', [scenario.repo, '--parallel', '1'], child.pid])
-    // the same checks as a run's start: one identity call, one clone check
+    // the same checks as a run's start: one identity call and one clone check
     assert.deepEqual(h.gh.calls.filter((call) => call.args[0] === 'api').map((call) => call.args), [['api', 'user', '--jq', '.login']])
     assert.equal(h.launch.gitCalls.length, 1)
     assert.deepEqual(h.watched, [sweep.id])
@@ -358,7 +358,7 @@ test('the confirmation names the repository, says the sweep is serial and that t
   assert.match(start.posts, /never merges or pushes/)
   assert.equal(start.unavailable, null)
   assert.deepEqual(start.runners, ['claude', 'codex'])
-  // not available while a sweep runs, or without a clone
+  // not available while a sweep runs or without a clone
   assert.match(sweepStartOf(baseConfig(), true).unavailable ?? '', /already in flight/)
   const noClone = baseConfig()
   delete noClone.cloneDir

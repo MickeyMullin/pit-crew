@@ -747,7 +747,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
 
   const runningSweeps = (): Sweep[] => all('SELECT * FROM sweeps WHERE status = \'running\' ORDER BY id').map(toSession)
 
-  // a sweep still in flight is never pruned, however old
+  // all but the newest sweeps are pruned, but a sweep still in flight is never pruned, however old
   const pruneSweeps = (): Sweep[] => transaction(() => {
     const doomed = all('SELECT * FROM sweeps WHERE status != \'running\' AND id NOT IN (SELECT id FROM sweeps ORDER BY id DESC LIMIT $keep) ORDER BY id', { keep: keepSweeps }).map(toSession)
     for (const gone of doomed) run('DELETE FROM sweeps WHERE id = $id', { id: gone.id })

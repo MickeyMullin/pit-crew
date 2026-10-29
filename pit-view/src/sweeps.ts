@@ -9,7 +9,7 @@ import type { CiState, PostForm, Priority, Recommendation, StartRequest, StepSlo
 export const sweepCommand = 'review-dependabot-sweep'
 export const sweepLabel = 'Dependabot sweep'
 
-// the sweep's arguments, without --emit-json, which the launcher adds: the repository, and one reviewer at a time. Never --no-post: approving and requesting at one stroke is what a sweep is for
+// the sweep's arguments, without --emit-json, which the launcher adds: the repository and one reviewer at a time. Never --no-post: approving and requesting at one stroke is what a sweep is for
 export const sweepArgs = (repo: string): string[] => [repo, '--parallel', '1']
 
 // a sweep has no PR; the number is ignored by the sweeps store and never written anywhere
@@ -22,7 +22,7 @@ export const sweepRequest = (repo: string, runner?: RunnerName): StartRequest =>
   ...(runner === undefined ? {} : { runner }),
 })
 
-// what the confirmation tells the owner before a sweep starts: the repository, that it runs one reviewer at a time, and that the reviewers post on GitHub as the viewer. Pit View posts nothing itself
+// what the confirmation tells the owner before a sweep starts: that it covers the repository, that it runs one reviewer at a time, and that the reviewers post on GitHub as the viewer. Pit View posts nothing itself
 export type SweepStart = {
   heading: string
   repo: string
@@ -60,7 +60,7 @@ export type SweepRow = {
   number: number
   url: string
   title: string
-  // the full SHA, and its first seven characters
+  // the full SHA and its first seven characters
   head: string
   headShort: string
   bump: string

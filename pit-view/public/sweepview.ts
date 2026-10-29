@@ -43,7 +43,7 @@ export const sweepWhen = (sweep: Pick<SweepView, 'startedAt' | 'finishedAt'>, ti
   return `${formatDay(at, timeZone)} ${formatClock(at, false, timeZone)}`
 }
 
-// the bot group header's two controls: Run sweep, and the current or latest sweep's state, which opens the drawer. The group's own collapse button is not part of this. The status keeps what moves with the clock (the running timer, the finish age) out of its label, so the button is not rebuilt under the pointer while the sweep's state holds: the page sets those in place
+// the bot group header's two controls: Run sweep and the current or latest sweep's state, which opens the drawer. The group's own collapse button is not part of this. The status keeps what moves with the clock (the running timer and the finish age) out of its label, so the button is not rebuilt under the pointer while the sweep's state holds: the page sets those in place
 export type SweepHeaderModel = {
   start: { label: string, name: string, disabled: boolean, reason: string | null }
   status: null | {
@@ -96,7 +96,7 @@ const runningText = (sweep: Pick<SweepView, 'startedAt' | 'lastStepAt'>, nowMs: 
 
 export const sweepRunningText = runningText
 
-// the confirmation before a sweep starts: the repository, serial, and that the reviewers post
+// the confirmation before a sweep starts: that it covers the repository, that it runs serially, and that the reviewers post
 export type SweepConfirmModel = {
   heading: string
   repo: string
@@ -180,7 +180,7 @@ export type SweepRowModel = {
   reused: boolean
   escalation: string | null
   findings: { priority: string, summary: string, tone: Tone }[]
-  // the report's file name when the report panel can open it, and its path as written
+  // the report's file name when the report panel can open it and its path as written
   report: { name: string | null, path: string } | null
   notes: string
 }

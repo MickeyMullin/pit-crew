@@ -90,7 +90,7 @@ export type PitServer = {
   clients: Clients
   cache: Cache
   launcher: Launcher
-  // sweeps are their own concept: a launcher over the sweeps table, and the sweeps held in memory
+  // sweeps are their own concept: a launcher over the sweeps table and the sweeps held in memory
   sweepLauncher: Launcher<Sweep>
   sweeps: SweepMemory
   // the token this start injected into its pages

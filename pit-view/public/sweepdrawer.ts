@@ -67,7 +67,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
   let opener: SweepOpener | null = null
   // the sweep shown: null follows the newest
   let shownId: number | null = null
-  // the PR whose card is marked, and whether it is still to be scrolled to
+  // the PR whose card is marked and whether it is still to be scrolled to
   let marked: number | null = null
   let scrollPending = false
   let confirm: Confirm | null = null
