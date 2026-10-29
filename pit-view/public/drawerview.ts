@@ -4,6 +4,8 @@
 // elements. Nothing here reads the DOM or the clock: every time is passed in
 import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
+import { actionConfirmModel, actionOffers } from './actionsview.ts'
+import type { ActionConfirm, ActionConfirmModel, ActionOffer, PersonChoice } from './actionsview.ts'
 import { commandLine, doneTone, runnerLabels, sentence, stepTitle } from './agent.ts'
 import type { AgentCell, AgentResult, DoneTone, RunnerName, RunView, StartKind, StartOption, StepSlot } from './agent.ts'
 import { shortSha } from './format.ts'
@@ -11,10 +13,11 @@ import { safeHref } from './safeurl.ts'
 
 export type Loadable<T> = { state: 'loading' } | { state: 'error', message: string } | { state: 'ready', items: T[] }
 
-// what the drawer is asking about: a start waiting for its Start, or a stop waiting for its Stop
+// what the drawer is asking about: a start waiting for its Start, a stop waiting for its Stop, or a direct action on the PR waiting for its confirmation
 export type Confirm =
   | { type: 'start', kind: StartKind, runner: RunnerName }
   | { type: 'stop', andOpen: boolean, runId: number }
+  | ActionConfirm
 
 // the control that opened the drawer, named by its data-focus-key, so focus can go back to it
 export type Opener = { key: string, number: number }
@@ -466,6 +469,8 @@ export type DrawerInput = {
   runs: Loadable<RunView>
   reports: Loadable<ReportListing>
   confirm: Confirm | null
+  // the people the config lists, for a review request's choice; read when that is asked
+  people?: readonly PersonChoice[]
 }
 
 export type DrawerModel = {
@@ -473,6 +478,9 @@ export type DrawerModel = {
   gone: string | null
   starts: StartsModel
   confirm: StartConfirmModel | null
+  // direct actions: what the row offers (none for Others' rows and PRs that left the open tables), and the confirmation being asked
+  actions: ActionOffer[]
+  actionAsk: ActionConfirmModel | null
   card: CardKind
   running: RunningModel | null
   stop: StopModel | null
@@ -497,6 +505,8 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
     gone: input.open ? null : goneText(row.number),
     starts: cell === null ? { buttons: [], shared: null } : startsModel(cell, input.open, row.number),
     confirm: startAsk,
+    actions: actionOffers(row, input.open),
+    actionAsk: confirm?.type === 'action' ? actionConfirmModel(row, confirm, input.people ?? []) : null,
     card,
     running: cell !== null && card === 'running' ? runningModel(row, cell) : null,
     stop: cell !== null && card === 'running' ? stopModel(row.number, cell, confirm?.type === 'stop' && confirm.andOpen) : null,
@@ -586,6 +596,8 @@ export const latestCell = (cell: AgentCell | null, runs: Loadable<RunView>): Age
 // a confirmation outlives nothing: a stop is about one run that must still be running, a start
 // about a start the PR still offers and can run now; otherwise it is dropped
 export const confirmHolds = (confirm: Confirm, cell: AgentCell | null, open: boolean): boolean => {
+  // an action's confirmation is about the row, not the run: actionHolds judges it
+  if (confirm.type === 'action') return true
   if (cell === null) return false
   if (confirm.type === 'stop') return cell.state === 'running' && cell.runId === confirm.runId
   if (!open) return false

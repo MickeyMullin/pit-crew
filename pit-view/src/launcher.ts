@@ -345,6 +345,8 @@ export type LaunchSpec = {
   home: string
   // Claude's, chosen by Pit View before the start
   sessionId: string | null
+  // every Claude run's --model
+  claudeModel: string
   codexModel?: string
   // Codex only: ~/agents/output and ~/agents/worktrees resolved through their symlinks
   reportsDir: string
@@ -366,7 +368,7 @@ export const claudeInvocation = (spec: LaunchSpec): Invocation => ({
   command: 'claude',
   args: [
     '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
-    '--session-id', spec.sessionId ?? '', '--permission-mode', 'auto', '--add-dir', join(spec.home, 'agents'),
+    '--model', spec.claudeModel, '--session-id', spec.sessionId ?? '', '--permission-mode', 'auto', '--add-dir', join(spec.home, 'agents'),
   ],
   // one user message; stdin then stays open until the result arrives with nothing in the background
   stdin: `${JSON.stringify({ type: 'user', message: { role: 'user', content: requestText('/', spec.command, spec.args, spec.runDir) } })}\n`,
@@ -1332,6 +1334,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       runDir: dir,
       home,
       sessionId: run.sessionId,
+      claudeModel: config.agent.claudeModel,
       ...(config.agent.codexModel === undefined ? {} : { codexModel: config.agent.codexModel }),
       reportsDir: await resolved(join(home, 'agents', 'output')),
       worktreesDir: await resolved(join(home, 'agents', 'worktrees')),

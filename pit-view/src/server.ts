@@ -9,6 +9,8 @@ import type { AddressInfo } from 'node:net'
 import { homedir } from 'node:os'
 import { extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ActionError, createActions } from './actions.ts'
+import type { ActionErrorCode } from './actions.ts'
 import { openCache } from './cache.ts'
 import type { Cache } from './cache.ts'
 import { createClients, keepsSchedule } from './clients.ts'
@@ -161,13 +163,17 @@ export const hostAllowed = (header: string | undefined, port: number, allowed: r
   return match !== null && allowed.includes(match[1] ?? '')
 }
 
-// a write's Origin is the server's own page: a loopback origin with the server's port, or
-// http or https on an allowed host, with any port or none
-export const originAllowed = (origin: string, port: number, allowed: readonly string[]): boolean => {
-  const value = origin.toLowerCase()
-  if (value.startsWith('http://') && loopbackHosts(port).has(value.slice('http://'.length))) return true
-  const match = /^https?:\/\/([a-z0-9.-]+)(?::\d{1,5})?$/.exec(value)
-  return match !== null && allowed.includes(match[1] ?? '')
+// Origin must be the actual origin addressed by this request. The Host header and, when a reverse proxy supplies it, X-Forwarded-Proto are the effective host and scheme; allowedHosts only decides which Host values the server accepts, never which Origins are interchangeable.
+export const originAllowed = (origin: string, hostHeader: string | undefined, scheme = 'http'): boolean => {
+  if (hostHeader === undefined || !/^(?:https?)$/i.test(scheme)) return false
+  try {
+    const actual = new URL(origin)
+    if (actual.protocol !== `${scheme.toLowerCase()}:` || actual.username !== '' || actual.password !== '' || actual.pathname !== '/' || actual.search !== '' || actual.hash !== '') return false
+    const expected = new URL(`${scheme.toLowerCase()}://${hostHeader}`)
+    return actual.hostname.toLowerCase() === expected.hostname.toLowerCase() && actual.port === expected.port
+  } catch {
+    return false
+  }
 }
 
 const clientIdPattern = /^[A-Za-z0-9_-]{1,100}$/
@@ -202,6 +208,19 @@ const launchStatus: Readonly<Record<LaunchErrorCode, number>> = {
   tandemRunner: 400,
   fixRunner: 400,
   notRunning: 409,
+}
+
+// why a direct action was refused, as an HTTP status
+const actionStatus: Readonly<Record<ActionErrorCode, number>> = {
+  badRequest: 400,
+  notOpen: 422,
+  notYours: 422,
+  notAllowed: 422,
+  stale: 409,
+  identityMismatch: 422,
+  identityUnknown: 502,
+  busy: 409,
+  ghFailed: 502,
 }
 
 // why a report could not be read, as an HTTP status
@@ -478,6 +497,11 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (!tokenMatches(req.headers[tokenHeader], token)) throw new HttpError(403, 'missing or wrong Pit View token; reload the page')
   }
 
+  // direct actions are the first GitHub writes, so they also need an Origin header: a request with none is refused, where the run writes accept one (the global check refuses a foreign one)
+  const requireOrigin = (req: IncomingMessage): void => {
+    if (req.headers.origin === undefined) throw new HttpError(403, 'missing Origin header; use the Pit View page')
+  }
+
   const prNumber = (raw: string): number => {
     if (!/^[1-9]\d{0,8}$/.test(raw)) throw new HttpError(400, 'the PR number must be a positive integer')
     return Number(raw)
@@ -540,6 +564,28 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       json(res, 200, runView(run))
     } catch (error) {
       launchFailure(error)
+    }
+  }
+
+  const actions = createActions({
+    cache,
+    gh,
+    config: effective,
+    refreshPr: (repo, number) => poller.refreshPrAfterWrite(repo, number),
+    log,
+  })
+
+  // a direct action on the viewer's own PR (section 9 of DESIGN.md); answers once gh has finished, while the PR's refresh runs on and its row arrives as a patch
+  const prAction = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
+    requireOrigin(req)
+    requireToken(req)
+    const number = prNumber(raw)
+    const body = await readJson(req)
+    try {
+      json(res, 200, await actions.run(number, body))
+    } catch (error) {
+      if (!(error instanceof ActionError)) throw error
+      json(res, actionStatus[error.code], { error: error.message, ...(error.errorKind === null ? {} : { errorKind: error.errorKind }) })
     }
   }
 
@@ -741,6 +787,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'POST', pattern: /^\/api\/clients\/([^/]+)$/, handle: (req, res, _url, match) => updateClient(req, res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/refresh$/, handle: (_req, res) => json(res, 200, poller.refresh('manual')) },
     { method: 'POST', pattern: /^\/api\/prs\/([^/]+)\/refresh$/, handle: (req, res, _url, match) => refreshPr(req, res, match[1] ?? '') },
+    { method: 'POST', pattern: /^\/api\/prs\/([^/]+)\/actions$/, handle: (req, res, _url, match) => prAction(req, res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/prs\/([^/]+)\/runs$/, handle: (req, res, _url, match) => startRun(req, res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/prs\/([^/]+)\/runs$/, handle: (_req, res, _url, match) => json(res, 200, cache.runsFor(effective().repo, prNumber(match[1] ?? '')).map(runView)) },
     { method: 'GET', pattern: /^\/api\/prs\/([^/]+)\/reports$/, handle: (_req, res, _url, match) => listReportsFor(res, match[1] ?? '') },
@@ -763,7 +810,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     const method = req.method ?? 'GET'
     const origin = req.headers.origin
     // writes from another site's page are refused; the page's own requests carry its origin or none
-    if (method !== 'GET' && origin !== undefined && !originAllowed(origin, port, allowed)) {
+    const forwardedProto = req.headers['x-forwarded-proto']
+    const scheme = typeof forwardedProto === 'string' ? forwardedProto.split(',')[0]?.trim() ?? 'http' : 'http'
+    if (method !== 'GET' && origin !== undefined && !originAllowed(origin, req.headers.host, scheme)) {
       throw new HttpError(403, 'cross-origin request refused')
     }
     const url = new URL(req.url ?? '/', `http://${host}:${port}`)

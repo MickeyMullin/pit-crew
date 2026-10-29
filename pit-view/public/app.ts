@@ -342,6 +342,7 @@ const drawer = createDrawer({
   token: readToken(document),
   nowMs,
   rowOf: (number) => feed.view === null ? undefined : findOpenRow(feed.view, number),
+  repo: () => feed.view?.repo ?? '',
   say,
   reports: reportPanel,
   // a PR in a settled sweep at its current head links to it; one in none shows nothing

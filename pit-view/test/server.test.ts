@@ -483,15 +483,23 @@ test('hostAllowed accepts the loopback names on the server\'s port, and allowed 
   assert.equal(hostAllowed('pit.example.test', 4791, []), false)
 })
 
-test('originAllowed accepts the loopback origins, and http or https on an allowed host', () => {
-  const allowed = ['pit.example.test']
-  for (const origin of ['http://127.0.0.1:4791', 'http://localhost:4791', 'http://[::1]:4791', 'https://pit.example.test', 'http://pit.example.test', 'https://pit.example.test:8443', 'HTTPS://PIT.EXAMPLE.TEST']) {
-    assert.equal(originAllowed(origin, 4791, allowed), true, origin)
-  }
-  for (const origin of ['null', 'http://127.0.0.1:4792', 'https://127.0.0.1:4791', 'http://attacker.test', 'https://pit.example.test.attacker.test', 'ftp://pit.example.test', 'https://pit.example.test/', 'https://user@pit.example.test', 'pit.example.test']) {
-    assert.equal(originAllowed(origin, 4791, allowed), false, origin)
-  }
-  assert.equal(originAllowed('https://pit.example.test', 4791, []), false)
+test('originAllowed accepts only the origin for the effective scheme, Host, and port', () => {
+  for (const [origin, host, scheme] of ([
+    ['http://127.0.0.1:4791', '127.0.0.1:4791', 'http'],
+    ['http://localhost:4791', 'localhost:4791', 'http'],
+    ['https://pit.example.test', 'pit.example.test', 'https'],
+    ['https://pit.example.test:8443', 'pit.example.test:8443', 'https'],
+  ]) as const) assert.equal(originAllowed(origin, host, scheme), true, origin)
+  for (const [origin, host, scheme] of ([
+    ['https://127.0.0.1:4791', '127.0.0.1:4791', 'http'],
+    ['http://127.0.0.1:4792', '127.0.0.1:4791', 'http'],
+    ['http://localhost:4791', '127.0.0.1:4791', 'http'],
+    ['http://pit.example.test:4791', 'pit.example.test', 'https'],
+    ['https://pit.example.test:8443', 'pit.example.test', 'https'],
+    ['http://attacker.test:4791', 'pit.example.test:4791', 'http'],
+    ['null', 'pit.example.test:4791', 'http'],
+  ]) as const) assert.equal(originAllowed(origin, host, scheme), false, origin)
+  assert.equal(originAllowed('http://localhost:4791', undefined, 'http'), false)
 })
 
 test('with allowedHosts set, a proxied host is served, its page may write, and the event stream is unbuffered with keepalives', async () => {
@@ -500,7 +508,7 @@ test('with allowedHosts set, a proxied host is served, its page may write, and t
     assert.equal((await raw(h.server.port, '/api/view', { Host: 'pit.example.test' })).status, 200)
     assert.equal((await raw(h.server.port, '/api/view', { Host: 'other.example.test' })).status, 403)
     const write = (origin: string): Promise<{ status: number, type: string, body: string }> =>
-      raw(h.server.port, '/api/refresh', { Host: 'pit.example.test', Origin: origin }, 'POST')
+      raw(h.server.port, '/api/refresh', { Host: 'pit.example.test', Origin: origin, 'X-Forwarded-Proto': 'https' }, 'POST')
     assert.equal((await write('http://attacker.test')).status, 403)
     assert.equal(h.server.cache.latestCycle(scenario.repo), null)
     assert.equal((await write('https://pit.example.test')).status, 200)
@@ -1084,7 +1092,7 @@ test('the view carries each row\'s Agent cell, and a start on the viewer\'s own 
 const lastWrite = (h: Harness): string => h.launch.children.at(-1)?.writes[0] ?? ''
 
 test('a start takes a kind beside the runner: default, tandem (Claude only) or stack, each with its own command line and label', async () => {
-  const h = await setup({ config: { cloneDir: '~/dev/orbit', agent: { runner: 'codex' } } })
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', agent: { runner: 'codex', claudeModel: 'sonnet' } } })
   try {
     await filled(h)
     const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
@@ -1219,7 +1227,7 @@ test('the view\'s Agent cell lists the starts a row offers, and the run list car
 })
 
 test('a fix session starts only on the viewer\'s own PR: fix-pr with Claude, never --no-post, after the identity check; others\' PRs 422, Codex 400', async () => {
-  const h = await setup({ config: { cloneDir: '~/dev/orbit', agent: { runner: 'codex' } } })
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', agent: { runner: 'codex', claudeModel: 'sonnet' } } })
   try {
     await filled(h)
     const url = (number: number): string => `${h.base}/api/prs/${number}/runs`

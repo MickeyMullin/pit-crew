@@ -95,7 +95,7 @@ test('a sweep launches review-dependabot-sweep for the repo with --parallel 1 an
 })
 
 test('Codex gets the same sweep as a $ skill, still serial and never --no-post', async () => {
-  const h = await harness({ config: { agent: { runner: 'codex' } } })
+  const h = await harness({ config: { agent: { runner: 'codex', claudeModel: 'sonnet' } } })
   try {
     const sweep = await h.launcher.start(start())
     const prompt = h.launch.children[0]!.request.args.at(-1) ?? ''

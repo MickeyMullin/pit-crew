@@ -669,3 +669,113 @@ test('pruning keeps the newest sweeps and never one still running', () => {
   assert.equal(cache.getSweep(old.id)?.id, old.id)
   cache.close()
 })
+
+test('a page fetched before a one-PR refresh does not overwrite what that refresh wrote, and a later cycle still updates the row', async () => {
+  const { pages, closed } = await fetched()
+  const { cache, tick } = memoryCache()
+  fullCycle(cache, tick, pages, closed)
+  tick(second)
+  const stale = cache.startCycle(scenario.repo, 'manual')
+  tick(second)
+  // the action finished and its refresh wrote the post-action state while that cycle was running
+  const target = pages[0]!.prs[0]!
+  const after = { ...target, title: 'after the action', headRefOid: 'f'.repeat(40) }
+  cache.writePr(scenario.repo, after, null)
+  // a PR merged by the action leaves the open table
+  const merged = pages[0]!.prs[1]!
+  cache.closePr(scenario.repo, merged.number)
+  tick(second)
+  // the page was read before the action, so it still says the old state
+  cache.writeOpenPage(stale.id, pages[0]!)
+  const open = cache.readView(scenario.repo).open
+  assert.equal(open.find((row) => row.number === target.number)?.pr.title, 'after the action')
+  assert.equal(open.find((row) => row.number === merged.number), undefined)
+  assert.equal(cache.finishCycle(stale.id).cycle.state, 'finished')
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === merged.number), undefined)
+
+  // a cycle that starts afterwards fetches newer state and wins as usual
+  tick(second)
+  fullCycle(cache, tick, pages, closed)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, target.title)
+})
+
+test('a PR on two pages of one cycle still ends as its later copy', async () => {
+  const { pages } = await fetched()
+  const { cache, tick } = memoryCache()
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  tick(second)
+  const target = pages[0]!.prs[0]!
+  cache.writeOpenPage(cycle.id, pages[0]!)
+  tick(second)
+  cache.writeOpenPage(cycle.id, { ...pages[1]!, prs: [{ ...target, title: 'later copy' }] })
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'later copy')
+})
+
+// a clock that never moves, so every timestamp the cache writes is identical
+const frozenCache = () => {
+  const cache = openCache({ path: ':memory:', clock: { now: () => Date.parse(scenario.now) } })
+  return cache
+}
+
+test('with identical timestamps, a page fetched before a one-PR refresh still does not overwrite it', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  const target = pages[0]!.prs[0]!
+  const merged = pages[0]!.prs[1]!
+  const stale = cache.startCycle(scenario.repo, 'manual')
+  cache.writePr(scenario.repo, { ...target, title: 'after the action' }, null)
+  cache.closePr(scenario.repo, merged.number)
+  cache.writeOpenPage(stale.id, pages[0]!)
+  const open = cache.readView(scenario.repo).open
+  assert.equal(open.find((row) => row.number === target.number)?.pr.title, 'after the action')
+  assert.equal(open.find((row) => row.number === merged.number), undefined)
+  cache.writeClosed(stale.id, closed)
+  cache.finishCycle(stale.id)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'after the action')
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === merged.number), undefined)
+})
+
+test('a duplicate page after an intervening one-PR refresh does not overwrite the refreshed row or resurrect a closed PR', async () => {
+  const { pages } = await fetched()
+  const { cache, tick } = memoryCache()
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  tick(second)
+  const target = pages[0]!.prs[0]!
+  const merged = pages[0]!.prs[1]!
+  // both PRs appear on a page first, so the cycle has already written them
+  cache.writeOpenPage(cycle.id, pages[0]!)
+  tick(second)
+  cache.writePr(scenario.repo, { ...target, title: 'after the action' }, null)
+  cache.closePr(scenario.repo, merged.number)
+  tick(second)
+  // the same PRs show up again on a later page of the same cycle, read before the action
+  cache.writeOpenPage(cycle.id, { ...pages[1]!, prs: [{ ...target, title: 'older copy' }, merged] })
+  const open = cache.readView(scenario.repo).open
+  assert.equal(open.find((row) => row.number === target.number)?.pr.title, 'after the action')
+  assert.equal(open.find((row) => row.number === merged.number), undefined)
+})
+
+test('a cycle that starts after a one-PR refresh updates the row, even at an identical instant', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  fullCycle(cache, () => {}, pages, closed)
+  const target = pages[0]!.prs[0]!
+  const merged = pages[0]!.prs[1]!
+  cache.writePr(scenario.repo, { ...target, title: 'after the action' }, null)
+  cache.closePr(scenario.repo, merged.number)
+  fullCycle(cache, () => {}, pages, closed)
+  const open = cache.readView(scenario.repo).open
+  assert.equal(open.find((row) => row.number === target.number)?.pr.title, target.title)
+  assert.equal(open.find((row) => row.number === merged.number)?.pr.title, merged.title)
+})
+
+test('a one-PR refresh that wrote nothing leaves the running cycle\'s data in place', async () => {
+  const { pages } = await fetched()
+  const cache = frozenCache()
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  cache.writeOpenPage(cycle.id, pages[0]!)
+  // a failed refresh calls neither writePr nor closePr, so a later duplicate page still wins as usual
+  const target = pages[0]!.prs[0]!
+  cache.writeOpenPage(cycle.id, { ...pages[1]!, prs: [{ ...target, title: 'later copy' }] })
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'later copy')
+})

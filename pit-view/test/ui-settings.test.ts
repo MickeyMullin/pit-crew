@@ -47,7 +47,7 @@ const sample = (): Config => ({
   showAgentColumn: true,
   // not on the page yet (P2.5 or later), so a save must carry them over
   cloneDir: '~/dev/orbit',
-  agent: { runner: 'codex', codexModel: 'gpt-6.1-terra' },
+  agent: { runner: 'codex', claudeModel: 'sonnet', codexModel: 'gpt-6.1-terra' },
   notifications: { enabled: false, kinds: ['readyToMerge'] },
 })
 

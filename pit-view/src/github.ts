@@ -254,6 +254,18 @@ export class GhError extends Error {
   }
 }
 
+// a write that did not run because the account gh would write as could not be confirmed as the expected one: login is the account gh reported, or null when it could not be read at all
+export class WriteIdentityError extends Error {
+  override name = 'WriteIdentityError'
+  login: string | null
+  errorKind: GhErrorKind | null
+  constructor (message: string, login: string | null, errorKind: GhErrorKind | null = null) {
+    super(message)
+    this.login = login
+    this.errorKind = errorKind
+  }
+}
+
 // spawns the real command; resolves with its exit code rather than rejecting on failure
 export const commandRunner = (command: string): Runner => (args, options = {}) =>
   new Promise((resolve, reject) => {
@@ -377,6 +389,8 @@ export type Gh = {
   // runs gh with the cached token, refreshing it once on a 401
   run: (args: string[]) => Promise<string>
   graphql: <T>(query: string, variables: Record<string, string | number | null>) => Promise<T>
+  // a GitHub write as the expected account: reads one token, confirms with it that gh is signed in as that account, then runs the write with the same token. It runs at most once: a failure of the lookup or the write, a 401 included, is never retried and never meets another token. A mismatch or an unreadable account throws WriteIdentityError before anything is written. The optional check runs after the account is confirmed and before the write, reading through the same token; if it throws, nothing is written and its error propagates unchanged
+  write: (args: string[], expected: string, check?: (read: (args: string[]) => Promise<string>) => Promise<void>) => Promise<string>
 }
 
 // holds the token in memory only; it is read once and again after any 401
@@ -432,6 +446,51 @@ export const createGh = (runner: Runner): Gh => {
     return result.stdout
   }
 
+  const write = async (args: string[], expected: string, check?: (read: (args: string[]) => Promise<string>) => Promise<void>): Promise<string> => {
+    const reading = token ??= readToken()
+    let value: string
+    try {
+      value = await reading
+    } catch (error) {
+      if (token === reading) token = null
+      throw new WriteIdentityError(`cannot confirm which account gh uses: ${(error as Error).message}`, null, error instanceof GhError ? error.kind : null)
+    }
+    const forget = (result: RunResult): void => {
+      // a 401 means the cached token is dead for the reads that follow; this write is not retried
+      if (result.code !== 0 && classify(result.stderr) === 'auth') token = null
+    }
+    const env = { GH_TOKEN: value }
+    let lookup: RunResult
+    try {
+      lookup = await spawnSafe(['api', 'user', '--jq', '.login'], { env })
+    } catch (error) {
+      throw new WriteIdentityError(`cannot confirm which account gh uses: ${(error as Error).message}`, null, error instanceof GhError ? error.kind : null)
+    }
+    forget(lookup)
+    if (lookup.code !== 0) {
+      throw new WriteIdentityError(`cannot confirm which account gh uses: gh api failed: ${firstLine(lookup.stderr)}`, null, classify(lookup.stderr))
+    }
+    const login = lookup.stdout.trim()
+    if (login.toLowerCase() !== expected.toLowerCase()) {
+      throw new WriteIdentityError(`gh is signed in as ${login || 'nobody'}, but the viewer is ${expected}; switch with gh auth switch before acting`, login)
+    }
+    if (check !== undefined) {
+      // read-only, with the token that was just verified; a 401 here is not retried either
+      await check(async (readArgs) => {
+        const read = await spawnSafe(readArgs, { env })
+        forget(read)
+        if (read.code !== 0) throw new GhError(classify(read.stderr), `gh ${readArgs[0]} failed: ${firstLine(read.stderr)}`, read.stderr)
+        return read.stdout
+      })
+    }
+    const result = await spawnSafe(args, { env })
+    forget(result)
+    if (result.code !== 0) {
+      throw new GhError(classify(result.stderr), `gh ${args[0]} failed: ${firstLine(result.stderr)}`, result.stderr)
+    }
+    return result.stdout
+  }
+
   const graphql = async <T>(query: string, variables: Record<string, string | number | null>): Promise<T> => {
     const args = ['api', 'graphql', '-f', `query=${query}`]
     for (const [key, value] of Object.entries(variables)) {
@@ -461,7 +520,7 @@ export const createGh = (runner: Runner): Gh => {
     return parsed as T
   }
 
-  return { run, graphql }
+  return { run, graphql, write }
 }
 
 export const fetchViewerLogin = async (gh: Gh): Promise<string> =>

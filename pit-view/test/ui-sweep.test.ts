@@ -108,10 +108,10 @@ test('the confirmation names the repository, says it runs one PR at a time, and 
   assert.equal(model.confirm, 'Start sweep')
   // Codex gets a dollar sign, and the configured runner is offered first
   assert.equal(sweepConfirmModel(start, 'codex').command, `$review-dependabot-sweep ${scenario.repo} --parallel 1`)
-  const codexStart = sweepStartOf(config({ agent: { runner: 'codex' } }), false)
+  const codexStart = sweepStartOf(config({ agent: { runner: 'codex', claudeModel: 'sonnet' } }), false)
   assert.equal(defaultSweepRunner(codexStart, codexStart.runner), 'codex')
   assert.equal(defaultSweepRunner(codexStart, 'claude'), 'claude')
-  assert.equal(sweepStartOf(config({ agent: { runner: 'codex' } }), false).runner, 'codex')
+  assert.equal(sweepStartOf(config({ agent: { runner: 'codex', claudeModel: 'sonnet' } }), false).runner, 'codex')
 })
 
 test('a sweep is started and stopped with the token, a runner, the repository, and the viewer, the last two as the confirmation showed them, and nothing else', () => {

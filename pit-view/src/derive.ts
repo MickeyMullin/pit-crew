@@ -49,7 +49,11 @@ export type PrBase = {
   author: PersonView
   headRef: string
   baseRef: string
+  // whether baseRef is the repository's primary branch, the only base a merge is offered for
+  primaryBase: boolean
   headOid: string
+  // the full head SHA, which a merge confirmation is bound to (headOid is the short form shown)
+  headSha: string
   createdAt: string
   additions: number
   deletions: number
@@ -604,14 +608,20 @@ export const deriveStacks = (prs: readonly StackPr[], defaultBranch: string | nu
 const freshnessOf = (number: number, ctx: DeriveContext): Freshness =>
   ctx.freshness?.(number) ?? { state: 'current', fetchedAt: iso(ctx.clock.now()) }
 
-const prBase = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, Stack>, issues: Issue[], merge: MergeState): PrBase => ({
+// the repository's primary branch: its default branch when that is known, otherwise exactly master or main. A stacked PR's base is its parent's branch and a release branch is neither, so neither is primary
+export const isPrimaryBase = (baseRef: string, defaultBranch: string | null): boolean =>
+  defaultBranch === null || defaultBranch === '' ? baseRef === 'master' || baseRef === 'main' : baseRef === defaultBranch
+
+const prBase = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, Stack>, issues: Issue[], merge: MergeState, defaultBranch: string | null): PrBase => ({
   number: pr.number,
   url: pr.url,
   title: pr.title,
   author: personView(pr.author?.login ?? ghost, pr.author?.avatarUrl ?? null, ctx.config),
   headRef: pr.headRefName,
   baseRef: pr.baseRefName,
+  primaryBase: isPrimaryBase(pr.baseRefName, defaultBranch),
   headOid: shortSha(pr.headRefOid),
+  headSha: pr.headRefOid,
   createdAt: pr.createdAt,
   additions: pr.additions,
   deletions: pr.deletions,
@@ -628,12 +638,12 @@ const prBase = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, S
 })
 
 // one open PR as a Mine or Others' row; null for rows hidden in v1 (others' drafts)
-export const deriveOpenRow = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, Stack>): OpenRow | null => {
+export const deriveOpenRow = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, Stack>, defaultBranch: string | null = null): OpenRow | null => {
   const issues = deriveIssues(pr)
   const merge = deriveMerge(pr, issues)
   if (isMine(pr, ctx.config)) {
     return {
-      ...prBase(pr, ctx, stacks, issues, merge),
+      ...prBase(pr, ctx, stacks, issues, merge, defaultBranch),
       section: 'mine',
       ...mineGroupAndStage(pr, merge),
       selfReview: selfReviewOf(ctx.reports?.get(pr.number), pr.headRefOid),
@@ -642,13 +652,13 @@ export const deriveOpenRow = (pr: RawOpenPr, ctx: DeriveContext, stacks: Readonl
   }
   const group = otherGroup(pr, issues, merge, ctx.config)
   if (group === null) return null
-  return { ...prBase(pr, ctx, stacks, issues, merge), section: 'others', group, flags: deriveFlags(pr, ctx.config) }
+  return { ...prBase(pr, ctx, stacks, issues, merge, defaultBranch), section: 'others', group, flags: deriveFlags(pr, ctx.config) }
 }
 
 // every open PR, with stacks computed across all of them
 export const deriveOpenRows = (prs: readonly RawOpenPr[], defaultBranch: string | null, ctx: DeriveContext): OpenRow[] => {
   const stacks = deriveStacks(prs, defaultBranch)
-  return prs.map((pr) => deriveOpenRow(pr, ctx, stacks)).filter((row) => row !== null)
+  return prs.map((pr) => deriveOpenRow(pr, ctx, stacks, defaultBranch)).filter((row) => row !== null)
 }
 
 // attention order: Re-review, then Requested of you, then most recent activity first

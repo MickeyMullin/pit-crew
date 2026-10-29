@@ -478,17 +478,30 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     const running = runningCycle()
     if (running !== null) throw new CacheError(`cycle ${running.id} is still running`)
     const id = Number(db.prepare('INSERT INTO cycles (repo, trigger, started_at) VALUES ($repo, $trigger, $at)').run({ repo, trigger, at: now() }).lastInsertRowid)
+    // every stamp so far is older than this cycle, so none can hold one of its pages back
+    refreshStamps.clear()
+    cycleSequence.set(id, ++sequence)
     return requireRunning(id)
   }
+
+  // Ordering between a cycle's pages and a one-PR refresh, which the clock cannot give (it has one-second resolution). One counter owned by this cache instance: a cycle takes a number when it starts, and a one-PR refresh stamps the PR it wrote or closed with a newer one. A page may write a PR only if no refresh stamped it after the cycle started. Held in memory only: no cycle runs across a restart
+  let sequence = 0
+  const cycleSequence = new Map<number, number>()
+  const refreshStamps = new Map<string, number>()
+  const stamp = (repo: string, number: number): void => { refreshStamps.set(`${repo}#${number}`, ++sequence) }
 
   const writeOpenPage = (cycleId: number, page: OpenPage): CachedPr[] => transaction(() => {
     const { repo } = requireRunning(cycleId)
     const at = now()
+    const cycleStarted = cycleSequence.get(cycleId) ?? 0
     insertSnapshot({ cycle: cycleId, repo, kind: 'open-page', page: page.page, at, error: null, payload: JSON.stringify(page.raw) })
     const upsert = db.prepare('INSERT INTO prs (repo, number, state, updated_at, head_oid, fetched_at, cycle, last_seen_at, data) VALUES ($repo, $number, \'open\', $updatedAt, $headOid, $at, $cycle, $at, $data) ON CONFLICT (repo, number) DO UPDATE SET state = \'open\', updated_at = excluded.updated_at, head_oid = excluded.head_oid, fetched_at = excluded.fetched_at, cycle = excluded.cycle, last_seen_at = excluded.last_seen_at, data = excluded.data')
     // a PR updated mid-pagination can appear on two pages; the later copy wins
     const written = new Map<number, CachedPr>()
     for (const pr of page.prs) {
+      // a page was fetched after its cycle started and before any refresh that stamped the PR since finished, so a one-PR refresh after the cycle started holds newer state than this page can have (even a merge that closed it), and the page does not overwrite it
+      const refreshed = refreshStamps.get(`${repo}#${pr.number}`)
+      if (refreshed !== undefined && refreshed > cycleStarted) continue
       upsert.run({ repo, number: pr.number, updatedAt: pr.updatedAt, headOid: pr.headRefOid, at, cycle: cycleId, data: JSON.stringify(pr) })
       written.set(pr.number, {
         repo,
@@ -530,6 +543,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       repo, number: pr.number, updatedAt: pr.updatedAt, headOid: pr.headRefOid, at, cycle: cycleId, data: JSON.stringify(pr),
     })
     if (defaultBranch !== null) setMeta(metaKey('defaultBranch', repo), defaultBranch)
+    stamp(repo, pr.number)
     return {
       repo,
       number: pr.number,
@@ -544,8 +558,10 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     }
   })
 
-  const closePr = (repo: string, number: number): boolean =>
-    run('UPDATE prs SET state = \'closed\', fetched_at = $at WHERE repo = $repo AND number = $number AND state = \'open\'', { repo, number, at: now() }) > 0
+  const closePr = (repo: string, number: number): boolean => {
+    stamp(repo, number)
+    return run('UPDATE prs SET state = \'closed\', fetched_at = $at WHERE repo = $repo AND number = $number AND state = \'open\'', { repo, number, at: now() }) > 0
+  }
 
   const recordError = (cycleId: number, kind: SnapshotKind, page: number | null, error: string): void => {
     const { repo } = requireRunning(cycleId)
