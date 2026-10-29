@@ -157,9 +157,7 @@ export const hostAllowed = (header: string | undefined, port: number, allowed: r
   return match !== null && allowed.includes(match[1] ?? '')
 }
 
-// Origin must be the actual origin addressed by this request. The Host header and, when a
-// reverse proxy supplies it, X-Forwarded-Proto are the effective host and scheme; allowedHosts
-// only decides which Host values the server accepts, never which Origins are interchangeable.
+// Origin must be the actual origin addressed by this request. The Host header and, when a reverse proxy supplies it, X-Forwarded-Proto are the effective host and scheme; allowedHosts only decides which Host values the server accepts, never which Origins are interchangeable.
 export const originAllowed = (origin: string, hostHeader: string | undefined, scheme = 'http'): boolean => {
   if (hostHeader === undefined || !/^(?:https?)$/i.test(scheme)) return false
   try {
@@ -452,8 +450,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (!tokenMatches(req.headers[tokenHeader], token)) throw new HttpError(403, 'missing or wrong Pit View token; reload the page')
   }
 
-  // direct actions are the first GitHub writes, so they also need an Origin header: a request
-  // with none is refused, where the run writes accept one (the global check refuses a foreign one)
+  // direct actions are the first GitHub writes, so they also need an Origin header: a request with none is refused, where the run writes accept one (the global check refuses a foreign one)
   const requireOrigin = (req: IncomingMessage): void => {
     if (req.headers.origin === undefined) throw new HttpError(403, 'missing Origin header; use the Pit View page')
   }
@@ -520,8 +517,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     log,
   })
 
-  // a direct action on the viewer's own PR (section 9 of DESIGN.md); answers once gh has finished,
-  // while the PR's refresh runs on and its row arrives as a patch
+  // a direct action on the viewer's own PR (section 9 of DESIGN.md); answers once gh has finished, while the PR's refresh runs on and its row arrives as a patch
   const prAction = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
     requireOrigin(req)
     requireToken(req)

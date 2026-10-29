@@ -254,8 +254,7 @@ export class GhError extends Error {
   }
 }
 
-// a write that did not run because the account gh would write as could not be confirmed as the
-// expected one: login is the account gh reported, or null when it could not be read at all
+// a write that did not run because the account gh would write as could not be confirmed as the expected one: login is the account gh reported, or null when it could not be read at all
 export class WriteIdentityError extends Error {
   override name = 'WriteIdentityError'
   login: string | null
@@ -390,12 +389,7 @@ export type Gh = {
   // runs gh with the cached token, refreshing it once on a 401
   run: (args: string[]) => Promise<string>
   graphql: <T>(query: string, variables: Record<string, string | number | null>) => Promise<T>
-  // a GitHub write as the expected account: reads one token, confirms with it that gh is signed in
-  // as that account, then runs the write with the same token. It runs at most once: a failure of
-  // the lookup or the write, a 401 included, is never retried and never meets another token. A
-  // mismatch or an unreadable account throws WriteIdentityError before anything is written. The
-  // optional check runs after the account is confirmed and before the write, reading through the
-  // same token; if it throws, nothing is written and its error propagates unchanged
+  // a GitHub write as the expected account: reads one token, confirms with it that gh is signed in as that account, then runs the write with the same token. It runs at most once: a failure of the lookup or the write, a 401 included, is never retried and never meets another token. A mismatch or an unreadable account throws WriteIdentityError before anything is written. The optional check runs after the account is confirmed and before the write, reading through the same token; if it throws, nothing is written and its error propagates unchanged
   write: (args: string[], expected: string, check?: (read: (args: string[]) => Promise<string>) => Promise<void>) => Promise<string>
 }
 

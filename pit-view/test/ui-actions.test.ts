@@ -1,7 +1,5 @@
 // test/ui-actions.test.ts
-// the drawer's direct actions (public/actionsview.ts and their place in public/drawerview.ts and
-// public/drawer.ts): what each row offers, the confirmation that must come before any request,
-// the request that follows it, and the words for a refusal
+// the drawer's direct actions (public/actionsview.ts and their place in public/drawerview.ts and public/drawer.ts): what each row offers, the confirmation that must come before any request, the request that follows it, and the words for a refusal
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -170,8 +168,7 @@ test('Escape cancels an action\'s confirmation before closing the drawer, and no
   assert.equal(escapeTarget({ report: false, confirm: true, busy: true, drawer: true }), null)
 })
 
-// the page cannot be run here, so the wiring is checked in the source: a button click only asks,
-// and the one place that sends is the confirmation's own Confirm button
+// the page cannot be run here, so the wiring is checked in the source: a button click only asks, and the one place that sends is the confirmation's own Confirm button
 test('in drawer.ts an action button only asks, and the request is sent from one place, behind the confirmation', async () => {
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
   assert.match(source, /button\.addEventListener\('click', \(\) => void askAction\(offer\.action\)\)/)

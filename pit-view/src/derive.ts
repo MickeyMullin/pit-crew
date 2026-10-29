@@ -608,9 +608,7 @@ export const deriveStacks = (prs: readonly StackPr[], defaultBranch: string | nu
 const freshnessOf = (number: number, ctx: DeriveContext): Freshness =>
   ctx.freshness?.(number) ?? { state: 'current', fetchedAt: iso(ctx.clock.now()) }
 
-// the repository's primary branch: its default branch when that is known, otherwise exactly
-// master or main. A stacked PR's base is its parent's branch and a release branch is neither, so
-// neither is primary
+// the repository's primary branch: its default branch when that is known, otherwise exactly master or main. A stacked PR's base is its parent's branch and a release branch is neither, so neither is primary
 export const isPrimaryBase = (baseRef: string, defaultBranch: string | null): boolean =>
   defaultBranch === null || defaultBranch === '' ? baseRef === 'master' || baseRef === 'main' : baseRef === defaultBranch
 

@@ -13,8 +13,7 @@ import { safeHref } from './safeurl.ts'
 
 export type Loadable<T> = { state: 'loading' } | { state: 'error', message: string } | { state: 'ready', items: T[] }
 
-// what the drawer is asking about: a start waiting for its Start, a stop waiting for its Stop, or
-// a direct action on the PR waiting for its confirmation
+// what the drawer is asking about: a start waiting for its Start, a stop waiting for its Stop, or a direct action on the PR waiting for its confirmation
 export type Confirm =
   | { type: 'start', kind: StartKind, runner: RunnerName }
   | { type: 'stop', andOpen: boolean, runId: number }
@@ -479,8 +478,7 @@ export type DrawerModel = {
   gone: string | null
   starts: StartsModel
   confirm: StartConfirmModel | null
-  // direct actions: what the row offers (none for Others' rows and PRs that left the open tables),
-  // and the confirmation being asked
+  // direct actions: what the row offers (none for Others' rows and PRs that left the open tables), and the confirmation being asked
   actions: ActionOffer[]
   actionAsk: ActionConfirmModel | null
   card: CardKind

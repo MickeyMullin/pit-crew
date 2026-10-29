@@ -5,11 +5,8 @@ import { deriveIssues, deriveMerge, isPrimaryBase } from './derive.ts'
 import { GhError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind } from './github.ts'
 
-// direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs,
-// each through gh with the viewer's own token. This module decides whether an action is allowed
-// and what gh is asked; it never trusts the page, so every rule is checked here again.
-// merge is always a squash into the repository's primary branch; the method is fixed, not a
-// setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused
+// direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs, each through gh with the viewer's own token. This module decides whether an action is allowed and what gh is asked; it never trusts the page, so every rule is checked here again.
+// merge is always a squash into the repository's primary branch; the method is fixed, not a setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused
 export const actionNames = ['merge', 'markReady', 'convertToDraft', 'requestReview'] as const
 export type ActionName = typeof actionNames[number]
 
@@ -67,11 +64,7 @@ export const parseAction = (body: unknown): ActionRequest => {
   return { action: action as 'markReady' | 'convertToDraft', repo }
 }
 
-// exactly what gh is asked for each action. Merge uses GitHub's REST merge endpoint rather than
-// `gh pr merge`: that endpoint refuses when branch rules require a queue, so one click cannot
-// silently enable auto-merge or enqueue anything. The method is fixed to squash.
-// The merge carries the head SHA the viewer's confirmation showed as GitHub's `sha` precondition,
-// so a push after that is refused by GitHub (409) instead of merged.
+// exactly what gh is asked for each action. Merge uses GitHub's REST merge endpoint rather than `gh pr merge`: that endpoint refuses when branch rules require a queue, so one click cannot silently enable auto-merge or enqueue anything. The method is fixed to squash. The merge carries the head SHA the viewer's confirmation showed as GitHub's `sha` precondition, so a push after that is refused by GitHub (409) instead of merged.
 export const ghArgs = (repo: string, number: number, request: ActionRequest, headSha = ''): string[] => {
   switch (request.action) {
     case 'merge': return ['api', '--method', 'PUT', `repos/${repo}/pulls/${number}/merge`, '-f', 'merge_method=squash', '-f', `sha=${headSha}`]
@@ -99,8 +92,7 @@ export type ActionsOptions = {
   gh: Gh
   // the config in effect, read afresh at every action
   config: () => Config
-  // starts the targeted refresh of one PR, in the repository the write used, that is certain to
-  // start after the write (the poller's refreshPrAfterWrite); not awaited
+  // starts the targeted refresh of one PR, in the repository the write used, that is certain to start after the write (the poller's refreshPrAfterWrite); not awaited
   refreshPr: (repo: string, number: number) => Promise<unknown>
   log: (line: string) => void
 }
@@ -123,7 +115,7 @@ export const createActions = (options: ActionsOptions): Actions => {
     const request = parseAction(body)
     const config = options.config()
     const { repo, viewer } = config
-    // the repository the confirmation displayed must still be the one in effect: the page learns of a change in Settings only when its feed patch arrives, and #<n> in another repository is another PR. Nothing is read, written or held in flight
+    // the repository the confirmation displayed must still be the one in effect: the page learns of a change in Settings only when its feed patch arrives, and #<n> in another repository is another PR. Nothing is read, written, or held in flight
     if (request.repo !== repo) throw new ActionError('stale', `the repository is now ${repo}, not ${request.repo}; the confirmation was for ${request.repo}, so nothing was done`)
     const cached = cache.readView(repo)
     const row = cached.open.find((entry) => entry.number === number)
@@ -141,8 +133,7 @@ export const createActions = (options: ActionsOptions): Actions => {
       if (!isPrimaryBase(base, cached.defaultBranch)) {
         throw new ActionError('notAllowed', `#${number} targets ${base}, not the primary branch (${cached.defaultBranch ?? 'master or main'}); Pit View merges only into the primary branch`)
       }
-      // the confirmation named a head and a base; the cache can have moved on before the page was
-      // patched, and then the viewer never saw what is cached: nothing is written
+      // the confirmation named a head and a base; the cache can have moved on before the page was patched, and then the viewer never saw what is cached: nothing is written
       if (request.base !== base || request.headSha !== row.pr.headRefOid.toLowerCase()) {
         refresh(repo, number)
         throw new ActionError('stale', `#${number} changed since you saw it (${request.base !== base ? `it now targets ${base}, not ${request.base}` : 'it has new commits'}); nothing was merged. Reload its confirmation to see the current state`)
@@ -161,13 +152,11 @@ export const createActions = (options: ActionsOptions): Actions => {
     if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
     inFlight.add(key)
     try {
-      // gh writes as whichever account it is signed in as, and this machine holds more than one:
-      // the write confirms the account with the token it then writes with, and runs once
+      // gh writes as whichever account it is signed in as, and this machine holds more than one: the write confirms the account with the token it then writes with, and runs once
       const checked: ActionRequest = reviewer === undefined ? request : { action: 'requestReview', repo, reviewer }
       try {
         const check = merging === undefined ? undefined : async (read: (args: string[]) => Promise<string>): Promise<void> => {
-          // the confirmation named the cached base and head; the PR is read once more, live, and
-          // anything that differs refuses before a write is made
+          // the confirmation named the cached base and head; the PR is read once more, live, and anything that differs refuses before a write is made
           let live: LivePr
           try {
             live = JSON.parse(await read(['api', `repos/${repo}/pulls/${number}`])) as LivePr

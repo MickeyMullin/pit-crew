@@ -453,10 +453,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     return requireRunning(id)
   }
 
-  // Ordering between a cycle's pages and a one-PR refresh, which the clock cannot give (it has one-second
-  // resolution). One counter owned by this cache instance: a cycle takes a number when it starts, and a
-  // one-PR refresh stamps the PR it wrote or closed with a newer one. A page may write a PR only if no
-  // refresh stamped it after the cycle started. Held in memory only: no cycle runs across a restart
+  // Ordering between a cycle's pages and a one-PR refresh, which the clock cannot give (it has one-second resolution). One counter owned by this cache instance: a cycle takes a number when it starts, and a one-PR refresh stamps the PR it wrote or closed with a newer one. A page may write a PR only if no refresh stamped it after the cycle started. Held in memory only: no cycle runs across a restart
   let sequence = 0
   const cycleSequence = new Map<number, number>()
   const refreshStamps = new Map<string, number>()
@@ -471,9 +468,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     // a PR updated mid-pagination can appear on two pages; the later copy wins
     const written = new Map<number, CachedPr>()
     for (const pr of page.prs) {
-      // a page was fetched after its cycle started and before any refresh that stamped the PR since
-      // finished, so a one-PR refresh after the cycle started holds newer state than this page can
-      // have (even a merge that closed it), and the page does not overwrite it
+      // a page was fetched after its cycle started and before any refresh that stamped the PR since finished, so a one-PR refresh after the cycle started holds newer state than this page can have (even a merge that closed it), and the page does not overwrite it
       const refreshed = refreshStamps.get(`${repo}#${pr.number}`)
       if (refreshed !== undefined && refreshed > cycleStarted) continue
       upsert.run({ repo, number: pr.number, updatedAt: pr.updatedAt, headOid: pr.headRefOid, at, cycle: cycleId, data: JSON.stringify(pr) })

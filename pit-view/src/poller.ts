@@ -89,8 +89,7 @@ export type Poller = {
   refresh: (trigger: Exclude<Trigger, 'active' | 'interval'>) => RefreshResult
   // fetches one PR and patches its row, outside any cycle; joins a refresh of that PR in flight
   refreshPr: (number: number, repo?: string) => Promise<PrRefreshResult>
-  // the refresh that follows a GitHub write: starts after the write settled, so an earlier one in
-  // flight, which may have read before the write, is followed by exactly one more
+  // the refresh that follows a GitHub write: starts after the write settled, so an earlier one in flight, which may have read before the write, is followed by exactly one more
   refreshPrAfterWrite: (repo: string, number: number) => Promise<PrRefreshResult>
   // the clients changed; returns the cycle started or joined under the active rule, or null
   setActive: (activeCount: number, becameActive: boolean) => number | null
@@ -479,9 +478,7 @@ export const createPoller = (options: PollerOptions): Poller => {
   // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that
   // row and any other its change moved (stacks), or its removal once closed; a failure stays on
   // the row and never touches the cycles, so the board does not read offline
-  // repo is the repository the caller meant (a write's), not whatever the configuration says now:
-  // when Settings has moved on, the cache of that repository is still refreshed, but nothing of it
-  // reaches the board, the baseline, or a notification
+  // repo is the repository the caller meant (a write's), not whatever the configuration says now: when Settings has moved on, the cache of that repository is still refreshed, but nothing of it reaches the board, the baseline, or a notification
   const runPrRefresh = async (number: number, repo: string): Promise<PrRefreshResult> => {
     const settings = config()
     const key = prKey(repo, number)
@@ -530,8 +527,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     return job
   }
 
-  // a refresh in flight may have read GitHub before the write, so joining it could show the old
-  // state; one more starts when it ends, and any number of asks meanwhile share that one
+  // a refresh in flight may have read GitHub before the write, so joining it could show the old state; one more starts when it ends, and any number of asks meanwhile share that one
   const afterWrite = new Map<string, Promise<PrRefreshResult>>()
   const refreshPrAfterWrite = (repo: string, number: number): Promise<PrRefreshResult> => {
     const key = prKey(repo, number)

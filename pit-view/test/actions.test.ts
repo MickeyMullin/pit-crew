@@ -26,8 +26,7 @@ const people = [
   { login: 'sam-tran', alias: 'Sam', initials: 'ST', color: '#B45309', avatar: 'github' },
 ]
 
-// a gh that answers the fixture world, records the writes it was asked for, and lets a test change
-// what the one-PR query and the account lookup say
+// a gh that answers the fixture world, records the writes it was asked for, and lets a test change what the one-PR query and the account lookup say
 type Behavior = {
   // the account `gh api user` reports
   account?: string
@@ -131,8 +130,7 @@ const filled = async (h: Harness): Promise<void> => {
   await h.server.poller.idle()
 }
 
-// a request body as the page sends it: the repository the confirmation displayed is always in it, so a test that does not mean to
-// vary it gets the configured one
+// a request body as the page sends it: the repository the confirmation displayed is always in it, so a test that does not mean to vary it gets the configured one
 const withRepo = (body: unknown): unknown =>
   typeof body === 'object' && body !== null && !Array.isArray(body) && !('repo' in body) ? { repo: scenario.repo, ...body } : body
 
@@ -182,8 +180,7 @@ const collectPatches = async (base: string): Promise<{ patches: Patch[], close: 
   return { patches, close: () => controller.abort() }
 }
 
-// the scenario's PRs: 101 is the viewer's and open for review, 103 the viewer's draft, 106 and 113
-// are other people's
+// the scenario's PRs: 101 is the viewer's and open for review, 103 the viewer's draft, 106 and 113 are other people's
 const requestReview = { action: 'requestReview', reviewer: 'sam-tran' }
 
 test('an action needs a same-origin Origin header and this start\'s token, and a refusal reaches neither gh nor GitHub', async () => {
@@ -246,7 +243,7 @@ test('the Host check applies, and the body must be JSON', async () => {
   }
 })
 
-test('the server refuses what the page should never send: a bad number, body, action or field', async () => {
+test('the server refuses what the page should never send: a bad number, body, action, or field', async () => {
   const h = await setup()
   try {
     await filled(h)
@@ -296,8 +293,7 @@ test('the viewer must be known: with no viewer configured and none from gh, ever
   }
 })
 
-// the scenario's merge states for the viewer's own PRs: 102 is ready (approved, CLEAN), 101 and 120
-// are blocked, 104 needs review, 103 is a draft; 110 is ready but someone else's, and 100 was merged
+// the scenario's merge states for the viewer's own PRs: 102 is ready (approved, CLEAN), 101 and 120 are blocked, 104 needs review, 103 is a draft; 110 is ready but someone else's, and 100 was merged
 const refusedWithoutGh = async (h: Harness, number: number | string, body: unknown, status: number, error: RegExp): Promise<void> => {
   const before = h.runner.calls.length
   const refused = await act(h, number, body)
@@ -924,8 +920,7 @@ test('a refresh after an action targets the repository the write used, even when
   }
 })
 
-// the confirmation named a head and a base; the cache can move before the page learns of it, so
-// the request carries them and the server refuses, writing nothing, when its row differs
+// the confirmation named a head and a base; the cache can move before the page learns of it, so the request carries them and the server refuses, writing nothing, when its row differs
 const staleRefusal = async (h: Harness, body: unknown, error: RegExp): Promise<void> => {
   const refused = await act(h, 102, body)
   assert.equal(refused.status, 409)
@@ -1015,8 +1010,7 @@ test('the other actions carry nothing to bind: a head SHA or base on them is ref
     await refusedWithoutGh(h, 103, { action: 'markReady', headSha: sha }, 400, /takes no headSha/)
     await refusedWithoutGh(h, 101, { action: 'convertToDraft', base: 'main' }, 400, /takes no base/)
     await refusedWithoutGh(h, 101, { action: 'requestReview', reviewer: 'sam-tran', headSha: sha }, 400, /takes no headSha/)
-    // the state each confirmation shows is checked against the cache already: a draft shown as
-    // ready-to-convert, or a ready PR shown as a draft, is refused
+    // the state each confirmation shows is checked against the cache already: a draft shown as ready-to-convert, or a ready PR shown as a draft, is refused
     await refusedWithoutGh(h, 102, { action: 'markReady' }, 422, /not a draft/)
     await refusedWithoutGh(h, 103, { action: 'convertToDraft' }, 422, /already a draft/)
   } finally {
@@ -1024,8 +1018,7 @@ test('the other actions carry nothing to bind: a head SHA or base on them is ref
   }
 })
 
-// the confirmation displayed a repository; Settings can change it before the page's feed patch arrives, and #<n> in the new
-// repository is another PR, so every action names the repository and the server refuses one that is not in effect
+// the confirmation displayed a repository; Settings can change it before the page's feed patch arrives, and #<n> in the new repository is another PR, so every action names the repository and the server refuses one that is not in effect
 const other = 'other-org/other-repo'
 
 const stranger = async (h: Harness, repo: string): Promise<void> => {
@@ -1055,7 +1048,7 @@ test('every action carrying a repository other than the one in effect is refused
       assert.equal(refused.status, 409, String(body.action))
       assert.match(String(refused.body.error), new RegExp(`the repository is now ${scenario.repo}, not ${other}.*nothing was done`))
       assert.equal(refused.body.done, undefined)
-      assert.equal(h.runner.calls.length, before, 'refused before any account lookup, live read, refresh or write')
+      assert.equal(h.runner.calls.length, before, 'refused before any account lookup, live read, refresh, or write')
       // nothing is left in flight: the same action for the right repository goes through at once
       const done = await act(h, number, body)
       assert.equal(done.status, 200, `${String(body.action)}: ${JSON.stringify(done.body)}`)

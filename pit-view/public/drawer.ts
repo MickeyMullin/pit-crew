@@ -85,8 +85,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   // a start or stop request is on its way
   let busy = false
   let error = ''
-  // the people used for the current confirmation; review requests refresh this list every time
-  // they are asked because Settings can change while the drawer is open
+  // the people used for the current confirmation; review requests refresh this list every time they are asked because Settings can change while the drawer is open
   let people: PersonChoice[] | null = null
   // what the last direct action did, shown under the buttons until the next ask or another PR
   let actionNote = ''
@@ -265,8 +264,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     byKey('confirm-cancel')?.focus({ preventScroll: true })
   }
 
-  // a direct action: one click opens the confirmation, naming the PR and the action; nothing is
-  // sent until its own button is clicked. A review request first reads the people it chooses from
+  // a direct action: one click opens the confirmation, naming the PR and the action; nothing is sent until its own button is clicked. A review request first reads the people it chooses from
   const askAction = async (action: ActionKind): Promise<void> => {
     const n = number
     if (n === null || options.rowOf(n) === undefined) return
