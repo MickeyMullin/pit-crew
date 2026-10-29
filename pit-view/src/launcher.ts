@@ -59,6 +59,8 @@ export type SweepResult = {
   status: ResultStatus
   repo: string
   counts: { swept: number, fresh: number, reused: number, failed: number }
+  // null when the sweep may post; noPost when it ran with --no-post. A result written before the field existed has none, and reads as null
+  notPostedReason: 'noPost' | null
   rows: unknown[]
   mergeOrder: unknown[]
   summary: string | null
@@ -135,6 +137,7 @@ const check = (ok: boolean, message: string): void => {
 
 const fixFields = ['schema', 'command', 'status', 'target', 'head', 'requests', 'checks', 'pushed', 'notPushedReason', 'worktree', 'report', 'question', 'error']
 const reviewFields = ['schema', 'command', 'status', 'target', 'reviewed', 'verdict', 'recommendation', 'findings', 'ci', 'fixAttempts', 'posted', 'notPostedReason', 'report', 'question', 'error']
+// notPostedReason is absent from a sweep result written before the field existed, so it is not required here
 const sweepFields = ['schema', 'command', 'status', 'repo', 'counts', 'rows', 'mergeOrder', 'summary', 'question', 'error']
 
 // the status rules both schemas share: failed carries its error, needsInput its question
@@ -189,6 +192,8 @@ const checkSweep = (value: Record<string, unknown>): void => {
   check(isObject(counts) && ['swept', 'fresh', 'reused', 'failed'].every((key) => Number.isInteger(counts[key])), 'counts must hold swept, fresh, reused and failed')
   check(Array.isArray(value.rows) && Array.isArray(value.mergeOrder), 'rows and mergeOrder must be lists')
   check(isStringOrNull(value.summary), 'summary must be a path or null')
+  if (!('notPostedReason' in value)) value.notPostedReason = null
+  check(oneOfOrNull(value.notPostedReason, ['noPost']), 'notPostedReason must be noPost or null')
 }
 
 // git's full 40-character object name; a short one cannot be compared with a PR's head

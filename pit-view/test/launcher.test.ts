@@ -352,6 +352,30 @@ test('result.json is checked against its schema; anything else is no result', ()
   }
 })
 
+test('a sweep result carries notPostedReason as null or noPost, and one written before the field reads as null', () => {
+  const sweep = { schema: 'pit-crew/sweep-result@1', command: 'review-dependabot-sweep', status: 'done', repo: scenario.repo, counts: { swept: 0, fresh: 0, reused: 0, failed: 0 }, notPostedReason: null, rows: [], mergeOrder: [], summary: null, question: null, error: null }
+  const reasonOf = (value: unknown): unknown => {
+    const parsed = parseResult(JSON.stringify(value))
+    assert.equal(parsed.ok, true)
+    return parsed.ok ? (parsed.value as { notPostedReason?: unknown }).notPostedReason : undefined
+  }
+  assert.equal(reasonOf(sweep), null)
+  assert.equal(reasonOf({ ...sweep, notPostedReason: 'noPost' }), 'noPost')
+  // written before the field existed: accepted, and read as null
+  const { notPostedReason: _reason, ...old } = sweep
+  assert.equal(reasonOf(old), null)
+  for (const bad of ['ownPr', 'ghFailed', 'awaitingAnswer', '', 7, false]) {
+    const parsed = parseResult(JSON.stringify({ ...sweep, notPostedReason: bad }))
+    assert.equal(parsed.ok, false)
+    assert.match(parsed.ok ? '' : parsed.error, /notPostedReason must be noPost or null/)
+  }
+  // only the sweep schema may omit it
+  const { notPostedReason: _missing, ...review } = reviewResult()
+  const parsedReview = parseResult(JSON.stringify(review))
+  assert.equal(parsedReview.ok, false)
+  assert.match(parsedReview.ok ? '' : parsedReview.error, /notPostedReason is missing/)
+})
+
 test('an events.jsonl line is read only when it has the four fields of the contract', () => {
   assert.deepEqual(parseStepEvent('{"at":"2026-10-28T14:03:12Z","step":"consolidate","state":"skipped","note":"no tandem review"}'),
     { at: '2026-10-28T14:03:12Z', step: 'consolidate', state: 'skipped', note: 'no tandem review' })
