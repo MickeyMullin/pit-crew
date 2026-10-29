@@ -57,8 +57,9 @@ export type SweepResult = {
   schema: 'pit-crew/sweep-result@1'
   command: 'review-dependabot-sweep'
   status: ResultStatus
-  repo: string
-  counts: { swept: number, fresh: number, reused: number, failed: number }
+  // repo and counts are null only for a failed or needsInput sweep that stopped before it had them
+  repo: string | null
+  counts: { swept: number, fresh: number, reused: number, failed: number } | null
   // null when the sweep may post; noPost when it ran with --no-post. A result written before the field existed has none, and reads as null
   notPostedReason: 'noPost' | null
   rows: unknown[]
@@ -860,7 +861,7 @@ export const judge = (input: JudgeInput): Judgement => {
   if (value.status === 'needsInput') return { status: 'needsInput', note: null, result: value }
   const path = reportPath(value)
   // a sweep with nothing to sweep writes no summary and is still done
-  if (path === null && !(value.schema === 'pit-crew/sweep-result@1' && value.counts.swept === 0)) {
+  if (path === null && !(value.schema === 'pit-crew/sweep-result@1' && value.counts !== null && value.counts.swept === 0)) {
     return { status: 'failed', note: 'noReport: result.json names no report', result: value }
   }
   if (path !== null && input.reportExists === false) return { status: 'failed', note: `noReport: ${path} does not exist`, result: value }
