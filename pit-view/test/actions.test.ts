@@ -60,6 +60,15 @@ const listed = async (number: number): Promise<{ sha: string, base: string }> =>
   return { sha: node.headRefOid, base: node.baseRefName }
 }
 
+// a merge request as the page sends it: the full head SHA and base branch the confirmation showed
+const mergeBody = async (number: number): Promise<{ action: 'merge', headSha: string, base: string }> => {
+  const { sha, base } = await listed(number)
+  return { action: 'merge', headSha: sha, base }
+}
+
+// a well-formed merge body for refusals that come before the binding is compared
+const placeholderMerge = { action: 'merge', headSha: 'a'.repeat(40), base: 'main' }
+
 const ghWorld = (behavior: Behavior = {}): FakeRunner => {
   const base = fixtureRunner()
   return fakeRunner(async (args) => {
@@ -301,7 +310,7 @@ test('merge squashes a ready PR of the viewer\'s own into its primary base throu
     const row = (await rowOf(h, 102))!
     assert.equal(row.merge.state, 'ready')
     assert.equal(row.section, 'mine')
-    const done = await act(h, 102, { action: 'merge' })
+    const done = await act(h, 102, await mergeBody(102))
     assert.equal(done.status, 200)
     assert.deepEqual(done.body, { number: 102, action: 'merge', done: true })
     assert.deepEqual(writesOf(h.runner).map((call) => call.args), [['api', '--method', 'PUT', `repos/${scenario.repo}/pulls/102/merge`, '-f', 'merge_method=squash', '-f', `sha=${(await listed(102)).sha}`]])
@@ -322,7 +331,7 @@ test('merge is refused unless the cached merge state is ready, and gh is not ask
     await filled(h)
     for (const [number, state] of [[101, 'blocked'], [104, 'needsReview'], [120, 'blocked']] as const) {
       assert.equal((await rowOf(h, number))?.merge.state, state)
-      await refusedWithoutGh(h, number, { action: 'merge' }, 422, /not ready to merge/)
+      await refusedWithoutGh(h, number, await mergeBody(102), 422, /not ready to merge/)
     }
   } finally {
     await h.cleanup()
@@ -334,7 +343,7 @@ test('merge is refused for a draft, and gh is not asked anything', async () => {
   try {
     await filled(h)
     assert.equal((await rowOf(h, 103))?.merge.state, 'draft')
-    await refusedWithoutGh(h, 103, { action: 'merge' }, 422, /is a draft/)
+    await refusedWithoutGh(h, 103, placeholderMerge, 422, /is a draft/)
   } finally {
     await h.cleanup()
   }
@@ -345,8 +354,8 @@ test('merge is refused for other people\'s PRs, even a ready one, and gh is not 
   try {
     await filled(h)
     assert.equal((await rowOf(h, 110))?.merge.state, 'ready')
-    await refusedWithoutGh(h, 110, { action: 'merge' }, 422, /not your PR/)
-    await refusedWithoutGh(h, 106, { action: 'merge' }, 422, /not your PR/)
+    await refusedWithoutGh(h, 110, placeholderMerge, 422, /not your PR/)
+    await refusedWithoutGh(h, 106, placeholderMerge, 422, /not your PR/)
   } finally {
     await h.cleanup()
   }
@@ -357,8 +366,8 @@ test('merge is refused for a PR that is not open, and gh is not asked anything',
   try {
     await filled(h)
     // 100 is the viewer's own PR, already merged; 999 was never fetched
-    await refusedWithoutGh(h, 100, { action: 'merge' }, 422, /not an open PR/)
-    await refusedWithoutGh(h, 999, { action: 'merge' }, 422, /not an open PR/)
+    await refusedWithoutGh(h, 100, placeholderMerge, 422, /not an open PR/)
+    await refusedWithoutGh(h, 999, placeholderMerge, 422, /not an open PR/)
   } finally {
     await h.cleanup()
   }
@@ -371,14 +380,14 @@ test('merge is refused unless the PR targets the primary branch: a stacked PR or
     const row = (await rowOf(h, 102))!
     assert.equal(row.merge.state, 'ready')
     assert.equal(row.baseRef, 'feat/parent-branch')
-    await refusedWithoutGh(h, 102, { action: 'merge' }, 422, /feat\/parent-branch.*main|primary branch/)
+    await refusedWithoutGh(h, 102, placeholderMerge, 422, /feat\/parent-branch.*main|primary branch/)
   } finally {
     await h.cleanup()
   }
   const release = await setup({ runner: ghWorld({ bases: { 102: 'release/2.4' } }) })
   try {
     await filled(release)
-    await refusedWithoutGh(release, 102, { action: 'merge' }, 422, /release\/2\.4/)
+    await refusedWithoutGh(release, 102, placeholderMerge, 422, /release\/2\.4/)
     assert.equal(writesOf(release.runner).length, 0)
   } finally {
     await release.cleanup()
@@ -389,7 +398,7 @@ test('merge goes by the default branch the cache holds: master is refused where 
   const h = await setup({ runner: ghWorld({ bases: { 102: 'master' } }) })
   try {
     await filled(h)
-    await refusedWithoutGh(h, 102, { action: 'merge' }, 422, /master/)
+    await refusedWithoutGh(h, 102, placeholderMerge, 422, /master/)
   } finally {
     await h.cleanup()
   }
@@ -409,7 +418,7 @@ test('merge takes no other field: a method, a branch deletion, admin or auto fla
   try {
     await filled(h)
     for (const extra of [{ method: 'merge' }, { deleteBranch: true }, { admin: true }, { auto: true }, { subject: 'x' }, { body: 'x' }, { reviewer: 'sam-tran' }]) {
-      await refusedWithoutGh(h, 102, { action: 'merge', ...extra }, 400, /unknown field|takes no reviewer/)
+      await refusedWithoutGh(h, 102, { ...(await mergeBody(102)), ...extra }, 400, /unknown field|takes no reviewer/)
     }
   } finally {
     await h.cleanup()
@@ -421,13 +430,13 @@ test('merge needs the same Origin and token as every action, and a refusal reach
   try {
     await filled(h)
     const before = h.runner.calls.length
-    assert.equal((await act(h, 102, { action: 'merge' }, { Origin: 'http://attacker.test' })).status, 403)
-    assert.equal((await act(h, 102, { action: 'merge' }, { Origin: '' })).status, 403)
-    assert.equal((await act(h, 102, { action: 'merge' }, { 'X-Pit-View-Token': 'not-the-token' })).status, 403)
+    assert.equal((await act(h, 102, await mergeBody(102), { Origin: 'http://attacker.test' })).status, 403)
+    assert.equal((await act(h, 102, await mergeBody(102), { Origin: '' })).status, 403)
+    assert.equal((await act(h, 102, await mergeBody(102), { 'X-Pit-View-Token': 'not-the-token' })).status, 403)
     const noToken = await fetch(`${h.base}/api/prs/102/actions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Origin: h.base },
-      body: JSON.stringify({ action: 'merge' }),
+      body: JSON.stringify(await mergeBody(102)),
     })
     assert.equal(noToken.status, 403)
     assert.equal(h.runner.calls.length, before)
@@ -440,7 +449,7 @@ test('merge is refused while gh is signed in as another account than the viewer,
   const h = await setup({ runner: ghWorld({ account: 'someone-else' }) })
   try {
     await filled(h)
-    const refused = await act(h, 102, { action: 'merge' })
+    const refused = await act(h, 102, await mergeBody(102))
     assert.equal(refused.status, 422)
     assert.match(String(refused.body.error), /someone-else/)
     assert.equal(writesOf(h.runner).length, 0)
@@ -453,7 +462,7 @@ test('a merge GitHub refuses is a 502 with the reason and claims nothing: no don
   const h = await setup({ runner: ghWorld({ writeError: 'X Pull request is not mergeable: the base branch policy prohibits the merge' }) })
   try {
     await filled(h)
-    const refused = await act(h, 102, { action: 'merge' })
+    const refused = await act(h, 102, await mergeBody(102))
     assert.equal(refused.status, 502)
     assert.match(String(refused.body.error), /base branch policy/)
     assert.equal(refused.body.errorKind, 'command')
@@ -478,7 +487,7 @@ test('after a merge the PR is refreshed on its own and its row leaves the open t
     await filled(h)
     const stream = await collectPatches(h.base)
     const cyclesBefore = (await (await fetch(`${h.base}/api/view`)).json() as View).sync.cycle?.id
-    const done = await act(h, 102, { action: 'merge' })
+    const done = await act(h, 102, await mergeBody(102))
     assert.equal(done.status, 200)
     await until(() => stream.patches.some((patch) => patch.removed.includes(102)))
     const mine = stream.patches.filter((patch) => patch.rows.some((row) => row.number === 102) || patch.removed.includes(102))
@@ -501,9 +510,9 @@ test('a second click while a merge is in flight writes once', async () => {
   const h = await setup({ runner: ghWorld({ gate }) })
   try {
     await filled(h)
-    const first = act(h, 102, { action: 'merge' })
+    const first = act(h, 102, await mergeBody(102))
     await until(() => writesOf(h.runner).length === 1)
-    const second = await act(h, 102, { action: 'merge' })
+    const second = await act(h, 102, await mergeBody(102))
     assert.equal(second.status, 409)
     release()
     assert.equal((await first).status, 200)
@@ -777,10 +786,24 @@ test('the pure parts: parseAction names what it refuses, and ghArgs is exactly w
   assert.deepEqual(parseAction({ action: 'markReady' }), { action: 'markReady' })
   assert.deepEqual(parseAction({ action: 'requestReview', reviewer: 'sam-tran' }), { action: 'requestReview', reviewer: 'sam-tran' })
   assert.throws(() => parseAction(null), /send \{/)
-  assert.deepEqual(parseAction({ action: 'merge' }), { action: 'merge' })
-  assert.throws(() => parseAction({ action: 'merge', method: 'rebase' }), /unknown field method/)
-  assert.throws(() => parseAction({ action: 'merge', reviewer: 'sam-tran' }), /takes no reviewer/)
-  assert.deepEqual(ghArgs('o/r', 7, { action: 'merge' }, 'a'.repeat(40)), ['api', '--method', 'PUT', 'repos/o/r/pulls/7/merge', '-f', 'merge_method=squash', '-f', `sha=${'a'.repeat(40)}`])
+  const sha = 'a'.repeat(40)
+  assert.deepEqual(parseAction({ action: 'merge', headSha: sha, base: 'main' }), { action: 'merge', headSha: sha, base: 'main' })
+  assert.deepEqual(parseAction({ action: 'merge', headSha: sha.toUpperCase(), base: 'main' }), { action: 'merge', headSha: sha, base: 'main' })
+  assert.throws(() => parseAction({ action: 'merge', headSha: sha, base: 'main', method: 'rebase' }), /unknown field method/)
+  assert.throws(() => parseAction({ action: 'merge', headSha: sha, base: 'main', reviewer: 'sam-tran' }), /takes no reviewer/)
+  // the confirmation's head and base are required, and the head must be a full SHA
+  assert.throws(() => parseAction({ action: 'merge' }), /merge needs headSha/)
+  assert.throws(() => parseAction({ action: 'merge', base: 'main' }), /merge needs headSha/)
+  assert.throws(() => parseAction({ action: 'merge', headSha: sha }), /merge needs .*base/)
+  assert.throws(() => parseAction({ action: 'merge', headSha: sha, base: '' }), /merge needs .*base/)
+  assert.throws(() => parseAction({ action: 'merge', headSha: 'a'.repeat(7), base: 'main' }), /full 40-character/)
+  assert.throws(() => parseAction({ action: 'merge', headSha: 'z'.repeat(40), base: 'main' }), /full 40-character/)
+  for (const action of ['markReady', 'convertToDraft']) {
+    assert.throws(() => parseAction({ action, headSha: sha }), /takes no headSha/)
+    assert.throws(() => parseAction({ action, base: 'main' }), /takes no base/)
+  }
+  assert.throws(() => parseAction({ action: 'requestReview', reviewer: 'sam-tran', headSha: sha }), /takes no headSha/)
+  assert.deepEqual(ghArgs('o/r', 7, { action: 'merge', headSha: 'a'.repeat(40), base: 'main' }, 'a'.repeat(40)), ['api', '--method', 'PUT', 'repos/o/r/pulls/7/merge', '-f', 'merge_method=squash', '-f', `sha=${'a'.repeat(40)}`])
   assert.deepEqual(ghArgs('o/r', 7, { action: 'markReady' }), ['pr', 'ready', '7', '--repo', 'o/r'])
   assert.deepEqual(ghArgs('o/r', 7, { action: 'convertToDraft' }), ['pr', 'ready', '7', '--undo', '--repo', 'o/r'])
 })
@@ -789,7 +812,7 @@ test('the merge names the cached full head SHA, and the live PR is read once, wi
   const h = await setup()
   try {
     await filled(h)
-    assert.equal((await act(h, 102, { action: 'merge' })).status, 200)
+    assert.equal((await act(h, 102, await mergeBody(102))).status, 200)
     const write = writesOf(h.runner)[0]!
     const { sha } = await listed(102)
     assert.equal(sha.length, 40)
@@ -808,7 +831,7 @@ test('a merge is refused with no write when the live head differs from the cache
   const h = await setup({ runner: ghWorld({ live: () => ({ head: { sha: 'b'.repeat(40) } }) }) })
   try {
     await filled(h)
-    const refused = await act(h, 102, { action: 'merge' })
+    const refused = await act(h, 102, await mergeBody(102))
     assert.equal(refused.status, 422)
     assert.match(String(refused.body.error), /new commits/)
     assert.match(String(refused.body.error), /nothing was merged/)
@@ -831,7 +854,7 @@ test('a merge is refused with no write when the base was retargeted, or the PR i
     const h = await setup({ runner: ghWorld({ live: () => live }) })
     try {
       await filled(h)
-      const refused = await act(h, 102, { action: 'merge' })
+      const refused = await act(h, 102, await mergeBody(102))
       assert.equal(refused.status, 422, JSON.stringify(live))
       assert.match(String(refused.body.error), error)
       assert.equal(writesOf(h.runner).length, 0, JSON.stringify(live))
@@ -845,7 +868,7 @@ test('GitHub answering 409 to the merge is a refusal that claims nothing was mer
   const h = await setup({ runner: ghWorld({ writeError: 'gh: Head branch was modified. Review and try the merge again. (HTTP 409)' }) })
   try {
     await filled(h)
-    const refused = await act(h, 102, { action: 'merge' })
+    const refused = await act(h, 102, await mergeBody(102))
     assert.equal(refused.status, 502)
     assert.match(String(refused.body.error), /changed since you saw it/)
     assert.match(String(refused.body.error), /nothing was merged/)
@@ -886,6 +909,106 @@ test('a refresh after an action targets the repository the write used, even when
     stream.close()
   } finally {
     release()
+    await h.cleanup()
+  }
+})
+
+// the confirmation named a head and a base; the cache can move before the page learns of it, so
+// the request carries them and the server refuses, writing nothing, when its row differs
+const staleRefusal = async (h: Harness, body: unknown, error: RegExp): Promise<void> => {
+  const refused = await act(h, 102, body)
+  assert.equal(refused.status, 409)
+  assert.match(String(refused.body.error), error)
+  assert.equal(refused.body.done, undefined)
+  assert.equal(writesOf(h.runner).length, 0, 'nothing was written')
+  assert.equal(liveReadsOf(h.runner).length, 0, 'refused before the live read')
+  assert.equal(h.runner.calls.some((call) => call.args[0] === 'api' && call.args[1] === 'user'), false, 'refused before the account lookup')
+}
+
+test('a merge request carrying a head SHA other than the cached row\'s is refused with 409 and no write, and the row is read again', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    const body = await mergeBody(102)
+    // the viewer saw an older head; the cache has moved on
+    await staleRefusal(h, { ...body, headSha: 'b'.repeat(40) }, /new commits|changed since you saw it/)
+    await until(() => singleCallsOf(h.runner).length === 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a merge request carrying a base other than the cached row\'s is refused with 409 and no write', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    const body = await mergeBody(102)
+    await staleRefusal(h, { ...body, base: 'release/2.4' }, /targets|changed since you saw it/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a cache that moved after the confirmation was shown makes it stale: the newer head is never merged', async () => {
+  // a base that moved to a non-primary branch is refused earlier (422, not the primary branch); the head is what can move unseen
+  for (const patch of [{ headRefOid: 'c'.repeat(40) }]) {
+    const h = await setup({ runner: ghWorld({ single: async (number) => singlePr(number, { patch }) }) })
+    try {
+      await filled(h)
+      // what the viewer's page showed when the confirmation opened
+      const shown = await mergeBody(102)
+      // the poller then caches the PR's new state, and the page has not been patched with it yet
+      const refresh = await fetch(`${h.base}/api/prs/102/refresh`, { method: 'POST', headers: { Origin: h.base, 'X-Pit-View-Token': h.server.token } })
+      assert.equal(refresh.status, 200)
+      await until(() => singleCallsOf(h.runner).length === 1)
+      for (let tries = 0; tries < 400; tries += 1) {
+        const row = await rowOf(h, 102)
+        if (row !== undefined && (row.baseRef !== shown.base || row.headSha !== shown.headSha)) break
+        await delay(5)
+      }
+      const moved = await rowOf(h, 102)
+      assert.ok(moved !== undefined && (moved.baseRef !== shown.base || moved.headSha !== shown.headSha), 'the cache moved')
+      const before = h.runner.calls.length
+      const refused = await act(h, 102, shown)
+      assert.equal(refused.status, 409, JSON.stringify(patch))
+      assert.equal(writesOf(h.runner).length, 0)
+      assert.equal(liveReadsOf(h.runner).length, 0)
+      assert.equal(h.runner.calls.slice(before).filter((call) => call.args[0] === 'api' && call.args[1] === 'user').length, 0)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('a merge request carrying the cached head and base succeeds, and the write uses the confirmed SHA as its precondition', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    const body = await mergeBody(102)
+    const done = await act(h, 102, { ...body, headSha: body.headSha.toUpperCase() })
+    assert.equal(done.status, 200)
+    const write = writesOf(h.runner)[0]!
+    assert.ok(write.args.includes(`sha=${body.headSha}`))
+    assert.equal(writesOf(h.runner).length, 1)
+    assert.equal(liveReadsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the other actions carry nothing to bind: a head SHA or base on them is refused, and their state is the action\'s own precondition', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    const sha = (await listed(103)).sha
+    await refusedWithoutGh(h, 103, { action: 'markReady', headSha: sha }, 400, /takes no headSha/)
+    await refusedWithoutGh(h, 101, { action: 'convertToDraft', base: 'main' }, 400, /takes no base/)
+    await refusedWithoutGh(h, 101, { action: 'requestReview', reviewer: 'sam-tran', headSha: sha }, 400, /takes no headSha/)
+    // the state each confirmation shows is checked against the cache already: a draft shown as
+    // ready-to-convert, or a ready PR shown as a draft, is refused
+    await refusedWithoutGh(h, 102, { action: 'markReady' }, 422, /not a draft/)
+    await refusedWithoutGh(h, 103, { action: 'convertToDraft' }, 422, /already a draft/)
+  } finally {
     await h.cleanup()
   }
 })

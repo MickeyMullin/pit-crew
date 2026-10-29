@@ -52,6 +52,8 @@ export type PrBase = {
   // whether baseRef is the repository's primary branch, the only base a merge is offered for
   primaryBase: boolean
   headOid: string
+  // the full head SHA, which a merge confirmation is bound to (headOid is the short form shown)
+  headSha: string
   createdAt: string
   additions: number
   deletions: number
@@ -621,6 +623,7 @@ const prBase = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, S
   baseRef: pr.baseRefName,
   primaryBase: isPrimaryBase(pr.baseRefName, defaultBranch),
   headOid: shortSha(pr.headRefOid),
+  headSha: pr.headRefOid,
   createdAt: pr.createdAt,
   additions: pr.additions,
   deletions: pr.deletions,

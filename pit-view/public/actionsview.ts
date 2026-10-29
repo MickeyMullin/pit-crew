@@ -15,7 +15,9 @@ export const actionKinds: readonly ActionKind[] = ['merge', 'markReady', 'conver
 // a person the config lists, as far as a reviewer choice needs
 export type PersonChoice = { login: string, alias: string }
 
-export type ActionConfirm = { type: 'action', action: ActionKind, reviewer: string }
+// headSha and baseRef are what the row showed when a merge was asked, in full, and the merge request
+// carries them; they are empty for the other actions, which have nothing of the row to be bound to
+export type ActionConfirm = { type: 'action', action: ActionKind, reviewer: string, headSha: string, baseRef: string }
 
 export type ActionOffer = { action: ActionKind, text: string }
 
@@ -58,18 +60,18 @@ const aliasOf = (people: readonly PersonChoice[], login: string): string =>
 // null when the row no longer offers that action. The chosen reviewer is kept when still listed,
 // otherwise the first choice
 export const actionConfirmModel = (
-  row: Pick<OpenRow, 'number' | 'title' | 'author' | 'section' | 'merge' | 'baseRef' | 'primaryBase'>,
+  row: Pick<OpenRow, 'number' | 'title' | 'author' | 'section' | 'merge' | 'baseRef' | 'primaryBase' | 'headOid' | 'headSha'>,
   ask: ActionConfirm,
   people: readonly PersonChoice[],
 ): ActionConfirmModel | null => {
-  if (!actionOffers(row, true).some((offer) => offer.action === ask.action)) return null
+  if (!actionHolds(ask, row, true)) return null
   const n = row.number
   if (ask.action === 'merge') {
     return {
       action: ask.action,
-      heading: `Squash and merge #${n} into ${row.baseRef}?`,
+      heading: `Squash and merge #${n} into ${ask.baseRef}?`,
       title: row.title,
-      effect: `Squashes the PR into one commit on ${row.baseRef} under your account. The head branch is not deleted. The merge cannot be undone from Pit View.`,
+      effect: `Squashes the PR at head ${row.headOid} into one commit on ${ask.baseRef} under your account. The head branch is not deleted. The merge cannot be undone from Pit View.`,
       reviewers: null,
       reviewer: '',
       canConfirm: true,
@@ -121,17 +123,26 @@ export const actionConfirmModel = (
 }
 
 // a confirmation outlives nothing: it is dropped when the PR has left the open tables, or no
-// longer offers its action (a draft marked ready by a patch no longer offers Mark ready)
-export const actionHolds = (ask: ActionConfirm, row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase'>, open: boolean): boolean =>
-  actionOffers(row, open).some((offer) => offer.action === ask.action)
+// longer offers its action (a draft marked ready by a patch no longer offers Mark ready). A merge
+// confirmation is also dropped when a patch changed the head or base it showed: the request is bound
+// to them, and the confirmation must not go on describing a PR that is no longer the one cached
+export const actionHolds = (ask: ActionConfirm, row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'headSha' | 'baseRef'>, open: boolean): boolean =>
+  actionOffers(row, open).some((offer) => offer.action === ask.action) &&
+  (ask.action !== 'merge' || (row.headSha === ask.headSha && row.baseRef === ask.baseRef))
 
-// the request the confirmation sends: the token header, and the reviewer for a review request only
+// the request the confirmation sends: the token header, the head SHA and base the confirmation
+// showed for a merge, and the reviewer for a review request
 export const actionRequest = (number: number, ask: ActionConfirm, token: string): RunRequest => ({
   url: `/api/prs/${number}/actions`,
   init: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', [tokenHeader]: token },
-    body: JSON.stringify(ask.action === 'requestReview' ? { action: ask.action, reviewer: ask.reviewer } : { action: ask.action }),
+    body: JSON.stringify(
+      ask.action === 'requestReview'
+        ? { action: ask.action, reviewer: ask.reviewer }
+        : ask.action === 'merge'
+          ? { action: ask.action, headSha: ask.headSha, base: ask.baseRef }
+          : { action: ask.action }),
   },
 })
 

@@ -212,6 +212,7 @@ const actionStatus: Readonly<Record<ActionErrorCode, number>> = {
   notOpen: 422,
   notYours: 422,
   notAllowed: 422,
+  stale: 409,
   identityMismatch: 422,
   identityUnknown: 502,
   busy: 409,

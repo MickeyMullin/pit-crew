@@ -617,7 +617,7 @@ test('the derived view has the API shape, with injected freshness', async () => 
   const sample = find(shown, 110)
   assert.deepEqual(Object.keys(sample).sort(), [
     'additions', 'agent', 'author', 'baseRef', 'changedFiles', 'createdAt', 'deletions', 'flags', 'freshness', 'group', 'headOid',
-    'headRef', 'issues', 'lastActivity', 'merge', 'number', 'primaryBase', 'refresh', 'reviewers', 'section', 'stack', 'tickets', 'title', 'url',
+    'headRef', 'headSha', 'issues', 'lastActivity', 'merge', 'number', 'primaryBase', 'refresh', 'reviewers', 'section', 'stack', 'tickets', 'title', 'url',
   ])
   assert.deepEqual([sample.headOid, sample.headRef, sample.baseRef, sample.agent, sample.refresh], ['cb052a4', 'feat/import-reader', 'main', null, null])
   // freshness defaults to current as of now

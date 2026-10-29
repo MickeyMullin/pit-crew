@@ -26,11 +26,16 @@ const mine = (mergeState: string, patch: Record<string, unknown> = {}): OpenRow 
   url: 'https://example.test/owner/name/pull/101',
   title: 'fix(retry): back off between attempts',
   author: { login: 'vera-quill', alias: 'You' },
-  headRef: 'fix/retry', baseRef: 'main', primaryBase: true, headOid: '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7',
+  headRef: 'fix/retry', baseRef: 'main', primaryBase: true, headOid: '755b78b', headSha: '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7',
   merge: { state: mergeState, label: mergeState },
   agent: null,
   ...patch,
 } as unknown as OpenRow)
+
+const fullSha = '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7'
+
+// a merge confirmation as the drawer opens it: bound to the head and base the row showed
+const mergeAsk = (headSha = fullSha, baseRef = 'main'): ActionConfirm => ({ type: 'action', action: 'merge', reviewer: '', headSha, baseRef })
 
 const others = (): OpenRow => mine('ready', { section: 'others', author: { login: 'alex-mendez', alias: 'Alex' } })
 
@@ -68,7 +73,7 @@ test('nothing is asked or sent until a click opens the confirmation: the drawer 
 
 test('the confirmation names the PR and the action, and says what happens on GitHub', () => {
   const draft = mine('draft')
-  const markReady = drawerModel(input(draft, { confirm: { type: 'action', action: 'markReady', reviewer: '' } })).actionAsk
+  const markReady = drawerModel(input(draft, { confirm: { type: 'action', action: 'markReady', reviewer: '', headSha: '', baseRef: '' } })).actionAsk
   assert.ok(markReady !== null)
   assert.equal(markReady.heading, 'Mark #101 ready for review?')
   assert.equal(markReady.title, 'fix(retry): back off between attempts')
@@ -76,20 +81,20 @@ test('the confirmation names the PR and the action, and says what happens on Git
   assert.equal(markReady.confirm, 'Mark ready')
   assert.equal(markReady.reviewers, null)
 
-  const merge = actionConfirmModel(mine('ready', { baseRef: 'release', primaryBase: false }), { type: 'action', action: 'merge', reviewer: '' }, people)
+  const merge = actionConfirmModel(mine('ready', { baseRef: 'release', primaryBase: false }), mergeAsk(), people)
   assert.equal(merge, null)
   assert.deepEqual(actionOffers(mine('ready', { baseRef: 'release', primaryBase: false }), true).map((offer) => offer.action), ['convertToDraft', 'requestReview'])
   // a state other than ready has no merge confirmation
   for (const state of ['draft', 'blocked', 'needsReview', 'needsApproval', 'checking']) {
-    assert.equal(actionConfirmModel(mine(state), { type: 'action', action: 'merge', reviewer: '' }, people), null, state)
+    assert.equal(actionConfirmModel(mine(state), mergeAsk(), people), null, state)
   }
 
-  const convert = actionConfirmModel(mine('ready'), { type: 'action', action: 'convertToDraft', reviewer: '' }, people)
+  const convert = actionConfirmModel(mine('ready'), { type: 'action', action: 'convertToDraft', reviewer: '', headSha: '', baseRef: '' }, people)
   assert.equal(convert?.heading, 'Convert #101 to a draft?')
   assert.match(convert?.effect ?? '', /cannot be merged until it is marked ready again/)
   assert.equal(convert?.confirm, 'Convert to draft')
 
-  const review = actionConfirmModel(mine('ready'), { type: 'action', action: 'requestReview', reviewer: 'sam-tran' }, people)
+  const review = actionConfirmModel(mine('ready'), { type: 'action', action: 'requestReview', reviewer: 'sam-tran', headSha: '', baseRef: '' }, people)
   assert.equal(review?.heading, 'Request a review on #101?')
   assert.equal(review?.reviewer, 'sam-tran')
   assert.match(review?.effect ?? '', /Sam \(@sam-tran\)/)
@@ -98,7 +103,7 @@ test('the confirmation names the PR and the action, and says what happens on Git
 
 test('a review request chooses from people, never the PR\'s author; a stale choice falls back to the first listed', () => {
   assert.deepEqual(reviewerChoices(mine('ready'), people).map((person) => person.login), ['alex-mendez', 'sam-tran'])
-  const ask: ActionConfirm = { type: 'action', action: 'requestReview', reviewer: 'gone-from-people' }
+  const ask: ActionConfirm = { type: 'action', action: 'requestReview', reviewer: 'gone-from-people', headSha: '', baseRef: '' }
   const model = actionConfirmModel(mine('ready'), ask, people)
   assert.equal(model?.reviewer, 'alex-mendez')
   assert.deepEqual(model?.reviewers?.map((choice) => choice.label), ['Alex (@alex-mendez)', 'Sam (@sam-tran)'])
@@ -110,14 +115,17 @@ test('a review request chooses from people, never the PR\'s author; a stale choi
 })
 
 test('an action the row no longer offers has no confirmation, and the open one is dropped when it stops holding', () => {
-  const markReady: ActionConfirm = { type: 'action', action: 'markReady', reviewer: '' }
+  const markReady: ActionConfirm = { type: 'action', action: 'markReady', reviewer: '', headSha: '', baseRef: '' }
   assert.equal(actionConfirmModel(mine('ready'), markReady, people), null)
-  assert.equal(actionConfirmModel(others(), { type: 'action', action: 'requestReview', reviewer: 'sam-tran' }, people), null)
-  const merge: ActionConfirm = { type: 'action', action: 'merge', reviewer: '' }
+  assert.equal(actionConfirmModel(others(), { type: 'action', action: 'requestReview', reviewer: 'sam-tran', headSha: '', baseRef: '' }, people), null)
+  const merge: ActionConfirm = mergeAsk()
   assert.equal(actionHolds(merge, mine('ready'), true), true)
   // a patch moved the PR out of ready, or it left the open tables: the merge confirmation is dropped
   assert.equal(actionHolds(merge, mine('blocked'), true), false)
   assert.equal(actionHolds(merge, mine('ready'), false), false)
+  // a patch moved the head or the base the confirmation named: what it showed is no longer true, so it is dropped
+  assert.equal(actionHolds(merge, mine('ready', { headSha: 'c'.repeat(40) }), true), false)
+  assert.equal(actionHolds(merge, mine('ready', { baseRef: 'trunk' }), true), false)
   assert.equal(actionHolds(markReady, mine('draft'), true), true)
   // a patch took the draft out of draft, the PR left the open tables, or it is no longer the viewer's
   assert.equal(actionHolds(markReady, mine('ready'), true), false)
@@ -128,15 +136,15 @@ test('an action the row no longer offers has no confirmation, and the open one i
 })
 
 test('a request is built only from a confirmation, with the token header and exactly the fields the server takes', () => {
-  const ready = actionRequest(101, { type: 'action', action: 'markReady', reviewer: 'ignored' }, 'tok')
+  const ready = actionRequest(101, { type: 'action', action: 'markReady', reviewer: 'ignored', headSha: '', baseRef: '' }, 'tok')
   assert.equal(ready.url, '/api/prs/101/actions')
   assert.equal(ready.init.method, 'POST')
   assert.deepEqual(ready.init.headers, { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok' })
   assert.deepEqual(JSON.parse(ready.init.body ?? ''), { action: 'markReady' })
   // a merge sends the action alone: the method is the server's, never the page's
-  assert.deepEqual(JSON.parse(actionRequest(102, { type: 'action', action: 'merge', reviewer: 'ignored' }, 'tok').init.body ?? ''), { action: 'merge' })
-  assert.deepEqual(JSON.parse(actionRequest(101, { type: 'action', action: 'convertToDraft', reviewer: '' }, 'tok').init.body ?? ''), { action: 'convertToDraft' })
-  assert.deepEqual(JSON.parse(actionRequest(7, { type: 'action', action: 'requestReview', reviewer: 'sam-tran' }, 'tok').init.body ?? ''), { action: 'requestReview', reviewer: 'sam-tran' })
+  assert.deepEqual(JSON.parse(actionRequest(102, mergeAsk(), 'tok').init.body ?? ''), { action: 'merge', headSha: fullSha, base: 'main' })
+  assert.deepEqual(JSON.parse(actionRequest(101, { type: 'action', action: 'convertToDraft', reviewer: '', headSha: '', baseRef: '' }, 'tok').init.body ?? ''), { action: 'convertToDraft' })
+  assert.deepEqual(JSON.parse(actionRequest(7, { type: 'action', action: 'requestReview', reviewer: 'sam-tran', headSha: '', baseRef: '' }, 'tok').init.body ?? ''), { action: 'requestReview', reviewer: 'sam-tran' })
 })
 
 test('a refusal is the server\'s message as a sentence, a reload for the token, and a plain line when Pit View is down', () => {
@@ -148,10 +156,10 @@ test('a refusal is the server\'s message as a sentence, a reload for the token, 
 })
 
 test('the done line names the PR and says the row is refreshing', () => {
-  assert.equal(actionDoneText(101, { type: 'action', action: 'merge', reviewer: '' }, people), '#101: merge requested (squash). The row is refreshing.')
-  assert.equal(actionDoneText(101, { type: 'action', action: 'markReady', reviewer: '' }, people), '#101: marked ready for review. The row is refreshing.')
-  assert.equal(actionDoneText(101, { type: 'action', action: 'convertToDraft', reviewer: '' }, people), '#101: converted to a draft. The row is refreshing.')
-  assert.equal(actionDoneText(101, { type: 'action', action: 'requestReview', reviewer: 'sam-tran' }, people), '#101: review requested from Sam. The row is refreshing.')
+  assert.equal(actionDoneText(101, mergeAsk(), people), '#101: merge requested (squash). The row is refreshing.')
+  assert.equal(actionDoneText(101, { type: 'action', action: 'markReady', reviewer: '', headSha: '', baseRef: '' }, people), '#101: marked ready for review. The row is refreshing.')
+  assert.equal(actionDoneText(101, { type: 'action', action: 'convertToDraft', reviewer: '', headSha: '', baseRef: '' }, people), '#101: converted to a draft. The row is refreshing.')
+  assert.equal(actionDoneText(101, { type: 'action', action: 'requestReview', reviewer: 'sam-tran', headSha: '', baseRef: '' }, people), '#101: review requested from Sam. The row is refreshing.')
 })
 
 test('Escape cancels an action\'s confirmation before closing the drawer, and not while its request is on its way', () => {
@@ -173,4 +181,21 @@ test('in drawer.ts an action button only asks, and the request is sent from one 
   assert.match(source, /if \(action === 'requestReview'\)/)
   assert.match(source, /getJson<\{ people\?: PersonChoice\[\] \}>\('\/api\/config'\)/)
   assert.match(source, /model\?\.actionAsk\?\.canConfirm === false/)
+})
+
+test('a merge confirmation names the head it is bound to, and sends the displayed head and base in full', () => {
+  const model = actionConfirmModel(mine('ready'), mergeAsk(), people)
+  assert.match(model?.heading ?? '', /into main\?$/)
+  assert.match(model?.effect ?? '', /head 755b78b\b/)
+  const request = actionRequest(101, mergeAsk(), 'tok')
+  assert.deepEqual(JSON.parse(request.init.body ?? ''), { action: 'merge', headSha: fullSha, base: 'main' })
+  // the other actions send neither, whatever the confirmation holds
+  for (const action of ['markReady', 'convertToDraft'] as const) {
+    assert.deepEqual(JSON.parse(actionRequest(101, { type: 'action', action, reviewer: '', headSha: fullSha, baseRef: 'main' }, 'tok').init.body ?? ''), { action })
+  }
+})
+
+test('in drawer.ts the confirmation captures the head and base from the row when it is asked', async () => {
+  const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
+  assert.match(source, /confirm = \{ type: 'action', action, reviewer: '', headSha: row\.headSha, baseRef: row\.baseRef \}/)
 })

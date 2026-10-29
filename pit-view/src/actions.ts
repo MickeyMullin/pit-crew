@@ -14,7 +14,8 @@ export const actionNames = ['merge', 'markReady', 'convertToDraft', 'requestRevi
 export type ActionName = typeof actionNames[number]
 
 export type ActionRequest =
-  | { action: 'merge' }
+  // the full head SHA and the base branch the confirmation displayed
+  | { action: 'merge', headSha: string, base: string }
   | { action: 'markReady' }
   | { action: 'convertToDraft' }
   | { action: 'requestReview', reviewer: string }
@@ -22,7 +23,7 @@ export type ActionRequest =
 export type ActionResult = { number: number, action: ActionName, done: true, reviewer?: string }
 
 export type ActionErrorCode =
-  | 'badRequest' | 'notOpen' | 'notYours' | 'notAllowed' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'ghFailed'
+  | 'badRequest' | 'notOpen' | 'notYours' | 'notAllowed' | 'stale' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'ghFailed'
 
 export class ActionError extends Error {
   override name = 'ActionError'
@@ -36,32 +37,40 @@ export class ActionError extends Error {
   }
 }
 
-const usage = 'send { "action": "merge" | "markReady" | "convertToDraft" } or { "action": "requestReview", "reviewer": "<login from people>" }'
+const usage = 'send { "action": "merge", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "markReady" | "convertToDraft" } or { "action": "requestReview", "reviewer": "<login from people>" }'
 
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
 // the body, checked field by field: an unknown field is refused rather than ignored
 export const parseAction = (body: unknown): ActionRequest => {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ActionError('badRequest', usage)
-  const { action, reviewer, ...rest } = body as Record<string, unknown>
+  const { action, reviewer, headSha, base, ...rest } = body as Record<string, unknown>
   if (typeof action !== 'string' || !actionNames.includes(action as ActionName)) {
     throw new ActionError('badRequest', `action must be one of ${actionNames.join(', ')}; ${usage}`)
   }
   const extra = Object.keys(rest)[0]
   if (extra !== undefined) throw new ActionError('badRequest', `unknown field ${extra}; ${usage}`)
+  if (action === 'merge') {
+    if (reviewer !== undefined) throw new ActionError('badRequest', `merge takes no reviewer; ${usage}`)
+    if (typeof headSha !== 'string' || typeof base !== 'string' || base === '') throw new ActionError('badRequest', `merge needs headSha and base, the head and base branch the confirmation showed; ${usage}`)
+    if (!/^[0-9a-f]{40}$/i.test(headSha)) throw new ActionError('badRequest', `headSha must be the full 40-character head SHA the confirmation showed; ${usage}`)
+    return { action, headSha: headSha.toLowerCase(), base }
+  }
+  if (headSha !== undefined) throw new ActionError('badRequest', `${action} takes no headSha; ${usage}`)
+  if (base !== undefined) throw new ActionError('badRequest', `${action} takes no base; ${usage}`)
   if (action === 'requestReview') {
     if (typeof reviewer !== 'string' || reviewer === '') throw new ActionError('badRequest', `requestReview needs a reviewer; ${usage}`)
     return { action, reviewer }
   }
   if (reviewer !== undefined) throw new ActionError('badRequest', `${action} takes no reviewer; ${usage}`)
-  return { action: action as 'merge' | 'markReady' | 'convertToDraft' }
+  return { action: action as 'markReady' | 'convertToDraft' }
 }
 
 // exactly what gh is asked for each action. Merge uses GitHub's REST merge endpoint rather than
 // `gh pr merge`: that endpoint refuses when branch rules require a queue, so one click cannot
 // silently enable auto-merge or enqueue anything. The method is fixed to squash.
-// The merge carries the head SHA the viewer saw as GitHub's `sha` precondition, so a push after
-// that is refused by GitHub (409) instead of merged.
+// The merge carries the head SHA the viewer's confirmation showed as GitHub's `sha` precondition,
+// so a push after that is refused by GitHub (409) instead of merged.
 export const ghArgs = (repo: string, number: number, request: ActionRequest, headSha = ''): string[] => {
   switch (request.action) {
     case 'merge': return ['api', '--method', 'PUT', `repos/${repo}/pulls/${number}/merge`, '-f', 'merge_method=squash', '-f', `sha=${headSha}`]
@@ -129,7 +138,13 @@ export const createActions = (options: ActionsOptions): Actions => {
       if (!isPrimaryBase(base, cached.defaultBranch)) {
         throw new ActionError('notAllowed', `#${number} targets ${base}, not the primary branch (${cached.defaultBranch ?? 'master or main'}); Pit View merges only into the primary branch`)
       }
-      merging = { base, headSha: row.pr.headRefOid }
+      // the confirmation named a head and a base; the cache can have moved on before the page was
+      // patched, and then the viewer never saw what is cached: nothing is written
+      if (request.base !== base || request.headSha !== row.pr.headRefOid.toLowerCase()) {
+        refresh(repo, number)
+        throw new ActionError('stale', `#${number} changed since you saw it (${request.base !== base ? `it now targets ${base}, not ${request.base}` : 'it has new commits'}); nothing was merged. Reload its confirmation to see the current state`)
+      }
+      merging = { base: request.base, headSha: request.headSha }
     }
     if (request.action === 'markReady' && !row.pr.isDraft) throw new ActionError('notAllowed', `#${number} is not a draft`)
     if (request.action === 'convertToDraft' && row.pr.isDraft) throw new ActionError('notAllowed', `#${number} is already a draft`)

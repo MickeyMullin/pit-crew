@@ -280,7 +280,10 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       }
       people = answer.value.people.map((person) => ({ login: person.login, alias: person.alias }))
     }
-    confirm = { type: 'action', action, reviewer: '' }
+    // the head and base shown now are the ones a merge is bound to
+    const row = options.rowOf(n)
+    if (row === undefined) return
+    confirm = { type: 'action', action, reviewer: '', headSha: row.headSha, baseRef: row.baseRef }
     confirmFrom = `action:${action}`
     error = ''
     render()
