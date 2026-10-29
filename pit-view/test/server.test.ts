@@ -1082,7 +1082,7 @@ test('the view carries each row\'s Agent cell, and a start on the viewer\'s own 
 const lastWrite = (h: Harness): string => h.launch.children.at(-1)?.writes[0] ?? ''
 
 test('a start takes a kind beside the runner: default, tandem (Claude only) or stack, each with its own command line and label', async () => {
-  const h = await setup({ config: { cloneDir: '~/dev/orbit', agent: { runner: 'codex' } } })
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', agent: { runner: 'codex', claudeModel: 'sonnet' } } })
   try {
     await filled(h)
     const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
@@ -1215,7 +1215,7 @@ test('the view\'s Agent cell lists the starts a row offers, and the run list car
 })
 
 test('a fix session starts only on the viewer\'s own PR: fix-pr with Claude, never --no-post, after the identity check; others\' PRs 422, Codex 400', async () => {
-  const h = await setup({ config: { cloneDir: '~/dev/orbit', agent: { runner: 'codex' } } })
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', agent: { runner: 'codex', claudeModel: 'sonnet' } } })
   try {
     await filled(h)
     const url = (number: number): string => `${h.base}/api/prs/${number}/runs`

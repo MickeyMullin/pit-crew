@@ -34,6 +34,7 @@
   "showAgentColumn": false,
   "allowedHosts": [],
   "agent": {
-    "runner": "claude"
+    "runner": "claude",
+    "claudeModel": "sonnet"
   }
 }

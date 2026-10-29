@@ -32,9 +32,13 @@ export type Notifications = { enabled: boolean, kinds: NotificationKind[] }
 export type RunnerName = 'claude' | 'codex'
 export const runnerNames: readonly RunnerName[] = ['claude', 'codex']
 
+export const defaultClaudeModel = 'sonnet'
+
 export type AgentSettings = {
   // the default runner; a single run may pick the other
   runner: RunnerName
+  // passed to every Claude run as --model; the default is sonnet, not the owner's own Claude default
+  claudeModel: string
   // passed to Codex as -m when set; Codex otherwise uses its own configured model
   codexModel?: string
 }
@@ -100,7 +104,7 @@ export const defaultConfig = (): Config => ({
   density: 'comfortable',
   showAgentColumn: false,
   allowedHosts: [],
-  agent: { runner: 'claude' },
+  agent: { runner: 'claude', claudeModel: defaultClaudeModel },
 })
 
 // the default instance ('') is the deployed app; a named one, such as dev, keeps folders of its own
@@ -247,19 +251,26 @@ const toCloneDir = (value: unknown): string | undefined => {
   return path
 }
 
-// a model name as Codex takes it after -m; never a flag, never whitespace
-const codexModelPattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/
+// a model name as Claude takes it after --model or Codex after -m; never a flag, never whitespace
+const modelPattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/
 
 // absent means the default runner, so a config written before phase 2 still validates
 const toAgent = (value: unknown): AgentSettings => {
-  if (value === undefined) return { runner: 'claude' }
+  if (value === undefined) return { runner: 'claude', claudeModel: defaultClaudeModel }
   if (!isObject(value)) return fail('config.agent must be an object such as { "runner": "claude" }')
-  onlyKeys(value, ['runner', 'codexModel'], 'agent')
-  const agent: AgentSettings = { runner: oneOf(value, 'runner', runnerNames, 'agent') }
+  onlyKeys(value, ['runner', 'claudeModel', 'codexModel'], 'agent')
+  const agent: AgentSettings = { runner: oneOf(value, 'runner', runnerNames, 'agent'), claudeModel: defaultClaudeModel }
+  if (value.claudeModel !== undefined) {
+    const model = str(value, 'claudeModel', 'agent').trim()
+    if (model !== '') {
+      if (!modelPattern.test(model)) fail('agent.claudeModel must be a model name such as sonnet or opus, with no spaces')
+      agent.claudeModel = model
+    }
+  }
   if (value.codexModel !== undefined) {
     const model = str(value, 'codexModel', 'agent').trim()
     if (model !== '') {
-      if (!codexModelPattern.test(model)) fail('agent.codexModel must be a model name such as gpt-6.1-terra, with no spaces')
+      if (!modelPattern.test(model)) fail('agent.codexModel must be a model name such as gpt-6.1-terra, with no spaces')
       agent.codexModel = model
     }
   }

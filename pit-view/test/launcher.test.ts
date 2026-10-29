@@ -47,7 +47,7 @@ const runRow = (patch: Partial<Run> = {}): Run => ({
 
 const spec = (patch: Partial<LaunchSpec> = {}): LaunchSpec => ({
   command: 'review-pr', args: ['106'], cwd: '/home/tester/dev/orbit', runDir: '/home/tester/.local/state/pit-view/runs/3', home: '/home/tester',
-  sessionId: '6f1c1f9e-0000-4000-8000-000000000003', reportsDir: '/Volumes/Data/agents/output', worktreesDir: '/Volumes/Data/agents/worktrees', ...patch,
+  sessionId: '6f1c1f9e-0000-4000-8000-000000000003', claudeModel: 'sonnet', reportsDir: '/Volumes/Data/agents/output', worktreesDir: '/Volumes/Data/agents/worktrees', ...patch,
 })
 
 // command lines
@@ -57,7 +57,7 @@ test('Claude starts exactly as Launching runs pins it, with the request as one s
   assert.equal(invocation.command, 'claude')
   assert.deepEqual(invocation.args, [
     '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
-    '--session-id', '6f1c1f9e-0000-4000-8000-000000000003', '--permission-mode', 'auto', '--add-dir', '/home/tester/agents',
+    '--model', 'sonnet', '--session-id', '6f1c1f9e-0000-4000-8000-000000000003', '--permission-mode', 'auto', '--add-dir', '/home/tester/agents',
   ])
   assert.ok(invocation.stdin?.endsWith('\n'))
   assert.deepEqual(JSON.parse(invocation.stdin ?? ''), {
@@ -66,6 +66,19 @@ test('Claude starts exactly as Launching runs pins it, with the request as one s
   })
   // never --bare or --safe-mode, which drop the sign-in or the installed commands
   assert.ok(!invocation.args.some((arg) => arg === '--bare' || arg === '--safe-mode'))
+})
+
+test('every Claude run carries --model from the configured claudeModel, and the model is the one that was set', () => {
+  const modelOf = (args: readonly string[]): string | undefined => args[args.indexOf('--model') + 1]
+  for (const command of ['review-pr', 'review-dependabot', 'review-stack', 'fix-pr']) {
+    assert.equal(modelOf(claudeInvocation(spec({ command })).args), 'sonnet', command)
+  }
+  const opus = claudeInvocation(spec({ claudeModel: 'opus' })).args
+  assert.equal(modelOf(opus), 'opus')
+  assert.equal(opus.filter((arg) => arg === '--model').length, 1)
+  // the model never lands in the request, and Codex is not given it
+  assert.ok(!(claudeInvocation(spec()).stdin ?? '').includes('sonnet'))
+  assert.ok(!codexInvocation(spec({ claudeModel: 'opus' })).args.includes('opus'))
 })
 
 test('Codex starts exactly as Launching runs pins it: a $ skill, the sandbox, the resolved folders and the note', () => {
@@ -91,6 +104,8 @@ test('a request is the command, its arguments and --emit-json, with / for Claude
 
 test('the resume command starts in the run\'s folder; Codex\'s carries its model and sandbox again', () => {
   assert.equal(runners.claude.resume('~/dev/orbit', 'sess-1', spec(), '/home/tester'), 'cd ~/dev/orbit && claude --resume sess-1')
+  // a resumed Claude session comes back on the model it ran with (checked against Claude Code 2.1.312), so the model is not repeated
+  assert.equal(runners.claude.resume('~/dev/orbit', 'sess-1', spec({ claudeModel: 'opus' }), '/home/tester'), 'cd ~/dev/orbit && claude --resume sess-1')
   assert.equal(
     runners.codex.resume('~/dev/orbit', 'th-9', spec({ codexModel: 'gpt-6.1-terra', reportsDir: '/home/tester/agents/output', worktreesDir: '/home/tester/agents/worktrees' }), '/home/tester'),
     'cd ~/dev/orbit && codex resume th-9 -m gpt-6.1-terra -s workspace-write -c sandbox_workspace_write.network_access=true --add-dir ~/dev/orbit/.git --add-dir ~/agents/output --add-dir ~/agents/worktrees',
@@ -129,7 +144,7 @@ test('a row\'s default run: Review, Re-review, Self-review with --no-post, and r
 // the Agent cell
 
 test('an idle cell offers the default run with the configured runner and says when the last review was', async () => {
-  const config = { ...baseConfig(), agent: { runner: 'codex' as const } }
+  const config = { ...baseConfig(), agent: { runner: 'codex' as const, claudeModel: 'sonnet' } }
   const others = agentCell(await prOf(106), config, undefined, undefined)
   assert.equal(others.state, 'idle')
   assert.equal(others.label, 'Re-review')
@@ -591,7 +606,7 @@ test('a start checks gh\'s account, spawns Claude in cloneDir with a clean envir
 })
 
 test('a tandem start is refused for Codex, asked for or configured, before anything runs', async () => {
-  const h = await harness({ config: { agent: { runner: 'codex' } } })
+  const h = await harness({ config: { agent: { runner: 'codex', claudeModel: 'sonnet' } } })
   try {
     const tandem = request(106, { args: ['106', '--tandem'], label: 'Tandem review' })
     const refused = (error: unknown): boolean => error instanceof LaunchError && error.code === 'tandemRunner' && /tandem runs with Claude only/.test(error.message)
@@ -797,7 +812,7 @@ test('every outcome settles from the files: failed, needsInput, noResult, noRepo
 })
 
 test('a Codex run takes its session from thread.started, has no stdin, and is judged by its files alone', async () => {
-  const h = await harness({ config: { agent: { runner: 'codex', codexModel: 'gpt-6.1-terra' } } })
+  const h = await harness({ config: { agent: { runner: 'codex', claudeModel: 'sonnet', codexModel: 'gpt-6.1-terra' } } })
   try {
     const run = await h.launcher.start(request(104, { args: ['104', '--no-post'], label: 'Self-review' }))
     const runDir = join(h.stateDir, 'runs', String(run.id))
@@ -805,7 +820,7 @@ test('a Codex run takes its session from thread.started, has no stdin, and is ju
     const cwd = join(h.home, 'dev', 'orbit')
     assert.equal(child.request.command, 'codex')
     assert.deepEqual(child.request.args, codexInvocation({
-      command: 'review-pr', args: ['104', '--no-post'], cwd, runDir, home: h.home, sessionId: null, codexModel: 'gpt-6.1-terra',
+      command: 'review-pr', args: ['104', '--no-post'], cwd, runDir, home: h.home, sessionId: null, claudeModel: 'sonnet', codexModel: 'gpt-6.1-terra',
       reportsDir: join(h.home, 'agents', 'output'), worktreesDir: join(h.home, 'agents', 'worktrees'),
     }).args)
     assert.equal(child.request.stdin, 'ignore')
@@ -1137,7 +1152,7 @@ test('a fix run settles from its result: done needs its report on disk, a stop b
 })
 
 test('a fix run starts as fix-pr with Claude only, settles from FIX-<n>.md, and Codex is refused before anything runs', async () => {
-  const h = await harness({ config: { agent: { runner: 'codex' } } })
+  const h = await harness({ config: { agent: { runner: 'codex', claudeModel: 'sonnet' } } })
   try {
     const fix = request(101, { command: 'fix-pr', args: ['101'], label: 'Fix session' })
     const refused = (error: unknown): boolean => error instanceof LaunchError && error.code === 'fixRunner' && /Fix session runs with Claude only/.test(error.message)

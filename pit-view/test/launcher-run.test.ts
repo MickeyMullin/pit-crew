@@ -144,7 +144,7 @@ test('a Claude run end to end: stream-json request on stdin, steps, stdin closed
     assert.equal(final.result?.schema === 'pit-crew/review-result@1' && final.result.notPostedReason, 'noPost')
     const call = await callOf(dir)
     assert.deepEqual(call.argv, claudeInvocation({
-      command: 'review-pr', args: ['104', '--no-post'], cwd: h.cwd, runDir: dir, home: h.home, sessionId: '00000000-0000-4000-8000-0000000000e2',
+      command: 'review-pr', args: ['104', '--no-post'], cwd: h.cwd, runDir: dir, home: h.home, sessionId: '00000000-0000-4000-8000-0000000000e2', claudeModel: 'sonnet',
       reportsDir: join(h.home, 'agents', 'output'), worktreesDir: join(h.home, 'agents', 'worktrees'),
     }).args)
     assert.equal(call.request, `/review-pr 104 --no-post --emit-json=${dir}`)
@@ -161,8 +161,32 @@ test('a Claude run end to end: stream-json request on stdin, steps, stdin closed
   }
 })
 
+test('a Claude run carries the configured model on its real command line, sonnet unless the config sets another', { timeout: 20_000 }, async () => {
+  const modelOf = (argv: readonly string[]): string | undefined => argv[argv.indexOf('--model') + 1]
+  const first = await setup()
+  try {
+    const run = await first.launcher.start(request)
+    await first.launcher.settled(run.id)
+    const call = await callOf(join(first.home, '.local', 'state', 'pit-view', 'runs', String(run.id)))
+    assert.equal(modelOf(call.argv), 'sonnet')
+    // the resumed session keeps its own model, so the resume command carries none
+    assert.doesNotMatch((await first.launcher.settled(run.id)).resume ?? '', /--model/)
+  } finally {
+    await first.cleanup()
+  }
+  const second = await setup({ agent: { runner: 'claude', claudeModel: 'opus' } })
+  try {
+    const run = await second.launcher.start(request)
+    await second.launcher.settled(run.id)
+    const call = await callOf(join(second.home, '.local', 'state', 'pit-view', 'runs', String(run.id)))
+    assert.equal(modelOf(call.argv), 'opus')
+  } finally {
+    await second.cleanup()
+  }
+})
+
 test('a Codex run end to end: the $ skill and note as its prompt, the session from thread.started, settled done by its files', { timeout: 20_000 }, async () => {
-  const h = await setup({ agent: { runner: 'codex', codexModel: 'gpt-6.1-terra' } })
+  const h = await setup({ agent: { runner: 'codex', claudeModel: 'sonnet', codexModel: 'gpt-6.1-terra' } })
   try {
     const run = await h.launcher.start(request)
     const final = await h.launcher.settled(run.id)
@@ -171,7 +195,7 @@ test('a Codex run end to end: the $ skill and note as its prompt, the session fr
     assert.match(final.resume ?? '', /^cd ~\/dev\/orbit && codex resume th-fake-1 -m gpt-6\.1-terra -s workspace-write /)
     const call = await callOf(dir)
     assert.deepEqual(call.argv, codexInvocation({
-      command: 'review-pr', args: ['104', '--no-post'], cwd: h.cwd, runDir: dir, home: h.home, sessionId: null, codexModel: 'gpt-6.1-terra',
+      command: 'review-pr', args: ['104', '--no-post'], cwd: h.cwd, runDir: dir, home: h.home, sessionId: null, claudeModel: 'sonnet', codexModel: 'gpt-6.1-terra',
       reportsDir: join(h.home, 'agents', 'output'), worktreesDir: join(h.home, 'agents', 'worktrees'),
     }).args)
     assert.ok(call.request.startsWith(`$review-pr 104 --no-post --emit-json=${dir}\n\nNote: `))

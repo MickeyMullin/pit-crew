@@ -57,15 +57,15 @@ test('cloneDir is optional: an absolute path or one under ~, trimmed, and left o
   assert.deepEqual(Object.keys(validateConfig({ ...base, cloneDir: '~/dev/orbit' })).slice(-3), ['allowedHosts', 'cloneDir', 'agent'])
 })
 
-test('agent names the default runner, claude unless set, and an optional Codex model', () => {
+test('agent names the default runner, claude unless set, the Claude model, and an optional Codex model', () => {
   const base = defaultConfig()
-  assert.deepEqual(base.agent, { runner: 'claude' })
-  assert.deepEqual(validateConfig({ ...base, agent: { runner: 'codex' } }).agent, { runner: 'codex' })
-  assert.deepEqual(validateConfig({ ...base, agent: { runner: 'codex', codexModel: ' gpt-6.1-terra ' } }).agent, { runner: 'codex', codexModel: 'gpt-6.1-terra' })
-  assert.deepEqual(validateConfig({ ...base, agent: { runner: 'claude', codexModel: '' } }).agent, { runner: 'claude' })
+  assert.deepEqual(base.agent, { runner: 'claude', claudeModel: 'sonnet' })
+  assert.deepEqual(validateConfig({ ...base, agent: { runner: 'codex' } }).agent, { runner: 'codex', claudeModel: 'sonnet' })
+  assert.deepEqual(validateConfig({ ...base, agent: { runner: 'codex', codexModel: ' gpt-6.1-terra ' } }).agent, { runner: 'codex', claudeModel: 'sonnet', codexModel: 'gpt-6.1-terra' })
+  assert.deepEqual(validateConfig({ ...base, agent: { runner: 'claude', codexModel: '' } }).agent, { runner: 'claude', claudeModel: 'sonnet' })
   // a config written before phase 2 has none
   const { agent: _agent, ...older } = base
-  assert.deepEqual(validateConfig(older).agent, { runner: 'claude' })
+  assert.deepEqual(validateConfig(older).agent, { runner: 'claude', claudeModel: 'sonnet' })
   assert.throws(() => validateConfig({ ...base, agent: { runner: 'hermes' } }), /agent\.runner must be one of claude, codex/)
   assert.throws(() => validateConfig({ ...base, agent: 'claude' }), /config\.agent must be an object/)
   assert.throws(() => validateConfig({ ...base, agent: { runner: 'codex', codexModel: '--dangerously-bypass' } }), /agent\.codexModel must be a model name/)
@@ -73,11 +73,23 @@ test('agent names the default runner, claude unless set, and an optional Codex m
   assert.throws(() => validateConfig({ ...base, agent: { runner: 'codex', tandem: true } }), /agent\.tandem is not a known setting/)
 })
 
+test('agent.claudeModel reads as sonnet when missing or empty, takes an explicit model, and refuses a flag or a space', () => {
+  const base = defaultConfig()
+  assert.equal(validateConfig({ ...base, agent: { runner: 'claude' } }).agent.claudeModel, 'sonnet')
+  assert.equal(validateConfig({ ...base, agent: { runner: 'claude', claudeModel: '' } }).agent.claudeModel, 'sonnet')
+  assert.equal(validateConfig({ ...base, agent: { runner: 'claude', claudeModel: '   ' } }).agent.claudeModel, 'sonnet')
+  assert.equal(validateConfig({ ...base, agent: { runner: 'claude', claudeModel: ' opus ' } }).agent.claudeModel, 'opus')
+  assert.equal(validateConfig({ ...base, agent: { runner: 'codex', claudeModel: 'claude-sonnet-5-5' } }).agent.claudeModel, 'claude-sonnet-5-5')
+  assert.throws(() => validateConfig({ ...base, agent: { runner: 'claude', claudeModel: '--dangerously-skip-permissions' } }), /agent\.claudeModel must be a model name/)
+  assert.throws(() => validateConfig({ ...base, agent: { runner: 'claude', claudeModel: 'opus 5' } }), /agent\.claudeModel must be a model name/)
+  assert.throws(() => validateConfig({ ...base, agent: { runner: 'claude', claudeModel: 7 } }), /agent\.claudeModel/)
+})
+
 test('a stored cloneDir and agent survive a save and a read', async () => {
   const { dir, cleanup } = await tempDir()
   try {
     const file = join(dir, 'config.json')
-    const config = { ...defaultConfig(), cloneDir: '~/dev/orbit', agent: { runner: 'codex' as const, codexModel: 'gpt-6.1-terra' } }
+    const config = { ...defaultConfig(), cloneDir: '~/dev/orbit', agent: { runner: 'codex' as const, claudeModel: 'opus', codexModel: 'gpt-6.1-terra' } }
     await saveConfig(file, config)
     assert.deepEqual(await readConfig(file), config)
   } finally {
