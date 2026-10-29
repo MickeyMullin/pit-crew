@@ -103,7 +103,7 @@ const makeRun = (cache: ReturnType<typeof openCache>, repo: string, number: numb
     finishedAt: status === 'running' ? null : startedAt, status, result: null, note: null, costUsd: null, resume: null,
   }, (id) => `~/runs/${id}`)
 
-// a time before the poller's own start, and the poller's start itself
+// a time before the poller's own start, and the present
 const earlier = (time: { clock: { now: () => number } }): string => new Date(time.clock.now() - 3_600_000).toISOString()
 const nowIso = (time: { clock: { now: () => number } }): string => new Date(time.clock.now()).toISOString()
 
@@ -250,10 +250,15 @@ test('a row marked stale reports nothing', async () => {
   poller.stop()
 })
 
-test('review session kinds fire when a run that was running settles, and only then', async () => {
+// the launcher registers a run it created or adopted; the cache row stands for what it wrote
+const watch = (poller: { runWatched: (run: { id: number, repo: string, number: number }) => void }, run: { id: number, repo: string, number: number }): void =>
+  poller.runWatched({ id: run.id, repo: run.repo, number: run.number })
+
+test('review session kinds fire when a watched run settles, and only then', async () => {
   const { cycle, poller, cache, events, time } = await harness()
   await cycle()
   const run = makeRun(cache, scenario.repo, 106, nowIso(time))
+  watch(poller, run)
   poller.runChanged(scenario.repo, 106)
   assert.deepEqual(events, [])
   cache.updateRun(run.id, { status: 'needsInput' })
@@ -264,10 +269,27 @@ test('review session kinds fire when a run that was running settles, and only th
   poller.stop()
 })
 
-test('a run whose start fails before it is ever running still fires runFinished once', async () => {
+test('done and failed fire runFinished, and stopped fires nothing', async () => {
   const { cycle, poller, cache, events, time } = await harness()
   await cycle()
+  for (const [number, status] of [[106, 'done'], [107, 'failed'], [108, 'stopped']] as const) {
+    const run = makeRun(cache, scenario.repo, number, nowIso(time))
+    watch(poller, run)
+    cache.updateRun(run.id, { status, finishedAt: nowIso(time) })
+    poller.runChanged(scenario.repo, number)
+    poller.runChanged(scenario.repo, number)
+  }
+  assert.deepEqual(only(events), [['runFinished', 106], ['runFinished', 107]])
+  poller.stop()
+})
+
+test('a run whose start fails synchronously fires runFinished once, even with the wall clock moved backward', async () => {
+  const { cycle, poller, cache, events, time } = await harness()
+  await cycle()
+  // the clock steps back a week after the server started
+  time.advance(-7 * 86_400_000)
   const run = makeRun(cache, scenario.repo, 106, nowIso(time))
+  watch(poller, run)
   cache.updateRun(run.id, { status: 'failed', finishedAt: nowIso(time), note: 'spawnFailed: no such file' })
   poller.runChanged(scenario.repo, 106)
   assert.deepEqual(only(events), [['runFinished', 106]])
@@ -276,40 +298,76 @@ test('a run whose start fails before it is ever running still fires runFinished 
   poller.stop()
 })
 
-test('after a repository switch, a run requested then notifies once and history stays silent', async () => {
-  const { cycle, poller, cache, events, settings, time } = await harness()
+test('an old settled run first seen after a forward clock correction or a restart is history and fires nothing', async () => {
+  const { cycle, poller, cache, events, time } = await harness()
   await cycle()
-  // history in the repo being switched to: settled before this server started
-  makeRun(cache, otherRepo, 7, earlier(time), 'done')
-  makeRun(cache, otherRepo, 8, earlier(time), 'needsInput')
-  const before = settings.current
-  settings.current = { ...before, repo: otherRepo }
-  await poller.configChanged(before)
-  // the run requested after the switch fails to start before the launcher reports it
-  const fresh = makeRun(cache, otherRepo, 9, nowIso(time))
-  cache.updateRun(fresh.id, { status: 'failed', finishedAt: nowIso(time), note: 'spawnFailed: no such file' })
-  for (const number of [7, 8, 9]) poller.runChanged(otherRepo, number)
-  assert.deepEqual(only(events), [['runFinished', 9]])
-  poller.runChanged(otherRepo, 9)
-  assert.equal(events.length, 1)
+  // a run settled before this process, stamped in the future of a clock that has since been corrected
+  const old = makeRun(cache, scenario.repo, 106, new Date(time.clock.now() + 3_600_000).toISOString(), 'failed')
+  time.advance(7_200_000)
+  poller.runChanged(scenario.repo, 106)
+  assert.equal(old.status, 'failed')
+  const stale = makeRun(cache, scenario.repo, 107, earlier(time), 'needsInput')
+  poller.runChanged(scenario.repo, 107)
+  assert.equal(stale.status, 'needsInput')
+  assert.deepEqual(events, [])
   poller.stop()
 })
 
-test('a run already running at a repository switch notifies once when it settles', async () => {
+test('a run in the new repository that settles while the asynchronous configChanged is pending fires once', async () => {
   const { cycle, poller, cache, events, settings, time } = await harness()
   await cycle()
-  const running = makeRun(cache, otherRepo, 7, earlier(time))
   const before = settings.current
+  // the config changes first; the scan inside configChanged has not finished
   settings.current = { ...before, repo: otherRepo }
-  await poller.configChanged(before)
-  cache.updateRun(running.id, { status: 'done' })
+  const pending = poller.configChanged(before)
+  const run = makeRun(cache, otherRepo, 7, nowIso(time), 'failed')
+  watch(poller, run)
   poller.runChanged(otherRepo, 7)
+  assert.deepEqual(only(events), [['runFinished', 7]])
+  await pending
   poller.runChanged(otherRepo, 7)
   assert.deepEqual(only(events), [['runFinished', 7]])
   poller.stop()
 })
 
-test('runs settled at startup are history: nothing fires for them, now or on a later callback', async () => {
+test('a run settling while another repository is in effect fires nothing, then or later', async () => {
+  const { cycle, poller, cache, events, settings, time } = await harness()
+  await cycle()
+  const run = makeRun(cache, scenario.repo, 106, nowIso(time))
+  watch(poller, run)
+  const before = settings.current
+  settings.current = { ...before, repo: otherRepo }
+  await poller.configChanged(before)
+  cache.updateRun(run.id, { status: 'done', finishedAt: nowIso(time) })
+  poller.runChanged(scenario.repo, 106)
+  // switching back finds the run settled, and it is not announced late
+  const back = settings.current
+  settings.current = before
+  await poller.configChanged(back)
+  poller.runChanged(scenario.repo, 106)
+  assert.deepEqual(events, [])
+  poller.stop()
+})
+
+test('settled history is silent at a repository switch and on every later callback', async () => {
+  const { cycle, poller, cache, events, settings, time } = await harness()
+  await cycle()
+  makeRun(cache, otherRepo, 7, earlier(time), 'done')
+  makeRun(cache, otherRepo, 8, earlier(time), 'needsInput')
+  const before = settings.current
+  settings.current = { ...before, repo: otherRepo }
+  await poller.configChanged(before)
+  for (const number of [7, 8]) {
+    poller.runChanged(otherRepo, number)
+    poller.runChanged(otherRepo, number)
+  }
+  await poller.configChanged(settings.current)
+  poller.runChanged(otherRepo, 7)
+  assert.deepEqual(events, [])
+  poller.stop()
+})
+
+test('a run watched at startup notifies once when it settles, and history at startup is silent', async () => {
   const time = fakeTime()
   const cache = openCache({ path: ':memory:', clock: time.clock })
   const settled = makeRun(cache, scenario.repo, 106, earlier(time), 'failed')
@@ -327,12 +385,12 @@ test('runs settled at startup are history: nothing fires for them, now or on a l
     emit: () => {},
     notify: (found) => events.push(...found),
   })
-  // startup recovery reports the runs it finds, settled or still going
+  // recovery adopts only the run that was still running, then reports all it found
+  watch(poller, recovered)
   poller.runChanged(scenario.repo, 106)
   poller.runChanged(scenario.repo, 107)
   poller.runChanged(scenario.repo, 108)
   assert.deepEqual(events, [])
-  // one that was running at startup and settles during recovery fires, once
   cache.updateRun(recovered.id, { status: 'needsInput' })
   poller.runChanged(scenario.repo, 108)
   poller.runChanged(scenario.repo, 108)
@@ -346,6 +404,7 @@ test('a run settling after its PR left the open rows still notifies, by number a
   const { cycle, poller, cache, events, state, time } = await harness()
   await cycle()
   const run = makeRun(cache, scenario.repo, 106, nowIso(time))
+  watch(poller, run)
   poller.runChanged(scenario.repo, 106)
   // the PR leaves the open rows before the run settles
   state.edits.set(106, (pr) => ({ ...pr, number: 9999 }))
@@ -364,24 +423,14 @@ test('a run settling after its PR left the open rows still notifies, by number a
   poller.stop()
 })
 
-test('runEvent needs a running run of the same id to settle', () => {
-  const running = { runId: 3, status: 'running' }
+test('runEvent maps a settled status to its kind, and stopped and running to nothing', () => {
   const row: { number: number, title: string | null } = { number: 106, title: 'Fix the thing' }
-  assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'done' })?.kind, 'runFinished')
-  assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'failed' })?.kind, 'runFinished')
-  assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'needsInput' })?.kind, 'runNeedsInput')
-  assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'stopped' }), null)
-  assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'running' }), null)
-  // a run never seen running (its start failed first) still reports how it settled, once
-  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'failed' }, true)?.kind, 'runFinished')
-  assert.equal(runEvent(scenario.repo, row, running, { runId: 4, status: 'failed' }, true)?.kind, 'runFinished')
-  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'stopped' }, true), null)
-  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'running' }, true), null)
-  assert.equal(runEvent(scenario.repo, row, { runId: 3, status: 'done' }, { runId: 3, status: 'done' }, true), null)
-  // first seen already settled and not requested in this process: history
-  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'failed' }, false), null)
-  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'failed' }), null)
-  assert.equal(runEvent(scenario.repo, { number: 106, title: null }, running, { runId: 3, status: 'done' })?.title, null)
+  assert.equal(runEvent(scenario.repo, row, 'done')?.kind, 'runFinished')
+  assert.equal(runEvent(scenario.repo, row, 'failed')?.kind, 'runFinished')
+  assert.equal(runEvent(scenario.repo, row, 'needsInput')?.kind, 'runNeedsInput')
+  assert.equal(runEvent(scenario.repo, row, 'stopped'), null)
+  assert.equal(runEvent(scenario.repo, row, 'running'), null)
+  assert.equal(runEvent(scenario.repo, { number: 106, title: null }, 'done')?.title, null)
 })
 
 const event = (kind: NotifyEvent['kind']): NotifyEvent => ({ kind, number: 7, title: 'Title', repo: scenario.repo })

@@ -1085,6 +1085,9 @@ export type LauncherOptions = {
   // the environment the child's few variables are picked from
   env: Readonly<Record<string, string | undefined>>
   newSessionId: () => string
+  // a run is now this process's to watch: created here (even one whose start fails at once) or
+  // adopted at startup because it was still running; called before its first onChange
+  onWatch: (run: Run) => void
   // a run's row changed: started, stepped, or settled
   onChange: (run: Run) => void
   log?: (line: string) => void
@@ -1129,7 +1132,7 @@ export const remoteNamesRepo = (remotes: string, repo: string): boolean => {
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
 export const createLauncher = (options: LauncherOptions): Launcher => {
-  const { cache, gh, git, spawn, fs, kill, procs, clock, timers, home, onChange } = options
+  const { cache, gh, git, spawn, fs, kill, procs, clock, timers, home, onChange, onWatch } = options
   const log = options.log ?? (() => {})
   const pollMs = options.pollMs ?? 1000
   const watchedPollMs = options.watchedPollMs ?? 10_000
@@ -1402,6 +1405,7 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
       costUsd: null,
       resume: null,
     }, (id) => tildePath(join(runsDir, String(id)), home))
+    if (!closed) onWatch(run)
     const dir = join(runsDir, String(run.id))
     let child: SpawnedProcess
     let spec: LaunchSpec
@@ -1536,6 +1540,7 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
       const same = pid !== null && startedAt !== null && alive(pid) && await procs.startTime(pid).catch(() => null) === startedAt
       if (same) {
         log(`run ${run.id}: still running after the restart (pid ${pid}); watching it again`)
+        if (!closed) onWatch(run)
         watchRun({ ...run, pid }, dir, null, false, null)
       } else {
         const entry = watchRun({ ...run, pid: null }, dir, null, false, null)

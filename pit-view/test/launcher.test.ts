@@ -469,6 +469,8 @@ const harness = async ({ config = {}, launch = fakeLaunch(), gh = fixtureRunner(
   const time = fakeTime()
   const cache = openCache({ path: ':memory:', clock: time.clock, ...(keepRuns === undefined ? {} : { keepRuns }) })
   const changes: Run[] = []
+  // the ids the launcher announced as its own to watch, in order
+  const watched: number[] = []
   const settings = { current: { ...baseConfig(), ...config } }
   const stateDir = join(home, '.local', 'state', 'pit-view')
   const make = (onChange: (run: Run) => void = (run) => changes.push(run)) => createLauncher({
@@ -486,6 +488,7 @@ const harness = async ({ config = {}, launch = fakeLaunch(), gh = fixtureRunner(
     stateDir,
     env: launch.deps.env,
     newSessionId: launch.deps.newSessionId,
+    onWatch: (run) => watched.push(run.id),
     onChange,
   })
   const launcher = make()
@@ -495,7 +498,7 @@ const harness = async ({ config = {}, launch = fakeLaunch(), gh = fixtureRunner(
     cache.close()
     await temp.cleanup()
   }
-  return { home, time, cache, launcher, make, changes, settings, stateDir, launch, gh, report, cleanup }
+  return { home, time, cache, launcher, make, changes, watched, settings, stateDir, launch, gh, report, cleanup }
 }
 
 const request = (number = 106, patch: Partial<StartRequest> = {}): StartRequest =>
@@ -849,7 +852,10 @@ test('after a restart, a live run is watched again and the rest settle from resu
 
     const changes: Run[] = []
     const again = h.make((run) => changes.push(run))
+    h.watched.length = 0
     await again.recover()
+    // only the run that was still running is adopted; those recovery settled are not watched
+    assert.deepEqual(h.watched, [live.id])
     assert.equal(h.cache.getRun(finished.id)?.status, 'done')
     assert.deepEqual([h.cache.getRun(lost.id)?.status, h.cache.getRun(lost.id)?.note], ['failed', 'serverRestarted'])
     assert.deepEqual([h.cache.getRun(reused.id)?.status, h.cache.getRun(reused.id)?.note], ['failed', 'serverRestarted'])
@@ -904,6 +910,8 @@ test('a run that cannot spawn fails as spawnFailed and frees its PR', async () =
   try {
     const run = await h.launcher.start(request())
     assert.deepEqual([run.status, run.note], ['failed', 'spawnFailed: spawn claude ENOENT'])
+    // announced as watched before it settled in the same call
+    assert.deepEqual(h.watched, [run.id])
     launch.spawnError = null
     assert.equal((await h.launcher.start(request())).status, 'running')
   } finally {

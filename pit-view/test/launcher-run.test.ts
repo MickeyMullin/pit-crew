@@ -107,6 +107,7 @@ const setup = async (config: Partial<Config> = {}) => {
     // a server started inside an agent session must not pass that session on
     env: { PATH: `${bin}:/usr/bin:/bin`, USER: 'tester', LANG: 'en_US.UTF-8', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'desktop', ANTHROPIC_API_KEY: 'sk-fake' },
     newSessionId: () => '00000000-0000-4000-8000-0000000000e2',
+    onWatch: () => {},
     onChange: (run) => changes.push(run),
     pollMs: 50,
     watchedPollMs: 200,

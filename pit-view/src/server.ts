@@ -342,6 +342,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     stateDir: options.stateDir,
     env: options.launch.env,
     newSessionId: options.launch.newSessionId,
+    onWatch: (run) => poller.runWatched(run),
     onChange: (run) => poller.runChanged(run.repo, run.number),
     log,
     pollMs: options.launch.pollMs,

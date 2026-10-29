@@ -68,21 +68,13 @@ export const compareRows = (baseline: RowBaseline, rows: ReadonlyMap<number, Ope
   return events
 }
 
-// the review-session kinds: a run's status as last seen, by PR, and what a new status fires
-export type RunSeen = { runId: number, status: string }
-
-// a run settles once it was running (the same run, as last seen), or once it is first seen already
-// settled and was requested during this server's lifetime (its start failed before it ever ran);
-// a run first seen already settled that was requested before this server started is history and
-// fires nothing. A stopped run fires nothing, and a run already settled fires nothing again.
-// `title` is null when the PR is no longer among the open rows.
-export const runEvent = (repo: string, row: { number: number, title: string | null }, before: RunSeen | undefined, after: RunSeen, requestedHere = false): NotifyEvent | null => {
-  const wasRunning = before !== undefined && before.runId === after.runId && before.status === 'running'
-  const sameSettled = before !== undefined && before.runId === after.runId && before.status !== 'running'
-  if (sameSettled || !(wasRunning || requestedHere)) return null
+// the review-session kinds: the event a watched run's settled status fires. Done and failed are
+// runFinished, needsInput is runNeedsInput, and stopped and running fire nothing. `title` is null
+// when the PR is no longer among the open rows.
+export const runEvent = (repo: string, row: { number: number, title: string | null }, status: string): NotifyEvent | null => {
   const base = { number: row.number, title: row.title, repo }
-  if (after.status === 'done' || after.status === 'failed') return { ...base, kind: 'runFinished' }
-  if (after.status === 'needsInput') return { ...base, kind: 'runNeedsInput' }
+  if (status === 'done' || status === 'failed') return { ...base, kind: 'runFinished' }
+  if (status === 'needsInput') return { ...base, kind: 'runNeedsInput' }
   return null
 }
 

@@ -8,7 +8,7 @@ import { fetchClosedPrs, fetchOpenPrs, fetchPr, GhError } from './github.ts'
 import type { Gh, RawOpenPr } from './github.ts'
 import { agentCell } from './launcher.ts'
 import { baselineOf, compareRows, runEvent } from './notify.ts'
-import type { NotifyEvent, RowBaseline, RunSeen } from './notify.ts'
+import type { NotifyEvent, RowBaseline } from './notify.ts'
 import { scanReports } from './reports.ts'
 import type { ReportInfo, ReportTarget } from './reports.ts'
 import { closedSearchWindow, iso } from './time.ts'
@@ -93,6 +93,9 @@ export type Poller = {
   setActive: (activeCount: number, becameActive: boolean) => number | null
   // a saved config replaced `before`; emits the recomputed rows and starts a config cycle when needed
   configChanged: (before: Config) => Promise<void>
+  // the launcher created this run in this process, or adopted it as still running at startup; only
+  // such runs notify, and each at most once when it settles
+  runWatched: (run: { id: number, repo: string, number: number }) => void
   // a run of this PR started, stepped or settled: one patch upserting its row
   runChanged: (repo: string, number: number) => void
   // resolves once no cycle is running, including any follow-up cycle
@@ -176,22 +179,10 @@ export const createPoller = (options: PollerOptions): Poller => {
   })()
 
   const notify = options.notify ?? (() => {})
-  // notifications (section 9): the rows as last compared, and each PR's latest run as last seen
+  // notifications (section 9): the rows as last compared, and the runs this process is
+  // responsible for watching, by run id, until each settles
   let baseline: RowBaseline | null = null
-  let runsSeen: { repo: string, byNumber: Map<number, RunSeen> } | null = null
-
-  // a run first seen already settled notifies only when it was requested after this poller started
-  const startedMs = clock.now()
-
-  const seenRuns = (repo: string): Map<number, RunSeen> => {
-    if (runsSeen === null || runsSeen.repo !== repo) {
-      const byNumber = new Map<number, RunSeen>()
-      for (const [number, run] of cache.latestRuns(repo)) byNumber.set(number, { runId: run.id, status: run.status })
-      runsSeen = { repo, byNumber }
-    }
-    return runsSeen.byNumber
-  }
-  seenRuns(config().repo)
+  const watched = new Map<number, { repo: string, number: number }>()
 
   // self-review reports for the viewer's PRs, and the head branch each was looked up for
   let reports = new Map<number, ReportInfo>()
@@ -549,13 +540,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       counts: next.view.counts,
       sync: syncOf(next.cached, after),
     }
-    if (changed('repo')) {
-      body.repo = after.repo
-      // the new repo's runs as they are at the switch are the baseline, so a run requested after it
-      // is compared against what came before it and not against its own first report
-      runsSeen = null
-      seenRuns(after.repo)
-    }
+    if (changed('repo')) body.repo = after.repo
     if (!same(previous.view.viewer, next.view.viewer)) body.viewer = next.view.viewer
     patch(body)
     if (changed('refreshSeconds')) schedule()
@@ -568,19 +553,27 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
+  const runWatched = (run: { id: number, repo: string, number: number }): void => {
+    watched.set(run.id, { repo: run.repo, number: run.number })
+  }
+
   const runChanged = (repo: string, number: number): void => {
-    if (stopped || config().repo !== repo) return
-    const row = snapshot(config(), reports).rows.get(number)
+    if (stopped) return
+    const settings = config()
+    const row = settings.repo === repo ? snapshot(settings, reports).rows.get(number) : undefined
     if (row !== undefined) patch({ rows: [row] })
-    // the run itself comes from the cache, so it counts even when its PR has left the open rows
-    const run = cache.latestRuns(repo).get(number)
-    if (run === undefined) return
-    const seen = seenRuns(repo)
-    const now = { runId: run.id, status: run.status }
-    const requestedHere = Date.parse(run.startedAt) >= startedMs
-    const event = runEvent(repo, { number, title: row?.title ?? null }, seen.get(number), now, requestedHere)
-    seen.set(number, now)
-    if (event !== null) notify([event])
+    // a watched run is looked up by id, so it counts even when its PR has left the open rows; once
+    // settled it is forgotten, which is what makes it fire at most once
+    for (const [id, found] of watched) {
+      if (found.repo !== repo || found.number !== number) continue
+      const run = cache.getRun(id)
+      if (run?.status === 'running') continue
+      watched.delete(id)
+      // the repository in effect is the run's own, decided here and not by any scan in flight
+      if (run === null || config().repo !== repo) continue
+      const event = runEvent(repo, { number, title: row?.title ?? null }, run.status)
+      if (event !== null) notify([event])
+    }
   }
 
   const view = async (): Promise<View> => {
@@ -622,5 +615,5 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
-  return { view, refresh, refreshPr, setActive, configChanged, runChanged, idle, stop, version: () => version }
+  return { view, refresh, refreshPr, setActive, configChanged, runWatched, runChanged, idle, stop, version: () => version }
 }
