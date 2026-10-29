@@ -92,8 +92,9 @@ The sweep's response, `pit-crew/sweep-result@1`:
   - `command`: `"review-dependabot-sweep"`.
   - `status`: `"done"`, `"failed"` (with `error`), or `"needsInput"` (with `question`). A sweep that finishes with some reviews failed is `"done"`, its failures counted and noted per row.
   - `repo`: `"<owner>/<name>"`.
+  - `notPostedReason`: `null` when the sweep may post, or `"noPost"` when it ran with `--no-post` (see `no-post.md`). The name and the values mirror `review-result@1`; no other reason applies to a sweep. A sweep run with `--no-post` sets it whether or not any row was reviewed.
   - `counts`: `{ "swept", "fresh", "reused", "failed" }`, the numbers on the summary's first line.
-  - `rows`: one object per PR, sorted by number: `{ "number", "url", "title", "head" (the full SHA), "bump" (the return structure's `Bump` text), "recommendation" (as in `review-result@1`), "ci" (as in `review-result@1`), "findings" ([`{ "priority", "summary" }`], at most four), "escalation" (the trigger, or null), "posted" (as in `review-result@1`), "reused" (true when the row reused an unchanged report), "report" (the path, with `~`), "notes" (the table's Notes text) }`.
+  - `rows`: one object per PR, sorted by number: `{ "number", "url", "title", "head" (the full SHA), "bump" (the return structure's `Bump` text), "recommendation" (as in `review-result@1`), "ci" (as in `review-result@1`), "findings" ([`{ "priority", "summary" }`], at most four), "escalation" (the trigger, or null), "posted" (as in `review-result@1`; under `--no-post` null for every row that is not `reused`), "reused" (true when the row reused an unchanged report), "report" (the path, with `~`), "notes" (the table's Notes text) }`.
   - `mergeOrder`: `[ { "action", "prs": [<numbers>] } ]`, the summary's Merge order and actions, in order.
   - `summary`: the Markdown summary's path, with the home directory written as `~`.
   - `question`, `error`: as in `review-result@1`.
