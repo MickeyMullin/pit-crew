@@ -202,7 +202,7 @@ export const sweepRowModel = (row: SweepRow): SweepRowModel => ({
   notes: row.notes,
 })
 
-// the server serves PR-<n>*.md, FIX-<n>.md and no other file, so anything else is shown as a path
+// the server serves PR-<n>*.md, FIX-<n>.md, and no other file, so anything else is shown as a path
 const openableReport = (path: string): string | null => {
   const name = reportName(path)
   return name !== null && /^(PR-\d+[A-Za-z0-9._-]*|FIX-\d+)\.md$/.test(name) ? name : null

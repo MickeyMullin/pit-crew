@@ -499,12 +499,14 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   const startRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
     requireToken(req)
     const number = prNumber(raw)
-    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex", "viewer": "login" } or no body'
+    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex", "repo": "owner/name", "viewer": "login" }'
     const length = Number(req.headers['content-length'] ?? 0)
     const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
-    const { runner: asked, kind: askedKind, viewer: confirmed, ...rest } = body as Record<string, unknown>
+    const { runner: asked, kind: askedKind, repo: confirmedRepo, viewer: confirmed, ...rest } = body as Record<string, unknown>
     if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
+    // the page always names the repository its confirmation showed; a start that does not is from an older page and is refused rather than guessed at
+    if (typeof confirmedRepo !== 'string') throw new HttpError(400, `repo is required and must be a string; ${usage}`)
     if (confirmed !== undefined && typeof confirmed !== 'string') throw new HttpError(400, 'viewer must be a string')
     if (asked !== undefined && !runnerNames.includes(asked as RunnerName)) throw new HttpError(400, 'runner must be claude or codex')
     if (askedKind !== undefined && !startKinds.includes(askedKind as StartKind)) throw new HttpError(400, 'kind must be default, tandem, stack or fix')
@@ -513,6 +515,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (kind === 'tandem' && asked === 'codex') throw new HttpError(400, 'Review in tandem runs with Claude only; send runner claude or leave it out')
     if (kind === 'fix' && asked === 'codex') throw new HttpError(400, 'Fix session runs with Claude only; send runner claude or leave it out')
     const config = effective()
+    // the repository the viewer confirmed must still be the one in effect: a run posts or pushes on GitHub, and a PR number means another PR in another repository
+    if (confirmedRepo !== config.repo) throw new HttpError(409, `the repository is now ${config.repo}, not ${confirmedRepo}; the confirmation was for ${confirmedRepo}, so nothing was started`)
     staleViewer(confirmed, config.viewer)
     const cached = cache.readView(config.repo)
     const row = cached.open.find((entry) => entry.number === number)

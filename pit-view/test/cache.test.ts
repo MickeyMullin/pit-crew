@@ -635,7 +635,7 @@ test('a rebuild of the GitHub tables keeps the sweeps it finds, as it keeps the 
   }
 })
 
-test('sweeps are recorded in a table of their own, with ids of their own, updated in place and read newest first', () => {
+test('sweeps are recorded in a table of their own, with ids of their own, updated in place, and read newest first', () => {
   const { cache } = memoryCache()
   const run = cache.createRun(newRun(106), (id) => `~/runs/${id}`)
   const first = cache.createSweep(newSweep(), (id) => `~/.local/state/pit-view/sweeps/${id}`)

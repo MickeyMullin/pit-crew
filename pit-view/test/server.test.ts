@@ -981,7 +981,7 @@ test('starting and stopping a run need the token as well as the Host and Origin 
     assert.equal((await raw(h.server.port, '/api/prs/106/runs', { ...token(h), Host: 'pit-view.attacker.test' }, 'POST')).status, 403)
     assert.equal(h.launch.children.length, 0)
 
-    const started = await send(url, 'POST', undefined, { ...token(h), Origin: h.base })
+    const started = await send(url, 'POST', { repo: scenario.repo }, { ...token(h), Origin: h.base })
     assert.equal(started.status, 200)
     assert.equal(started.body.status, 'running')
     assert.equal(started.body.command, 'review-pr')
@@ -990,7 +990,7 @@ test('starting and stopping a run need the token as well as the Host and Origin 
     assert.equal(started.body.runner, 'claude')
     assert.equal(started.body.cwd, '~/dev/orbit')
     assert.equal(h.launch.children.length, 1)
-    const busy = await send(url, 'POST', {}, token(h))
+    const busy = await send(url, 'POST', { repo: scenario.repo }, token(h))
     assert.equal(busy.status, 409)
     assert.match(String(busy.body.error), /already in flight/)
 
@@ -1013,7 +1013,7 @@ test('starting and stopping a run need the token as well as the Host and Origin 
     assert.equal((await getJson<Record<string, unknown>[]>(url)).body[0]?.status, 'stopped')
 
     // stopped, the PR may start again, with the other runner for this one run
-    const codex = await send(url, 'POST', { runner: 'codex' }, token(h))
+    const codex = await send(url, 'POST', { repo: scenario.repo, runner: 'codex' }, token(h))
     assert.equal(codex.status, 200)
     assert.equal(codex.body.runner, 'codex')
     assert.deepEqual((await getJson<Record<string, unknown>[]>(url)).body.map((run) => run.id), [Number(codex.body.id), id])
@@ -1026,12 +1026,12 @@ test('a start is refused with a clear error: unknown PR, no cloneDir, another gh
   const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
   try {
     await filled(h)
-    const unknown = await send(`${h.base}/api/prs/999/runs`, 'POST', undefined, token(h))
+    const unknown = await send(`${h.base}/api/prs/999/runs`, 'POST', { repo: scenario.repo }, token(h))
     assert.equal(unknown.status, 422)
     assert.match(String(unknown.body.error), /#999 is not an open PR/)
-    assert.equal((await send(`${h.base}/api/prs/abc/runs`, 'POST', undefined, token(h))).status, 400)
-    assert.equal((await send(`${h.base}/api/prs/106/runs`, 'POST', { runner: 'hermes' }, token(h))).status, 400)
-    assert.equal((await send(`${h.base}/api/prs/106/runs`, 'POST', { runner: 'claude', tandem: true }, token(h))).status, 400)
+    assert.equal((await send(`${h.base}/api/prs/abc/runs`, 'POST', { repo: scenario.repo }, token(h))).status, 400)
+    assert.equal((await send(`${h.base}/api/prs/106/runs`, 'POST', { repo: scenario.repo, runner: 'hermes' }, token(h))).status, 400)
+    assert.equal((await send(`${h.base}/api/prs/106/runs`, 'POST', { repo: scenario.repo, runner: 'claude', tandem: true }, token(h))).status, 400)
     assert.equal((await send(`${h.base}/api/prs/106/runs`, 'POST', 'runner=codex', { ...token(h), 'Content-Type': 'text/plain' })).status, 415)
     assert.equal(h.launch.children.length, 0)
   } finally {
@@ -1040,7 +1040,7 @@ test('a start is refused with a clear error: unknown PR, no cloneDir, another gh
   const unset = await setup()
   try {
     await filled(unset)
-    const refused = await send(`${unset.base}/api/prs/106/runs`, 'POST', undefined, token(unset))
+    const refused = await send(`${unset.base}/api/prs/106/runs`, 'POST', { repo: scenario.repo }, token(unset))
     assert.equal(refused.status, 422)
     assert.match(String(refused.body.error), /set cloneDir/)
   } finally {
@@ -1051,7 +1051,7 @@ test('a start is refused with a clear error: unknown PR, no cloneDir, another gh
   const mismatch = await setup({ runner: other, config: { cloneDir: '~/dev/orbit' } })
   try {
     await filled(mismatch)
-    const refused = await send(`${mismatch.base}/api/prs/106/runs`, 'POST', undefined, token(mismatch))
+    const refused = await send(`${mismatch.base}/api/prs/106/runs`, 'POST', { repo: scenario.repo }, token(mismatch))
     assert.equal(refused.status, 422)
     assert.match(String(refused.body.error), /gh is signed in as someone-else, but the viewer is vera-quill/)
     assert.equal(mismatch.launch.children.length, 0)
@@ -1069,7 +1069,7 @@ test('the view carries each row\'s Agent cell, and a start on the viewer\'s own 
     assert.deepEqual(rowIn(view, 113)?.agent?.action, { kind: 'review', label: 'Review', command: 'review-pr', args: ['113'], runner: 'claude' })
     assert.deepEqual(rowIn(view, 101)?.agent?.action.args, ['101', '--no-post'])
     assert.equal(rowIn(view, 114)?.agent?.action.command, 'review-dependabot')
-    const own = await send(`${h.base}/api/prs/101/runs`, 'POST', undefined, token(h))
+    const own = await send(`${h.base}/api/prs/101/runs`, 'POST', { repo: scenario.repo }, token(h))
     assert.equal(own.status, 200)
     assert.deepEqual(own.body.args, ['101', '--no-post'])
     assert.equal(own.body.label, 'Self-review')
@@ -1095,7 +1095,7 @@ test('a start takes a kind beside the runner: default, tandem (Claude only) or s
     }
 
     // omitted and explicit default are the same start, with the configured runner
-    const plain = await send(url(113), 'POST', { kind: 'default' }, token(h))
+    const plain = await send(url(113), 'POST', { repo: scenario.repo, kind: 'default' }, token(h))
     assert.equal(plain.status, 200)
     assert.deepEqual([plain.body.runner, plain.body.label, plain.body.args, plain.body.tandem], ['codex', 'Review', ['113'], false])
     // Codex gets its request as an argument, not on stdin
@@ -1103,7 +1103,7 @@ test('a start takes a kind beside the runner: default, tandem (Claude only) or s
     await stop(plain.body)
 
     // tandem with no runner is Claude's, whatever the configured default is
-    const tandem = await send(url(113), 'POST', { kind: 'tandem' }, token(h))
+    const tandem = await send(url(113), 'POST', { repo: scenario.repo, kind: 'tandem' }, token(h))
     assert.equal(tandem.status, 200)
     assert.deepEqual([tandem.body.runner, tandem.body.command, tandem.body.args, tandem.body.label, tandem.body.tandem], ['claude', 'review-pr', ['113', '--tandem'], 'Tandem review', true])
     assert.match(lastWrite(h), /\/review-pr 113 --tandem --emit-json=/)
@@ -1111,17 +1111,17 @@ test('a start takes a kind beside the runner: default, tandem (Claude only) or s
     await stop(tandem.body)
 
     // on the viewer's own PR a tandem review still passes --no-post
-    const own = await send(url(104), 'POST', { kind: 'tandem', runner: 'claude' }, token(h))
+    const own = await send(url(104), 'POST', { repo: scenario.repo, kind: 'tandem', runner: 'claude' }, token(h))
     assert.deepEqual([own.status, own.body.args, own.body.label], [200, ['104', '--tandem', '--no-post'], 'Tandem self-review'])
     assert.match(lastWrite(h), /\/review-pr 104 --tandem --no-post --emit-json=/)
     await stop(own.body)
 
     // a stack review starts from any layer, with either runner
-    const stack = await send(url(111), 'POST', { kind: 'stack', runner: 'claude' }, token(h))
+    const stack = await send(url(111), 'POST', { repo: scenario.repo, kind: 'stack', runner: 'claude' }, token(h))
     assert.deepEqual([stack.status, stack.body.command, stack.body.args, stack.body.label], [200, 'review-stack', ['111'], 'Review stack'])
     assert.match(lastWrite(h), /^\{.*\/review-stack 111 --emit-json=/)
     await stop(stack.body)
-    const codexStack = await send(url(112), 'POST', { kind: 'stack' }, token(h))
+    const codexStack = await send(url(112), 'POST', { repo: scenario.repo, kind: 'stack' }, token(h))
     assert.deepEqual([codexStack.status, codexStack.body.runner, codexStack.body.args], [200, 'codex', ['112']])
   } finally {
     await h.cleanup()
@@ -1133,15 +1133,15 @@ test('a kind that cannot start is refused before anything runs: bad kind 400, ta
   try {
     await filled(h)
     const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
-    assert.equal((await send(url(113), 'POST', { kind: 'lint' }, token(h))).status, 400)
-    assert.equal((await send(url(113), 'POST', { kind: 7 }, token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', { repo: scenario.repo, kind: 'lint' }, token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', { repo: scenario.repo, kind: 7 }, token(h))).status, 400)
     // a body that is not a plain object of known fields, or a field of the wrong type, is 400
-    assert.equal((await send(url(113), 'POST', { kind: null }, token(h))).status, 400)
-    assert.equal((await send(url(113), 'POST', { runner: null }, token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', { repo: scenario.repo, kind: null }, token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', { repo: scenario.repo, runner: null }, token(h))).status, 400)
     assert.equal((await send(url(113), 'POST', ['tandem'], token(h))).status, 400)
     assert.equal((await send(url(113), 'POST', 'tandem', token(h))).status, 400)
-    assert.equal((await send(url(113), 'POST', { kind: ['tandem'] }, token(h))).status, 400)
-    assert.equal((await send(url(113), 'POST', { kind: { toString: 'tandem' } }, token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', { repo: scenario.repo, kind: ['tandem'] }, token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', { repo: scenario.repo, kind: { toString: 'tandem' } }, token(h))).status, 400)
     // an own __proto__ key (JSON.parse makes it a plain property) is an unknown field, not a prototype
     const proto = await fetch(url(113), {
       method: 'POST',
@@ -1149,23 +1149,23 @@ test('a kind that cannot start is refused before anything runs: bad kind 400, ta
       body: '{"__proto__":{"kind":"tandem"}}',
     })
     assert.equal(proto.status, 400)
-    assert.equal((await send(url(113), 'POST', { kind: 'tandem', fix: true }, token(h))).status, 400)
-    const codex = await send(url(113), 'POST', { kind: 'tandem', runner: 'codex' }, token(h))
+    assert.equal((await send(url(113), 'POST', { repo: scenario.repo, kind: 'tandem', fix: true }, token(h))).status, 400)
+    const codex = await send(url(113), 'POST', { repo: scenario.repo, kind: 'tandem', runner: 'codex' }, token(h))
     assert.equal(codex.status, 400)
     assert.match(String(codex.body.error), /tandem runs with Claude only/)
-    const dependabot = await send(url(114), 'POST', { kind: 'tandem' }, token(h))
+    const dependabot = await send(url(114), 'POST', { repo: scenario.repo, kind: 'tandem' }, token(h))
     assert.equal(dependabot.status, 422)
     assert.match(String(dependabot.body.error), /#114.*no tandem mode/)
-    const flat = await send(url(113), 'POST', { kind: 'stack' }, token(h))
+    const flat = await send(url(113), 'POST', { repo: scenario.repo, kind: 'stack' }, token(h))
     assert.equal(flat.status, 422)
     assert.match(String(flat.body.error), /#113.*not part of a stack/)
-    assert.equal((await send(url(999), 'POST', { kind: 'tandem' }, token(h))).status, 422)
-    assert.equal((await send(url(111), 'POST', { kind: 'stack' })).status, 403)
+    assert.equal((await send(url(999), 'POST', { repo: scenario.repo, kind: 'tandem' }, token(h))).status, 422)
+    assert.equal((await send(url(111), 'POST', { repo: scenario.repo, kind: 'stack' })).status, 403)
     assert.equal(h.launch.children.length, 0)
     // the one-run-per-PR rule holds across kinds
-    assert.equal((await send(url(113), 'POST', { kind: 'tandem' }, token(h))).status, 200)
-    assert.equal((await send(url(113), 'POST', { kind: 'default' }, token(h))).status, 409)
-    assert.equal((await send(url(113), 'POST', { kind: 'tandem' }, token(h))).status, 409)
+    assert.equal((await send(url(113), 'POST', { repo: scenario.repo, kind: 'tandem' }, token(h))).status, 200)
+    assert.equal((await send(url(113), 'POST', { repo: scenario.repo, kind: 'default' }, token(h))).status, 409)
+    assert.equal((await send(url(113), 'POST', { repo: scenario.repo, kind: 'tandem' }, token(h))).status, 409)
     assert.equal(h.launch.children.length, 1)
   } finally {
     await h.cleanup()
@@ -1184,13 +1184,14 @@ test('the view\'s Agent cell lists the starts a row offers, and the run list car
     assert.deepEqual(rowIn(view, 111)?.agent?.starts[0], {
       kind: 'default', label: 'Review', button: 'Review PR', command: 'review-pr', args: ['111'], runners: ['claude', 'codex'],
       posts: { kind: 'review', text: 'Posts its report to the PR as @vera-quill: an approval, a request for changes, or a comment, per the findings.' },
+      repo: scenario.repo,
       viewer: 'vera-quill',
       unavailable: null,
     })
     assert.equal(rowIn(view, 113)?.agent?.tandem, false)
     assert.equal(rowIn(view, 113)?.agent?.steps.length, 5)
 
-    const started = await send(`${h.base}/api/prs/113/runs`, 'POST', { kind: 'tandem' }, token(h))
+    const started = await send(`${h.base}/api/prs/113/runs`, 'POST', { repo: scenario.repo, kind: 'tandem' }, token(h))
     const id = Number(started.body.id)
     // the child writes a step, and the row's patch carries it
     const stream = await openStream(h.base, 'client=steps&visible=true&paused=false')
@@ -1229,33 +1230,34 @@ test('a fix session starts only on the viewer\'s own PR: fix-pr with Claude, nev
     assert.deepEqual(rowIn(view, 101)?.agent?.starts.find((start) => start.kind === 'fix'), {
       kind: 'fix', label: 'Fix session', button: 'Fix requested changes', command: 'fix-pr', args: ['101'], runners: ['claude'],
       posts: { kind: 'push', text: 'Pushes new commits to fix/webhook-retry on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.' },
+      repo: scenario.repo,
       viewer: 'vera-quill',
       unavailable: null,
     })
     assert.deepEqual([rowIn(view, 101)?.agent?.action.kind, rowIn(view, 101)?.agent?.action.args], ['selfReview', ['101', '--no-post']])
 
     // refusals come before anything runs
-    const others = await send(url(113), 'POST', { kind: 'fix' }, token(h))
+    const others = await send(url(113), 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))
     assert.equal(others.status, 422)
     assert.match(String(others.body.error), /Fix session is offered only on your own PRs, and #113 is not yours/)
-    assert.equal((await send(url(114), 'POST', { kind: 'fix', runner: 'claude' }, token(h))).status, 422)
-    const codex = await send(url(101), 'POST', { kind: 'fix', runner: 'codex' }, token(h))
+    assert.equal((await send(url(114), 'POST', { repo: scenario.repo, kind: 'fix', runner: 'claude' }, token(h))).status, 422)
+    const codex = await send(url(101), 'POST', { repo: scenario.repo, kind: 'fix', runner: 'codex' }, token(h))
     assert.equal(codex.status, 400)
     assert.match(String(codex.body.error), /Fix session runs with Claude only/)
-    assert.equal((await send(url(113), 'POST', { kind: 'fix', runner: 'codex' }, token(h))).status, 400)
-    assert.equal((await send(url(101), 'POST', { kind: 'fix' })).status, 403)
+    assert.equal((await send(url(113), 'POST', { repo: scenario.repo, kind: 'fix', runner: 'codex' }, token(h))).status, 400)
+    assert.equal((await send(url(101), 'POST', { repo: scenario.repo, kind: 'fix' })).status, 403)
     assert.equal(h.launch.children.length, 0)
     assert.equal(githubCalls(h.runner).filter((call) => call.args[1] === 'user').length, 0)
 
     // with no runner it is Claude's, whatever the configured default is
-    const started = await send(url(101), 'POST', { kind: 'fix' }, token(h))
+    const started = await send(url(101), 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))
     assert.equal(started.status, 200)
     assert.deepEqual([started.body.runner, started.body.command, started.body.args, started.body.label, started.body.tandem], ['claude', 'fix-pr', ['101'], 'Fix session', false])
     assert.match(lastWrite(h), /"\/fix-pr 101 --emit-json=[^"]+"/)
     assert.ok(!lastWrite(h).includes('--no-post'))
     assert.equal(githubCalls(h.runner).filter((call) => call.args[1] === 'user').length, 1)
     // one run per PR, whatever the kind
-    assert.equal((await send(url(101), 'POST', {}, token(h))).status, 409)
+    assert.equal((await send(url(101), 'POST', { repo: scenario.repo }, token(h))).status, 409)
   } finally {
     await h.cleanup()
   }
@@ -1267,7 +1269,7 @@ test('a fix start is refused when gh is signed in as someone else, even on the v
   const h = await setup({ config: { cloneDir: '~/dev/orbit' }, runner: other })
   try {
     await filled(h)
-    const refused = await send(`${h.base}/api/prs/101/runs`, 'POST', { kind: 'fix' }, token(h))
+    const refused = await send(`${h.base}/api/prs/101/runs`, 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))
     assert.equal(refused.status, 422)
     assert.match(String(refused.body.error), /gh is signed in as someone-else, but the viewer is vera-quill/)
     assert.equal(h.launch.children.length, 0)
@@ -1404,7 +1406,7 @@ const sweepsUrl = (h: Harness): string => `${h.base}/api/sweeps`
 const writeSweepSummary = (h: Harness): Promise<void> =>
   mkdir(join(h.home, 'agents', 'output'), { recursive: true }).then(() => writeFile(join(h.home, 'agents', 'output', 'dependabot-sweep-octo-example-orbit-2026-10-26.md'), '# sweep\n'))
 
-test('starting a sweep needs the token and the Host, Origin and content-type checks, takes only a runner, and is one per repository', async () => {
+test('starting a sweep needs the token and the Host, Origin, and content-type checks, takes only a runner, and is one per repository', async () => {
   const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
   try {
     const url = sweepsUrl(h)
@@ -1420,7 +1422,7 @@ test('starting a sweep needs the token and the Host, Origin and content-type che
     assert.equal((await send(url, 'POST', ['codex'], token(h))).status, 400)
     assert.equal(h.launch.children.length, 0)
 
-    const started = await send(url, 'POST', undefined, { ...token(h), Origin: h.base })
+    const started = await send(url, 'POST', { repo: scenario.repo }, { ...token(h), Origin: h.base })
     assert.equal(started.status, 200)
     assert.deepEqual([started.body.status, started.body.command, started.body.args, started.body.label, started.body.runner, started.body.cwd],
       ['running', 'review-dependabot-sweep', [scenario.repo, '--parallel', '1'], 'Dependabot sweep', 'claude', '~/dev/orbit'])
@@ -1437,7 +1439,7 @@ test('starting a sweep needs the token and the Host, Origin and content-type che
     assert.equal(h.launch.children.length, 1)
     // a sweep does not hold up a PR's own run, and its record is not in that PR's runs
     await filled(h)
-    const run = await send(`${h.base}/api/prs/106/runs`, 'POST', undefined, token(h))
+    const run = await send(`${h.base}/api/prs/106/runs`, 'POST', { repo: scenario.repo }, token(h))
     assert.equal(run.status, 200)
     assert.deepEqual((await getJson<Record<string, unknown>[]>(`${h.base}/api/prs/106/runs`)).body.map((entry) => entry.command), ['review-pr'])
   } finally {
@@ -1467,6 +1469,34 @@ test('a sweep start naming a repository that is no longer the one in effect is r
   }
 })
 
+test('a run start naming a repository that is no longer the one in effect is refused with 409 and starts nothing, and one naming none is refused with 400', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const url = `${h.base}/api/prs/106/runs`
+    // an older page that names no repository is refused rather than guessed at
+    const omitted = await send(url, 'POST', { kind: 'default', runner: 'claude', viewer: scenario.viewer }, token(h))
+    assert.equal(omitted.status, 400)
+    assert.match(String(omitted.body.error), /repo is required/)
+    assert.equal((await send(url, 'POST', undefined, token(h))).status, 400)
+    assert.equal((await send(url, 'POST', { repo: 7 }, token(h))).status, 400)
+    // another repository than the one in effect
+    const stale = await send(url, 'POST', { kind: 'default', runner: 'claude', repo: 'octo-example/other', viewer: scenario.viewer }, token(h))
+    assert.equal(stale.status, 409)
+    assert.match(String(stale.body.error), /octo-example\/other/)
+    assert.equal(h.launch.children.length, 0)
+    assert.deepEqual((await getJson<unknown[]>(url)).body, [])
+    // the repository changes under an open confirmation: the one it showed is stale now, though the PR number may exist in the new one
+    const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
+    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, repo: 'octo-example/other' })).status, 200)
+    const moved = await send(url, 'POST', { kind: 'default', runner: 'claude', repo: scenario.repo, viewer: scenario.viewer }, token(h))
+    assert.equal(moved.status, 409)
+    assert.equal(h.launch.children.length, 0)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 // the viewer and the gh account change together while a confirmation is open: the server's configuration has moved on, and the page still shows the old account until its feed patch arrives
 const switchedAccount = async (): Promise<{ h: Harness, switchTo: (login: string) => Promise<void> }> => {
   let login: string = scenario.viewer
@@ -1485,7 +1515,7 @@ test('a sweep start naming a viewer that is no longer the one in effect is refus
   const { h, switchTo } = await switchedAccount()
   try {
     const url = sweepsUrl(h)
-    assert.equal((await send(url, 'POST', { viewer: 7 }, token(h))).status, 400)
+    assert.equal((await send(url, 'POST', { repo: scenario.repo, viewer: 7 }, token(h))).status, 400)
     await switchTo('new-account')
     const stale = await send(url, 'POST', { runner: 'claude', repo: scenario.repo, viewer: scenario.viewer }, token(h))
     assert.equal(stale.status, 409)
@@ -1507,15 +1537,15 @@ test('a run start naming a viewer that is no longer the one in effect is refused
   try {
     await filled(h)
     const url = `${h.base}/api/prs/106/runs`
-    assert.equal((await send(url, 'POST', { viewer: 7 }, token(h))).status, 400)
+    assert.equal((await send(url, 'POST', { repo: scenario.repo, viewer: 7 }, token(h))).status, 400)
     await switchTo('new-account')
-    const stale = await send(url, 'POST', { kind: 'default', runner: 'claude', viewer: scenario.viewer }, token(h))
+    const stale = await send(url, 'POST', { kind: 'default', runner: 'claude', repo: scenario.repo, viewer: scenario.viewer }, token(h))
     assert.equal(stale.status, 409)
     assert.match(String(stale.body.error), /new-account/)
     assert.equal(h.launch.children.length, 0)
     assert.deepEqual((await getJson<unknown[]>(url)).body, [])
     // the confirmation named the viewer now in effect, in any letter case, so it starts
-    const current = await send(url, 'POST', { kind: 'default', runner: 'claude', viewer: 'NEW-ACCOUNT' }, token(h))
+    const current = await send(url, 'POST', { kind: 'default', runner: 'claude', repo: scenario.repo, viewer: 'NEW-ACCOUNT' }, token(h))
     assert.equal(current.status, 200)
     assert.equal(h.launch.children.length, 1)
   } finally {
@@ -1523,7 +1553,7 @@ test('a run start naming a viewer that is no longer the one in effect is refused
   }
 })
 
-test('the sweeps the cache prunes leave memory, the list and the feed with the same ids', async () => {
+test('the sweeps the cache prunes leave memory, the list, and the feed with the same ids', async () => {
   const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
   try {
     const { cache } = h.server
@@ -1625,7 +1655,7 @@ test('GET /api/sweeps lists the repository\'s sweeps newest first with the parse
   }
 })
 
-test('the view carries the sweeps and how to start one, and the live feed sends them whole when a sweep starts, steps and settles', async () => {
+test('the view carries the sweeps and how to start one, and the live feed sends them whole when a sweep starts, steps, and settles', async () => {
   const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
   try {
     await filled(h)
@@ -1684,7 +1714,7 @@ test('a sweep with nothing to sweep settles done with zero counts, and the feed 
   }
 })
 
-// a second start over the same home, cache and state folder: what a restart of the server is
+// a second start over the same home, cache, and state folder: what a restart of the server is
 const restart = async (h: Harness): Promise<PitServer> => {
   await h.server.close()
   h.server = await startServer(restartOptions(h))

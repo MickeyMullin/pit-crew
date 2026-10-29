@@ -107,7 +107,7 @@ test('Codex gets the same sweep as a $ skill, still serial and never --no-post',
   }
 })
 
-test('a start is refused for another gh account, an unset cloneDir and a folder that is not a clone, before anything runs', async () => {
+test('a start is refused for another gh account, an unset cloneDir, and a folder that is not a clone, before anything runs', async () => {
   const other = fakeRunner((args) => args[0] === 'api' ? ok('someone-else\n') : ok('gho_fixture_token\n'))
   const mismatch = await harness({ gh: other })
   try {
@@ -159,7 +159,7 @@ test('one sweep per repository: a second start is refused while one is in flight
   }
 })
 
-test('a sweep settles done from result.json with its rows, counts and merge order', async () => {
+test('a sweep settles done from result.json with its rows, counts, and merge order', async () => {
   const h = await harness()
   try {
     const sweep = await h.launcher.start(start())
@@ -313,7 +313,7 @@ test('after a restart a sweep whose process is gone settles from its result.json
     await child.result(sweepResult())
     h.launcher.close()
     h.launch.alive.delete(child.pid)
-    // the first sweep is recorded as running, with a result on disk; settle it, then start another and lose it
+    // the first sweep is recorded as running, with a result on disk; settle it, then start another, and lose it
     const again = h.make()
     await again.recover()
     assert.deepEqual([h.cache.getSweep(withResult.id)?.status, h.cache.getSweep(withResult.id)?.note], ['done', null])

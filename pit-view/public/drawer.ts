@@ -251,14 +251,14 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     if (busy || confirm?.type !== 'start' || number === null) return
     const asked = confirm
     const n = number
-    // the viewer of the option the confirmation shows, read before anything is awaited
+    // the repository and viewer of the option the confirmation shows, read before anything is awaited
     const cell = latest()
-    const viewer = cell === null ? undefined : optionOf(cell, asked.kind)?.viewer
-    if (viewer === undefined) return
+    const option = cell === null ? undefined : optionOf(cell, asked.kind)
+    if (option === undefined) return
     busy = true
     error = ''
     paintConfirm()
-    const answer = await sendRun(startRequest(n, asked.kind, asked.runner, viewer, options.token))
+    const answer = await sendRun(startRequest(n, asked.kind, asked.runner, option.repo, option.viewer, options.token))
     busy = false
     if (n !== number) return
     if (answer.ok) {

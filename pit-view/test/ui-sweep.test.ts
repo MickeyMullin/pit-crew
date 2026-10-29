@@ -1,5 +1,5 @@
 // test/ui-sweep.test.ts
-// the Dependabot sweep's page logic in public/, run under Node: the bot group header's control, the confirmation, the drawer's models, the broom link and the PR drawer's link, against sweeps built the way the server builds them (src/sweeps.ts)
+// the Dependabot sweep's page logic in public/, run under Node: the bot group header's control, the confirmation, the drawer's models, the broom link, and the PR drawer's link, against sweeps built the way the server builds them (src/sweeps.ts)
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -114,7 +114,7 @@ test('the confirmation names the repository, says it runs one PR at a time, and 
   assert.equal(sweepStartOf(config({ agent: { runner: 'codex' } }), false).runner, 'codex')
 })
 
-test('a sweep is started and stopped with the token, a runner and the repository and viewer the confirmation showed, and nothing else', () => {
+test('a sweep is started and stopped with the token, a runner, and the repository and viewer the confirmation showed, and nothing else', () => {
   const start = sweepStartRequest('codex', scenario.repo, scenario.viewer, 'tok-1')
   assert.equal(start.url, '/api/sweeps')
   assert.deepEqual(start.init.headers, { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok-1' })
@@ -255,7 +255,7 @@ test('a change of the newest sweep\'s status is announced once, and the first re
 
 // the DOM modules are not run under Node; their wiring is checked as source
 
-test('the bot group header, the broom and the PR drawer are wired to the sweep models, with the group\'s collapse button kept', async () => {
+test('the bot group header, the broom, and the PR drawer are wired to the sweep models, with the group\'s collapse button kept', async () => {
   const dir = join(import.meta.dirname, '..', 'public')
   const tables = await readFile(join(dir, 'tables.ts'), 'utf8')
   assert.match(tables, /sweepControls\(sweep\)/)
@@ -288,7 +288,7 @@ test('the start confirmation\'s signature changes with the repository, the viewe
   assert.equal(sig(config({ refreshSeconds: 120 })), reference)
 })
 
-test('the confirmation\'s heading, repository and effect text follow the configuration they are built from', () => {
+test('the confirmation\'s heading, repository, and effect text follow the configuration they are built from', () => {
   const other = sweepConfirmModel(sweepStartOf(config({ repo: 'octo-example/other', viewer: 'someone-else' }), false), 'claude')
   assert.match(other.heading, /octo-example\/other/)
   assert.equal(other.repo, 'octo-example/other')

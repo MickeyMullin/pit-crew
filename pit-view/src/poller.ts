@@ -68,7 +68,7 @@ export type Patch = {
   tiles?: Tiles
   counts?: Counts
   sync?: Sync
-  // the sweeps as they now stand, replacing the page's: sent whole whenever a sweep, the repository or the start text's config changed
+  // the sweeps as they now stand, replacing the page's: sent whole whenever a sweep, the repository, or the start text's config changed
   sweeps?: SweepsView
   repo?: string
   viewer?: PersonView
@@ -104,7 +104,7 @@ export type Poller = {
   runWatched: (run: { id: number, repo: string, number: number }) => void
   // a run of this PR started, stepped or settled: one patch upserting its row
   runChanged: (repo: string, number: number) => void
-  // a sweep of this repo started, stepped or settled: one patch carrying the sweeps whole
+  // a sweep of this repo started, stepped, or settled: one patch carrying the sweeps whole
   sweepsChanged: (repo: string) => void
   // resolves once no cycle is running, including any follow-up cycle
   idle: () => Promise<void>
