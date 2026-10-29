@@ -4,7 +4,7 @@ import type { Config, RunnerName } from './config.ts'
 import { doneText, stepsOf } from './launcher.ts'
 import type { CiState, PostForm, Priority, Recommendation, StartRequest, StepSlot, SweepResult } from './launcher.ts'
 
-// the Dependabot sweep as a concept of its own (section 8 of DESIGN.md, Sweeps): the command line it launches, what the confirmation says, the view the page draws from a sweep record, and the sweeps held in memory beside the runs. Launching is the launcher's: createSweepLauncher
+// the Dependabot sweep as a concept of its own (section 8 of DESIGN.md, Sweeps): the command line it launches, what the confirmation says, the view the page draws from a sweep record, and the sweeps held in memory beside the runs. The launcher launches it (createSweepLauncher in launcher.ts).
 
 export const sweepCommand = 'review-dependabot-sweep'
 export const sweepLabel = 'Dependabot sweep'
