@@ -45,8 +45,7 @@ export type Form = {
   notifyKinds: NotificationKind[]
 }
 
-// the notification kinds in the order the page lists them; the same names as notificationKinds in
-// src/notify.ts, which a test keeps in step (the page cannot import that module's code)
+// the notification kinds in the order the page lists them; the same names as notificationKinds in src/notify.ts, which a test keeps in step (the page cannot import that module's code)
 export const notifyChoices: readonly { kind: NotificationKind, label: string, hint: string }[] = [
   { kind: 'changesRequested', label: 'Changes requested on your PR', hint: 'A PR of yours moves to Changes requested.' },
   { kind: 'readyToMerge', label: 'Your PR is ready to merge', hint: 'A PR of yours reaches the Ready to merge state.' },
@@ -139,8 +138,7 @@ export const toConfig = (form: Form, base: Config): Config => {
     ...(base.cloneDir === undefined ? {} : { cloneDir: base.cloneDir }),
     agent: base.agent,
   }
-  // absent means off, so a config that never had the key and a form still at that default
-  // leave it out
+  // absent means off, so a config that never had the key and a form still at that default leave it out
   const kinds = allKinds.filter((kind) => form.notifyKinds.includes(kind))
   const untouched = !form.notifyEnabled && kinds.length === allKinds.length
   if (base.notifications !== undefined || !untouched) config.notifications = { enabled: form.notifyEnabled, kinds }

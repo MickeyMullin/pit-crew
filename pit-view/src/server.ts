@@ -71,8 +71,7 @@ export type ServerOptions = {
   stateDir: string
   publicDir: string
   launch: LaunchDeps
-  // how a notification reaches the OS; nothing is delivered when left out, so a test never
-  // fires a real one
+  // how a notification reaches the OS; nothing is delivered when left out, so a test never fires a real one
   deliver?: Deliver
   // the per-start token the pages carry on run writes; random when left out
   token?: string
