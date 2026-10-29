@@ -4,10 +4,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  announcements, cellModel, commandLine, doneTone, formatDuration, refusalText, runningLine, sentence,
-  startRequest, stepText, stopRequest, tokenHeader,
+  announcements, cellModel, commandLine, doneTone, fixStart, formatDuration, refusalText, runningLine, sentence,
+  startRequest, stepText, stepTitle, stopRequest, tokenHeader,
 } from '../public/agent.ts'
-import type { AgentCell } from '../public/agent.ts'
+import type { AgentCell, StartOption } from '../public/agent.ts'
 import { tokenHeader as serverTokenHeader, tokenMeta } from '../src/server.ts'
 
 const now = Date.parse('2026-10-28T15:00:00Z')
@@ -65,6 +65,23 @@ test('a running cell names its label and its step for screen readers and tooltip
   assert.equal(stepText(null), 'Starting: no step recorded yet')
 })
 
+test('a Fix session\'s steps read by its own meanings: resolve, triage, fix and check, write report, push', () => {
+  assert.deepEqual(['resolveBase', 'review', 'consolidate', 'writeReport', 'post'].map((step) => stepTitle('fix-pr', step)), [
+    'Resolve', 'Triage', 'Fix and check', 'Write report', 'Push',
+  ])
+  // every other command keeps a review's
+  for (const command of ['review-pr', 'review-stack', 'review-dependabot', null]) {
+    assert.deepEqual(['resolveBase', 'review', 'consolidate', 'writeReport', 'post'].map((step) => stepTitle(command, step)), [
+      'Resolve base', 'Review', 'Consolidate', 'Write report', 'Post',
+    ])
+  }
+  assert.equal(stepText({ name: 'consolidate', state: 'started' }, 'fix-pr'), 'Step: fix and check, started')
+  assert.equal(stepText({ name: 'post', state: 'done' }, 'fix-pr'), 'Step: push, done')
+  assert.equal(stepText({ name: 'review', state: 'started' }, 'review-pr'), 'Step: review, started')
+  const fixing = running({ command: 'fix-pr', label: 'Fix session', step: { name: 'review', state: 'started' } })
+  assert.equal((cellModel(fixing, 101, now) as { step: string }).step, 'Step: triage, started')
+})
+
 test('a done cell shows the server\'s text and when it finished, colored by what comes next', () => {
   const model = cellModel(done(), 101, now)
   assert.deepEqual(model, {
@@ -80,6 +97,26 @@ test('a done cell shows the server\'s text and when it finished, colored by what
   assert.equal(tones('Needs your answer', 'needsInput'), 'amber')
   assert.equal(tones('Stopped', 'stopped'), 'gray')
   assert.equal(tones('Failed · no result', 'failed'), 'red')
+  // a Fix session: pushed is good news, nothing to fix needs nothing, not pushed wants a look
+  assert.equal(tones('Fixed · pushed 2 commits'), 'green')
+  assert.equal(tones('Fixed · pushed 1 commit'), 'green')
+  assert.equal(tones('Nothing to fix'), 'gray')
+  for (const text of ['Not pushed', 'Not pushed · checks failed', 'Not pushed · checks not run', 'Not pushed · push refused']) assert.equal(tones(text), 'amber', text)
+  assert.equal(tones('Failed · push refused', 'failed'), 'red')
+})
+
+test('the banner offers a Fix session while the row offers one, available or not, and never without one', () => {
+  const fix: StartOption = {
+    kind: 'fix', label: 'Fix session', button: 'Fix requested changes', command: 'fix-pr', args: ['101'], runners: ['claude'],
+    posts: { kind: 'push', text: 'Pushes new commits to fix/retry on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.' },
+    unavailable: null,
+  }
+  const review: StartOption = { ...fix, kind: 'default', label: 'Self-review', button: 'Self-review', command: 'review-pr', args: ['101', '--no-post'], runners: ['claude', 'codex'], posts: { kind: 'nothing', text: 'Posts nothing.' } }
+  assert.equal(fixStart(idle({ starts: [review, fix] })), fix)
+  const busy = { ...fix, unavailable: 'a run for #101 is already in flight' }
+  assert.equal(fixStart(idle({ starts: [review, busy] })), busy, 'an unavailable fix still shows; the drawer says why')
+  assert.equal(fixStart(idle({ starts: [review] })), null, 'a PR that is not yours, or a bot\'s, has no fix start')
+  assert.equal(fixStart(null), null)
 })
 
 test('a run waiting for an answer keeps its question as the cell\'s tooltip; the drawer offers the resume command', () => {
@@ -119,6 +156,8 @@ test('a start sends JSON with the kind, the runner and the token; a stop sends t
     init: { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok-123' }, body: '{"kind":"default","runner":"codex"}' },
   })
   assert.equal(startRequest(111, 'stack', 'claude', 't').init.body, '{"kind":"stack","runner":"claude"}')
+  // a Fix session names no runner: the server runs it with Claude
+  assert.equal(startRequest(101, 'fix', 'codex', 't').init.body, '{"kind":"fix"}')
   assert.deepEqual(stopRequest(42, 'tok-123'), { url: '/api/runs/42/stop', init: { method: 'POST', headers: { 'X-Pit-View-Token': 'tok-123' } } })
   // the page sends the header the server reads (Node lowercases incoming header names)
   assert.equal(tokenHeader.toLowerCase(), serverTokenHeader)

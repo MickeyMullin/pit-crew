@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdir, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { branchReportName, isReportName, listPrReports, listReports, parseReviewedCommit, parseVerdict, readHead, readReport, ReportReadError, scanReports } from '../src/reports.ts'
+import { branchReportName, isReportName, listPrReports, listReports, parseFixHead, parseReviewedCommit, parseVerdict, readHead, readReport, ReportReadError, scanReports } from '../src/reports.ts'
 import { tempDir } from './helpers.ts'
 
 // invented report bodies in the review commands' format
@@ -120,8 +120,8 @@ test('a PR\'s reports are listed newest first with sha, verdict and tandem, and 
     await write(dir, 'PR-101-.md', 'nope')
     await mkdir(join(dir, 'PR-101-dir.md'))
     assert.deepEqual(await listPrReports(dir, 101), [
-      { name: 'PR-101-codex.md', modifiedAt: '2026-10-26T13:00:00.000Z', sha: 'abc1234', verdict: 'clean', tandem: true },
-      { name: 'PR-101.md', modifiedAt: '2026-10-26T12:00:00.000Z', sha: 'abc1234', verdict: 'changesRequested', tandem: true },
+      { name: 'PR-101-codex.md', kind: 'review', modifiedAt: '2026-10-26T13:00:00.000Z', sha: 'abc1234', verdict: 'clean', tandem: true },
+      { name: 'PR-101.md', kind: 'review', modifiedAt: '2026-10-26T12:00:00.000Z', sha: 'abc1234', verdict: 'changesRequested', tandem: true },
     ])
     assert.deepEqual((await listPrReports(dir, 102)).map((entry) => [entry.name, entry.tandem]), [['PR-102.md', false]])
     assert.deepEqual(await listPrReports(dir, 103), [])
@@ -228,6 +228,88 @@ test('reportsDir may itself be a symlink: the configured folder is followed, fil
     await write(join(dir, 'real'), 'PR-101.md', 'ok')
     assert.equal((await readReport(join(dir, 'output'), 'PR-101.md')).raw, 'ok')
     assert.deepEqual((await listPrReports(join(dir, 'output'), 101)).map((entry) => entry.name), ['PR-101.md'])
+  } finally {
+    await cleanup()
+  }
+})
+
+// fix-pr's reports (P2.6)
+
+const fixReport = (number: number, sha: string): string =>
+  `PR: #${number} \`fix/webhook-retry\` @ \`${sha}\`\nBase: \`main\`\nPush: pushed \`bbbbbbb\` (2 commits)\n\n## Summary\n\n- **P1** is not a verdict here\n`
+
+const at = async (dir: string, name: string, time: string): Promise<void> => utimes(join(dir, name), new Date(time), new Date(time))
+
+test('a PR\'s fix report is listed among its reports, newest first, as kind fix with its head and no verdict or tandem', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    await write(dir, 'PR-101.md', findings(['P1']))
+    await at(dir, 'PR-101.md', '2026-10-26T12:00:00Z')
+    await write(dir, 'FIX-101.md', fixReport(101, 'aaaaaaa'))
+    await at(dir, 'FIX-101.md', '2026-10-27T09:00:00Z')
+    await write(dir, 'PR-101-codex.md', findings(['P3']))
+    await at(dir, 'PR-101-codex.md', '2026-10-26T13:00:00Z')
+    for (const name of ['FIX-1010.md', 'FIX-10.md', 'FIX-101-old.md', 'FIX-101.md.bak', 'fix-101.md.txt', 'FIX-0101.md']) await write(dir, name, fixReport(101, 'ccccccc'))
+    assert.deepEqual(await listPrReports(dir, 101), [
+      { name: 'FIX-101.md', kind: 'fix', modifiedAt: '2026-10-27T09:00:00.000Z', sha: 'aaaaaaa', verdict: null, tandem: false },
+      { name: 'PR-101-codex.md', kind: 'review', modifiedAt: '2026-10-26T13:00:00.000Z', sha: 'abc1234', verdict: 'clean', tandem: true },
+      { name: 'PR-101.md', kind: 'review', modifiedAt: '2026-10-26T12:00:00.000Z', sha: 'abc1234', verdict: 'changesRequested', tandem: true },
+    ])
+    // a fix report never makes a review report a tandem one, and stands alone
+    await write(dir, 'PR-102.md', findings([]))
+    await write(dir, 'FIX-102.md', '# no first line\n')
+    assert.deepEqual((await listPrReports(dir, 102)).map((entry) => [entry.name, entry.kind, entry.sha, entry.tandem]), [['FIX-102.md', 'fix', null, false], ['PR-102.md', 'review', 'abc1234', false]].sort((a, b) => String(a[0]).localeCompare(String(b[0]))))
+    await write(dir, 'FIX-103.md', fixReport(103, 'ddddddd'))
+    assert.deepEqual((await listPrReports(dir, 103)).map((entry) => entry.name), ['FIX-103.md'])
+    assert.deepEqual(await listPrReports(dir, 10), [{ name: 'FIX-10.md', kind: 'fix', modifiedAt: '2026-10-26T12:00:00.000Z', sha: 'ccccccc', verdict: null, tandem: false }])
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a fix report\'s head is the SHA after @ on its PR: line', () => {
+  assert.equal(parseFixHead(['PR: #101 `fix/webhook-retry` @ `AAAAAAA`', 'Base: `main`']), 'aaaaaaa')
+  assert.equal(parseFixHead(['Base: `main`', 'PR: #101 `x` @ `not-a-sha`']), null)
+  assert.equal(parseFixHead(['Reviewed commit: `x` @ `abc1234`']), null)
+})
+
+test('a symlinked fix report is never listed, and FIX-<n>.md is read with the same containment as a review report', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const reports = join(dir, 'reports')
+    await mkdir(reports)
+    await mkdir(join(dir, 'outside'))
+    await write(reports, 'FIX-101.md', fixReport(101, 'aaaaaaa'))
+    await write(join(dir, 'outside'), 'FIX-104.md', 'outside')
+    await symlink(join(dir, 'outside', 'FIX-104.md'), join(reports, 'FIX-104.md'))
+    await mkdir(join(reports, 'FIX-105.md'))
+    assert.deepEqual(await listPrReports(reports, 104), [])
+    assert.deepEqual(await listPrReports(reports, 105), [])
+    assert.equal((await readReport(reports, 'FIX-101.md')).raw, fixReport(101, 'aaaaaaa'))
+    for (const name of ['FIX-104.md', 'FIX-105.md', 'FIX-999.md']) await assert.rejects(readReport(reports, name), refused('notFound'), name)
+    for (const name of ['FIX-101-old.md', 'FIX-101.md.bak', 'FIX-.md', 'FIX-1a.md', 'fix-101.md', 'FIX-101.MD', '../FIX-101.md', 'FIX-1/../FIX-101.md', 'outside/FIX-104.md', 'FIX-101.md\0', 'XFIX-101.md']) {
+      await assert.rejects(readReport(reports, name), refused('badName'), JSON.stringify(name))
+    }
+    assert.ok(isReportName('FIX-101.md') && !isReportName('FIX-101-x.md') && isReportName('PR-101.md'))
+    const big = join(dir, 'big')
+    await mkdir(big)
+    await write(big, 'FIX-1.md', 'x'.repeat(101))
+    await assert.rejects(readReport(big, 'FIX-1.md', 100), refused('tooLarge'))
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a fix report never counts as a self-review, even for a branch whose report name it would be', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    await write(dir, 'FIX-101.md', fixReport(101, 'aaaaaaa'))
+    await write(dir, 'FIX-7.md', report('FIX-7', 'abc1234'))
+    const found = await scanReports(dir, [{ number: 101, headRefName: 'fix/webhook-retry' }, { number: 7, headRefName: 'FIX-7' }, { number: 8, headRefName: 'FIX/7' }])
+    assert.equal(found.size, 0)
+    await write(dir, 'PR-101.md', report('fix/webhook-retry', 'abc1234'))
+    const own = (await scanReports(dir, [{ number: 101, headRefName: 'fix/webhook-retry' }])).get(101)
+    assert.deepEqual([own?.file, own?.reviewedSha, own?.tandem], ['PR-101.md', 'abc1234', false])
   } finally {
     await cleanup()
   }

@@ -1,4 +1,4 @@
-Machine-readable output: a review invoked with `--emit-json=<run-dir>` records its progress and its outcome as JSON files in `<run-dir>`, for the program that started the run and is watching it. This file is loaded by `review-pr.md`, `review-stack.md`, `review-dependabot.md`, and `review-dependabot-sweep.md` when the invocation carries the flag. It adds two files and changes nothing else: everything in the calling prompt applies as written, and the human-readable report is written, printed, and posted, or not posted, exactly as it would be without the flag.
+Machine-readable output: a review invoked with `--emit-json=<run-dir>` records its progress and its outcome as JSON files in `<run-dir>`, for the program that started the run and is watching it. This file is loaded by `review-pr.md`, `review-stack.md`, `review-dependabot.md`, and `review-dependabot-sweep.md`, and by `prompts/fix/fix-pr.md`, when the invocation carries the flag. It adds two files and changes nothing else: everything in the calling prompt applies as written, and the human-readable report is written, printed, and posted, or not posted, exactly as it would be without the flag (for `fix-pr`, the fixes are pushed, or not pushed, exactly as they would be).
 
 The flag:
 
@@ -98,6 +98,62 @@ The sweep's response, `pit-crew/sweep-result@1`:
   - `summary`: the Markdown summary's path, with the home directory written as `~`.
   - `question`, `error`: as in `review-result@1`.
 
+The fix's response, `pit-crew/fix-result@1`:
+
+- This schema applies only to `prompts/fix/fix-pr.md`, which loads this file when its invocation carries the flag. That prompt says what each of the five steps above covers in a fix, and where each is recorded; its step meanings replace the single-review ones above, so a fix records `consolidate` for making the fixes and running the checks rather than skipping it as `no tandem review`, and `post` for the push.
+- `fix-pr`'s stops to ask (a request that needs judgment, a local branch holding unpushed commits, a failed check, checks that cannot run, a fix that needs a file outside its rules) are stops to ask under "Stopping to ask" below. Its instructions to stop and say so are failures under "Failing" below, and so is a refused push: for `fix-pr`, the rule that a failed post is not a failure of the run does not apply.
+- `result.json` is written as the run's last act, under the rules above: after the report is written and updated, after any push, and after the worktree is removed. Every field is always present, with null where it does not apply:
+
+```json
+{
+  "schema": "pit-crew/fix-result@1",
+  "command": "fix-pr",
+  "status": "done",
+  "target": { "repo": "owner/name", "pr": 101, "branch": "fix/example" },
+  "head": { "sha": "755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7" },
+  "requests": [ { "id": "PRRT_kwDOexample", "kind": "thread", "author": "reviewer-login", "path": "src/retry.ts", "line": 12, "outdated": false, "url": "https://github.com/owner/name/pull/101#discussion_r1", "summary": "Back off between retries", "triage": "clear", "outcome": "fixed", "commits": ["9f8e7d6c5b4a39281706f5e4d3c2b1a098765432"] } ],
+  "checks": [ { "name": "pnpm test", "result": "passed" } ],
+  "pushed": { "branch": "fix/example", "head": "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432", "commits": [ { "sha": "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432", "subject": "Back off between retries" } ] },
+  "notPushedReason": null,
+  "worktree": null,
+  "report": "~/agents/output/FIX-101.md",
+  "question": null,
+  "error": null
+}
+```
+
+- `schema`: `"pit-crew/fix-result@1"`.
+- `command`: `"fix-pr"`.
+- `status`: `"done"` when the run reached its end: the fixes were pushed, there was nothing to fix, or the owner, answering a stop, told it to discard its commits. `"needsInput"` when it stopped to ask; `"failed"` when it cannot complete, a refused push included.
+- `target`: `{ "repo": "<owner>/<name>", "pr": <number>, "branch": "<the PR's head branch>" }`. Null when the run stopped before resolving its target.
+- `head`: `{ "sha": "<full SHA>" }`, the full 40-character SHA of the PR head the run read and triaged against, and at which any worktree was created. When the run started again because the head moved, the head of the pass that ended the run. Null when the run stopped before reading it.
+- `requests`: one object per request, in the report's order (threads in file order, then review bodies), the same requests as the report's Requests section, or the stop's list when no report was written:
+  - `id`: the review thread's GraphQL node id, or the review's.
+  - `kind`: `"thread"` or `"review"` (the body of a reviewer's standing change request).
+  - `author`: the login of the reviewer whose ask it is: for a thread, the first comment's author other than the owner. Null when GitHub gives no login.
+  - `path`: the thread's repo-relative path; null for a review.
+  - `line`: the thread's `line`, or its `originalLine` when the thread is outdated; null for a review, or a thread on a whole file.
+  - `outdated`: true when the thread is outdated; false for a current thread and for a review.
+  - `url`: the URL of the thread's first comment, or of the review.
+  - `summary`: the request in one line.
+  - `triage`: `"needsJudgment"`, `"noChange"`, `"disagree"`, `"outOfScope"`, or `"clear"`, as `fix-pr.md` defines them; for a request the owner settled at a stop, still the triage the run gave it.
+  - `outcome`: `"fixed"` when a commit answers it, pushed or not (`pushed` says which); `"notFixed"` when the run settled it without a fix (`noChange`, `disagree`, `outOfScope`, or the owner's answer); `"awaitingAnswer"` when the run stopped to ask before it was settled.
+  - `commits`: the full SHAs of the commits that answer it, or `[]`.
+  - `[]` when the PR had no request, and when the run stopped before gathering.
+- `checks`: one object per check in the verifying run, in the order run: `{ "name": "<the command as run>", "result": "passed" | "failed" | "notRun" }`, with `notRun` for a check that applied but could not run. `[]` when no fix was made.
+- `pushed`: `{ "branch": "<branch>", "head": "<full SHA of the new head>", "commits": [ { "sha": "<full SHA>", "subject": "<subject line>" } ] }`, the commits in the order made, when the push landed; otherwise null.
+- `notPushedReason`: null when the push landed. Otherwise exactly one of:
+  - `"nothingToFix"`: triage left no request to fix, and the run finished `"done"`.
+  - `"awaitingAnswer"`: the run stopped to ask before touching code, or because a fix needs a file outside its rules.
+  - `"checksFailed"`: a check failed, including a commit hook that refused a commit.
+  - `"checksNotRun"`: the checks could not run, so the fix is unverified, including a dependency install that failed before any fix was made.
+  - `"pushFailed"`: the push was refused. `status` is `"failed"`, and git's error goes in `error`.
+  - When a check failed or could not run, that reason is used over `"awaitingAnswer"`, as the report's `Push:` line does. A run the owner told to discard its commits keeps the reason of the stop it answered.
+  - It is null as well when the run failed before deciding the push, as at any stop to say so; `error` says why.
+- `worktree`: the throwaway worktree's path, with the home directory written as `~`, when the run left one behind: commits not pushed, or a removal that refused. Otherwise null.
+- `report`: `~/agents/output/FIX-<number>.md`, with the home directory written as `~`. Null when no report was written, as at a stop to ask before touching code.
+- `question`, `error`: as in `review-result@1`; `error` also carries git's error for a refused push.
+
 Stopping to ask:
 
 - **Wherever the calling prompt, or `tandem.md`, says to stop and ask, a run with the flag stops there too.** That includes a closed or merged PR under `review-pr.md`; a missing stack identity with more than one stack open; whether to fix, and at which model or effort; the one-attempt bound when the re-review after a fix finds anything; a tandem secondary that failed, or a draft that fails its checks; an unreachable pinned SHA; a prior invocation that cannot be repeated as written; and `review-stack`'s closing offer to post, which waits for an explicit yes.
@@ -119,5 +175,6 @@ What the flag never changes:
 - The one-attempt bound on fix mode, and the `Fix attempts:` line that carries it.
 - `review-pr` fixing only the viewer's own PR, confirmed by matching `gh api user` against the PR author login, never inferred from a checked-out branch.
 - `review-stack` never fixing, on any stack, under any authorship.
+- `fix-pr` acting only on the viewer's own PR, confirmed the same way; its push as its only GitHub write; its one fix attempt; and its report written before the push.
 - Where the report goes, what it says, and when it is written. The JSON describes the run; it never replaces the report or the chat response.
 - The no-attribution rules, which apply to both files exactly as to the report: no model, provider, or agent names anywhere in them, and escalation is reported by its trigger, never by which model ran.

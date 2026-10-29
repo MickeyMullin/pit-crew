@@ -19,7 +19,7 @@ import type { LaunchSpec, RunResultJson, StartRequest, StepEvent } from '../src/
 import { createPoller } from '../src/poller.ts'
 import type { Patch } from '../src/poller.ts'
 import { scenario } from './fixtures/scenario.ts'
-import { fakeLaunch, fakeRemotes, fakeRunner, fakeTime, fixtureRunner, ok, openPage1, openPage2, reviewResult, tempDir } from './helpers.ts'
+import { fakeLaunch, fakeRemotes, fakeRunner, fakeTime, fixCommits, fixHead, fixPushedHead, fixRequest, fixResult, fixtureRunner, ok, openPage1, openPage2, reviewResult, tempDir } from './helpers.ts'
 import type { FakeLaunch, FakeRunner } from './helpers.ts'
 
 const second = 1000
@@ -186,7 +186,7 @@ test('Clean · mark ready? only on the viewer\'s own draft, and a moved head ret
   assert.equal(ownDraft.state, 'done')
   assert.equal(ownDraft.text, 'Clean · mark ready?')
   assert.equal(ownDraft.label, 'Self-review')
-  assert.deepEqual(ownDraft.result, { verdict: 'clean', recommendation: null, findings: 0, ci: 'green', posted: null, notPostedReason: 'noPost', report: '~/agents/output/PR-106.md' })
+  assert.deepEqual(ownDraft.result, { kind: 'review', verdict: 'clean', recommendation: null, findings: 0, ci: 'green', posted: null, notPostedReason: 'noPost', report: '~/agents/output/PR-106.md' })
   const notDraft = agentCell(await prOf(104), config, runRow({ number: 104, status: 'done', result: cleanAt((await prOf(104)).headRefOid) }), undefined)
   assert.equal(notDraft.text, 'Clean')
   // the head moved past the reviewed commit: the next move is the idle action again
@@ -218,15 +218,16 @@ test('a PR offers its default run, the same review in tandem, and a stack review
     ['tandem', 'Tandem re-review', 'Re-review in tandem', 'review-pr', ['106', '--tandem']],
     ['stack', 'Review stack', 'Review stack', 'review-stack', ['106']],
   ])
-  // the viewer's own PR never posts, tandem or not
+  // the viewer's own PR never posts a review, tandem or not; its fix session pushes, so it has no --no-post
   assert.deepEqual(summary(await options(104)), [
     ['default', 'Self-review', 'Self-review', 'review-pr', ['104', '--no-post']],
     ['tandem', 'Tandem self-review', 'Self-review in tandem', 'review-pr', ['104', '--tandem', '--no-post']],
+    ['fix', 'Fix session', 'Fix requested changes', 'fix-pr', ['104']],
   ])
   // review-dependabot has no tandem mode; Renovate's PRs are ordinary reviews and do
   assert.deepEqual(summary(await options(114)), [['default', 'Review', 'Review PR', 'review-dependabot', ['114']]])
   assert.deepEqual((await options(115)).map((option) => option.kind), ['default', 'tandem'])
-  // nothing offered is ever review-local, a fix, or an unflagged review of the viewer's own PR
+  // nothing offered is ever review-local, review-pr's fix mode, or an unflagged review of the viewer's own PR
   for (const number of [101, 103, 104, 120]) {
     for (const option of await options(number, stacked)) {
       assert.notEqual(option.command, 'review-local')
@@ -243,7 +244,8 @@ test('each start says which runners it works with and what it does on GitHub', a
   const stack = { kind: 'offer', text: 'Posts nothing; writes the report only. It stops to offer posting it on the top PR, and you answer in the session.' }
   assert.deepEqual(await posts(113), { default: [['claude', 'codex'], review], tandem: [['claude'], review], stack: [['claude', 'codex'], stack] })
   const nothing = { kind: 'nothing', text: 'Posts nothing; writes the report only.' }
-  assert.deepEqual(await posts(104), { default: [['claude', 'codex'], nothing], tandem: [['claude'], nothing], stack: [['claude', 'codex'], stack] })
+  const push = { kind: 'push', text: 'Pushes new commits to feat/sync-status-endpoint on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.' }
+  assert.deepEqual(await posts(104), { default: [['claude', 'codex'], nothing], tandem: [['claude'], nothing], stack: [['claude', 'codex'], stack], fix: [['claude'], push] })
   assert.deepEqual((await posts(114)).default, [['claude', 'codex'], { kind: 'autoApprove', text: 'Posts its report to the PR as @vera-quill and may approve the PR automatically.' }])
 })
 
@@ -960,4 +962,266 @@ test('a run\'s start, steps and settling each patch its row, with consecutive ve
     poller.stop()
     await h.cleanup()
   }
+})
+
+// the fix session (P2.6)
+
+const fixRun = (result: Record<string, unknown> | null, patch: Partial<Run> = {}): Run => runRow({
+  number: 101, command: 'fix-pr', args: ['101'], label: 'Fix session', status: (result?.status as Run['status'] | undefined) ?? 'done',
+  finishedAt: '2026-10-28T15:00:00Z', result: result as unknown as RunResultJson | null, ...patch,
+})
+
+test('a fix session is offered on every own open PR, drafts included, Claude only and without --no-post; never on others\' or bots\' PRs, and never the default', async () => {
+  const config = baseConfig()
+  const fixOf = async (number: number, viewer = config) => startOptions(await prOf(number), viewer, null, false).find((option) => option.kind === 'fix')
+  // 101 has changes requested, 103 is a draft, 104 awaits review, 120 is approved
+  for (const number of [101, 103, 104, 120]) {
+    const fix = await fixOf(number)
+    assert.ok(fix !== undefined, `#${number}`)
+    assert.deepEqual([fix.label, fix.button, fix.command, fix.args, fix.runners, fix.posts.kind, fix.unavailable], ['Fix session', 'Fix requested changes', 'fix-pr', [String(number)], ['claude'], 'push', null])
+    assert.ok(!fix.args.includes('--no-post'))
+    assert.equal(notOffered('fix', await prOf(number), config, null), null)
+  }
+  assert.equal((await fixOf(101))?.posts.text, 'Pushes new commits to fix/webhook-retry on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.')
+  // others' PRs, Dependabot's and Renovate's
+  for (const number of [113, 106, 111, 114, 115]) {
+    assert.equal(await fixOf(number), undefined, `#${number}`)
+    assert.match(notOffered('fix', await prOf(number), config, null) ?? '', new RegExp(`only on your own PRs, and #${number} is not yours`))
+  }
+  // a bot is never the owner, even when the configured viewer names one
+  const botViewer = { ...config, viewer: (await prOf(114)).author!.login }
+  assert.equal(await fixOf(114, botViewer), undefined)
+  assert.notEqual(notOffered('fix', await prOf(114), botViewer, null), null)
+  // the default stays Self-review, changes requested or not, and the fix comes last
+  const cell = agentCell(await prOf(101), config, undefined, undefined)
+  assert.deepEqual([cell.action.kind, cell.action.command, cell.action.args, cell.label], ['selfReview', 'review-pr', ['101', '--no-post'], 'Self-review'])
+  assert.deepEqual(cell.starts.map((option) => option.kind), ['default', 'tandem', 'fix'])
+  // while a run is in flight, the fix is as unavailable as the rest
+  assert.ok(agentCell(await prOf(101), config, runRow({ number: 101 }), undefined).starts.every((option) => option.unavailable?.includes('in flight')))
+})
+
+const fixParsed = (patch: Record<string, unknown> = {}) => parseResult(JSON.stringify(fixResult(patch)))
+
+const nothingToFix = (): Record<string, unknown> => fixResult({
+  requests: [fixRequest({ triage: 'noChange', outcome: 'notFixed', commits: [] })], checks: [], pushed: null, notPushedReason: 'nothingToFix',
+})
+
+const askedFirst = (): Record<string, unknown> => fixResult({
+  status: 'needsInput', requests: [fixRequest({ triage: 'needsJudgment', outcome: 'awaitingAnswer', commits: [] })], checks: [], pushed: null,
+  notPushedReason: 'awaitingAnswer', report: null, question: 'Either retry with jitter or cap the attempts: which?',
+})
+
+const refusedPush = (): Record<string, unknown> => fixResult({
+  status: 'failed', pushed: null, notPushedReason: 'pushFailed', worktree: '~/agents/worktrees/orbit-fix-101-20261028T150000',
+  error: '! [rejected] HEAD -> fix/webhook-retry (non-fast-forward)',
+})
+
+test('a fix result is checked against pit-crew/fix-result@1: done with pushes, nothing to fix, a stop with no report, a refused push', () => {
+  for (const [name, value] of [['pushed', fixResult()], ['nothing to fix', nothingToFix()], ['needsInput', askedFirst()], ['pushFailed', refusedPush()]] as const) {
+    const parsed = parseResult(JSON.stringify(value))
+    assert.equal(parsed.ok, true, `${name}: ${parsed.ok ? '' : parsed.error}`)
+  }
+  // a stop after the checks failed keeps its commits unpushed in a worktree; discarding them later ends done with that reason
+  const checksFailed = { status: 'needsInput', pushed: null, notPushedReason: 'checksFailed', checks: [{ name: 'pnpm test', result: 'failed' }], worktree: '~/agents/worktrees/orbit-fix-101-x', question: 'Push anyway, hand off, or discard?' }
+  assert.equal(fixParsed(checksFailed).ok, true)
+  assert.equal(fixParsed({ ...checksFailed, status: 'done', question: null }).ok, true)
+  // a run that failed before it read anything
+  assert.equal(fixParsed({ status: 'failed', target: null, head: null, requests: [], checks: [], pushed: null, notPushedReason: null, report: null, error: 'this PR is not yours' }).ok, true)
+  // uppercase hex is still a full SHA
+  assert.equal(fixParsed({ head: { sha: fixHead.toUpperCase() } }).ok, true)
+})
+
+test('a fix result that breaks its schema is no result: a missing field, a bad enum, a short SHA, a URL that is not http or https', () => {
+  const short = fixHead.slice(0, 7)
+  const refusals: [Record<string, unknown>, RegExp][] = [
+    [(({ worktree: _worktree, ...rest }) => rest)(fixResult()), /worktree is missing/],
+    [(({ requests: _requests, ...rest }) => rest)(fixResult()), /requests is missing/],
+    [fixResult({ command: 'review-pr' }), /command must be fix-pr/],
+    [fixResult({ status: 'pushed' }), /status must be/],
+    [fixResult({ status: 'needsInput', question: null }), /must carry its question/],
+    [fixResult({ status: 'failed', error: '' }), /must carry its error/],
+    [fixResult({ notPushedReason: 'tooBig', pushed: null }), /notPushedReason must be/],
+    [fixResult({ requests: [fixRequest({ triage: 'easy' })] }), /requests\[0\]\.triage/],
+    [fixResult({ requests: [fixRequest({ outcome: 'done' })] }), /requests\[0\]\.outcome/],
+    [fixResult({ requests: [fixRequest({ kind: 'comment' })] }), /requests\[0\]\.kind/],
+    [fixResult({ requests: [fixRequest(), fixRequest({ outdated: 'yes' })] }), /requests\[1\]\.outdated/],
+    [fixResult({ requests: [fixRequest({ line: 0 })] }), /requests\[0\]\.line/],
+    [fixResult({ checks: [{ name: 'pnpm test', result: 'skipped' }] }), /checks must be/],
+    [fixResult({ target: { repo: 'octo-example/orbit', pr: '101', branch: 'fix/webhook-retry' } }), /target must be/],
+    [fixResult({ head: { sha: short } }), /head must be null or \{ sha \} with a full 40-character SHA/],
+    [fixResult({ head: { sha: `${fixHead}0` } }), /head must be/],
+    [fixResult({ head: { sha: fixHead.replace(/a/g, 'g') } }), /head must be/],
+    [fixResult({ requests: [fixRequest({ commits: [short] })] }), /requests\[0\]\.commits must be a list of full SHAs/],
+    [fixResult({ pushed: { branch: 'fix/webhook-retry', head: short, commits: [{ sha: fixPushedHead, subject: 'x' }] } }), /pushed must be/],
+    [fixResult({ pushed: { branch: 'fix/webhook-retry', head: fixPushedHead, commits: [{ sha: short, subject: 'x' }] } }), /pushed must be/],
+    [fixResult({ pushed: { branch: 'fix/webhook-retry', head: fixPushedHead, commits: [] } }), /at least one commit/],
+    [fixResult({ notPushedReason: 'checksFailed' }), /notPushedReason must be null when pushed/],
+  ]
+  for (const url of ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', ' https://example.test/x', 'data:text/html,x', '/pull/101#discussion_r1', '', null]) {
+    refusals.push([fixResult({ requests: [fixRequest({ url })] }), /requests\[0\]\.url must be an absolute http or https url/])
+  }
+  for (const [value, pattern] of refusals) {
+    const parsed = parseResult(JSON.stringify(value))
+    assert.equal(parsed.ok, false, String(pattern))
+    assert.match(parsed.ok ? '' : parsed.error, pattern)
+  }
+  // through the settle path, an invalid fix result fails the run as noResult
+  const settled = judge({ stopped: false, restarted: false, exit: { code: 0, signal: null, error: null }, reportExists: true, denials: [], lastEvent: null, parsed: fixParsed({ requests: [fixRequest({ url: 'javascript:alert(1)' })] }) })
+  assert.deepEqual([settled.status, settled.result], ['failed', null])
+  assert.match(settled.note ?? '', /^noResult: result.json: requests\[0\]\.url/)
+})
+
+test('a fix run settles from its result: done needs its report on disk, a stop before touching code needs none, a refused push fails with git\'s error', () => {
+  const base = { stopped: false, restarted: false, exit: { code: 0, signal: null, error: null }, denials: [], lastEvent: null }
+  assert.equal(judge({ ...base, reportExists: true, parsed: fixParsed() }).status, 'done')
+  assert.deepEqual(judge({ ...base, reportExists: false, parsed: fixParsed() }).note, 'noReport: ~/agents/output/FIX-101.md does not exist')
+  assert.deepEqual(judge({ ...base, reportExists: false, parsed: parseResult(JSON.stringify(nothingToFix())) }).note, 'noReport: ~/agents/output/FIX-101.md does not exist')
+  const waiting = judge({ ...base, reportExists: null, parsed: parseResult(JSON.stringify(askedFirst())) })
+  assert.deepEqual([waiting.status, waiting.note, waiting.result?.question], ['needsInput', null, 'Either retry with jitter or cap the attempts: which?'])
+  const refused = judge({ ...base, reportExists: null, parsed: parseResult(JSON.stringify(refusedPush())) })
+  assert.deepEqual([refused.status, refused.note], ['failed', '! [rejected] HEAD -> fix/webhook-retry (non-fast-forward)'])
+})
+
+test('a fix run starts as fix-pr with Claude only, settles from FIX-<n>.md, and Codex is refused before anything runs', async () => {
+  const h = await harness({ config: { agent: { runner: 'codex' } } })
+  try {
+    const fix = request(101, { command: 'fix-pr', args: ['101'], label: 'Fix session' })
+    const refused = (error: unknown): boolean => error instanceof LaunchError && error.code === 'fixRunner' && /Fix session runs with Claude only/.test(error.message)
+    await assert.rejects(h.launcher.start(fix), refused)
+    await assert.rejects(h.launcher.start({ ...fix, runner: 'codex' }), refused)
+    assert.equal(h.launch.children.length, 0)
+    const run = await h.launcher.start({ ...fix, runner: 'claude' })
+    const child = h.launch.children[0]!
+    const runDir = join(h.stateDir, 'runs', String(run.id))
+    assert.deepEqual(child.writes.map((line) => JSON.parse(line).message.content), [`/fix-pr 101 --emit-json=${runDir}`])
+    // the identity check still runs before the start
+    assert.deepEqual(h.gh.calls.filter((call) => call.args[0] === 'api').map((call) => call.args), [['api', 'user', '--jq', '.login']])
+    await child.result(fixResult())
+    let settled = h.launcher.settled(run.id)
+    child.exit(0)
+    assert.deepEqual([(await settled).status, (await settled).note], ['failed', 'noReport: ~/agents/output/FIX-101.md does not exist'])
+    await writeFile(join(h.home, 'agents', 'output', 'FIX-101.md'), 'PR: #101 `fix/webhook-retry` @ `aaaaaaa`\n')
+    const again = await h.launcher.start({ ...fix, runner: 'claude' })
+    const second = h.launch.children[1]!
+    await second.result(fixResult())
+    settled = h.launcher.settled(again.id)
+    second.exit(0)
+    const done = await settled
+    assert.deepEqual([done.status, done.note, done.result?.schema], ['done', null, 'pit-crew/fix-result@1'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a finished fix stays done while the PR\'s head is the one it pushed, or the one it read when it pushed nothing, then goes idle', async () => {
+  const config = baseConfig()
+  const pr = await prOf(101)
+  const at = (sha: string): RawOpenPr => ({ ...pr, headRefOid: sha })
+  const other = '0123456789abcdef0123456789abcdef01234567'
+  const pushed = fixRun(fixResult())
+  assert.equal(agentCell(at(fixPushedHead), config, pushed, undefined).state, 'done')
+  // the cached row still has the head the run read until the PR is next fetched
+  assert.equal(agentCell(at(fixHead), config, pushed, undefined).state, 'done')
+  const moved = agentCell(at(other), config, pushed, undefined)
+  assert.deepEqual([moved.state, moved.label, moved.runId, moved.text], ['idle', 'Self-review', 7, 'Fixed · pushed 2 commits'])
+  // nothing pushed: the head it read
+  const nothing = fixRun(nothingToFix())
+  assert.equal(agentCell(at(fixHead), config, nothing, undefined).state, 'done')
+  assert.equal(agentCell(at(other), config, nothing, undefined).state, 'idle')
+  assert.equal(agentCell(at(fixHead), config, fixRun(askedFirst()), undefined).state, 'done')
+  assert.equal(agentCell(at(other), config, fixRun(askedFirst()), undefined).state, 'idle')
+  // a run that stopped before reading the head, or left no result, stays done
+  const early = fixRun(fixResult({ status: 'failed', target: null, head: null, requests: [], checks: [], pushed: null, notPushedReason: null, report: null, error: 'not yours' }), { note: 'not yours' })
+  assert.equal(agentCell(at(other), config, early, undefined).state, 'done')
+  assert.equal(agentCell(at(other), config, fixRun(null, { status: 'failed', note: 'noResult: no result.json; exit code 1; last event: none' }), undefined).state, 'done')
+})
+
+test('a fix run\'s done text says what it pushed, or why not, beside the failure texts every run shares', () => {
+  const text = (result: Record<string, unknown> | null, patch: Partial<Run> = {}): string => doneText(fixRun(result, patch), false)
+  assert.equal(text(fixResult()), 'Fixed · pushed 2 commits')
+  const one = fixResult({ pushed: { branch: 'fix/webhook-retry', head: fixPushedHead, commits: [{ sha: fixPushedHead, subject: 'Log the attempt number' }] } })
+  assert.equal(text(one), 'Fixed · pushed 1 commit')
+  assert.equal(text(nothingToFix()), 'Nothing to fix')
+  // the owner discarded the commits at a stop: done, with the stop's reason
+  assert.equal(text(fixResult({ pushed: null, notPushedReason: 'checksFailed' })), 'Not pushed · checks failed')
+  assert.equal(text(fixResult({ pushed: null, notPushedReason: 'checksNotRun' })), 'Not pushed · checks not run')
+  assert.equal(text(fixResult({ pushed: null, notPushedReason: 'awaitingAnswer' })), 'Not pushed')
+  assert.equal(text(askedFirst()), 'Needs your answer')
+  assert.equal(text(fixResult({ status: 'needsInput', pushed: null, notPushedReason: 'checksFailed', question: 'Push anyway?' })), 'Needs your answer')
+  assert.equal(text(refusedPush(), { note: '! [rejected] HEAD -> fix/webhook-retry (non-fast-forward)' }), 'Failed · push refused')
+  assert.equal(text(fixResult({ status: 'failed', pushed: null, notPushedReason: null, error: 'this PR is not yours' }), { note: 'this PR is not yours' }), 'Failed')
+  // Pit View's own failures win over the command's, as for every run
+  assert.equal(text(refusedPush(), { note: 'permissionDenied: Bash' }), 'Failed · permission denied')
+  assert.equal(text(null, { status: 'failed', note: 'noResult: no result.json; exit code 1; last event: none' }), 'Failed · no result')
+  assert.equal(text(fixResult(), { status: 'failed', note: 'noReport: ~/agents/output/FIX-101.md does not exist' }), 'Failed · no report')
+  assert.equal(text(null, { status: 'failed', note: 'serverRestarted' }), 'Failed · server restarted')
+  assert.equal(text(null, { status: 'failed', note: 'spawnFailed: spawn claude ENOENT' }), 'Failed · could not start')
+  assert.equal(text(null, { status: 'stopped' }), 'Stopped')
+})
+
+test('a fix run\'s cell carries the summary the drawer needs: counts by triage and outcome, the push with short SHAs, checks, worktree and report', async () => {
+  const pr = { ...(await prOf(101)), headRefOid: fixPushedHead }
+  const cell = agentCell(pr, baseConfig(), fixRun(fixResult()), undefined)
+  assert.deepEqual([cell.state, cell.label, cell.command, cell.args, cell.tandem, cell.text, cell.question], ['done', 'Fix session', 'fix-pr', ['101'], false, 'Fixed · pushed 2 commits', null])
+  assert.deepEqual(cell.result, {
+    kind: 'fix',
+    requests: 3,
+    triage: { needsJudgment: 0, noChange: 0, disagree: 0, outOfScope: 1, clear: 2 },
+    outcomes: { fixed: 2, notFixed: 1, awaitingAnswer: 0 },
+    pushed: { branch: 'fix/webhook-retry', head: fixPushedHead, count: 2, commits: [{ sha: fixCommits[0]!.slice(0, 7), subject: 'Back off between retries' }, { sha: 'bbbbbbb', subject: 'Log the attempt number' }] },
+    notPushedReason: null,
+    checks: [{ name: 'pnpm test', result: 'passed' }, { name: 'pnpm check', result: 'passed' }],
+    worktree: null,
+    report: '~/agents/output/FIX-101.md',
+  })
+  const waiting = agentCell({ ...pr, headRefOid: fixHead }, baseConfig(), fixRun(askedFirst()), undefined)
+  assert.deepEqual([waiting.state, waiting.text, waiting.question], ['done', 'Needs your answer', 'Either retry with jitter or cap the attempts: which?'])
+  assert.deepEqual(waiting.result, {
+    kind: 'fix', requests: 1, triage: { needsJudgment: 1, noChange: 0, disagree: 0, outOfScope: 0, clear: 0 }, outcomes: { fixed: 0, notFixed: 0, awaitingAnswer: 1 },
+    pushed: null, notPushedReason: 'awaitingAnswer', checks: [], worktree: null, report: null,
+  })
+  // a review's summary says it is one
+  assert.equal(agentCell(await prOf(106), baseConfig(), runRow({ status: 'done', result: reviewResult({ reviewed: { kind: 'commit', sha: (await prOf(106)).headRefOid } }) as unknown as RunResultJson }), undefined).result?.kind, 'review')
+})
+
+test('a well-formed fix result that contradicts itself fails the run but keeps the result: no report, no push outcome, another report, another branch', async () => {
+  const base = { stopped: false, restarted: false, exit: { code: 0, signal: null, error: null }, denials: [], lastEvent: null }
+  const settle = (patch: Record<string, unknown>, reportExists: boolean | null = true) => {
+    const parsed = fixParsed(patch)
+    assert.equal(parsed.ok, true, parsed.ok ? '' : parsed.error)
+    return judge({ ...base, reportExists, parsed })
+  }
+  // each keeps its result, so the drawer still has the commits
+  const kept = (judgement: ReturnType<typeof judge>): void => {
+    assert.equal(judgement.status, 'failed')
+    assert.equal(judgement.result?.schema, 'pit-crew/fix-result@1')
+  }
+  const unnamed = settle({ report: null }, null)
+  kept(unnamed)
+  assert.equal(unnamed.note, 'noReport: result.json names no report')
+  const neither = settle({ pushed: null, notPushedReason: null })
+  kept(neither)
+  assert.equal(neither.note, 'badResult: a done fix result carries neither pushed nor notPushedReason')
+  const review = settle({ report: '~/agents/output/PR-101.md' })
+  kept(review)
+  assert.equal(review.note, 'badResult: report ~/agents/output/PR-101.md is not FIX-101.md for the run\'s target')
+  for (const report of ['~/agents/output/FIX-1010.md', '~/agents/output/FIX-101.md.bak', 'FIX-102.md']) assert.match(settle({ report }).note ?? '', /^badResult: report /, report)
+  kept(settle({ status: 'needsInput', question: 'Push anyway?', report: '~/agents/output/PR-101.md' }))
+  assert.match(settle({ target: null, report: '~/agents/output/FIX-101.md' }).note ?? '', /^badResult: report .* is not FIX-<n>\.md/)
+  const branch = settle({ pushed: { branch: 'main', head: fixPushedHead, commits: [{ sha: fixPushedHead, subject: 'x' }] } })
+  kept(branch)
+  assert.equal(branch.note, 'badResult: pushed.branch main is not the target branch fix/webhook-retry')
+  // FIX-<n>.md anywhere is the basename the check reads; a stop with no report and a well-formed done pass
+  assert.equal(settle({ report: '/elsewhere/FIX-101.md' }).status, 'done')
+  assert.equal(settle({ status: 'needsInput', question: 'Which?', pushed: null, notPushedReason: 'awaitingAnswer', report: null }, null).status, 'needsInput')
+  assert.equal(settle({}).status, 'done')
+  assert.equal(doneText({ status: 'failed', note: neither.note, result: neither.result }, false), 'Failed · bad result')
+
+  // a run that really pushed still reads as pushed in the drawer, and its head rule still works
+  const config = baseConfig()
+  const pr = { ...(await prOf(101)), headRefOid: fixPushedHead }
+  const cell = agentCell(pr, config, fixRun(fixResult({ report: '~/agents/output/PR-101.md' }), { status: 'failed', note: review.note }), undefined)
+  assert.deepEqual([cell.state, cell.text], ['done', 'Failed · bad result'])
+  assert.deepEqual([cell.result?.kind === 'fix' ? cell.result.pushed?.count : null, cell.result?.kind === 'fix' ? cell.result.report : 'x'], [2, null])
+  assert.equal(agentCell({ ...pr, headRefOid: '0123456789abcdef0123456789abcdef01234567' }, config, fixRun(fixResult({ report: null }), { status: 'failed', note: unnamed.note }), undefined).state, 'idle')
 })

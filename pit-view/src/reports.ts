@@ -22,6 +22,10 @@ const headLines = 20
 
 export const prReportName = (number: number): string => `PR-${number}.md`
 
+// fix-pr's report, one per PR and never a self-review
+export const fixReportName = (number: number): string => `FIX-${number}.md`
+export const fixReportPattern = /^FIX-\d+\.md$/
+
 // the review commands' branch rule: anything not alphanumeric, - or _ becomes -, runs collapsed
 export const branchReportName = (branch: string): string => `${branch.replace(/[^A-Za-z0-9_-]/g, '-').replace(/-{2,}/g, '-')}.md`
 
@@ -71,9 +75,10 @@ export const listReports = async (dir: string): Promise<Set<string>> => {
   }
 }
 
-// PR-<number>.md first, then the branch-named report; tandem drafts alone are not a report
+// PR-<number>.md first, then the branch-named report; tandem drafts alone are not a report, and
+// neither is a fix report, even for a branch whose name would make one
 export const findReport = async (dir: string, files: ReadonlySet<string>, target: ReportTarget): Promise<ReportInfo | null> => {
-  const file = [prReportName(target.number), branchReportName(target.headRefName)].find((name) => files.has(name))
+  const file = [prReportName(target.number), branchReportName(target.headRefName)].find((name) => files.has(name) && !fixReportPattern.test(name))
   if (file === undefined) return null
   const path = join(dir, file)
   try {
@@ -108,16 +113,30 @@ export type ReportVerdict = 'changesRequested' | 'clean'
 
 export type ReportListing = {
   name: string
+  // a review's report (PR-<n>.md and its drafts) or fix-pr's (FIX-<n>.md)
+  kind: 'review' | 'fix'
   modifiedAt: string
-  // the SHA the `Reviewed commit:` line carries, as the report writes it (short); null when it has none
+  // as the report writes it (short): a review's `Reviewed commit:` SHA, a fix's head from its `PR:`
+  // line; null when it has none
   sha: string | null
+  // null for a fix report
   verdict: ReportVerdict | null
-  // a tandem draft, or a report with tandem drafts next to it
+  // a tandem draft, or a review report with tandem drafts next to it; false for a fix report
   tandem: boolean
+}
+
+// fix-pr's first line: PR: #<number> `<branch>` @ `<short head SHA>`
+export const parseFixHead = (lines: readonly string[]): string | null => {
+  const line = lines.find((text) => /^\s*PR:\s*#\d+/.test(text))
+  if (line === undefined) return null
+  const sha = /@\s*`([0-9a-f]{4,40})`/i.exec(line)?.[1]
+  return sha === undefined ? null : sha.toLowerCase()
 }
 
 // how much of a report is read to tell its verdict: the summary index is at the top
 const verdictBytes = 256 * 1024
+// a fix report is read only for its first lines
+const headBytes = 16 * 1024
 
 // the review prompts' own format: the summary index lists `- **P1**` bullets and each finding
 // opens with `**[P1] title**`; any P0, P1 or P2 means changes requested, P3 only or
@@ -154,23 +173,22 @@ const belongsTo = (number: number) => {
     isReportName(name) && (name === own || (name.startsWith(prefix) && name.endsWith('.md') && name.length > prefix.length + 3))
 }
 
-// a PR's reports in dir, newest first; a missing folder means none. Only regular files directly
-// in dir are listed, so a symlink never leads out of it
+// a PR's reports in dir, newest first: its review reports and its fix report; a missing folder
+// means none. Only regular files directly in dir are listed, so a symlink never leads out of it
 export const listPrReports = async (dir: string, number: number): Promise<ReportListing[]> => {
   const files = await listReports(dir)
-  const names = [...files].filter(belongsTo(number))
-  const drafts = names.some((name) => name !== prReportName(number))
+  const reviews = [...files].filter(belongsTo(number))
+  const drafts = reviews.some((name) => name !== prReportName(number))
+  const names = files.has(fixReportName(number)) ? [...reviews, fixReportName(number)] : reviews
   const listed = await Promise.all(names.map(async (name): Promise<ReportListing | null> => {
     const path = join(dir, name)
+    const fix = name === fixReportName(number)
     try {
-      const [text, info] = await Promise.all([readPrefix(path, verdictBytes), stat(path)])
-      return {
-        name,
-        modifiedAt: info.mtime.toISOString(),
-        sha: parseReviewedCommit(text.split('\n').slice(0, headLines)),
-        verdict: parseVerdict(text),
-        tandem: drafts,
-      }
+      const [text, info] = await Promise.all([readPrefix(path, fix ? headBytes : verdictBytes), stat(path)])
+      const head = text.split('\n').slice(0, headLines)
+      return fix
+        ? { name, kind: 'fix', modifiedAt: info.mtime.toISOString(), sha: parseFixHead(head), verdict: null, tandem: false }
+        : { name, kind: 'review', modifiedAt: info.mtime.toISOString(), sha: parseReviewedCommit(head), verdict: parseVerdict(text), tandem: drafts }
     } catch (error) {
       // removed between the listing and the read
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
@@ -181,7 +199,7 @@ export const listPrReports = async (dir: string, number: number): Promise<Report
 }
 
 export const reportNamePattern = /^PR-\d+[A-Za-z0-9._-]*\.md$/
-export const isReportName = (name: string): boolean => reportNamePattern.test(name) && !name.includes('..')
+export const isReportName = (name: string): boolean => (reportNamePattern.test(name) || fixReportPattern.test(name)) && !name.includes('..')
 export const maxReportBytes = 1024 * 1024
 
 export type ReportReadErrorCode = 'badName' | 'notFound' | 'tooLarge'
@@ -202,7 +220,7 @@ const absent = (error: unknown): boolean => ['ENOENT', 'ENOTDIR', 'ELOOP'].inclu
 // one report's text. The name must be a report's, and the file it resolves to (symlinks followed)
 // must be a regular file directly inside the folder reportsDir resolves to; anything else is not found
 export const readReport = async (dir: string, name: string, limit = maxReportBytes): Promise<ReportFile> => {
-  if (!isReportName(name)) throw new ReportReadError('badName', 'a report is named like PR-101.md')
+  if (!isReportName(name)) throw new ReportReadError('badName', 'a report is named like PR-101.md or FIX-101.md')
   let root: string
   let path: string
   try {

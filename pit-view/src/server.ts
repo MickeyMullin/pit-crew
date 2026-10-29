@@ -189,6 +189,7 @@ const launchStatus: Readonly<Record<LaunchErrorCode, number>> = {
   busy: 409,
   unknownRun: 404,
   tandemRunner: 400,
+  fixRunner: 400,
   notRunning: 409,
 }
 
@@ -433,21 +434,23 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   }
 
   // a start from the drawer (section 8 of DESIGN.md): the row's default run, the same review in
-  // tandem, or a review of its stack, with the configured runner or the one asked for
+  // tandem, a review of its stack, or a fix session on the viewer's own PR, with the configured
+  // runner or the one asked for
   const startRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
     requireToken(req)
     const number = prNumber(raw)
-    const usage = 'send { "kind": "default" | "tandem" | "stack", "runner": "claude" | "codex" } or no body'
+    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex" } or no body'
     const length = Number(req.headers['content-length'] ?? 0)
     const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
     const { runner: asked, kind: askedKind, ...rest } = body as Record<string, unknown>
     if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
     if (asked !== undefined && !runnerNames.includes(asked as RunnerName)) throw new HttpError(400, 'runner must be claude or codex')
-    if (askedKind !== undefined && !startKinds.includes(askedKind as StartKind)) throw new HttpError(400, 'kind must be default, tandem or stack')
+    if (askedKind !== undefined && !startKinds.includes(askedKind as StartKind)) throw new HttpError(400, 'kind must be default, tandem, stack or fix')
     const kind = (askedKind ?? 'default') as StartKind
     // a tandem primary launches its secondary in the background, which only Claude can do
     if (kind === 'tandem' && asked === 'codex') throw new HttpError(400, 'Review in tandem runs with Claude only; send runner claude or leave it out')
+    if (kind === 'fix' && asked === 'codex') throw new HttpError(400, 'Fix session runs with Claude only; send runner claude or leave it out')
     const config = effective()
     const cached = cache.readView(config.repo)
     const row = cached.open.find((entry) => entry.number === number)
@@ -457,8 +460,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (refusal !== null) throw new HttpError(422, refusal)
     const option = startOptions(row.pr, config, stack, false).find((candidate) => candidate.kind === kind)
     if (option === undefined) throw new HttpError(422, `${kind} is not offered for #${number}`)
-    // a tandem start without a runner is Claude's, whatever the configured default is
-    const runner = asked as RunnerName | undefined ?? (kind === 'tandem' ? 'claude' : undefined)
+    // a tandem or fix start without a runner is Claude's, whatever the configured default is
+    const runner = asked as RunnerName | undefined ?? (kind === 'tandem' || kind === 'fix' ? 'claude' : undefined)
     try {
       const run = await launcher.start({
         repo: config.repo,

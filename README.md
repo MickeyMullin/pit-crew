@@ -13,6 +13,7 @@ For actual usage, the local machine's LLM/agents refer to a deployed copy of the
 | `prompts/review/` | Code-review prompts, plus agent-specific execution notes. Agent-agnostic except where noted. |
 | `prompts/document/` | Documentation prompts: build a handover dossier for an area, and derive a client-facing version of it. |
 | `prompts/report/` | Reporting prompts: reconstruct a day's work from the machine's own records. |
+| `prompts/fix/` | Fix prompts: act on reviewers' requested changes on your own PR, pushing new commits as the only GitHub write. |
 | `commands/claude/` | Claude Code slash commands that invoke the prompts. |
 | `commands/skills/` | The same commands as `SKILL.md` skills, for Hermes and Codex. Both read the same format, so they share one tree. See [commands/README.md](commands/README.md). |
 | `bin/` | Executables the prompts call, rendered like the prompts. Today: `tandem-secondary`, which starts a tandem-mode secondary reviewer headless, read-only and offline, and installs its draft only if it validates. |
@@ -81,7 +82,7 @@ added later is caught without anyone remembering to update the check. It never t
 | `prompts/review/review-dependabot.md` | Review a Dependabot bump, accounting for rebases and re-bumps. Takes a PR number or URL and reviews it in a throwaway worktree, or reviews the current checkout. Root-causes every failing check. Approves a bump automatically when it has no finding above P3, complete changelog coverage, no conflicts, and green CI; otherwise posts the report as a comment. |
 | `prompts/review/review-dependabot-sweep.md` | Sweep every open Dependabot PR in a repo: review each one under `review-dependabot.md`, `N` at a time (`--parallel N`, default 2), reuse the verdict of any PR unchanged since its last report (`--force` overrides), find the PRs that must land together or in order, and end with one table of recommendations and a merge order, written to `{{HOME}}/agents/output/`. Approves a PR only through its reviewer's automatic approval of a bump with nothing above P3 and green CI; never merges, closes, pushes, or comments a bot command. `--emit-json=<run-dir>` also writes its progress and results as JSON (`prompts/review/emit-json.md`). Expect roughly 95k to 175k tokens per PR reviewed fresh. |
 | `prompts/review/tandem.md` | Tandem mode for `review-pr`, `review-local`, and `review-stack`: several agents review the same target, and one consolidates their drafts into the single report that gets posted. The primary (`--tandem`) launches its secondaries headless through `bin/tandem-secondary`; `--tandem=<id>` picks which, and `--tandem=manual` leaves them to you (`--tandem-secondary`). |
-| `prompts/review/emit-json.md` | Machine-readable output for `review-pr`, `review-stack`, `review-dependabot`, and `review-dependabot-sweep`: with `--emit-json=<run-dir>` (an absolute path to an existing directory), the run also appends a line to `<run-dir>/events.jsonl` at each step and writes `<run-dir>/result.json` (`pit-crew/review-result@1`, or `pit-crew/sweep-result@1` for the sweep's table and merge order) as its last act. A run that stops to ask ends with `"status": "needsInput"` and the question. Changes nothing else the commands do; Pit View uses it to launch and watch runs. |
+| `prompts/review/emit-json.md` | Machine-readable output for `review-pr`, `review-stack`, `review-dependabot`, `review-dependabot-sweep`, and `fix-pr`: with `--emit-json=<run-dir>` (an absolute path to an existing directory), the run also appends a line to `<run-dir>/events.jsonl` at each step and writes `<run-dir>/result.json` (`pit-crew/review-result@1`, `pit-crew/sweep-result@1` for the sweep's table and merge order, or `pit-crew/fix-result@1` for `fix-pr`'s requests, checks, and push) as its last act. A run that stops to ask ends with `"status": "needsInput"` and the question. Changes nothing else the commands do; Pit View uses it to launch and watch runs. |
 | `prompts/review/no-post.md` | `--no-post` for `review-pr`: the report is written as usual, but nothing is posted to GitHub in any form and fix mode never starts. Relaxes nothing else, and a terse re-review carries it. |
 | `prompts/review/claude-code-notes.md` | Claude Code–specific execution notes. Loaded alongside the prompt above when running under Claude Code; the Hermes and Codex skills say explicitly not to load it. |
 
@@ -94,6 +95,8 @@ Two prompts can write; one deliberately cannot.
 | `review-local` | Yes | WIP-commits your in-flight work, then edits the tree. Offers three ways to finish. |
 | `review-pr` | Yes, own PR only | Fixes, verifies, commits, pushes, re-reviews once. Never comments on your own PR unasked. |
 | `review-stack` | **No** | Reports only. Never posts on any stack unasked. |
+
+`fix-pr` writes too, but it acts on reviewers' requests rather than on findings of its own; see "The fix prompt" below.
 
 Both fixing prompts share the same shape: assess whether the current model and effort
 suit the findings and say so; fix and verify; re-review **once** from scratch, because a
@@ -211,6 +214,24 @@ The PR-writing prompts write their full report to `{{HOME}}/agents/output/` befo
 anything to GitHub, so a failed post never loses the review. That directory is
 referenced by absolute path — deliberately, so it stays stable across clones and
 worktrees rather than following the repo you happen to be reviewing.
+
+## The fix prompt
+
+| Prompt | Use |
+| --- | --- |
+| `prompts/fix/fix-pr.md` | Act on the changes reviewers requested on **your own** PR: gather every unresolved review thread (outdated ones included) and each reviewer's standing change request, triage each one, make only the clear fixes in a throwaway worktree, run the repo's checks, and push the fixes as new commits. `--emit-json=<run-dir>` also writes its progress and results as JSON (`pit-crew/fix-result@1`). |
+
+```
+/fix-pr 482
+```
+
+`review-pr`'s fix mode fixes the findings of its own review; `fix-pr` fixes what other people asked for. It takes a PR number, branch, or PR URL, resolved as `review-pr` resolves one, and with nothing named it takes the PR of the branch you have checked out. It confirms authorship the same way, matching `gh api user` against the PR author login and never inferring it, and stops on anyone else's PR, a bot's, a fork's, or a closed or merged one.
+
+**The push is its only GitHub write.** It never replies to a thread, resolves one, re-requests review, reviews, comments, or edits the PR. Instead its report, `{{HOME}}/agents/output/FIX-<number>.md`, maps each request to the commit that answers it or the reason it was not fixed, with a suggested reply for you to post yourself.
+
+Each request is triaged as `clear`, `needsJudgment`, `noChange` (already done, or no change asked), `disagree`, or `outOfScope`. If any request needs judgment, it stops and asks **before touching code**, listing every request and its triage; you answer in the same session. A comment counts as a request only from the repo's owners, members, and collaborators, or from a bot, whose suggested code is never applied as written; anyone else's needs judgment. So does a fix that needs a file outside the PR's diff (other than a test file covering code in the diff), a fix to a file the checks or tooling execute (manifests, lockfiles, task runners, CI, hooks, build and test config), and, on a stacked PR, a fix that belongs in a lower layer. Your answer can authorize a named file in this layer, never a lower one. If nothing is clear, it writes the report and pushes nothing.
+
+It makes one fix attempt. The fixes are new commits only, never amended, rebased, or force-pushed, pushed with `git push origin HEAD:<branch>` only when every check passed. A failed check, or checks that cannot run, stops to ask and leaves the commits unpushed in the worktree, which it names; a refused push is a failure, never retried. It never re-reviews its own fixes.
 
 ## The documentation prompts
 

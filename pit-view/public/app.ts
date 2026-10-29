@@ -332,9 +332,12 @@ document.addEventListener('click', (event) => {
   const target = event.target instanceof Element ? event.target : null
   const cell = target?.closest<HTMLButtonElement>('button[data-agent="open"][data-pr]') ?? null
   const banner = target?.closest<HTMLButtonElement>('button[data-open-agent]') ?? null
-  if (cell !== null || banner !== null) seedRuns()
+  // the banner's Fix session opens the drawer with that start's confirmation already asked
+  const fix = target?.closest<HTMLButtonElement>('button[data-fix-session]') ?? null
+  if (cell !== null || banner !== null || fix !== null) seedRuns()
   if (cell !== null) drawer.open(Number(cell.dataset.pr), { key: `agent-open:${cell.dataset.pr}`, number: Number(cell.dataset.pr) })
   else if (banner !== null) drawer.open(Number(banner.dataset.openAgent), { key: `banner-open:${banner.dataset.openAgent}`, number: Number(banner.dataset.openAgent) })
+  else if (fix !== null) drawer.open(Number(fix.dataset.fixSession), { key: `banner-fix:${fix.dataset.fixSession}`, number: Number(fix.dataset.fixSession) }, 'fix')
 })
 
 // Escape closes what is topmost: the report panel, a confirmation in the drawer, then the drawer

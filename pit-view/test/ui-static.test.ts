@@ -83,6 +83,9 @@ const textPairs: [string, string][] = [
   ['red-fg', 'surface'], ['amber-fg', 'surface'], ['green-fg', 'surface'], ['gray-fg', 'surface'],
   ['red-fg', 'red-row'], ['amber-fg', 'red-row'], ['green-fg', 'red-row'], ['gray-fg', 'red-row'],
   ['gray-fg', 'gray-bg'], ['on-red-button', 'red-button'],
+  // the Fix session's caution confirmation: its heading and push line, its refusal, its facts and
+  // its Start; and a finished fix's worktree notice
+  ['amber-fg', 'amber-bg'], ['red-fg', 'amber-bg'], ['muted', 'amber-bg'], ['ink', 'amber-bg'], ['on-amber-button', 'amber-button'],
   // the drawer: the confirmation sits on ground, the waiting card on amber-bg, the no-longer-open
   // note is amber on amber-bg; the report panel's code is ink on gray-bg (also the iframe's)
   ['red-fg', 'ground'], ['ink', 'ground'], ['muted', 'ground'], ['ink', 'amber-bg'], ['muted', 'amber-bg'], ['amber-fg', 'amber-bg'],

@@ -28,6 +28,9 @@
   --amber-fg: light-dark(#7A4106, #F2C46D);
   --amber-bg: light-dark(#FCEFD2, #3A2A0F);
   --amber-edge: light-dark(#EBCF94, #6E5220);
+  /* the Fix session's Start: a caution fill, told apart from a review's blue Start */
+  --amber-button: light-dark(#7A4106, #F2C46D);
+  --on-amber-button: light-dark(#FFFFFF, #2A1C05);
   --green-fg: light-dark(#14632F, #7ED79A);
   --green-bg: light-dark(#DDF5E3, #15301F);
   --purple-fg: light-dark(#5B21B6, #C7ADFF);
@@ -1407,6 +1410,52 @@ button.agent:hover {
   gap: 8px;
 }
 
+/* a start that pushes to the PR's branch (the Fix session): amber throughout, a warning mark in
+   its heading, a plain line about the push, and a Start in the caution fill */
+.confirm-caution {
+  border-color: var(--amber-edge);
+  border-left-width: 4px;
+  background: var(--amber-bg);
+  color: var(--ink);
+}
+
+.confirm-caution .confirm-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--amber-fg);
+  overflow-wrap: anywhere;
+}
+
+.confirm-caution-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.confirm-caution .confirm-title,
+.confirm-caution .confirm-facts dt {
+  color: var(--muted);
+}
+
+.confirm-caution-line {
+  margin: 0;
+  color: var(--amber-fg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.button-caution {
+  padding: 0 14px;
+  border-color: var(--amber-button);
+  background: var(--amber-button);
+  color: var(--on-amber-button);
+  font-weight: 600;
+}
+
+.button-caution:hover {
+  color: var(--on-amber-button);
+}
+
 /* the agent drawer: a non-modal panel on the right, below the header at desktop widths so the
    header's own controls (Refresh, Pause, the theme toggle) stay reachable, and over everything at
    phone width. The report panel docks to its left, or covers it at phone width */
@@ -1745,6 +1794,46 @@ button.agent:hover {
 .drawer-fact dd {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+/* a finished Fix session: the commits it pushed, its checks, a worktree it left behind */
+.drawer-pushed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.drawer-commits,
+.drawer-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.drawer-commits li,
+.drawer-checks li {
+  overflow-wrap: anywhere;
+}
+
+.drawer-commit-sha {
+  color: var(--muted);
+}
+
+.drawer-notice {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--amber-edge);
+  border-radius: 6px;
+  background: var(--amber-bg);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.drawer-result > .button {
+  align-self: flex-start;
 }
 
 .drawer-list {

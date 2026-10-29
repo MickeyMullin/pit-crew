@@ -6,7 +6,7 @@ import { join, resolve, sep } from 'node:path'
 import type { Cache, Run, RunChanges, RunStatus } from './cache.ts'
 import { expandHome, tildePath } from './config.ts'
 import type { Clock, Config, RunnerName } from './config.ts'
-import { isMine, viewerReview } from './derive.ts'
+import { isBotLogin, isMine, viewerReview } from './derive.ts'
 import type { Stack } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
 import type { Gh, RawOpenPr, Runner } from './github.ts'
@@ -66,7 +66,55 @@ export type SweepResult = {
   error: string | null
 }
 
-export type RunResultJson = ReviewResult | SweepResult
+// fix-pr's response, pinned with it as pit-crew/fix-result@1 (section 8 of DESIGN.md)
+export type FixTriage = 'needsJudgment' | 'noChange' | 'disagree' | 'outOfScope' | 'clear'
+export const fixTriages: readonly FixTriage[] = ['needsJudgment', 'noChange', 'disagree', 'outOfScope', 'clear']
+export type FixOutcome = 'fixed' | 'notFixed' | 'awaitingAnswer'
+export const fixOutcomes: readonly FixOutcome[] = ['fixed', 'notFixed', 'awaitingAnswer']
+export type CheckResult = 'passed' | 'failed' | 'notRun'
+export type NotPushedReason = 'nothingToFix' | 'awaitingAnswer' | 'checksFailed' | 'checksNotRun' | 'pushFailed'
+export const notPushedReasons: readonly NotPushedReason[] = ['nothingToFix', 'awaitingAnswer', 'checksFailed', 'checksNotRun', 'pushFailed']
+
+export type FixRequest = {
+  // the review thread's or the review's node id
+  id: string
+  kind: 'thread' | 'review'
+  author: string | null
+  // null for a review
+  path: string | null
+  // the thread's line, or its original line when outdated; null for a review or a whole file
+  line: number | null
+  outdated: boolean
+  url: string
+  summary: string
+  triage: FixTriage
+  outcome: FixOutcome
+  // full SHAs
+  commits: string[]
+}
+
+export type FixCheck = { name: string, result: CheckResult }
+export type FixCommit = { sha: string, subject: string }
+export type Pushed = { branch: string, head: string, commits: FixCommit[] }
+
+export type FixResult = {
+  schema: 'pit-crew/fix-result@1'
+  command: 'fix-pr'
+  status: ResultStatus
+  target: { repo: string, pr: number, branch: string } | null
+  // the PR head the run read and triaged against
+  head: { sha: string } | null
+  requests: FixRequest[]
+  checks: FixCheck[]
+  pushed: Pushed | null
+  notPushedReason: NotPushedReason | null
+  worktree: string | null
+  report: string | null
+  question: string | null
+  error: string | null
+}
+
+export type RunResultJson = ReviewResult | SweepResult | FixResult
 
 export type Parsed<T> = { ok: true, value: T } | { ok: false, error: string }
 
@@ -85,6 +133,7 @@ const check = (ok: boolean, message: string): void => {
   if (!ok) throw new Invalid(message)
 }
 
+const fixFields = ['schema', 'command', 'status', 'target', 'head', 'requests', 'checks', 'pushed', 'notPushedReason', 'worktree', 'report', 'question', 'error']
 const reviewFields = ['schema', 'command', 'status', 'target', 'reviewed', 'verdict', 'recommendation', 'findings', 'ci', 'fixAttempts', 'posted', 'notPostedReason', 'report', 'question', 'error']
 const sweepFields = ['schema', 'command', 'status', 'repo', 'counts', 'rows', 'mergeOrder', 'summary', 'question', 'error']
 
@@ -142,6 +191,78 @@ const checkSweep = (value: Record<string, unknown>): void => {
   check(isStringOrNull(value.summary), 'summary must be a path or null')
 }
 
+// git's full 40-character object name; a short one cannot be compared with a PR's head
+export const isFullSha = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
+
+const isPositiveInteger = (value: unknown): value is number => Number.isInteger(value) && (value as number) > 0
+
+const checkFixRequest = (request: unknown, index: number): void => {
+  const at = `requests[${index}]`
+  check(isObject(request), `${at} must be an object`)
+  const value = request as Record<string, unknown>
+  check(typeof value.id === 'string' && value.id !== '', `${at}.id must be a node id`)
+  check(value.kind === 'thread' || value.kind === 'review', `${at}.kind must be thread or review`)
+  check(isStringOrNull(value.author), `${at}.author must be a login or null`)
+  check(isStringOrNull(value.path), `${at}.path must be a path or null`)
+  check(value.line === null || isPositiveInteger(value.line), `${at}.line must be a line number or null`)
+  check(typeof value.outdated === 'boolean', `${at}.outdated must be true or false`)
+  // the page may link it, so it is held to the same rule as posted.url
+  check(isHttpUrl(value.url), `${at}.url must be an absolute http or https url`)
+  check(typeof value.summary === 'string', `${at}.summary must be a string`)
+  check(fixTriages.includes(value.triage as FixTriage), `${at}.triage must be needsJudgment, noChange, disagree, outOfScope or clear`)
+  check(fixOutcomes.includes(value.outcome as FixOutcome), `${at}.outcome must be fixed, notFixed or awaitingAnswer`)
+  check(Array.isArray(value.commits) && value.commits.every(isFullSha), `${at}.commits must be a list of full SHAs`)
+}
+
+const checkPushed = (pushed: unknown): void => {
+  if (pushed === null) return
+  check(isObject(pushed) && typeof pushed.branch === 'string' && pushed.branch !== '' && isFullSha(pushed.head) && Array.isArray(pushed.commits) && pushed.commits.length > 0 &&
+    pushed.commits.every((commit) => isObject(commit) && isFullSha(commit.sha) && typeof commit.subject === 'string'),
+  'pushed must be null or { branch, head, commits: [{ sha, subject }] } with full SHAs and at least one commit')
+}
+
+const checkFix = (value: Record<string, unknown>): void => {
+  for (const field of fixFields) check(field in value, `${field} is missing`)
+  check(value.command === 'fix-pr', 'command must be fix-pr')
+  checkStatus(value)
+  const target = value.target
+  check(target === null || (isObject(target) && typeof target.repo === 'string' && isPositiveInteger(target.pr) && typeof target.branch === 'string' && target.branch !== ''),
+    'target must be null or { repo, pr, branch }')
+  const head = value.head
+  check(head === null || (isObject(head) && isFullSha(head.sha)), 'head must be null or { sha } with a full 40-character SHA')
+  check(Array.isArray(value.requests), 'requests must be a list')
+  ;(value.requests as unknown[]).forEach(checkFixRequest)
+  check(Array.isArray(value.checks) && value.checks.every((entry) =>
+    isObject(entry) && typeof entry.name === 'string' && ['passed', 'failed', 'notRun'].includes(entry.result as string)), 'checks must be a list of { name, result: passed, failed or notRun }')
+  checkPushed(value.pushed)
+  check(oneOfOrNull(value.notPushedReason, notPushedReasons), 'notPushedReason must be nothingToFix, awaitingAnswer, checksFailed, checksNotRun, pushFailed or null')
+  check(value.pushed === null || value.notPushedReason === null, 'notPushedReason must be null when pushed')
+  check(isStringOrNull(value.worktree), 'worktree must be a path or null')
+  check(isStringOrNull(value.report), 'report must be a path or null')
+}
+
+// the file name a fix's report must have: FIX-<the PR's number>.md
+const fixReportFile = (result: FixResult): string | null => result.target === null ? null : `FIX-${result.target.pr}.md`
+
+const baseName = (path: string): string => path.split('/').at(-1) ?? ''
+
+// a well-formed fix result whose fields contradict each other: the run fails, keeping the result
+// for the drawer. Null when they agree
+export const fixMismatch = (result: FixResult): string | null => {
+  const file = fixReportFile(result)
+  if (result.report !== null && (file === null || baseName(result.report) !== file)) {
+    return `report ${result.report} is not ${file ?? 'FIX-<n>.md'} for the run's target`
+  }
+  if (result.pushed !== null && result.pushed.branch !== result.target?.branch) {
+    return `pushed.branch ${result.pushed.branch} is not the target branch ${result.target?.branch ?? '(none)'}`
+  }
+  // a done fix says what it pushed or why it did not (its report is checked as every run's is)
+  if (result.status === 'done' && result.pushed === null && result.notPushedReason === null) {
+    return 'a done fix result carries neither pushed nor notPushedReason'
+  }
+  return null
+}
+
 // result.json checked against its schema; anything else is no result at all
 export const parseResult = (text: string): Parsed<RunResultJson> => {
   let value: unknown
@@ -157,6 +278,8 @@ export const parseResult = (text: string): Parsed<RunResultJson> => {
       checkReview(result)
     } else if (result.schema === 'pit-crew/sweep-result@1') {
       checkSweep(result)
+    } else if (result.schema === 'pit-crew/fix-result@1') {
+      checkFix(result)
     } else {
       throw new Invalid(`unknown schema ${String(result.schema)}`)
     }
@@ -199,9 +322,9 @@ export const foldSteps = (steps: readonly StepSlot[], events: readonly StepEvent
 // a run never recorded as having stepped reads as five pending slots, never as an error
 export const stepsOf = (run: Pick<Run, 'steps'>): StepSlot[] => run.steps ?? emptySteps()
 
-// the report a done result names: the review's report, or the sweep's summary
+// the report a done result names: the review's or the fix's report, or the sweep's summary
 export const reportPath = (result: RunResultJson): string | null =>
-  result.schema === 'pit-crew/review-result@1' ? result.report : result.summary
+  result.schema === 'pit-crew/sweep-result@1' ? result.summary : result.report
 
 // command lines, one table entry per runner
 
@@ -313,7 +436,7 @@ export const isDependabot = (pr: RawOpenPr): boolean => (pr.author?.login ?? '')
 
 export const defaultRun = (pr: RawOpenPr, config: Config): DefaultRun => {
   const number = String(pr.number)
-  // unanswered changes requested still offers Self-review here; Fix session is P2.6
+  // unanswered changes requested still offers Self-review here: Fix session is never the default
   if (isMine(pr, config)) return { kind: 'selfReview', label: 'Self-review', command: 'review-pr', args: [number, '--no-post'] }
   const again = viewerReview(pr, config) !== undefined
   return {
@@ -325,14 +448,15 @@ export const defaultRun = (pr: RawOpenPr, config: Config): DefaultRun => {
 }
 
 // the starts the drawer offers (section 8 of DESIGN.md, Drawer): the row's default run, the same
-// review in tandem (Claude only), and a review of the whole stack. Fix mode is P2.6
+// review in tandem (Claude only), a review of the whole stack, and on the viewer's own PRs a fix
+// session (Claude only), which acts on the changes reviewers requested and pushes its fixes
 
-export type StartKind = 'default' | 'tandem' | 'stack'
-export const startKinds: readonly StartKind[] = ['default', 'tandem', 'stack']
+export type StartKind = 'default' | 'tandem' | 'stack' | 'fix'
+export const startKinds: readonly StartKind[] = ['default', 'tandem', 'stack', 'fix']
 
 // what a start does on GitHub, for the confirmation: the kind says how to style it, the text is
 // ready to show
-export type PostsKind = 'review' | 'nothing' | 'autoApprove' | 'offer'
+export type PostsKind = 'review' | 'nothing' | 'autoApprove' | 'offer' | 'push'
 export type StartPosts = { kind: PostsKind, text: string }
 
 export type StartOption = {
@@ -344,7 +468,7 @@ export type StartOption = {
   command: string
   // without --emit-json, which the launcher adds
   args: string[]
-  // the runners this start works with; tandem is Claude only
+  // the runners this start works with; tandem and fix are Claude only
   runners: RunnerName[]
   posts: StartPosts
   // why it cannot start right now, from what the server knows without asking GitHub; null otherwise
@@ -353,10 +477,18 @@ export type StartOption = {
 
 export const isTandemRun = (args: readonly string[]): boolean => args.includes('--tandem')
 
+// fix-pr pushes to the PR's branch, so it is offered only on the viewer's own PRs, never a bot's
+export const offersFix = (pr: RawOpenPr, config: Config): boolean =>
+  isMine(pr, config) && pr.author?.__typename !== 'Bot' && !isBotLogin(pr.author?.login, config)
+
+// the commands that only Claude can run: a tandem primary, and the fix session
+export const claudeOnly = (command: string, args: readonly string[]): boolean => isTandemRun(args) || command === 'fix-pr'
+
 // null when the kind is offered for this PR, otherwise why it is not
 export const notOffered = (kind: StartKind, pr: RawOpenPr, config: Config, stack: Stack | null): string | null => {
   if (kind === 'tandem' && defaultRun(pr, config).command !== 'review-pr') return `Review in tandem is not offered for #${pr.number}: review-dependabot has no tandem mode`
   if (kind === 'stack' && stack === null) return `Review stack is not offered for #${pr.number}: it is not part of a stack`
+  if (kind === 'fix' && !offersFix(pr, config)) return `Fix session is offered only on your own PRs, and #${pr.number} is not yours`
   return null
 }
 
@@ -399,13 +531,27 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
       runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), unavailable,
     })
   }
+  // never --no-post: the push is what it is for
+  if (notOffered('fix', pr, config, stack) === null) {
+    options.push({
+      kind: 'fix', label: 'Fix session', button: 'Fix requested changes', command: 'fix-pr', args: [String(pr.number)], runners: ['claude'],
+      posts: {
+        kind: 'push',
+        text: `Pushes new commits to ${pr.headRefName} on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.`,
+      },
+      unavailable,
+    })
+  }
   return options
 }
 
 // the Agent cell on a row (section 8 of DESIGN.md)
 
 export type AgentAction = { kind: RunKind, label: string, command: string, args: string[], runner: RunnerName }
-export type AgentResult = {
+
+// the cell's summary of a review's result.json
+export type ReviewSummary = {
+  kind: 'review'
   verdict: Verdict | null
   recommendation: Recommendation | null
   findings: number
@@ -414,6 +560,24 @@ export type AgentResult = {
   notPostedReason: NotPostedReason | null
   report: string | null
 }
+
+// the cell's summary of a fix's result.json: what the drawer shows without reading the file
+export type FixSummary = {
+  kind: 'fix'
+  // how many requests, then how many of each triage and each outcome (every key present)
+  requests: number
+  triage: Record<FixTriage, number>
+  outcomes: Record<FixOutcome, number>
+  // the head as a full SHA; each commit's SHA short, as the report writes it
+  pushed: { branch: string, head: string, count: number, commits: FixCommit[] } | null
+  notPushedReason: NotPushedReason | null
+  checks: FixCheck[]
+  worktree: string | null
+  report: string | null
+}
+
+// null for a sweep, whose rows the bot group's drawer renders (P2.7)
+export type AgentResult = ReviewSummary | FixSummary
 
 export type AgentCell = {
   // running while a run is in flight; done while its latest run's outcome still stands; idle
@@ -451,11 +615,12 @@ export type AgentCell = {
   costUsd: number | null
 }
 
-export type FailureKind = 'noResult' | 'noReport' | 'permissionDenied' | 'serverRestarted' | 'spawnFailed'
+export type FailureKind = 'noResult' | 'noReport' | 'badResult' | 'permissionDenied' | 'serverRestarted' | 'spawnFailed'
 
 const failureTexts: Readonly<Record<FailureKind, string>> = {
   noResult: 'no result',
   noReport: 'no report',
+  badResult: 'bad result',
   permissionDenied: 'permission denied',
   serverRestarted: 'server restarted',
   spawnFailed: 'could not start',
@@ -466,15 +631,34 @@ export const noteKind = (note: string | null): FailureKind | null => {
   return kind in failureTexts ? kind as FailureKind : null
 }
 
-// the cell's text for a finished run, from section 8's mapping of verdict and posted
+const plural = (count: number, word: string): string => `${count} ${word}${count === 1 ? '' : 's'}`
+
+// a finished fix that pushed nothing: nothing to fix, or the owner discarded the commits at a stop
+const notPushedTexts: Readonly<Record<NotPushedReason, string>> = {
+  nothingToFix: 'Nothing to fix',
+  awaitingAnswer: 'Not pushed',
+  checksFailed: 'Not pushed · checks failed',
+  checksNotRun: 'Not pushed · checks not run',
+  pushFailed: 'Not pushed · push refused',
+}
+
+const fixText = (result: FixResult): string => {
+  if (result.pushed !== null) return `Fixed · pushed ${plural(result.pushed.commits.length, 'commit')}`
+  return result.notPushedReason === null ? 'Done' : notPushedTexts[result.notPushedReason]
+}
+
+// the cell's text for a finished run, from section 8's mappings: a review's verdict and posted, a
+// fix's push
 export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'>, ownDraft: boolean): string => {
   if (run.status === 'stopped') return 'Stopped'
   if (run.status === 'needsInput') return 'Needs your answer'
   if (run.status === 'failed') {
     const kind = noteKind(run.note)
-    return kind === null ? 'Failed' : `Failed · ${failureTexts[kind]}`
+    if (kind !== null) return `Failed · ${failureTexts[kind]}`
+    return run.result?.schema === 'pit-crew/fix-result@1' && run.result.notPushedReason === 'pushFailed' ? 'Failed · push refused' : 'Failed'
   }
   const result = run.result
+  if (result?.schema === 'pit-crew/fix-result@1') return fixText(result)
   if (result === null || result.schema !== 'pit-crew/review-result@1' || result.verdict === null) return 'Done'
   let text = 'Clean'
   if (result.verdict === 'changesRequested') text = 'Changes requested'
@@ -484,9 +668,32 @@ export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'>, ownDraft:
   return result.notPostedReason === 'ghFailed' ? `${text} · post failed` : text
 }
 
+const countBy = <K extends string>(keys: readonly K[], values: readonly K[]): Record<K, number> =>
+  Object.fromEntries(keys.map((key) => [key, values.filter((value) => value === key).length])) as Record<K, number>
+
+const fixSummary = (result: FixResult): FixSummary => ({
+  kind: 'fix',
+  requests: result.requests.length,
+  triage: countBy(fixTriages, result.requests.map((request) => request.triage)),
+  outcomes: countBy(fixOutcomes, result.requests.map((request) => request.outcome)),
+  pushed: result.pushed === null ? null : {
+    branch: result.pushed.branch,
+    head: result.pushed.head,
+    count: result.pushed.commits.length,
+    commits: result.pushed.commits.map((commit) => ({ sha: commit.sha.slice(0, 7), subject: commit.subject })),
+  },
+  notPushedReason: result.notPushedReason,
+  checks: result.checks,
+  worktree: result.worktree,
+  // only FIX-<n>.md, so the drawer never opens another report from a fix run
+  report: result.report !== null && baseName(result.report) === fixReportFile(result) ? result.report : null,
+})
+
 const agentResult = (result: RunResultJson | null): AgentResult | null => {
+  if (result?.schema === 'pit-crew/fix-result@1') return fixSummary(result)
   if (result === null || result.schema !== 'pit-crew/review-result@1') return null
   return {
+    kind: 'review',
     verdict: result.verdict,
     recommendation: result.recommendation,
     findings: result.findings.length,
@@ -497,8 +704,15 @@ const agentResult = (result: RunResultJson | null): AgentResult | null => {
   }
 }
 
-const reviewedSha = (run: Run): string | null =>
-  run.result?.schema === 'pit-crew/review-result@1' ? run.result.reviewed?.sha ?? null : null
+// the heads a finished run's outcome is about: the commit a review read; the head a fix pushed,
+// and the head it read, since the cached row keeps that one until the PR is next fetched. Empty
+// when the run stopped first, so its outcome stands
+const standingShas = (run: Run): string[] => {
+  const result = run.result
+  if (result?.schema === 'pit-crew/review-result@1') return result.reviewed === null ? [] : [result.reviewed.sha]
+  if (result?.schema === 'pit-crew/fix-result@1') return [result.pushed?.head, result.head?.sha].filter((sha) => sha !== undefined)
+  return []
+}
 
 export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null): AgentCell => {
   const mine = isMine(pr, config)
@@ -512,11 +726,12 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     finishedAt: null, text: null, result: null, question: null, note: null, resume: null, costUsd: null,
   }
   if (run === undefined) return idle
-  const sha = reviewedSha(run)
+  const shas = standingShas(run)
+  const head = pr.headRefOid.toLowerCase()
   let state: AgentCell['state'] = 'done'
   if (run.status === 'running') state = 'running'
   // a stack review reads the top layer, whose commit is not this PR's head
-  else if (run.command !== 'review-stack' && sha !== null && !pr.headRefOid.toLowerCase().startsWith(sha.toLowerCase())) state = 'idle'
+  else if (run.command !== 'review-stack' && shas.length > 0 && !shas.some((sha) => head.startsWith(sha.toLowerCase()))) state = 'idle'
   return {
     ...idle,
     state,
@@ -630,6 +845,10 @@ export const judge = (input: JudgeInput): Judgement => {
     return { status: 'failed', note: `noResult: ${why}; ${exitText(input.exit)}; last event: ${input.lastEvent ?? 'none'}`, result: null }
   }
   const value = input.parsed.value
+  if (value.schema === 'pit-crew/fix-result@1') {
+    const mismatch = fixMismatch(value)
+    if (mismatch !== null) return { status: 'failed', note: `badResult: ${mismatch}`, result: value }
+  }
   if (value.status === 'failed') return { status: 'failed', note: value.error, result: value }
   if (value.status === 'needsInput') return { status: 'needsInput', note: null, result: value }
   const path = reportPath(value)
@@ -808,7 +1027,7 @@ export const systemFs: LauncherFs = {
 // the launcher
 
 export type LaunchErrorCode =
-  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner'
+  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner'
 
 export class LaunchError extends Error {
   override name = 'LaunchError'
@@ -1238,10 +1457,11 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
 
   const start = async (request: StartRequest): Promise<Run> => {
     const config = options.config()
-    // a tandem primary launches its secondary in the background, which only Claude can do; the
-    // runner is the one asked for or the configured default, so no caller can get around this
-    if (isTandemRun(request.args) && (request.runner ?? config.agent.runner) !== 'claude') {
-      throw new LaunchError('tandemRunner', 'Review in tandem runs with Claude only; send runner claude or leave it out')
+    // a tandem primary launches its secondary in the background, and the fix session is pinned to
+    // Claude; the runner is the one asked for or the configured default, so no caller gets around this
+    if (claudeOnly(request.command, request.args) && (request.runner ?? config.agent.runner) !== 'claude') {
+      if (isTandemRun(request.args)) throw new LaunchError('tandemRunner', 'Review in tandem runs with Claude only; send runner claude or leave it out')
+      throw new LaunchError('fixRunner', 'Fix session runs with Claude only; send runner claude or leave it out')
     }
     const key = `${request.repo}#${request.number}`
     // one run per PR in flight, counting a start still between its checks and its row

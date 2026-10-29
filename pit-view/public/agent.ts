@@ -3,10 +3,10 @@
 // the per-start token, how a refusal reads, and what changes are announced; pure, with every
 // clock reading passed in. The drawer's own words are in drawerview.ts
 import type { RunnerName } from '../src/config.ts'
-import type { AgentCell, RunView, StartKind, StartOption, StepSlot } from '../src/launcher.ts'
+import type { AgentCell, AgentResult, RunView, StartKind, StartOption, StepSlot } from '../src/launcher.ts'
 import { formatSince } from './format.ts'
 
-export type { AgentCell, RunnerName, RunView, StartKind, StartOption, StepSlot }
+export type { AgentCell, AgentResult, RunnerName, RunView, StartKind, StartOption, StepSlot }
 
 const second = 1000
 const minute = 60 * second
@@ -16,22 +16,27 @@ export const runnerNames: readonly RunnerName[] = ['claude', 'codex']
 
 export const runnerLabels: Readonly<Record<RunnerName, string>> = { claude: 'Claude Code', codex: 'Codex' }
 
-const stepLabels: Readonly<Record<string, string>> = {
-  resolveBase: 'resolve base',
-  review: 'review',
-  consolidate: 'consolidate',
-  writeReport: 'write report',
-  post: 'post',
-}
-
-// the progress bar's labels, in the order the steps run
-export const stepTitles: Readonly<Record<string, string>> = {
+// the progress bar's labels, in the order the steps run. fix-pr records the same five slots with
+// meanings of its own (section 8, the fix command); every other command's are a review's
+const reviewTitles: Readonly<Record<string, string>> = {
   resolveBase: 'Resolve base',
   review: 'Review',
   consolidate: 'Consolidate',
   writeReport: 'Write report',
   post: 'Post',
 }
+
+const fixTitles: Readonly<Record<string, string>> = {
+  resolveBase: 'Resolve',
+  review: 'Triage',
+  consolidate: 'Fix and check',
+  writeReport: 'Write report',
+  post: 'Push',
+}
+
+// a step's label for a run of this command
+export const stepTitle = (command: string | null, step: string): string =>
+  (command === 'fix-pr' ? fixTitles : reviewTitles)[step] ?? step
 
 // how long a run has gone: seconds under a minute, minutes under an hour, then hours and minutes
 export const formatDuration = (fromIso: string, nowMs: number): string => {
@@ -49,20 +54,21 @@ export const runningLine = (cell: Pick<AgentCell, 'startedAt' | 'lastStepAt'>, n
 }
 
 // the newest step in words, for the running cell's tooltip and screen readers
-export const stepText = (step: AgentCell['step']): string => {
+export const stepText = (step: AgentCell['step'], command: string | null = null): string => {
   if (step === null) return 'Starting: no step recorded yet'
-  const name = stepLabels[step.name] ?? step.name
-  return `Step: ${name}, ${step.state}`
+  const title = stepTitle(command, step.name)
+  return `Step: ${title.charAt(0).toLowerCase()}${title.slice(1)}, ${step.state}`
 }
 
 export type DoneTone = 'red' | 'amber' | 'green' | 'gray'
 
-// the done text's color follows what the owner should do next; the words carry the meaning
+// the done text's color follows what the owner should do next; the words carry the meaning. A fix
+// that left requests unpushed wants a look (amber); one with nothing to fix needs nothing (gray)
 export const doneTone = (cell: Pick<AgentCell, 'status' | 'text'>): DoneTone => {
   const text = cell.text ?? ''
   if (cell.status === 'failed') return 'red'
-  if (cell.status === 'needsInput' || text.endsWith('post failed') || text === 'Clean · CI failed') return 'amber'
-  if (cell.status === 'stopped' || text === 'Done') return 'gray'
+  if (cell.status === 'needsInput' || text.endsWith('post failed') || text === 'Clean · CI failed' || text.startsWith('Not pushed')) return 'amber'
+  if (cell.status === 'stopped' || text === 'Done' || text === 'Nothing to fix') return 'gray'
   return text === 'Changes requested' ? 'red' : 'green'
 }
 
@@ -92,7 +98,7 @@ export const cellModel = (cell: AgentCell, number: number, nowMs: number): CellM
       state: 'running',
       label: cell.label,
       line: runningLine(cell, nowMs),
-      step: stepText(cell.step),
+      step: stepText(cell.step, cell.command),
       name: `Open agent for #${number}, ${cell.label} running`,
     }
   }
@@ -121,14 +127,24 @@ export const cellModel = (cell: AgentCell, number: number, nowMs: number): CellM
 export const commandLine = (option: Pick<StartOption, 'command' | 'args'>, runner: RunnerName): string =>
   `${runner === 'codex' ? '$' : '/'}${[option.command, ...option.args].join(' ')}`
 
+// the start the changes-requested banner offers beside Open agent: the Fix session, while the row
+// offers one at all (an unavailable one still opens the drawer, which says why)
+export const fixStart = (cell: Pick<AgentCell, 'starts'> | null): StartOption | null =>
+  cell?.starts.find((option) => option.kind === 'fix') ?? null
+
 // the requests: both carry the token this page was served with
 export const tokenHeader = 'X-Pit-View-Token'
 
 export type RunRequest = { url: string, init: { method: 'POST', headers: Record<string, string>, body?: string } }
 
+// a Fix session names no runner: it runs with Claude only, which the server picks
 export const startRequest = (number: number, kind: StartKind, runner: RunnerName, token: string): RunRequest => ({
   url: `/api/prs/${number}/runs`,
-  init: { method: 'POST', headers: { 'Content-Type': 'application/json', [tokenHeader]: token }, body: JSON.stringify({ kind, runner }) },
+  init: {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', [tokenHeader]: token },
+    body: JSON.stringify(kind === 'fix' ? { kind } : { kind, runner }),
+  },
 })
 
 export const stopRequest = (runId: number, token: string): RunRequest => ({

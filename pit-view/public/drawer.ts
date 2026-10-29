@@ -34,7 +34,9 @@ export type DrawerOptions = {
 }
 
 export type Drawer = {
-  open: (number: number, opener: Opener) => void
+  // ask, when given, opens that start's confirmation at once (the banner's Fix session), if the
+  // PR offers it and it can run now; otherwise the drawer opens as usual and says why
+  open: (number: number, opener: Opener, ask?: StartKind) => void
   close: () => void
   // after every draw: take the live row, refetch what changed, bring the elements up to date
   update: () => void
@@ -126,7 +128,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
 
   const errorLine = (): HTMLParagraphElement => h('p', { id: 'drawer-error', class: 'confirm-error', role: 'alert' })
 
-  const confirmActions = (goText: string, tone: 'primary' | 'danger', onGo: () => void): HTMLDivElement => {
+  const confirmActions = (goText: string, tone: 'primary' | 'danger' | 'caution', onGo: () => void): HTMLDivElement => {
     const cancel = h('button', { type: 'button', class: 'button', 'data-focus-key': 'confirm-cancel' }, 'Cancel')
     const go = h('button', { type: 'button', class: `button button-${tone}`, 'data-focus-key': 'confirm-go', 'aria-describedby': 'drawer-error' }, goText)
     cancel.addEventListener('click', () => {
@@ -154,12 +156,23 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
         }))
     const list = facts([['Command', command], ['Runner', runner], ['On GitHub', ask.effect]])
     list.querySelector('dt:nth-of-type(2)')?.setAttribute('id', 'drawer-runner-term')
-    return h('div', { class: 'confirm', role: 'group', 'aria-labelledby': 'drawer-confirm-heading' },
-      h('h4', { id: 'drawer-confirm-heading', class: 'confirm-heading' }, ask.heading),
+    // a start that pushes is told apart from a review's by its caution treatment, a plain line
+    // about the push, and a Start that names the session
+    const caution = ask.caution !== null
+    return h('div', {
+      class: caution ? 'confirm confirm-caution' : 'confirm',
+      role: 'group',
+      'aria-labelledby': 'drawer-confirm-heading',
+      'aria-describedby': caution ? 'drawer-confirm-caution' : null,
+    },
+      h('h4', { id: 'drawer-confirm-heading', class: 'confirm-heading' },
+        caution ? svg([['path', { d: 'M12 3l10 18H2z' }], ['path', { d: 'M12 10v5' }], ['path', { d: 'M12 18h.01' }]], { size: 16, stroke: '2.2', className: 'confirm-caution-icon' }) : null,
+        ask.heading),
       h('p', { class: 'confirm-title' }, ask.title),
       list,
+      caution ? h('p', { id: 'drawer-confirm-caution', class: 'confirm-caution-line' }, ask.caution) : null,
       errorLine(),
-      confirmActions(ask.confirm, 'primary', () => void doStart()))
+      confirmActions(ask.confirm, caution ? 'caution' : 'primary', () => void doStart()))
   }
 
   const stopConfirmBlock = (stop: StopModel, row: OpenRow): HTMLElement => {
@@ -202,7 +215,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     const cell = latest()
     if (cell === null) return
     const option = optionOf(cell, kind)
-    if (option === undefined) return
+    if (option === undefined || option.unavailable !== null || options.rowOf(number ?? 0) === undefined) return
     confirm = { type: 'start', kind, runner: defaultRunner(option, cell.action.runner) }
     confirmFrom = `start:${kind}`
     error = ''
@@ -428,6 +441,16 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       const parts = result.facts.map((fact) => h('div', { class: 'drawer-fact' },
         h('dt', {}, fact.label),
         h('dd', {}, fact.href === null ? fact.value : h('a', { ...newTab, href: fact.href }, fact.value))))
+      const fix = result.fix
+      if (fix !== null) {
+        parts.push(h('div', { class: 'drawer-fact' }, h('dt', {}, 'Requests'), h('dd', {}, fix.requests)))
+        if (fix.outcomes !== null) parts.push(h('div', { class: 'drawer-fact' }, h('dt', {}, 'Outcome'), h('dd', {}, fix.outcomes)))
+        if (fix.checks.length > 0) {
+          parts.push(h('div', { class: 'drawer-fact' }, h('dt', {}, 'Checks'), h('dd', {},
+            h('ul', { class: 'drawer-checks' }, fix.checks.map((check) => h('li', {},
+              h('code', { class: 'mono' }, check.name), ' ', h('span', { class: `agent-text tone-text-${check.tone}` }, check.text)))))))
+        }
+      }
       return h('section', { class: 'drawer-section drawer-card drawer-result', 'aria-labelledby': 'drawer-result-title' },
         h('h3', { id: 'drawer-result-title', class: 'drawer-section-title' }, result.stale === null ? 'Latest run' : 'Last run'),
         h('p', { class: 'drawer-result-text' },
@@ -437,10 +460,24 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           result.cost === null ? null : h('span', { class: 'drawer-meta' }, ` · ${result.cost}`)),
         result.note === null ? null : h('p', { class: 'drawer-note' }, result.note),
         result.stale === null ? null : h('p', { class: 'drawer-note' }, result.stale),
+        fix?.pushed == null ? null : h('div', { class: 'drawer-pushed' },
+          h('p', { class: 'drawer-label' }, 'Pushed to ', h('code', { class: 'mono' }, fix.pushed.branch)),
+          h('ul', { class: 'drawer-commits' }, fix.pushed.commits.map((commit) => h('li', {},
+            h('code', { class: 'mono drawer-commit-sha' }, commit.sha), ' ', h('span', {}, commit.subject))))),
         parts.length === 0 ? null : h('dl', { class: 'drawer-facts' }, parts),
+        fix?.worktree == null ? null : h('p', { class: 'drawer-notice' }, fix.worktree),
+        fix?.report == null ? null : reportButton(fix.report.name, fix.report.openName, 'Open report'),
         resumeBlock(result.resume, result.copyName, n))
     },
   })
+
+  // the report panel opens a report by its file name; focus comes back to this button
+  const reportButton = (name: string, label: string, text: string): HTMLButtonElement => {
+    const key = text === 'Open' ? `report:${name}` : `result-report:${name}`
+    const button = h('button', { type: 'button', class: 'button button-small', 'aria-label': label, title: label, 'data-focus-key': key }, text)
+    button.addEventListener('click', () => options.reports.open(name, key))
+    return button
+  }
 
   const listState = (what: string, state: string, message: string | null, retry: () => void): Node | null => {
     if (state === 'loading') return h('p', { class: 'muted', role: 'status' }, `Loading ${what}…`)
@@ -467,17 +504,18 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
 
   const reportsPart = (model: DrawerModel): Part => ({
     key: 'reports',
-    sig: JSON.stringify([model.reports.state, model.reports.message, model.reports.rows.map((row) => ({ ...row, modifiedAt: '' }))]),
+    // a report rewritten under the same name (a second Fix session's FIX-<n>.md) has a new time, so it rebuilds
+    sig: JSON.stringify([model.reports.state, model.reports.message, model.reports.rows]),
     build: () => section('reports', 'Reports on disk',
       listState('reports', model.reports.state, model.reports.message, () => void loadReports()),
       model.reports.state === 'ready' && model.reports.rows.length === 0 ? h('p', { class: 'muted' }, 'No reports on disk for this PR.') : null,
       model.reports.rows.length === 0 ? null : h('ul', { class: 'drawer-list' },
         model.reports.rows.map((row) => {
-          const open = h('button', { type: 'button', class: 'button button-small', 'aria-label': row.openName, title: row.openName, 'data-focus-key': `report:${row.name}` }, 'Open')
-          open.addEventListener('click', () => options.reports.open(row.name, `report:${row.name}`))
+          const open = reportButton(row.name, row.openName, 'Open')
           return h('li', { class: 'drawer-item' },
             h('span', { class: 'drawer-item-main' },
               h('span', { class: 'drawer-item-name mono' }, row.name),
+              row.fix ? tag('Fix', 'gray') : null,
               row.verdict === null ? null : tag(row.verdict.text, row.verdict.tone),
               row.tandem ? tag('Tandem', 'blue') : null,
               open),
@@ -641,7 +679,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     render()
   }
 
-  const open = (n: number, from: Opener): void => {
+  const open = (n: number, from: Opener, ask?: StartKind): void => {
     const row = options.rowOf(n)
     if (row === undefined) return
     opener = from
@@ -666,6 +704,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     root.hidden = false
     update()
     heading.focus({ preventScroll: true })
+    // a start that cannot run now opens no confirmation: the drawer shows its reason instead
+    if (ask !== undefined && !busy) askStart(ask)
   }
 
   const close = (): void => {

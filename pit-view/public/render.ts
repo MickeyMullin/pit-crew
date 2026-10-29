@@ -3,6 +3,7 @@
 // banner and the three sections, each table filtered, grouped and sorted by this page's own controls
 import type { ClosedRange, ClosedRow, MineRow, OtherRow } from '../src/derive.ts'
 import type { View } from '../src/poller.ts'
+import { fixStart } from './agent.ts'
 import { avatar, icons } from './cells.ts'
 import { closedSummary, mondayNote, rangeButtons } from './closed.ts'
 import { byId, h, newTab, setText, svg, sync } from './dom.ts'
@@ -168,9 +169,11 @@ const renderBanner = (frame: Frame): void => {
     const who = row.changesRequested?.alias ?? 'A reviewer'
     const age = row.changesRequested === null ? null : formatAge(row.changesRequested.at, frame.nowMs)
     const phrase = selfReviewPhrase(row)
+    // the Fix session sits beside Open agent while the row offers one, available or not
+    const fix = fixStart(row.agent) !== null
     return {
       key: `pr-${row.number}`,
-      sig: JSON.stringify([who, age, row.url, row.title, phrase]),
+      sig: JSON.stringify([who, age, row.url, row.title, phrase, fix]),
       build: () => h('li', { class: 'banner-entry' },
         h('span', { class: 'banner-text' },
           h('span', { class: 'banner-lead' }, `${who} requested changes on `, h('a', { ...newTab, href: safeHref(row.url) }, `#${row.number}`), age === null ? '' : ` · ${age} ago`),
@@ -183,6 +186,13 @@ const renderBanner = (frame: Frame): void => {
             'data-focus-key': `banner-open:${row.number}`,
             'aria-label': `Open agent for #${row.number}`,
           }, 'Open agent'),
+          fix ? h('button', {
+            type: 'button',
+            class: 'button',
+            'data-fix-session': row.number,
+            'data-focus-key': `banner-fix:${row.number}`,
+            'aria-label': `Fix session for #${row.number}`,
+          }, 'Fix session') : null,
           h('a', { ...newTab, class: 'button button-danger', href: safeHref(row.url) }, 'Open review'))),
     }
   })

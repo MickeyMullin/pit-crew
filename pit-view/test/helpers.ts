@@ -299,3 +299,35 @@ export const reviewResult = (patch: Record<string, unknown> = {}): Record<string
   error: null,
   ...patch,
 })
+
+// an invented fix-pr result: a fix of #101 that pushed two commits answering two of three requests
+export const fixHead = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1'
+export const fixPushedHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2'
+export const fixCommits = ['cccccccccccccccccccccccccccccccccccccc01', fixPushedHead]
+
+export const fixRequest = (patch: Record<string, unknown> = {}): Record<string, unknown> => ({
+  id: 'PRRT_example1', kind: 'thread', author: 'alex-mendez', path: 'src/retry.ts', line: 12, outdated: false,
+  url: 'https://github.com/octo-example/orbit/pull/101#discussion_r1', summary: 'Back off between retries', triage: 'clear', outcome: 'fixed',
+  commits: [fixCommits[0]], ...patch,
+})
+
+export const fixResult = (patch: Record<string, unknown> = {}): Record<string, unknown> => ({
+  schema: 'pit-crew/fix-result@1',
+  command: 'fix-pr',
+  status: 'done',
+  target: { repo: 'octo-example/orbit', pr: 101, branch: 'fix/webhook-retry' },
+  head: { sha: fixHead },
+  requests: [
+    fixRequest(),
+    fixRequest({ id: 'PRRT_example2', line: 40, outdated: true, url: 'https://github.com/octo-example/orbit/pull/101#discussion_r2', summary: 'Log the attempt number', commits: [fixPushedHead] }),
+    fixRequest({ id: 'PRR_example3', kind: 'review', path: null, line: null, url: 'https://github.com/octo-example/orbit/pull/101#pullrequestreview-3', summary: 'Split the handler', triage: 'outOfScope', outcome: 'notFixed', commits: [] }),
+  ],
+  checks: [{ name: 'pnpm test', result: 'passed' }, { name: 'pnpm check', result: 'passed' }],
+  pushed: { branch: 'fix/webhook-retry', head: fixPushedHead, commits: [{ sha: fixCommits[0], subject: 'Back off between retries' }, { sha: fixPushedHead, subject: 'Log the attempt number' }] },
+  notPushedReason: null,
+  worktree: null,
+  report: '~/agents/output/FIX-101.md',
+  question: null,
+  error: null,
+  ...patch,
+})

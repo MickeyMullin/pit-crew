@@ -1131,7 +1131,7 @@ test('a kind that cannot start is refused before anything runs: bad kind 400, ta
   try {
     await filled(h)
     const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
-    assert.equal((await send(url(113), 'POST', { kind: 'fix' }, token(h))).status, 400)
+    assert.equal((await send(url(113), 'POST', { kind: 'lint' }, token(h))).status, 400)
     assert.equal((await send(url(113), 'POST', { kind: 7 }, token(h))).status, 400)
     // a body that is not a plain object of known fields, or a field of the wrong type, is 400
     assert.equal((await send(url(113), 'POST', { kind: null }, token(h))).status, 400)
@@ -1214,6 +1214,64 @@ test('the view\'s Agent cell lists the starts a row offers, and the run list car
   }
 })
 
+test('a fix session starts only on the viewer\'s own PR: fix-pr with Claude, never --no-post, after the identity check; others\' PRs 422, Codex 400', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', agent: { runner: 'codex' } } })
+  try {
+    await filled(h)
+    const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
+    const view = (await getJson<View>(`${h.base}/api/view`)).body
+    // offered on the viewer's own PRs, drafts included, and listed after the reviews; the default is still Self-review
+    for (const number of [101, 103, 104, 120]) assert.equal(rowIn(view, number)?.agent?.starts.at(-1)?.kind, 'fix', `#${number}`)
+    for (const number of [113, 106, 114, 115]) assert.ok(!(rowIn(view, number)?.agent?.starts ?? []).some((start) => start.kind === 'fix'), `#${number}`)
+    assert.deepEqual(rowIn(view, 101)?.agent?.starts.find((start) => start.kind === 'fix'), {
+      kind: 'fix', label: 'Fix session', button: 'Fix requested changes', command: 'fix-pr', args: ['101'], runners: ['claude'],
+      posts: { kind: 'push', text: 'Pushes new commits to fix/webhook-retry on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.' },
+      unavailable: null,
+    })
+    assert.deepEqual([rowIn(view, 101)?.agent?.action.kind, rowIn(view, 101)?.agent?.action.args], ['selfReview', ['101', '--no-post']])
+
+    // refusals come before anything runs
+    const others = await send(url(113), 'POST', { kind: 'fix' }, token(h))
+    assert.equal(others.status, 422)
+    assert.match(String(others.body.error), /Fix session is offered only on your own PRs, and #113 is not yours/)
+    assert.equal((await send(url(114), 'POST', { kind: 'fix', runner: 'claude' }, token(h))).status, 422)
+    const codex = await send(url(101), 'POST', { kind: 'fix', runner: 'codex' }, token(h))
+    assert.equal(codex.status, 400)
+    assert.match(String(codex.body.error), /Fix session runs with Claude only/)
+    assert.equal((await send(url(113), 'POST', { kind: 'fix', runner: 'codex' }, token(h))).status, 400)
+    assert.equal((await send(url(101), 'POST', { kind: 'fix' })).status, 403)
+    assert.equal(h.launch.children.length, 0)
+    assert.equal(githubCalls(h.runner).filter((call) => call.args[1] === 'user').length, 0)
+
+    // with no runner it is Claude's, whatever the configured default is
+    const started = await send(url(101), 'POST', { kind: 'fix' }, token(h))
+    assert.equal(started.status, 200)
+    assert.deepEqual([started.body.runner, started.body.command, started.body.args, started.body.label, started.body.tandem], ['claude', 'fix-pr', ['101'], 'Fix session', false])
+    assert.match(lastWrite(h), /"\/fix-pr 101 --emit-json=[^"]+"/)
+    assert.ok(!lastWrite(h).includes('--no-post'))
+    assert.equal(githubCalls(h.runner).filter((call) => call.args[1] === 'user').length, 1)
+    // one run per PR, whatever the kind
+    assert.equal((await send(url(101), 'POST', {}, token(h))).status, 409)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a fix start is refused when gh is signed in as someone else, even on the viewer\'s own PR', async () => {
+  const fixtures = fixtureRunner()
+  const other = fakeRunner((args) => args[0] === 'api' && args[1] === 'user' ? ok('someone-else\n') : fixtures.runner(args))
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' }, runner: other })
+  try {
+    await filled(h)
+    const refused = await send(`${h.base}/api/prs/101/runs`, 'POST', { kind: 'fix' }, token(h))
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /gh is signed in as someone-else, but the viewer is vera-quill/)
+    assert.equal(h.launch.children.length, 0)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 const reportBody = (priorities: string[], sha = 'abc1234'): string =>
   `Reviewed commit: \`feat/x\` @ \`${sha}\`\n\n## Summary\n\n${priorities.length === 0 ? 'No actionable findings.' : priorities.map((priority) => `- **${priority}**\n  - Something (a.ts)`).join('\n')}\n`
 
@@ -1231,7 +1289,7 @@ test('GET /api/prs/<n>/reports lists a PR\'s reports newest first, and GET /api/
     assert.deepEqual(listed.body.map((entry) => entry.name).sort(), ['PR-101-codex.md', 'PR-101.md'])
     const own = listed.body.find((entry) => entry.name === 'PR-101.md')!
     assert.deepEqual([own.sha, own.verdict, own.tandem, Number.isNaN(Date.parse(own.modifiedAt))], ['abc1234', 'changesRequested', true, false])
-    assert.deepEqual(Object.keys(own).sort(), ['modifiedAt', 'name', 'sha', 'tandem', 'verdict'])
+    assert.deepEqual(Object.keys(own).sort(), ['kind', 'modifiedAt', 'name', 'sha', 'tandem', 'verdict'])
     assert.deepEqual((await getJson<unknown[]>(`${h.base}/api/prs/103/reports`)).body, [])
     assert.equal((await getJson<unknown>(`${h.base}/api/prs/abc/reports`)).status, 400)
 
@@ -1276,6 +1334,44 @@ test('the report endpoints read nothing outside reportsDir: odd names, symlinks 
     // the listing skips the symlinks, the directory and any file that is not this PR's
     assert.deepEqual((await getJson<unknown[]>(`${h.base}/api/prs/104/reports`)).body, [])
     assert.deepEqual((await getJson<unknown[]>(`${h.base}/api/prs/106/reports`)).body, [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('GET /api/prs/<n>/reports lists FIX-<n>.md beside the review reports, and GET /api/reports/FIX-<n>.md serves it', async () => {
+  const fix = 'PR: #101 `fix/webhook-retry` @ `aaaaaaa`\nBase: `main`\nPush: pushed `bbbbbbb` (2 commits)\n\n## Summary\n\n- **P1** is not a verdict here\n\n[x](javascript:alert(1))\n'
+  const h = await setup({ files: {
+    'agents/output/PR-101.md': reportBody(['P1']),
+    'agents/output/FIX-101.md': fix,
+    'agents/output/FIX-1010.md': fix,
+    'agents/output/FIX-101-old.md': fix,
+    'secret/FIX-104.md': 'outside',
+  } })
+  try {
+    const output = join(h.home, 'agents', 'output')
+    await symlink(join(h.home, 'secret', 'FIX-104.md'), join(output, 'FIX-104.md'))
+    const listed = await getJson<{ name: string, kind: string, sha: string | null, verdict: string | null, tandem: boolean }[]>(`${h.base}/api/prs/101/reports`)
+    assert.deepEqual(listed.body.map((entry) => [entry.name, entry.kind, entry.sha, entry.verdict, entry.tandem]).sort(), [
+      ['FIX-101.md', 'fix', 'aaaaaaa', null, false],
+      ['PR-101.md', 'review', 'abc1234', 'changesRequested', false],
+    ])
+    assert.deepEqual((await getJson<unknown[]>(`${h.base}/api/prs/1010/reports`)).body.length, 1)
+    assert.deepEqual((await getJson<unknown[]>(`${h.base}/api/prs/104/reports`)).body, [])
+    const served = await getJson<{ name: string, html: string, raw: string }>(`${h.base}/api/reports/FIX-101.md`)
+    assert.equal(served.status, 200)
+    assert.equal(served.body.raw, fix)
+    assert.ok(!/javascript:/i.test(served.body.html))
+    const get = (name: string) => raw(h.server.port, `/api/reports/${name}`)
+    assert.equal((await get('FIX-104.md')).status, 404)
+    assert.ok(!(await get('FIX-104.md')).body.includes('outside'))
+    for (const name of ['FIX-101-old.md', '..%2Fsecret%2FFIX-104.md', 'FIX-1%2F..%2FFIX-101.md', 'fix-101.md', 'FIX-101.md%00', 'FIX-.md']) {
+      assert.equal((await get(name)).status, 400, name)
+    }
+    // a fix report is never a self-review
+    await filled(h)
+    const view = (await getJson<View>(`${h.base}/api/view`)).body
+    assert.equal((rowIn(view, 101) as MineRow | undefined)?.selfReview.file, 'PR-101.md')
   } finally {
     await h.cleanup()
   }
