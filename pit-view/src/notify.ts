@@ -10,8 +10,7 @@ export type NotificationKind = typeof notificationKinds[number]
 export const isNotificationKind = (value: unknown): value is NotificationKind =>
   typeof value === 'string' && (notificationKinds as readonly string[]).includes(value)
 
-// the state a row is watched for: each flag is a condition, and a notification fires when one
-// turns true that was false
+// the state a row is watched for: each flag is a condition, and a notification fires when one turns true that was false
 export type RowState = { changesRequested: boolean, readyToMerge: boolean, reviewRequested: boolean, ciFailing: boolean }
 
 export const rowState = (row: OpenRow): RowState => ({
@@ -28,29 +27,21 @@ export type NotifyEvent = { kind: NotificationKind, number: number, title: strin
 
 const rowKinds = ['changesRequested', 'readyToMerge', 'reviewRequested', 'ciFailing'] as const
 
-// the events for one row going from `before` to `after`; a row with no previous state (null) has
-// no transition and reports nothing, and a row marked stale reports nothing, since its state was
-// not confirmed
+// the events for one row going from `before` to `after`; a row with no previous state (null) has no transition and reports nothing, and a row marked stale reports nothing, since its state was not confirmed
 export const rowEvents = (repo: string, before: RowState | null, after: OpenRow): NotifyEvent[] => {
   if (before === null || after.freshness.state === 'stale') return []
   const now = rowState(after)
   return rowKinds.filter((kind) => now[kind] && !before[kind]).map((kind) => ({ kind, number: after.number, title: after.title, repo }))
 }
 
-// the previous states of a repo's rows for one viewer, advanced as transitions are compared. There
-// is no flag for the first load: a baseline with no rows, at the start or after every row has been
-// removed, is the first load, and the next comparison that finds open rows only records them.
+// the previous states of a repo's rows for one viewer, advanced as transitions are compared. There is no flag for the first load: a baseline with no rows, at the start or after every row has been removed, is the first load, and the next comparison that finds open rows only records them.
 export type RowBaseline = { repo: string, viewer: string, rows: Map<number, RowState> }
 
-// `loaded` is whether the repo has a successful cycle recorded; without one the cache holds no
-// confirmed rows, so the baseline starts empty
+// `loaded` is whether the repo has a successful cycle recorded; without one the cache holds no confirmed rows, so the baseline starts empty
 export const baselineOf = (repo: string, viewer: string, rows: readonly OpenRow[], loaded: boolean): RowBaseline =>
   ({ repo, viewer, rows: new Map(loaded ? rows.map((row) => [row.number, rowState(row)]) : []) })
 
-// compares the baseline with the rows now (or with one row, when `only` is a PR number),
-// advancing the baseline. Nothing fires while the baseline is empty; the first comparison that
-// finds open rows records them as the baseline. A stale row neither fires nor moves its baseline.
-// A row with no previous state is recorded and fires nothing.
+// compares the baseline with the rows now (or with one row, when `only` is a PR number), advancing the baseline. Nothing fires while the baseline is empty; the first comparison that finds open rows records them as the baseline. A stale row neither fires nor moves its baseline. A row with no previous state is recorded and fires nothing.
 export const compareRows = (baseline: RowBaseline, rows: ReadonlyMap<number, OpenRow>, only?: number): NotifyEvent[] => {
   const silent = baseline.rows.size === 0
   // a single row cannot settle the first load: the cycle that finishes it does
@@ -70,9 +61,7 @@ export const compareRows = (baseline: RowBaseline, rows: ReadonlyMap<number, Ope
   return events
 }
 
-// the review-session kinds: the event a watched run's settled status fires. Done and failed are
-// runFinished, needsInput is runNeedsInput, and stopped and running fire nothing. `title` is null
-// when the PR is no longer among the open rows.
+// the review-session kinds: the event a watched run's settled status fires. Done and failed are runFinished, needsInput is runNeedsInput, and stopped and running fire nothing. `title` is null when the PR is no longer among the open rows.
 export const runEvent = (repo: string, row: { number: number, title: string | null }, status: string): NotifyEvent | null => {
   const base = { number: row.number, title: row.title, repo }
   if (status === 'done' || status === 'failed') return { ...base, kind: 'runFinished' }
@@ -118,8 +107,7 @@ export const systemExec: Exec = (file, args) => new Promise((resolve, reject) =>
   execFile(file, args, { timeout: 10_000 }, (error) => error === null ? resolve() : reject(error))
 })
 
-// the AppleScript is this constant text and nothing else; the notice reaches it as arguments to
-// `on run argv`, so no quote, backslash, or newline in a PR title can change what it does
+// the AppleScript is this constant text and nothing else; the notice reaches it as arguments to `on run argv`, so no quote, backslash, or newline in a PR title can change what it does
 export const appleScript = [
   'on run argv',
   'display notification (item 3 of argv) with title (item 1 of argv) subtitle (item 2 of argv)',

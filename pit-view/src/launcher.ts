@@ -1100,8 +1100,7 @@ export type LauncherOptions<T extends Session = Run> = {
   // the environment the child's few variables are picked from
   env: Readonly<Record<string, string | undefined>>
   newSessionId: () => string
-  // a run is now this process's to watch: created here (even one whose start fails at once) or
-  // adopted at startup because it was still running; called before its first onChange
+  // a run is now this process's to watch: created here (even one whose start fails at once) or adopted at startup because it was still running; called before its first onChange
   onWatch: (run: T) => void
   // a run's row changed: started, stepped, or settled
   onChange: (run: T) => void

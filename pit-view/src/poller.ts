@@ -101,8 +101,7 @@ export type Poller = {
   setActive: (activeCount: number, becameActive: boolean) => number | null
   // a saved config replaced `before`; emits the recomputed rows and starts a config cycle when needed
   configChanged: (before: Config) => Promise<void>
-  // the launcher created this run in this process, or adopted it as still running at startup; only
-  // such runs notify, and each at most once when it settles
+  // the launcher created this run in this process, or adopted it as still running at startup; only such runs notify, and each at most once when it settles
   runWatched: (run: { id: number, repo: string, number: number }) => void
   // a run of this PR started, stepped or settled: one patch upserting its row
   runChanged: (repo: string, number: number) => void
@@ -135,8 +134,7 @@ export type PollerOptions = {
   activeFloorMs?: number
   // the sweeps held in memory; none when left out
   sweeps?: SweepMemory
-  // receives the notification events a transition produces (section 9); the notifier decides
-  // whether the config wants them
+  // receives the notification events a transition produces (section 9); the notifier decides whether the config wants them
   notify?: (events: NotifyEvent[]) => void
 }
 
@@ -192,8 +190,7 @@ export const createPoller = (options: PollerOptions): Poller => {
 
   const notify = options.notify ?? (() => {})
   const sweeps = options.sweeps ?? createSweepMemory(cache)
-  // notifications (section 9): the rows as last compared, and the runs this process is
-  // responsible for watching, by run id, until each settles
+  // notifications (section 9): the rows as last compared, and the runs this process is responsible for watching, by run id, until each settles
   let baseline: RowBaseline | null = null
   const watched = new Map<number, { repo: string, number: number }>()
 
@@ -270,10 +267,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     return { cached, view, rows }
   }
 
-  // the previous state transitions are compared against, taken from the cache before a fetch
-  // changes it; the first load (nothing ever fetched, or no rows) fires nothing. It is kept for
-  // one repo and viewer: a change of either rebuilds it silently, and while the viewer is still
-  // unresolved (empty) there is none, so nothing compares.
+  // the previous state transitions are compared against, taken from the cache before a fetch changes it; the first load (nothing ever fetched, or no rows) fires nothing. It is kept for one repo and viewer: a change of either rebuilds it silently, and while the viewer is still unresolved (empty) there is none, so nothing compares.
   const ensureBaseline = (settings: Config): void => {
     if (settings.viewer === '') {
       baseline = null
@@ -434,8 +428,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     const finished = cache.finishCycle(cycle.id, failure, failureKind)
     log(`cycle ${cycle.id} (${cycle.trigger}) ${failure === null ? `finished: ${finished.cycle.prsUpdated} PRs, ${finished.removed.length} removed` : `failed: ${failure}`}`)
     if (shown()) applyFinish(finished, sent)
-    // only a finished cycle compares; after a failed one the next success compares against the
-    // same baseline, so a transition is neither lost nor fired from stale rows
+    // only a finished cycle compares; after a failed one the next success compares against the same baseline, so a transition is neither lost nor fired from stale rows
     if (failure === null && shown()) {
       const current = config()
       const known = baselineFor(current)
@@ -608,8 +601,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     const settings = config()
     const row = settings.repo === repo ? snapshot(settings, reports).rows.get(number) : undefined
     if (row !== undefined) patch({ rows: [row] })
-    // a watched run is looked up by id, so it counts even when its PR has left the open rows; once
-    // settled it is forgotten, which is what makes it fire at most once
+    // a watched run is looked up by id, so it counts even when its PR has left the open rows; once settled it is forgotten, which is what makes it fire at most once
     for (const [id, found] of watched) {
       if (found.repo !== repo || found.number !== number) continue
       const run = cache.getRun(id)
