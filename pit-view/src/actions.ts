@@ -34,7 +34,11 @@ export class ActionError extends Error {
   }
 }
 
-const usage = 'send { "action": "merge", "repo": "<owner/name shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "markReady" | "convertToDraft", "repo": "<owner/name shown>" } or { "action": "requestReview", "repo": "<owner/name shown>", "reviewer": "<login from people>" }'
+const usage = 'send { "action": "merge", "repo": "<owner/name shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "markReady" | "convertToDraft", "repo": "<owner/name shown>" }, or { "action": "requestReview", "repo": "<owner/name shown>", "reviewer": "<login from people>" }'
+
+// "a", "a or b", "a, b, or c": the words for a choice among the items
+export const orList = (items: readonly string[]): string =>
+  items.length <= 2 ? items.join(' or ') : `${items.slice(0, -1).join(', ')}, or ${items[items.length - 1]}`
 
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
@@ -43,7 +47,7 @@ export const parseAction = (body: unknown): ActionRequest => {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ActionError('badRequest', usage)
   const { action, repo, reviewer, headSha, base, ...rest } = body as Record<string, unknown>
   if (typeof action !== 'string' || !actionNames.includes(action as ActionName)) {
-    throw new ActionError('badRequest', `action must be one of ${actionNames.join(', ')}; ${usage}`)
+    throw new ActionError('badRequest', `action must be one of ${orList(actionNames)}; ${usage}`)
   }
   const extra = Object.keys(rest)[0]
   if (extra !== undefined) throw new ActionError('badRequest', `unknown field ${extra}; ${usage}`)

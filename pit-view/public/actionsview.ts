@@ -1,5 +1,5 @@
 // public/actionsview.ts
-// the drawer's direct actions (section 9 of DESIGN.md) as pure functions of the open row and the people the config lists: which actions a row offers, the confirmation each one asks, the request it sends and the words for a refusal. drawer.ts makes the elements. Nothing here reads the DOM or the clock
+// the drawer's direct actions (section 9 of DESIGN.md) as pure functions of the open row and the people the config lists: which actions a row offers, the confirmation each one asks, the request it sends, and the words for a refusal. drawer.ts makes the elements. Nothing here reads the DOM or the clock
 import type { OpenRow } from '../src/derive.ts'
 import { sentence, tokenHeader } from './agent.ts'
 import type { RunRequest } from './agent.ts'

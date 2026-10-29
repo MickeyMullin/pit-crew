@@ -5,7 +5,7 @@ import { request } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { ghArgs, parseAction } from '../src/actions.ts'
+import { ghArgs, orList, parseAction } from '../src/actions.ts'
 import { isPrimaryBase } from '../src/derive.ts'
 import type { Config } from '../src/config.ts'
 import type { OpenRow } from '../src/derive.ts'
@@ -1098,4 +1098,15 @@ test('an action without a repository is 400, with no gh call, and the matching r
   } finally {
     await h.cleanup()
   }
+})
+
+test('orList joins one, two, and three or more items as plain English', () => {
+  assert.equal(orList(['a']), 'a')
+  assert.equal(orList(['a', 'b']), 'a or b')
+  assert.equal(orList(['a', 'b', 'c']), 'a, b, or c')
+  assert.equal(orList(['a', 'b', 'c', 'd']), 'a, b, c, or d')
+})
+
+test('an unknown action names the allowed actions with a final "or"', () => {
+  assert.throws(() => parseAction({ action: 'comment', repo: 'o/r' }), /action must be one of merge, markReady, convertToDraft, or requestReview;/)
 })
