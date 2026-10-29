@@ -187,9 +187,11 @@ const checkSweep = (value: Record<string, unknown>): void => {
   for (const field of sweepFields) check(field in value, `${field} is missing`)
   check(value.command === 'review-dependabot-sweep', 'command must be review-dependabot-sweep')
   checkStatus(value)
-  check(typeof value.repo === 'string', 'repo must be a string')
+  // a sweep that stops early may not have resolved the repository or written the summary; only a done one always has both
+  const stoppedEarly = value.status !== 'done'
+  check(typeof value.repo === 'string' || (stoppedEarly && value.repo === null), 'repo must be a string')
   const counts = value.counts
-  check(isObject(counts) && ['swept', 'fresh', 'reused', 'failed'].every((key) => Number.isInteger(counts[key])), 'counts must hold swept, fresh, reused and failed')
+  check((stoppedEarly && counts === null) || (isObject(counts) && ['swept', 'fresh', 'reused', 'failed'].every((key) => Number.isInteger(counts[key]))), 'counts must hold swept, fresh, reused and failed')
   check(Array.isArray(value.rows) && Array.isArray(value.mergeOrder), 'rows and mergeOrder must be lists')
   check(isStringOrNull(value.summary), 'summary must be a path or null')
   if (!('notPostedReason' in value)) value.notPostedReason = null

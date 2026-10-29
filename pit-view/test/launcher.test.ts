@@ -376,6 +376,28 @@ test('a sweep result carries notPostedReason as null or noPost, and one written 
   assert.match(parsedReview.ok ? '' : parsedReview.error, /notPostedReason is missing/)
 })
 
+test('a failed or needsInput sweep may carry a null repo and null counts, and a done one may not', () => {
+  const done = { schema: 'pit-crew/sweep-result@1', command: 'review-dependabot-sweep', status: 'done', repo: scenario.repo, counts: { swept: 0, fresh: 0, reused: 0, failed: 0 }, notPostedReason: 'noPost', rows: [], mergeOrder: [], summary: null, question: null, error: null }
+  const preflight = { ...done, status: 'failed', repo: null, counts: null, error: 'the repository is not reachable under this identity' }
+  const parsed = parseResult(JSON.stringify(preflight))
+  assert.equal(parsed.ok, true)
+  if (parsed.ok) {
+    const value = parsed.value as { error?: unknown, notPostedReason?: unknown }
+    assert.equal(value.error, preflight.error)
+    assert.equal(value.notPostedReason, 'noPost')
+  }
+  const asking = { ...done, status: 'needsInput', repo: null, counts: null, question: 'Which clone should the sweep use?' }
+  assert.equal(parseResult(JSON.stringify(asking)).ok, true)
+  for (const [field, message] of [['repo', /repo must be a string/], ['counts', /counts must hold/]] as const) {
+    const rejected = parseResult(JSON.stringify({ ...done, [field]: null }))
+    assert.equal(rejected.ok, false)
+    assert.match(rejected.ok ? '' : rejected.error, message)
+  }
+  // null is the only other value: a failed result still rejects a wrong type
+  assert.equal(parseResult(JSON.stringify({ ...preflight, repo: 7 })).ok, false)
+  assert.equal(parseResult(JSON.stringify({ ...preflight, counts: {} })).ok, false)
+})
+
 test('an events.jsonl line is read only when it has the four fields of the contract', () => {
   assert.deepEqual(parseStepEvent('{"at":"2026-10-28T14:03:12Z","step":"consolidate","state":"skipped","note":"no tandem review"}'),
     { at: '2026-10-28T14:03:12Z', step: 'consolidate', state: 'skipped', note: 'no tandem review' })
