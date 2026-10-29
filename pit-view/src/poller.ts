@@ -479,10 +479,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     return { started: cycle !== null, cycle: cycle?.id ?? null }
   }
 
-  // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that
-  // row and any other its change moved (stacks), or its removal once closed; a failure stays on
-  // the row and never touches the cycles, so the board does not read offline
-  // repo is the repository the caller meant (a write's), not whatever the configuration says now: when Settings has moved on, the cache of that repository is still refreshed, but nothing of it reaches the board, the baseline, or a notification
+  // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that row and any other its change moved (stacks), or its removal once closed; a failure stays on the row and never touches the cycles, so the board does not read offline repo is the repository the caller meant (a write's), not whatever the configuration says now: when Settings has moved on, the cache of that repository is still refreshed, but nothing of it reaches the board, the baseline, or a notification
   const runPrRefresh = async (number: number, repo: string): Promise<PrRefreshResult> => {
     const settings = config()
     const key = prKey(repo, number)
