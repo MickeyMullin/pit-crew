@@ -13,12 +13,12 @@ import type { Gh, GhErrorKind } from './github.ts'
 export const actionNames = ['merge', 'markReady', 'convertToDraft', 'requestReview'] as const
 export type ActionName = typeof actionNames[number]
 
+// every request names the repository the confirmation displayed; a merge also names the full head SHA and the base branch it displayed
 export type ActionRequest =
-  // the full head SHA and the base branch the confirmation displayed
-  | { action: 'merge', headSha: string, base: string }
-  | { action: 'markReady' }
-  | { action: 'convertToDraft' }
-  | { action: 'requestReview', reviewer: string }
+  | { action: 'merge', repo: string, headSha: string, base: string }
+  | { action: 'markReady', repo: string }
+  | { action: 'convertToDraft', repo: string }
+  | { action: 'requestReview', repo: string, reviewer: string }
 
 export type ActionResult = { number: number, action: ActionName, done: true, reviewer?: string }
 
@@ -37,33 +37,34 @@ export class ActionError extends Error {
   }
 }
 
-const usage = 'send { "action": "merge", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "markReady" | "convertToDraft" } or { "action": "requestReview", "reviewer": "<login from people>" }'
+const usage = 'send { "action": "merge", "repo": "<owner/name shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "markReady" | "convertToDraft", "repo": "<owner/name shown>" } or { "action": "requestReview", "repo": "<owner/name shown>", "reviewer": "<login from people>" }'
 
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
 // the body, checked field by field: an unknown field is refused rather than ignored
 export const parseAction = (body: unknown): ActionRequest => {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ActionError('badRequest', usage)
-  const { action, reviewer, headSha, base, ...rest } = body as Record<string, unknown>
+  const { action, repo, reviewer, headSha, base, ...rest } = body as Record<string, unknown>
   if (typeof action !== 'string' || !actionNames.includes(action as ActionName)) {
     throw new ActionError('badRequest', `action must be one of ${actionNames.join(', ')}; ${usage}`)
   }
   const extra = Object.keys(rest)[0]
   if (extra !== undefined) throw new ActionError('badRequest', `unknown field ${extra}; ${usage}`)
+  if (typeof repo !== 'string' || repo === '') throw new ActionError('badRequest', `${action} needs repo, the repository the confirmation showed; ${usage}`)
   if (action === 'merge') {
     if (reviewer !== undefined) throw new ActionError('badRequest', `merge takes no reviewer; ${usage}`)
     if (typeof headSha !== 'string' || typeof base !== 'string' || base === '') throw new ActionError('badRequest', `merge needs headSha and base, the head and base branch the confirmation showed; ${usage}`)
     if (!/^[0-9a-f]{40}$/i.test(headSha)) throw new ActionError('badRequest', `headSha must be the full 40-character head SHA the confirmation showed; ${usage}`)
-    return { action, headSha: headSha.toLowerCase(), base }
+    return { action, repo, headSha: headSha.toLowerCase(), base }
   }
   if (headSha !== undefined) throw new ActionError('badRequest', `${action} takes no headSha; ${usage}`)
   if (base !== undefined) throw new ActionError('badRequest', `${action} takes no base; ${usage}`)
   if (action === 'requestReview') {
     if (typeof reviewer !== 'string' || reviewer === '') throw new ActionError('badRequest', `requestReview needs a reviewer; ${usage}`)
-    return { action, reviewer }
+    return { action, repo, reviewer }
   }
   if (reviewer !== undefined) throw new ActionError('badRequest', `${action} takes no reviewer; ${usage}`)
-  return { action: action as 'markReady' | 'convertToDraft' }
+  return { action: action as 'markReady' | 'convertToDraft', repo }
 }
 
 // exactly what gh is asked for each action. Merge uses GitHub's REST merge endpoint rather than
@@ -122,6 +123,8 @@ export const createActions = (options: ActionsOptions): Actions => {
     const request = parseAction(body)
     const config = options.config()
     const { repo, viewer } = config
+    // the repository the confirmation displayed must still be the one in effect: the page learns of a change in Settings only when its feed patch arrives, and #<n> in another repository is another PR. Nothing is read, written or held in flight
+    if (request.repo !== repo) throw new ActionError('stale', `the repository is now ${repo}, not ${request.repo}; the confirmation was for ${request.repo}, so nothing was done`)
     const cached = cache.readView(repo)
     const row = cached.open.find((entry) => entry.number === number)
     if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched`)
@@ -160,7 +163,7 @@ export const createActions = (options: ActionsOptions): Actions => {
     try {
       // gh writes as whichever account it is signed in as, and this machine holds more than one:
       // the write confirms the account with the token it then writes with, and runs once
-      const checked: ActionRequest = reviewer === undefined ? request : { action: 'requestReview', reviewer }
+      const checked: ActionRequest = reviewer === undefined ? request : { action: 'requestReview', repo, reviewer }
       try {
         const check = merging === undefined ? undefined : async (read: (args: string[]) => Promise<string>): Promise<void> => {
           // the confirmation named the cached base and head; the PR is read once more, live, and

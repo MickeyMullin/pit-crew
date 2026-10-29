@@ -6,7 +6,7 @@
 // confirmation's state, and moves focus
 import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
-import { actionDoneText, actionHolds, actionRefusalText, actionRequest } from './actionsview.ts'
+import { actionBound, actionDoneText, actionRefusalText, actionRequest } from './actionsview.ts'
 import type { ActionConfirmModel, ActionKind, PersonChoice } from './actionsview.ts'
 import { refusalText, startRequest, stopRequest } from './agent.ts'
 import type { AgentCell, RunView, StartKind } from './agent.ts'
@@ -30,6 +30,8 @@ export type DrawerOptions = {
   nowMs: () => number
   // the live row by number, from the page's feed; undefined once the PR has left the open tables
   rowOf: (number: number) => OpenRow | undefined
+  // the repository the page shows now, from the page's feed; empty before the first view
+  repo: () => string
   // the page's polite live region
   say: (text: string) => void
   reports: ReportPanel
@@ -283,7 +285,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     // the head and base shown now are the ones a merge is bound to
     const row = options.rowOf(n)
     if (row === undefined) return
-    confirm = { type: 'action', action, reviewer: '', headSha: row.headSha, baseRef: row.baseRef }
+    confirm = { type: 'action', action, repo: options.repo(), reviewer: '', headSha: row.headSha, baseRef: row.baseRef }
     confirmFrom = `action:${action}`
     error = ''
     render()
@@ -761,7 +763,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     if (confirm === null || busy) return
     const live = number === null ? undefined : options.rowOf(number)
     if (confirm.type === 'action') {
-      if (last !== null && actionHolds(confirm, last, live !== undefined)) return
+      if (last !== null && actionBound(confirm, last, live !== undefined, options.repo())) return
     } else if (confirmHolds(confirm, latest(), live !== undefined)) {
       return
     }

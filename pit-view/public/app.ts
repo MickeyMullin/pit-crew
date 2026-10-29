@@ -324,6 +324,7 @@ const drawer = createDrawer({
   token: readToken(document),
   nowMs,
   rowOf: (number) => feed.view === null ? undefined : findOpenRow(feed.view, number),
+  repo: () => feed.view?.repo ?? '',
   say,
   reports: reportPanel,
 })

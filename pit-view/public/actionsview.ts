@@ -15,9 +15,10 @@ export const actionKinds: readonly ActionKind[] = ['merge', 'markReady', 'conver
 // a person the config lists, as far as a reviewer choice needs
 export type PersonChoice = { login: string, alias: string }
 
+// repo is the repository the page showed when the action was asked, and every request carries it back.
 // headSha and baseRef are what the row showed when a merge was asked, in full, and the merge request
-// carries them; they are empty for the other actions, which have nothing of the row to be bound to
-export type ActionConfirm = { type: 'action', action: ActionKind, reviewer: string, headSha: string, baseRef: string }
+// carries them; they are empty for the other actions, which have nothing more of the row to be bound to
+export type ActionConfirm = { type: 'action', action: ActionKind, repo: string, reviewer: string, headSha: string, baseRef: string }
 
 export type ActionOffer = { action: ActionKind, text: string }
 
@@ -130,8 +131,13 @@ export const actionHolds = (ask: ActionConfirm, row: Pick<OpenRow, 'section' | '
   actionOffers(row, open).some((offer) => offer.action === ask.action) &&
   (ask.action !== 'merge' || (row.headSha === ask.headSha && row.baseRef === ask.baseRef))
 
-// the request the confirmation sends: the token header, the head SHA and base the confirmation
-// showed for a merge, and the reviewer for a review request
+// actionHolds, and the page's repository is still the one the confirmation was opened for: #<n> in
+// another repository is another PR, so a confirmation never outlives a switch of repository
+export const actionBound = (ask: ActionConfirm, row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'headSha' | 'baseRef'>, open: boolean, repo: string): boolean =>
+  ask.repo === repo && actionHolds(ask, row, open)
+
+// the request the confirmation sends: the token header, the repository the confirmation showed, the
+// head SHA and base it showed for a merge, and the reviewer for a review request
 export const actionRequest = (number: number, ask: ActionConfirm, token: string): RunRequest => ({
   url: `/api/prs/${number}/actions`,
   init: {
@@ -139,10 +145,10 @@ export const actionRequest = (number: number, ask: ActionConfirm, token: string)
     headers: { 'Content-Type': 'application/json', [tokenHeader]: token },
     body: JSON.stringify(
       ask.action === 'requestReview'
-        ? { action: ask.action, reviewer: ask.reviewer }
+        ? { action: ask.action, repo: ask.repo, reviewer: ask.reviewer }
         : ask.action === 'merge'
-          ? { action: ask.action, headSha: ask.headSha, base: ask.baseRef }
-          : { action: ask.action }),
+          ? { action: ask.action, repo: ask.repo, headSha: ask.headSha, base: ask.baseRef }
+          : { action: ask.action, repo: ask.repo }),
   },
 })
 

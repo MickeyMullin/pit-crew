@@ -131,11 +131,16 @@ const filled = async (h: Harness): Promise<void> => {
   await h.server.poller.idle()
 }
 
+// a request body as the page sends it: the repository the confirmation displayed is always in it, so a test that does not mean to
+// vary it gets the configured one
+const withRepo = (body: unknown): unknown =>
+  typeof body === 'object' && body !== null && !Array.isArray(body) && !('repo' in body) ? { repo: scenario.repo, ...body } : body
+
 const act = async (h: Harness, number: number | string, body: unknown, headers: Record<string, string> = {}): Promise<{ status: number, body: Record<string, unknown> }> => {
   const response = await fetch(`${h.base}/api/prs/${number}/actions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: h.base, 'X-Pit-View-Token': h.server.token, ...headers },
-    body: typeof body === 'string' ? body : JSON.stringify(body),
+    body: typeof body === 'string' ? body : JSON.stringify(withRepo(body)),
   })
   return { status: response.status, body: await response.json() as Record<string, unknown> }
 }
@@ -783,29 +788,35 @@ test('a second click while an action on the same PR is in flight writes once', a
 })
 
 test('the pure parts: parseAction names what it refuses, and ghArgs is exactly what gh is asked', () => {
-  assert.deepEqual(parseAction({ action: 'markReady' }), { action: 'markReady' })
-  assert.deepEqual(parseAction({ action: 'requestReview', reviewer: 'sam-tran' }), { action: 'requestReview', reviewer: 'sam-tran' })
+  assert.deepEqual(parseAction({ action: 'markReady', repo: 'o/r' }), { action: 'markReady', repo: 'o/r' })
+  assert.deepEqual(parseAction({ action: 'requestReview', repo: 'o/r', reviewer: 'sam-tran' }), { action: 'requestReview', repo: 'o/r', reviewer: 'sam-tran' })
   assert.throws(() => parseAction(null), /send \{/)
   const sha = 'a'.repeat(40)
-  assert.deepEqual(parseAction({ action: 'merge', headSha: sha, base: 'main' }), { action: 'merge', headSha: sha, base: 'main' })
-  assert.deepEqual(parseAction({ action: 'merge', headSha: sha.toUpperCase(), base: 'main' }), { action: 'merge', headSha: sha, base: 'main' })
-  assert.throws(() => parseAction({ action: 'merge', headSha: sha, base: 'main', method: 'rebase' }), /unknown field method/)
-  assert.throws(() => parseAction({ action: 'merge', headSha: sha, base: 'main', reviewer: 'sam-tran' }), /takes no reviewer/)
-  // the confirmation's head and base are required, and the head must be a full SHA
-  assert.throws(() => parseAction({ action: 'merge' }), /merge needs headSha/)
-  assert.throws(() => parseAction({ action: 'merge', base: 'main' }), /merge needs headSha/)
-  assert.throws(() => parseAction({ action: 'merge', headSha: sha }), /merge needs .*base/)
-  assert.throws(() => parseAction({ action: 'merge', headSha: sha, base: '' }), /merge needs .*base/)
-  assert.throws(() => parseAction({ action: 'merge', headSha: 'a'.repeat(7), base: 'main' }), /full 40-character/)
-  assert.throws(() => parseAction({ action: 'merge', headSha: 'z'.repeat(40), base: 'main' }), /full 40-character/)
-  for (const action of ['markReady', 'convertToDraft']) {
-    assert.throws(() => parseAction({ action, headSha: sha }), /takes no headSha/)
-    assert.throws(() => parseAction({ action, base: 'main' }), /takes no base/)
+  assert.deepEqual(parseAction({ action: 'merge', repo: 'o/r', headSha: sha, base: 'main' }), { action: 'merge', repo: 'o/r', headSha: sha, base: 'main' })
+  assert.deepEqual(parseAction({ action: 'merge', repo: 'o/r', headSha: sha.toUpperCase(), base: 'main' }), { action: 'merge', repo: 'o/r', headSha: sha, base: 'main' })
+  // the repository the confirmation displayed is required on all four, as a non-empty string
+  for (const body of [{ action: 'merge', headSha: sha, base: 'main' }, { action: 'markReady' }, { action: 'convertToDraft' }, { action: 'requestReview', reviewer: 'sam-tran' }]) {
+    assert.throws(() => parseAction(body), /needs repo/, JSON.stringify(body))
+    assert.throws(() => parseAction({ ...body, repo: '' }), /needs repo/)
+    assert.throws(() => parseAction({ ...body, repo: ['o/r'] }), /needs repo/)
   }
-  assert.throws(() => parseAction({ action: 'requestReview', reviewer: 'sam-tran', headSha: sha }), /takes no headSha/)
-  assert.deepEqual(ghArgs('o/r', 7, { action: 'merge', headSha: 'a'.repeat(40), base: 'main' }, 'a'.repeat(40)), ['api', '--method', 'PUT', 'repos/o/r/pulls/7/merge', '-f', 'merge_method=squash', '-f', `sha=${'a'.repeat(40)}`])
-  assert.deepEqual(ghArgs('o/r', 7, { action: 'markReady' }), ['pr', 'ready', '7', '--repo', 'o/r'])
-  assert.deepEqual(ghArgs('o/r', 7, { action: 'convertToDraft' }), ['pr', 'ready', '7', '--undo', '--repo', 'o/r'])
+  assert.throws(() => parseAction({ action: 'merge', repo: 'o/r', headSha: sha, base: 'main', method: 'rebase' }), /unknown field method/)
+  assert.throws(() => parseAction({ action: 'merge', repo: 'o/r', headSha: sha, base: 'main', reviewer: 'sam-tran' }), /takes no reviewer/)
+  // the confirmation's head and base are required, and the head must be a full SHA
+  assert.throws(() => parseAction({ action: 'merge', repo: 'o/r' }), /merge needs headSha/)
+  assert.throws(() => parseAction({ action: 'merge', repo: 'o/r', base: 'main' }), /merge needs headSha/)
+  assert.throws(() => parseAction({ action: 'merge', repo: 'o/r', headSha: sha }), /merge needs .*base/)
+  assert.throws(() => parseAction({ action: 'merge', repo: 'o/r', headSha: sha, base: '' }), /merge needs .*base/)
+  assert.throws(() => parseAction({ action: 'merge', repo: 'o/r', headSha: 'a'.repeat(7), base: 'main' }), /full 40-character/)
+  assert.throws(() => parseAction({ action: 'merge', repo: 'o/r', headSha: 'z'.repeat(40), base: 'main' }), /full 40-character/)
+  for (const action of ['markReady', 'convertToDraft']) {
+    assert.throws(() => parseAction({ action, repo: 'o/r', headSha: sha }), /takes no headSha/)
+    assert.throws(() => parseAction({ action, repo: 'o/r', base: 'main' }), /takes no base/)
+  }
+  assert.throws(() => parseAction({ action: 'requestReview', repo: 'o/r', reviewer: 'sam-tran', headSha: sha }), /takes no headSha/)
+  assert.deepEqual(ghArgs('o/r', 7, { action: 'merge', repo: 'o/r', headSha: 'a'.repeat(40), base: 'main' }, 'a'.repeat(40)), ['api', '--method', 'PUT', 'repos/o/r/pulls/7/merge', '-f', 'merge_method=squash', '-f', `sha=${'a'.repeat(40)}`])
+  assert.deepEqual(ghArgs('o/r', 7, { action: 'markReady', repo: 'o/r' }), ['pr', 'ready', '7', '--repo', 'o/r'])
+  assert.deepEqual(ghArgs('o/r', 7, { action: 'convertToDraft', repo: 'o/r' }), ['pr', 'ready', '7', '--undo', '--repo', 'o/r'])
 })
 
 test('the merge names the cached full head SHA, and the live PR is read once, with the verified token, before the write', async () => {
@@ -1008,6 +1019,89 @@ test('the other actions carry nothing to bind: a head SHA or base on them is ref
     // ready-to-convert, or a ready PR shown as a draft, is refused
     await refusedWithoutGh(h, 102, { action: 'markReady' }, 422, /not a draft/)
     await refusedWithoutGh(h, 103, { action: 'convertToDraft' }, 422, /already a draft/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// the confirmation displayed a repository; Settings can change it before the page's feed patch arrives, and #<n> in the new
+// repository is another PR, so every action names the repository and the server refuses one that is not in effect
+const other = 'other-org/other-repo'
+
+const stranger = async (h: Harness, repo: string): Promise<void> => {
+  const stored = await (await fetch(`${h.base}/api/config`)).json() as Config
+  const changed = await fetch(`${h.base}/api/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...stored, repo }),
+  })
+  assert.equal(changed.status, 200)
+}
+
+const actionBodies = async (): Promise<[number, Record<string, unknown>][]> => [
+  [102, { ...await mergeBody(102) }],
+  [103, { action: 'markReady' }],
+  [101, { action: 'convertToDraft' }],
+  [101, { action: 'requestReview', reviewer: 'sam-tran' }],
+]
+
+test('every action carrying a repository other than the one in effect is refused with 409, no gh call at all, and leaves nothing in flight', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    for (const [number, body] of await actionBodies()) {
+      const before = h.runner.calls.length
+      const refused = await act(h, number, { ...body, repo: other })
+      assert.equal(refused.status, 409, String(body.action))
+      assert.match(String(refused.body.error), new RegExp(`the repository is now ${scenario.repo}, not ${other}.*nothing was done`))
+      assert.equal(refused.body.done, undefined)
+      assert.equal(h.runner.calls.length, before, 'refused before any account lookup, live read, refresh or write')
+      // nothing is left in flight: the same action for the right repository goes through at once
+      const done = await act(h, number, body)
+      assert.equal(done.status, 200, `${String(body.action)}: ${JSON.stringify(done.body)}`)
+    }
+    assert.equal(writesOf(h.runner).length, 4, 'only the four matching requests wrote')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a repository switched in Settings after the confirmation opened refuses its action, and switching back lets the same request through', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    for (const [number, body] of await actionBodies()) {
+      await stranger(h, other)
+      const before = writesOf(h.runner).length
+      const refused = await act(h, number, body)
+      assert.equal(refused.status, 409, String(body.action))
+      assert.match(String(refused.body.error), new RegExp(`the repository is now ${other}, not ${scenario.repo}`))
+      assert.equal(writesOf(h.runner).length, before, 'nothing was written')
+      await stranger(h, scenario.repo)
+      assert.equal((await act(h, number, body)).status, 200, String(body.action))
+    }
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('an action without a repository is 400, with no gh call, and the matching repository is compared exactly', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    const before = h.runner.calls.length
+    for (const [number, body] of await actionBodies()) {
+      const missing = await fetch(`${h.base}/api/prs/${number}/actions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: h.base, 'X-Pit-View-Token': h.server.token },
+        body: JSON.stringify(body),
+      })
+      assert.equal(missing.status, 400, String(body.action))
+      assert.match(String((await missing.json() as Record<string, unknown>).error), /needs repo/)
+      assert.equal((await act(h, number, { ...body, repo: 7 })).status, 400)
+      assert.equal((await act(h, number, { ...body, repo: '' })).status, 400)
+    }
+    assert.equal(h.runner.calls.length, before)
   } finally {
     await h.cleanup()
   }
