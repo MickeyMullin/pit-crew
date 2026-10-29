@@ -1130,6 +1130,12 @@ Each milestone is sized for one focused session or subagent. Check items off as 
 - [ ] P4.9 Report storage: design and refine the direction in section 10, Report storage, with the owner (the `reports` table, the retention rule, reading the viewer's posted reviews and comments from GitHub, ingest from `--emit-json`, importing from `reportsDir` during the transition), then move self-review detection and the duplicate-run guard to the database; pit-crew's prompts keep writing their files unchanged unless the owner decides otherwise. Needs P2.2; not v1 work
 - [ ] Investigate the caching items in section 7, only if polling becomes a problem
 
+### Backlog
+
+Ideas the owner has asked for that are not yet milestones. Each becomes one, with a design pass first, when it is scheduled.
+
+- [ ] Relevancy, a new agentic task for the viewer's own PRs: check the PR against the current base branch (`main` or `master`) and report whether it is still necessary and whether it needs any updates. Needs a pit-crew command of its own with `--emit-json` and a result schema, like `fix-pr`, and a start kind in the drawer. To settle in its design pass: whether it only reports or may also fix (and if so how it relates to `fix-pr` and to rebasing), what "still necessary" is judged against (the base's history since the PR's merge base, other merged PRs, linked tickets), and what the Agent cell and drawer show for each verdict
+
 ## 13. Resuming work
 
 1. Read this file, especially sections 3, 4, 5 and 12.
