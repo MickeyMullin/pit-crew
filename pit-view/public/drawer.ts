@@ -6,6 +6,8 @@
 // confirmation's state, and moves focus
 import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
+import { actionDoneText, actionHolds, actionRefusalText, actionRequest } from './actionsview.ts'
+import type { ActionConfirmModel, ActionKind, PersonChoice } from './actionsview.ts'
 import { refusalText, startRequest, stopRequest } from './agent.ts'
 import type { AgentCell, RunView, StartKind } from './agent.ts'
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
@@ -81,6 +83,12 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   // a start or stop request is on its way
   let busy = false
   let error = ''
+  // the people the config lists, read when a review request is first asked in this drawer's life
+  let people: PersonChoice[] | null = null
+  // what the last direct action did, shown under the buttons until the next ask or another PR
+  let actionNote = ''
+  // a direct action that could not even be asked (the people could not be read)
+  let actionFail = ''
   // the control to give focus back to when a confirmation is canceled
   let confirmFrom: string | null = null
   // a stop was accepted and the run has not settled yet; and whether to show the session then
@@ -188,12 +196,38 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       confirmActions(stop.confirm, 'danger', () => void doStop()))
   }
 
+  const actionConfirmBlock = (ask: ActionConfirmModel): HTMLElement => {
+    const picker = ask.reviewers === null ? null : h('select', { id: 'drawer-reviewer', class: 'confirm-select', 'data-focus-key': 'action-reviewer', disabled: ask.reviewers.length === 0 },
+      ask.reviewers.map((choice) => h('option', { value: choice.login, selected: choice.login === ask.reviewer }, choice.label)))
+    picker?.addEventListener('change', () => {
+      if (confirm?.type !== 'action') return
+      confirm = { ...confirm, reviewer: picker.value }
+      paintConfirm()
+    })
+    const list = facts([
+      ...(picker === null ? [] : [['Reviewer', picker] as [string, Node]]),
+      ['On GitHub', h('span', { 'data-confirm': 'effect' }, ask.effect)],
+    ])
+    if (picker !== null) list.querySelector('dt')?.setAttribute('id', 'drawer-reviewer-term')
+    picker?.setAttribute('aria-labelledby', 'drawer-reviewer-term')
+    return h('div', { class: 'confirm', role: 'group', 'aria-labelledby': 'drawer-confirm-heading' },
+      h('h4', { id: 'drawer-confirm-heading', class: 'confirm-heading' }, ask.heading),
+      h('p', { class: 'confirm-title' }, ask.title),
+      list,
+      errorLine(),
+      confirmActions(ask.confirm, 'primary', () => void doAction()))
+  }
+
   // the parts of the confirmation that change without a rebuild: the command for the chosen
   // runner, the error line and the buttons while a request is on its way
   const paintConfirm = (): void => {
     const model = current()
     const command = root.querySelector<HTMLElement>('[data-confirm="command"]')
     if (command !== null && model?.confirm != null) setText(command, model.confirm.command)
+    const effect = root.querySelector<HTMLElement>('[data-confirm="effect"]')
+    if (effect !== null && model?.actionAsk != null) setText(effect, model.actionAsk.effect)
+    const picker = root.querySelector<HTMLSelectElement>('#drawer-reviewer')
+    if (picker !== null && model?.actionAsk != null && picker.value !== model.actionAsk.reviewer) picker.value = model.actionAsk.reviewer
     for (const input of root.querySelectorAll<HTMLInputElement>('input[name="drawer-runner"]')) {
       const wanted = confirm?.type === 'start' && confirm.runner === input.value
       if (input.checked !== wanted) input.checked = wanted
@@ -202,11 +236,16 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     if (line !== null) setText(line, error)
     const cancel = byKey('confirm-cancel')
     const go = byKey('confirm-go') as HTMLButtonElement | null
+    if (picker !== null) picker.disabled = busy || (model?.actionAsk?.reviewers?.length ?? 0) === 0
     if (cancel !== null) (cancel as HTMLButtonElement).disabled = busy
     if (go !== null) {
       go.disabled = busy
-      const idleText = confirm?.type === 'stop' ? (model?.stop?.confirm ?? 'Stop run') : (model?.confirm?.confirm ?? 'Start')
-      const busyText = confirm?.type === 'stop' ? (model?.stop?.busy ?? 'Stopping…') : (model?.confirm?.busy ?? 'Starting…')
+      const idleText = confirm?.type === 'stop' ? (model?.stop?.confirm ?? 'Stop run')
+        : confirm?.type === 'action' ? (model?.actionAsk?.confirm ?? 'Confirm')
+          : (model?.confirm?.confirm ?? 'Start')
+      const busyText = confirm?.type === 'stop' ? (model?.stop?.busy ?? 'Stopping…')
+        : confirm?.type === 'action' ? (model?.actionAsk?.busy ?? 'Working…')
+          : (model?.confirm?.busy ?? 'Starting…')
       setText(go, busy ? busyText : idleText)
     }
   }
@@ -221,6 +260,60 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     error = ''
     render()
     byKey('confirm-cancel')?.focus({ preventScroll: true })
+  }
+
+  // a direct action: one click opens the confirmation, naming the PR and the action; nothing is
+  // sent until its own button is clicked. A review request first reads the people it chooses from
+  const askAction = async (action: ActionKind): Promise<void> => {
+    const n = number
+    if (n === null || options.rowOf(n) === undefined) return
+    actionNote = ''
+    actionFail = ''
+    if (action === 'requestReview' && people === null) {
+      const answer = await getJson<{ people?: PersonChoice[] }>('/api/config')
+      if (n !== number) return
+      if (!answer.ok || !Array.isArray(answer.value?.people)) {
+        actionFail = 'Could not read the people list to choose a reviewer from. Try again.'
+        render()
+        return
+      }
+      people = answer.value.people.map((person) => ({ login: person.login, alias: person.alias }))
+    }
+    confirm = { type: 'action', action, reviewer: '' }
+    confirmFrom = `action:${action}`
+    error = ''
+    render()
+    byKey('confirm-cancel')?.focus({ preventScroll: true })
+  }
+
+  const doAction = async (): Promise<void> => {
+    if (busy || confirm?.type !== 'action' || number === null) return
+    const asked = confirm
+    const n = number
+    // the reviewer shown is the one sent: a stale choice falls back to the first listed
+    const ask = current()?.actionAsk
+    const sent = { ...asked, reviewer: asked.action === 'requestReview' ? ask?.reviewer ?? '' : '' }
+    if (asked.action === 'requestReview' && sent.reviewer === '') return
+    busy = true
+    error = ''
+    paintConfirm()
+    const request = actionRequest(n, sent, options.token)
+    const answer = await sendRun(request)
+    busy = false
+    if (n !== number) return
+    if (answer.ok) {
+      confirm = null
+      confirmFrom = null
+      error = ''
+      actionNote = actionDoneText(n, sent, people ?? [])
+      options.say(actionNote)
+      render()
+      focusKey(`action:${asked.action}`)
+      return
+    }
+    error = actionRefusalText(answer.status, answer.error)
+    paintConfirm()
+    byKey('confirm-go')?.focus({ preventScroll: true })
   }
 
   const askStop = (andOpen: boolean): void => {
@@ -345,6 +438,26 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
         model.starts.shared === null ? null : h('p', { class: 'drawer-reason' }, model.starts.shared))
     },
   })
+
+  const actionsPart = (model: DrawerModel): Part | null => {
+    if (model.actions.length === 0) return null
+    return {
+      key: 'actions',
+      sig: JSON.stringify([model.actions, model.actionAsk === null ? null : { ...model.actionAsk, reviewer: '', effect: '' }, actionNote, actionFail]),
+      build: () => {
+        if (model.actionAsk !== null) return section('actions', 'Actions', actionConfirmBlock(model.actionAsk))
+        return section('actions', 'Actions',
+          h('div', { class: 'drawer-starts' }, model.actions.map((offer) => {
+            const button = h('button', { type: 'button', class: 'button', 'data-focus-key': `action:${offer.action}` }, offer.text)
+            button.addEventListener('click', () => void askAction(offer.action))
+            return h('div', { class: 'drawer-start' }, button)
+          })),
+          h('p', { class: 'drawer-reason' }, 'Each one asks for your confirmation first and acts on GitHub under your account.'),
+          actionNote === '' ? null : h('p', { class: 'drawer-reason', role: 'status' }, actionNote),
+          actionFail === '' ? null : h('p', { class: 'confirm-error', role: 'alert' }, actionFail))
+      },
+    }
+  }
 
   const goneNote = (text: string): Part => ({
     key: 'gone',
@@ -535,7 +648,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   const current = (): DrawerModel | null => {
     if (number === null || last === null) return null
     const cell = latest()
-    return drawerModel({ row: cell === last.agent ? last : { ...last, agent: cell }, open: options.rowOf(number) !== undefined, runs, reports, confirm })
+    return drawerModel({ row: cell === last.agent ? last : { ...last, agent: cell }, open: options.rowOf(number) !== undefined, runs, reports, confirm, people: people ?? [] })
   }
 
   const render = (): void => {
@@ -558,6 +671,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     const items: (Part | Keyed)[] = []
     if (model.gone !== null) items.push(goneNote(model.gone))
     items.push(startPart(model))
+    const actions = actionsPart(model)
+    if (actions !== null) items.push(actions)
     if (model.card === 'running') items.push(runningCard(model, row))
     else if (model.card === 'waiting') items.push(waitingCard(model, number))
     else if (model.card === 'result') items.push(resultCard(model, number))
@@ -640,7 +755,12 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   // is dropped, so a later Escape is not swallowed and a later run shows nothing nobody asked for
   const dropStaleConfirm = (): void => {
     if (confirm === null || busy) return
-    if (confirmHolds(confirm, latest(), options.rowOf(number ?? 0) !== undefined)) return
+    const live = number === null ? undefined : options.rowOf(number)
+    if (confirm.type === 'action') {
+      if (last !== null && actionHolds(confirm, last, live !== undefined)) return
+    } else if (confirmHolds(confirm, latest(), live !== undefined)) {
+      return
+    }
     confirm = null
     confirmFrom = null
     error = ''
@@ -693,6 +813,9 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       confirmFrom = null
       busy = false
       error = ''
+      actionNote = ''
+      actionFail = ''
+      people = null
       stopping = null
       openAfterStop = false
       seen = { runs: '', reports: '', gone: false }
@@ -715,6 +838,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     last = null
     confirm = null
     busy = false
+    actionNote = ''
+    actionFail = ''
     stopping = null
     openAfterStop = false
     clearTimeout(poll)
