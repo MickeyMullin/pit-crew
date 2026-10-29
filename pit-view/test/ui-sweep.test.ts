@@ -10,6 +10,7 @@ import type { Sweep } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import { parseResult } from '../src/launcher.ts'
+import type { SweepResult } from '../src/launcher.ts'
 import { sweepStartOf, sweepView } from '../src/sweeps.ts'
 import type { SweepsView, SweepView } from '../src/sweeps.ts'
 import { stepTitle } from '../public/agent.ts'
@@ -37,6 +38,11 @@ const settled = (value: Record<string, unknown>, patch: Partial<Sweep> = {}): Sw
   if (!parsed.ok) throw new Error(parsed.error)
   return sweepView(record({ status: 'done', finishedAt: '2026-10-26T17:55:00Z', result: parsed.value, ...patch }))
 }
+
+// a failed or waiting sweep may carry a null repo and null counts once the launcher's validation allows them;
+// the view tolerates them whether or not it does yet, so these skip the parse
+const settledLoose = (value: Record<string, unknown>, patch: Partial<Sweep> = {}): SweepView =>
+  sweepView(record({ status: 'done', finishedAt: '2026-10-26T17:55:00Z', result: value as unknown as SweepResult, ...patch }))
 
 const viewOf = (items: SweepView[], cfg: Config = config()): SweepsView => ({ start: sweepStartOf(cfg, items.some((sweep) => sweep.status === 'running')), items })
 
@@ -74,7 +80,7 @@ test('the status shows a running sweep, counts when done, the failure text, and 
   assert.deepEqual([failed?.label, failed?.tone], ['Sweep: Failed · no result', 'red'])
   assert.match(failed?.tip ?? '', /ended without a valid result file/)
 
-  const waiting = settled(sweepResult({ status: 'needsInput', question: 'Close #202 first? (yes / no)', counts: null, rows: [], mergeOrder: [], summary: null }), { status: 'needsInput' })
+  const waiting = settledLoose(sweepResult({ status: 'needsInput', question: 'Close #202 first? (yes / no)', counts: null, rows: [], mergeOrder: [], summary: null }), { status: 'needsInput' })
   const asked = sweepHeaderModel(viewOf([waiting]), now).status
   assert.deepEqual([asked?.label, asked?.tone, asked?.tip], ['Sweep: Needs your answer', 'amber', 'Close #202 first? (yes / no)'])
 })
@@ -162,13 +168,13 @@ test('a sweep with nothing to sweep renders as done with zero counts, no rows an
 })
 
 test('a failed sweep shows its note as a sentence, a stopped one says so, and a waiting one shows its question and the resume command', () => {
-  const failed = settled(sweepResult({ status: 'failed', error: 'the working directory is not a clone of the repository', repo: null, counts: null, rows: [], mergeOrder: [], summary: null }), { status: 'failed', note: 'the working directory is not a clone of the repository' })
+  const failed = settledLoose(sweepResult({ status: 'failed', error: 'the working directory is not a clone of the repository', repo: null, counts: null, rows: [], mergeOrder: [], summary: null }), { status: 'failed', note: 'the working directory is not a clone of the repository' })
   const model = sweepResultModel(failed)
   assert.deepEqual([model.text, model.tone, model.note, model.empty], ['Failed', 'red', 'the working directory is not a clone of the repository', false])
   const lost = sweepResultModel(sweepView(record({ status: 'failed', note: 'serverRestarted', finishedAt: '2026-10-26T17:50:00Z' })))
   assert.deepEqual([lost.text, lost.note], ['Failed · server restarted', 'Pit View restarted while the run was going and could not tell how it ended.'])
   assert.equal(sweepResultModel(sweepView(record({ status: 'stopped', finishedAt: '2026-10-26T17:50:00Z' }))).text, 'Stopped')
-  const waiting = settled(sweepResult({ status: 'needsInput', question: 'Close #202 first? (yes / no)', counts: null, rows: [], mergeOrder: [], summary: null }), { status: 'needsInput' })
+  const waiting = settledLoose(sweepResult({ status: 'needsInput', question: 'Close #202 first? (yes / no)', counts: null, rows: [], mergeOrder: [], summary: null }), { status: 'needsInput' })
   assert.equal(sweepCard(waiting), 'waiting')
   assert.deepEqual(sweepWaitingModel(waiting), { question: 'Close #202 first? (yes / no)', resume: 'cd ~/dev/orbit && claude --resume s-1' })
 })

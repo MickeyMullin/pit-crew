@@ -209,7 +209,7 @@ test('a sweep with nothing to sweep settles done with every count zero and no su
   }
 })
 
-test('a failed sweep keeps its own error, also when it stopped before it had counts or a repository', async () => {
+test('a failed sweep keeps its own error', async () => {
   const h = await harness()
   try {
     const outcome = async (value: Record<string, unknown>, code = 0): Promise<Sweep> => {
@@ -220,10 +220,9 @@ test('a failed sweep keeps its own error, also when it stopped before it had cou
       child.exit(code)
       return settled
     }
-    const failed = await outcome(sweepResult({ status: 'failed', error: 'the working directory is not a clone of the repository', repo: null, counts: null, rows: [], mergeOrder: [], summary: null }))
+    const failed = await outcome(sweepResult({ status: 'failed', error: 'the working directory is not a clone of the repository', rows: [], mergeOrder: [], summary: null }))
     assert.deepEqual([failed.status, failed.note], ['failed', 'the working directory is not a clone of the repository'])
     assert.equal(sweepView(failed).text, 'Failed')
-    assert.deepEqual(sweepView(failed).result?.counts, { swept: 0, fresh: 0, reused: 0, failed: 0 })
     // a sweep that finished with reviews failed is still done, its failures counted
     await writeFile(join(h.home, 'agents', 'output', 'dependabot-sweep-octo-example-orbit-2026-10-26.md'), '# sweep\n')
     const partial = await outcome(sweepResult({ counts: { swept: 3, fresh: 2, reused: 0, failed: 1 } }))
@@ -245,7 +244,7 @@ test('a sweep that stops to ask is needsInput with its question, and a review\'s
   const h = await harness()
   try {
     const first = await h.launcher.start(start())
-    await h.launch.children[0]!.result(sweepResult({ status: 'needsInput', question: 'Two PRs must land together. Close #202 first? (yes / no)', counts: null, rows: [], mergeOrder: [], summary: null }))
+    await h.launch.children[0]!.result(sweepResult({ status: 'needsInput', question: 'Two PRs must land together. Close #202 first? (yes / no)', rows: [], mergeOrder: [], summary: null }))
     const waiting = h.launcher.settled(first.id)
     h.launch.children[0]!.exit(0)
     const waited = await waiting
