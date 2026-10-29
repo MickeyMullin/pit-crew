@@ -27,25 +27,26 @@ export type NotifyEvent = { kind: NotificationKind, number: number, title: strin
 
 const rowKinds = ['changesRequested', 'readyToMerge', 'reviewRequested', 'ciFailing'] as const
 
-// the events for one row going from `before` (null: not in the previous state) to `after`; a
-// row marked stale reports nothing, since its state was not confirmed
+// the events for one row going from `before` to `after`; a row with no previous state (null) has
+// no transition and reports nothing, and a row marked stale reports nothing, since its state was
+// not confirmed
 export const rowEvents = (repo: string, before: RowState | null, after: OpenRow): NotifyEvent[] => {
-  if (after.freshness.state === 'stale') return []
+  if (before === null || after.freshness.state === 'stale') return []
   const now = rowState(after)
-  const was = before ?? noRowState
-  return rowKinds.filter((kind) => now[kind] && !was[kind]).map((kind) => ({ kind, number: after.number, title: after.title, repo }))
+  return rowKinds.filter((kind) => now[kind] && !before[kind]).map((kind) => ({ kind, number: after.number, title: after.title, repo }))
 }
 
-// the previous states of a repo's rows, advanced as transitions are compared; null until the
-// first comparison has a baseline to compare against
+// the previous states of a repo's rows, advanced as transitions are compared; `firstLoad` holds
+// until a nonempty baseline has been recorded
 export type RowBaseline = { repo: string, rows: Map<number, RowState>, firstLoad: boolean }
 
 export const baselineOf = (repo: string, rows: readonly OpenRow[], loaded: boolean): RowBaseline =>
   ({ repo, rows: new Map(rows.map((row) => [row.number, rowState(row)])), firstLoad: !loaded || rows.length === 0 })
 
 // compares the baseline with the rows now (or with one row, when `only` is a PR number),
-// advancing the baseline. Nothing fires while the baseline is the first load. A stale row
-// neither fires nor moves its baseline.
+// advancing the baseline. Nothing fires while the baseline is the first load, which ends with
+// the first comparison that finds open rows. A stale row neither fires nor moves its baseline.
+// A row with no previous state is recorded and fires nothing.
 export const compareRows = (baseline: RowBaseline, rows: ReadonlyMap<number, OpenRow>, only?: number): NotifyEvent[] => {
   const silent = baseline.firstLoad
   // a single row cannot settle the first load: the cycle that finishes it does
@@ -62,15 +63,17 @@ export const compareRows = (baseline: RowBaseline, rows: ReadonlyMap<number, Ope
     if (!silent) events.push(...rowEvents(baseline.repo, baseline.rows.get(number) ?? null, row))
     baseline.rows.set(number, rowState(row))
   }
-  if (only === undefined) baseline.firstLoad = false
+  if (only === undefined && rows.size > 0) baseline.firstLoad = false
   return events
 }
 
 // the review-session kinds: a run's status as last seen, by PR, and what a new status fires
 export type RunSeen = { runId: number, status: string }
 
+// a run settles once it was running, or once it is first seen already settled (its start failed
+// before it ever ran); a stopped run fires nothing, and a run already settled fires nothing again
 export const runEvent = (repo: string, row: { number: number, title: string }, before: RunSeen | undefined, after: RunSeen): NotifyEvent | null => {
-  if (before === undefined || before.runId !== after.runId || before.status !== 'running') return null
+  if (before !== undefined && before.runId === after.runId && before.status !== 'running') return null
   const base = { number: row.number, title: row.title, repo }
   if (after.status === 'done' || after.status === 'failed') return { ...base, kind: 'runFinished' }
   if (after.status === 'needsInput') return { ...base, kind: 'runNeedsInput' }

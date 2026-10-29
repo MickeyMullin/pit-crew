@@ -4,10 +4,11 @@ import { test } from 'node:test'
 import { openCache } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
+import type { OtherRow } from '../src/derive.ts'
 import { createGh } from '../src/github.ts'
 import type { RawOpenPr, RawOpenResponse } from '../src/github.ts'
 import {
-  appleScript, createNotifier, noticeOf, notificationKinds, osascriptArgs, rowEvents, rowState, runEvent, systemDeliver,
+  appleScript, baselineOf, compareRows, createNotifier, noticeOf, notificationKinds, osascriptArgs, noRowState, rowEvents, rowState, runEvent, systemDeliver,
 } from '../src/notify.ts'
 import type { Exec, Notice, NotifyEvent } from '../src/notify.ts'
 import { createPoller } from '../src/poller.ts'
@@ -174,14 +175,62 @@ test('a one-PR refresh during the first load fires nothing', async () => {
   poller.stop()
 })
 
+test('a PR with no previous state has no transition, and later changes to it fire', async () => {
+  const { poller } = await harness()
+  poller.refresh('manual')
+  await poller.idle()
+  const view = await poller.view()
+  const rows = new Map([...view.mine.groups, ...view.others.groups].flatMap((group) => group.rows.map((row) => [row.number, row] as const)))
+  const requested = rows.get(109)! as OtherRow
+  const others = [...rows.values()].filter((row) => row.number !== 109)
+  const baseline = baselineOf(scenario.repo, others, true)
+  // 109 already requests a review but has no previous state: nothing fires, and its state is recorded
+  assert.deepEqual(compareRows(baseline, rows), [])
+  assert.deepEqual(compareRows(baseline, rows), [])
+  const cleared = { ...requested, flags: requested.flags.filter((flag) => flag.kind !== 'requestedOfYou') }
+  assert.deepEqual(compareRows(baseline, new Map([...rows, [109, cleared]])), [])
+  assert.deepEqual(only(compareRows(baseline, rows)), [['reviewRequested', 109]])
+  poller.stop()
+})
+
+test('an empty baseline stays silent until a nonempty one has been recorded', async () => {
+  const { poller } = await harness()
+  poller.refresh('manual')
+  await poller.idle()
+  const view = await poller.view()
+  const rows = new Map([...view.mine.groups, ...view.others.groups].flatMap((group) => group.rows.map((row) => [row.number, row] as const)))
+  const baseline = baselineOf(scenario.repo, [], true)
+  assert.deepEqual(compareRows(baseline, new Map()), [])
+  assert.deepEqual(compareRows(baseline, new Map()), [])
+  // the first nonempty cycle is the baseline, and fires nothing
+  assert.deepEqual(compareRows(baseline, rows), [])
+  const requested = rows.get(113)! as OtherRow
+  const asked = { ...requested, flags: [{ kind: 'requestedOfYou' as const, label: 'Requested of you' }] }
+  assert.deepEqual(only(compareRows(baseline, new Map([...rows, [113, asked]]))), [['reviewRequested', 113]])
+  poller.stop()
+})
+
+test('the delivery script is the constant on run argv handler and only displays a notification', () => {
+  assert.deepEqual(appleScript, [
+    'on run argv',
+    'display notification (item 3 of argv) with title (item 1 of argv) subtitle (item 2 of argv)',
+    'end run',
+  ])
+  const script = appleScript.join('\n')
+  assert.equal((script.match(/display notification/g) ?? []).length, 1)
+  for (const word of ['open location', 'activate', 'URL', 'click', 'button', 'do shell script', 'tell ']) assert.equal(script.includes(word), false, word)
+  // only title, subtitle and body reach it, and no more, whatever the notice holds
+  assert.equal(osascriptArgs(noticeOf(event('ciFailing'))).length, appleScript.length * 2 + 3)
+})
+
 test('a row marked stale reports nothing', async () => {
   const { poller } = await harness()
   poller.refresh('manual')
   await poller.idle()
   const view = await poller.view()
   const row = [...view.others.groups.flatMap((group) => group.rows)].find((candidate) => candidate.number === 109)!
-  assert.deepEqual(only(rowEvents(scenario.repo, null, row)), [['reviewRequested', 109]])
-  assert.deepEqual(rowEvents(scenario.repo, null, { ...row, freshness: { ...row.freshness, state: 'stale' } }), [])
+  assert.deepEqual(only(rowEvents(scenario.repo, noRowState, row)), [['reviewRequested', 109]])
+  assert.deepEqual(rowEvents(scenario.repo, noRowState, { ...row, freshness: { ...row.freshness, state: 'stale' } }), [])
   assert.deepEqual(rowEvents(scenario.repo, rowState(row), row), [])
   poller.stop()
 })
@@ -204,6 +253,22 @@ test('review session kinds fire when a run that was running settles, and only th
   poller.stop()
 })
 
+test('a run whose start fails before it is ever running still fires runFinished once', async () => {
+  const { cycle, poller, cache, events } = await harness()
+  await cycle()
+  const run = cache.createRun({
+    repo: scenario.repo, number: 106, command: 'review-pr', args: ['106'], label: 'Review', runner: 'claude', cwd: '~/dev/orbit',
+    sessionId: null, pid: null, pidStartedAt: null, startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null,
+    finishedAt: null, status: 'running', result: null, note: null, costUsd: null, resume: null,
+  }, (id) => `~/runs/${id}`)
+  cache.updateRun(run.id, { status: 'failed', finishedAt: '2026-10-26T14:00:01Z', note: 'spawnFailed: no such file' })
+  poller.runChanged(scenario.repo, 106)
+  assert.deepEqual(only(events), [['runFinished', 106]])
+  poller.runChanged(scenario.repo, 106)
+  assert.equal(events.length, 1)
+  poller.stop()
+})
+
 test('runEvent needs a running run of the same id to settle', () => {
   const running = { runId: 3, status: 'running' }
   const row = { number: 106, title: 'Fix the thing' }
@@ -212,8 +277,11 @@ test('runEvent needs a running run of the same id to settle', () => {
   assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'needsInput' })?.kind, 'runNeedsInput')
   assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'stopped' }), null)
   assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'running' }), null)
-  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'done' }), null)
-  assert.equal(runEvent(scenario.repo, row, running, { runId: 4, status: 'done' }), null)
+  // a run never seen running (its start failed first) still reports how it settled, once
+  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'failed' })?.kind, 'runFinished')
+  assert.equal(runEvent(scenario.repo, row, running, { runId: 4, status: 'failed' })?.kind, 'runFinished')
+  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'stopped' }), null)
+  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'running' }), null)
   assert.equal(runEvent(scenario.repo, row, { runId: 3, status: 'done' }, { runId: 3, status: 'done' }), null)
 })
 
