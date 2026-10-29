@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   closedPrsQuery, closedSearchQuery, commandRunner, createGh, fetchClosedPrs, fetchOpenPrs, fetchViewerLogin,
-  GhError, openPrsQuery, searchTime,
+  GhError, openPrsQuery, searchTime, singlePrQuery,
 } from '../src/github.ts'
 import type { OpenPage, RawClosedResponse, RawOpenPr, RawOpenResponse } from '../src/github.ts'
 import { closedCases, openCases, scenario } from './fixtures/scenario.ts'
@@ -239,6 +239,13 @@ test('the queries name the operations the fixtures are keyed by', () => {
   assert.match(openPrsQuery, /^query OpenPullRequests\(/)
   assert.match(openPrsQuery, /orderBy: \{ field: UPDATED_AT, direction: DESC \}/)
   assert.match(closedPrsQuery, /^query ClosedPullRequests\(/)
+})
+
+test('the open list and the one-PR refresh both ask for the reviews a re-request leaves out of latestReviews', () => {
+  for (const query of [openPrsQuery, singlePrQuery]) {
+    assert.match(query, /latestReviews\(first: 50\) \{ nodes \{ author \{ login \} state submittedAt commit \{ oid \} \} \}/)
+    assert.match(query, /latestOpinionatedReviews\(first: 50\) \{ nodes \{ author \{ login \} state submittedAt commit \{ oid \} \} \}/)
+  }
 })
 
 test('commandRunner reports exit code, stdout, stderr and extra env', async () => {

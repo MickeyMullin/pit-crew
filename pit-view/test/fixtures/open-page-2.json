@@ -51,6 +51,9 @@
             "latestReviews": {
               "nodes": []
             },
+            "latestOpinionatedReviews": {
+              "nodes": []
+            },
             "headCommit": {
               "nodes": [
                 {
@@ -164,6 +167,9 @@
               ]
             },
             "latestReviews": {
+              "nodes": []
+            },
+            "latestOpinionatedReviews": {
               "nodes": []
             },
             "headCommit": {
@@ -294,6 +300,20 @@
               "nodes": []
             },
             "latestReviews": {
+              "nodes": [
+                {
+                  "author": {
+                    "login": "sam-tran"
+                  },
+                  "state": "APPROVED",
+                  "submittedAt": "2026-10-24T14:00:00Z",
+                  "commit": {
+                    "oid": "cb052a45c5bb6c37966f27946d99d1b44aa7671a"
+                  }
+                }
+              ]
+            },
+            "latestOpinionatedReviews": {
               "nodes": [
                 {
                   "author": {
@@ -457,6 +477,9 @@
                 }
               ]
             },
+            "latestOpinionatedReviews": {
+              "nodes": []
+            },
             "headCommit": {
               "nodes": [
                 {
@@ -585,6 +608,9 @@
             "latestReviews": {
               "nodes": []
             },
+            "latestOpinionatedReviews": {
+              "nodes": []
+            },
             "headCommit": {
               "nodes": [
                 {
@@ -702,6 +728,9 @@
             "latestReviews": {
               "nodes": []
             },
+            "latestOpinionatedReviews": {
+              "nodes": []
+            },
             "headCommit": {
               "nodes": [
                 {
@@ -803,6 +832,9 @@
               "nodes": []
             },
             "latestReviews": {
+              "nodes": []
+            },
+            "latestOpinionatedReviews": {
               "nodes": []
             },
             "headCommit": {
@@ -929,6 +961,20 @@
               ]
             },
             "latestReviews": {
+              "nodes": [
+                {
+                  "author": {
+                    "login": "alex-mendez"
+                  },
+                  "state": "APPROVED",
+                  "submittedAt": "2026-10-23T16:00:00Z",
+                  "commit": {
+                    "oid": "982d87fd2ab7a5f3578f4f2753a628c722543a36"
+                  }
+                }
+              ]
+            },
+            "latestOpinionatedReviews": {
               "nodes": [
                 {
                   "author": {
@@ -1122,6 +1168,9 @@
               ]
             },
             "latestReviews": {
+              "nodes": []
+            },
+            "latestOpinionatedReviews": {
               "nodes": []
             },
             "headCommit": {

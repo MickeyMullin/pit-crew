@@ -212,9 +212,31 @@ const reviewStates: Partial<Record<RawReview['state'], ReviewerState>> = {
 
 const reviewerLogin = (reviewer: RawReviewer): string => reviewer.__typename === 'Team' ? reviewer.name : reviewer.login
 
+const reviewTime = (review: RawReview): number => {
+  const time = Date.parse(review.submittedAt ?? '')
+  return Number.isNaN(time) ? Number.NEGATIVE_INFINITY : time
+}
+
+// one review per reviewer, the newest across latestReviews and latestOpinionatedReviews. GitHub drops a
+// reviewer from latestReviews once a review is re-requested of them, but latestOpinionatedReviews keeps
+// their approval or change request, so reading latestReviews alone loses what the reviewer decided. On a
+// tie the review from latestReviews wins, so it stays the one GitHub reports for the reviewer. A review
+// with no author cannot be matched to a reviewer; it counts once, when both lists hold the same one.
+export const latestReviewsOf = (pr: RawOpenPr): RawReview[] => {
+  const newest = new Map<string, RawReview>()
+  for (const review of [...pr.latestReviews.nodes, ...pr.latestOpinionatedReviews.nodes]) {
+    const key = review.author === null
+      ? `ghost:${review.state}:${review.submittedAt}:${review.commit?.oid ?? ''}`
+      : review.author.login.toLowerCase()
+    const seen = newest.get(key)
+    if (seen === undefined || reviewTime(review) > reviewTime(seen)) newest.set(key, review)
+  }
+  return [...newest.values()]
+}
+
 // reviews by anyone but the author, with a state that counts (not dismissed or pending)
 const countedReviews = (pr: RawOpenPr): RawReview[] =>
-  pr.latestReviews.nodes.filter((review) =>
+  latestReviewsOf(pr).filter((review) =>
     review.author !== null && !same(review.author.login, pr.author?.login) && reviewStates[review.state] !== undefined)
 
 // latest review per reviewer, then pending requests; a re-requested reviewer shows as requested
@@ -246,7 +268,7 @@ export const reviewerPips = (pr: RawOpenPr, config: Config): Reviewer[] => {
 // flags (Others' only)
 
 export const viewerReview = (pr: RawOpenPr, config: Config): RawReview | undefined =>
-  pr.latestReviews.nodes.find((review) => same(review.author?.login, config.viewer) && review.state !== 'PENDING')
+  latestReviewsOf(pr).find((review) => same(review.author?.login, config.viewer) && review.state !== 'PENDING')
 
 // a user, not a team, with a pending review request
 const isRequestedOf = (pr: RawOpenPr, login: string | undefined): boolean =>
@@ -335,7 +357,7 @@ export const deriveMerge = (pr: RawOpenPr, issues: readonly Issue[]): MergeState
 // changes requested
 
 const latestChangesRequest = (pr: RawOpenPr): RawReview | undefined =>
-  pr.latestReviews.nodes
+  latestReviewsOf(pr)
     .filter((review) => review.state === 'CHANGES_REQUESTED')
     .sort((a, b) => Date.parse(b.submittedAt ?? '') - Date.parse(a.submittedAt ?? ''))[0]
 

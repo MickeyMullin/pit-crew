@@ -144,6 +144,9 @@ export type RawOpenPr = {
   body: string
   reviewRequests: { nodes: RawReviewRequest[] }
   latestReviews: { nodes: RawReview[] }
+  // the newest approving or change-requesting review per reviewer; GitHub keeps it when a re-request
+  // drops the reviewer from latestReviews, so rules read both through derive.ts's latestReviewsOf
+  latestOpinionatedReviews: { nodes: RawReview[] }
   // commits(last: 1): the head commit and its checks
   headCommit: { nodes: RawHeadCommit[] }
   // commits(last: 30), oldest first: counts pushes since a review
@@ -283,6 +286,7 @@ mergeable mergeStateStatus reviewDecision
 body
 reviewRequests(first: 50) { nodes { requestedReviewer { ${reviewerFields} } } }
 latestReviews(first: 50) { nodes { author { login } state submittedAt commit { oid } } }
+latestOpinionatedReviews(first: 50) { nodes { author { login } state submittedAt commit { oid } } }
 headCommit: commits(last: 1) {
   nodes {
     commit {

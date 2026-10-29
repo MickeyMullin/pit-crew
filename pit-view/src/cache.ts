@@ -9,8 +9,10 @@ import type { RunResultJson, StepSlot } from './launcher.ts'
 
 // bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since
 // they hold nothing GitHub cannot give back. runs is the exception: it survives a rebuild, and a
-// change to its columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE)
-export const schemaVersion = 5
+// change to its columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE).
+// Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks
+// the field, and the rebuild empties prs so no such row is derived
+export const schemaVersion = 6
 
 export class CacheError extends Error {
   override name = 'CacheError'

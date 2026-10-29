@@ -17,7 +17,7 @@ import { cacheFile, ConfigError, configFile, expandHome, readConfig, runnerNames
 import type { Clock, Config, RunnerName } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner } from './github.ts'
-import { deriveStacks } from './derive.ts'
+import { deriveStacks, latestReviewsOf } from './derive.ts'
 import { createLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Spawn, StartKind } from './launcher.ts'
 import { renderMarkdown } from './markdown.ts'
@@ -552,7 +552,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     const cached = cache.readView(config.repo)
     for (const { pr } of cached.open) {
       const logins = new Map<string, string | null>([[pr.author?.login ?? '', pr.author?.avatarUrl ?? null]])
-      for (const review of pr.latestReviews.nodes) {
+      for (const review of latestReviewsOf(pr)) {
         if (review.author !== null && !logins.has(review.author.login)) logins.set(review.author.login, null)
       }
       for (const { requestedReviewer } of pr.reviewRequests.nodes) {

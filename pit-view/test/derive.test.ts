@@ -7,7 +7,7 @@ import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import {
   deriveClosed, deriveCounts, deriveIssues, deriveLastActivity, deriveMerge, deriveOpenRow, deriveOpenRows, deriveStacks,
-  deriveTickets, deriveTiles, deriveView, groupRows, localAvatarUrl, personView, reviewerPips,
+  deriveTickets, deriveTiles, deriveView, groupRows, latestReviewsOf, localAvatarUrl, personView, reviewerPips,
 } from '../src/derive.ts'
 import type { DeriveContext, MineRow, OpenRow, OtherRow } from '../src/derive.ts'
 import type { RawCheckContext, RawClosedPr, RawOpenPr, RawTimelineItem } from '../src/github.ts'
@@ -631,4 +631,118 @@ test('a deleted author and a null review decision do not break a row', async () 
   const found = deriveOpenRow(variant(base, { author: null, reviewDecision: null }), ctx(), new Map())
   assert.equal(found?.author.login, 'ghost')
   assert.equal(found?.section, 'others')
+})
+
+// GitHub drops a reviewer from latestReviews once a review is re-requested of them, and keeps their
+// approval or change request in latestOpinionatedReviews. These variants move a fixture's reviews there.
+const droppedByReRequest = (pr: RawOpenPr, ...reviewers: string[]): RawOpenPr => {
+  const moved = pr.latestReviews.nodes.filter((review) => reviewers.includes(review.author?.login ?? ''))
+  return variant(pr, {
+    latestReviews: { nodes: pr.latestReviews.nodes.filter((review) => !moved.includes(review)) },
+    latestOpinionatedReviews: {
+      nodes: [
+        ...pr.latestOpinionatedReviews.nodes.filter((review) => !reviewers.includes(review.author?.login ?? '')),
+        ...moved.filter((review) => review.state !== 'COMMENTED'),
+      ],
+    },
+  })
+}
+
+const othersRow = (pr: RawOpenPr): OtherRow => {
+  const found = deriveOpenRow(pr, ctx(), new Map())
+  assert.equal(found?.section, 'others')
+  return found as OtherRow
+}
+
+// #107 is the viewer's old change request, re-requested, on a head that moved; the review's commit
+// is moved into the last-30 window so the pushes since it can be counted
+const reRequestedOfViewer = async (): Promise<RawOpenPr> => {
+  const base = find(await page1(), 107)
+  const earlier = base.recentCommits.nodes[0]?.commit.oid
+  assert.ok(earlier)
+  const review = base.latestReviews.nodes[0]
+  assert.ok(review)
+  return variant(base, { latestReviews: { nodes: [{ ...review, commit: { oid: earlier } }] } })
+}
+
+test('a review GitHub dropped from latestReviews on a re-request still counts: a moved head and a re-request is your move', async () => {
+  const kept = await reRequestedOfViewer()
+  const dropped = droppedByReRequest(kept, 'vera-quill')
+  assert.deepEqual(dropped.latestReviews.nodes, [])
+  assert.equal(dropped.latestOpinionatedReviews.nodes[0]?.state, 'CHANGES_REQUESTED')
+  const found = othersRow(dropped)
+  assert.equal(found.group, 'yourMove')
+  // the pushes since the viewer's review are still counted, and the request is still flagged
+  assert.deepEqual(found.flags, [
+    { kind: 'reReview', label: 'Re-review · 1 push since yours', count: 1 },
+    { kind: 'requestedOfYou', label: 'Requested of you' },
+  ])
+  // and the row is the same one the review would have made had GitHub kept it in latestReviews
+  assert.deepEqual(found, othersRow(kept))
+})
+
+test('a dropped change request on an unmoved head with no re-request is still the author\'s turn', async () => {
+  const kept = await reRequestedOfViewer()
+  const head = kept.headRefOid
+  const review = kept.latestReviews.nodes[0]
+  assert.ok(review)
+  const unmoved = variant(kept, {
+    reviewRequests: { nodes: [] },
+    latestReviews: { nodes: [{ ...review, commit: { oid: head } }] },
+  })
+  const dropped = droppedByReRequest(unmoved, 'vera-quill')
+  assert.equal(othersRow(unmoved).group, 'waitingOnAuthor')
+  assert.equal(othersRow(dropped).group, 'waitingOnAuthor')
+  assert.deepEqual(othersRow(dropped).flags, [])
+})
+
+test('on yours, a change request only in latestOpinionatedReviews is answered by re-requesting that reviewer', async () => {
+  const { asked } = await answered()
+  const dropped = droppedByReRequest(asked, 'alex-mendez')
+  assert.deepEqual(dropped.latestReviews.nodes.map((review) => review.author?.login), ['sam-tran'])
+  const placed = (pr: RawOpenPr) => [mineOf(pr).group, mineOf(pr).stage]
+  // not re-requested: still the viewer's move, with the reviewer named
+  assert.deepEqual(placed(dropped), ['changesRequested', 'changesRequested'])
+  assert.deepEqual(mineOf(dropped).changesRequested, { login: 'alex-mendez', alias: 'Alex', at: '2026-10-25T22:14:00Z' })
+  // re-requested: the PR waits on its reviewer, as it would with the review in latestReviews
+  assert.deepEqual(placed(requesting(dropped, 'alex-mendez')), ['awaitingReview', 'reReviewRequested'])
+  assert.equal(mineOf(requesting(dropped, 'alex-mendez')).reviewers.find((pip) => pip.login === 'alex-mendez')?.state, 'requested')
+  // a push past the review also answers it, by commit
+  assert.deepEqual(placed(pushedPast(dropped)), ['awaitingReview', 'updatedNotRequested'])
+})
+
+test('latestReviewsOf keeps the newest review per reviewer across both connections', () => {
+  const review = (login: string | null, state: RawOpenPr['latestReviews']['nodes'][number]['state'], submittedAt: string | null, oid = 'c1') =>
+    ({ author: login === null ? null : { login }, state, submittedAt, commit: { oid } })
+  const pr = (reviews: ReturnType<typeof review>[], opinionated: ReturnType<typeof review>[]): RawOpenPr =>
+    ({ latestReviews: { nodes: reviews }, latestOpinionatedReviews: { nodes: opinionated } }) as RawOpenPr
+  const summary = (value: RawOpenPr) => latestReviewsOf(value).map((found) => [found.author?.login, found.state, found.commit?.oid])
+
+  // a later comment beats an earlier change request, and a later approval beats an earlier comment
+  assert.deepEqual(summary(pr(
+    [review('ana', 'COMMENTED', '2026-10-26T12:00:00Z', 'c2'), review('bo', 'APPROVED', '2026-10-26T12:00:00Z', 'c2')],
+    [review('ana', 'CHANGES_REQUESTED', '2026-10-26T10:00:00Z', 'c1'), review('bo', 'APPROVED', '2026-10-26T12:00:00Z', 'c2')],
+  )), [['ana', 'COMMENTED', 'c2'], ['bo', 'APPROVED', 'c2']])
+  // the opinionated list wins when it holds the newer review
+  assert.deepEqual(summary(pr(
+    [review('ana', 'COMMENTED', '2026-10-26T10:00:00Z', 'c1')],
+    [review('ana', 'APPROVED', '2026-10-26T12:00:00Z', 'c2')],
+  )), [['ana', 'APPROVED', 'c2']])
+  // a reviewer in only one list is kept, whichever, and logins match regardless of case
+  assert.deepEqual(summary(pr(
+    [review('Ana', 'COMMENTED', '2026-10-26T10:00:00Z')],
+    [review('bo', 'CHANGES_REQUESTED', '2026-10-26T09:00:00Z'), review('ANA', 'APPROVED', '2026-10-26T11:00:00Z', 'c3')],
+  )), [['ANA', 'APPROVED', 'c3'], ['bo', 'CHANGES_REQUESTED', 'c1']])
+  // a tie keeps the review latestReviews reported
+  assert.deepEqual(summary(pr(
+    [review('ana', 'COMMENTED', '2026-10-26T10:00:00Z', 'c1')],
+    [review('ana', 'APPROVED', '2026-10-26T10:00:00Z', 'c2')],
+  )), [['ana', 'COMMENTED', 'c1']])
+  // a review with no date loses to one with a date; two lists holding the same ghost review count it once
+  assert.deepEqual(summary(pr(
+    [review('ana', 'APPROVED', null)],
+    [review('ana', 'CHANGES_REQUESTED', '2026-10-26T10:00:00Z')],
+  )), [['ana', 'CHANGES_REQUESTED', 'c1']])
+  assert.equal(latestReviewsOf(pr([review(null, 'APPROVED', '2026-10-26T10:00:00Z')], [review(null, 'APPROVED', '2026-10-26T10:00:00Z')])).length, 1)
+  assert.deepEqual(summary(pr([], [])), [])
 })
