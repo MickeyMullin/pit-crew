@@ -3,7 +3,7 @@ import { spawn as spawnChild } from 'node:child_process'
 import { closeSync, openSync, watch as watchDir } from 'node:fs'
 import { mkdir, open, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
-import type { Cache, Run, RunChanges, RunStatus } from './cache.ts'
+import type { Cache, NewRun, NewSweep, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
 import { expandHome, tildePath } from './config.ts'
 import type { Clock, Config, RunnerName } from './config.ts'
 import { isBotLogin, isMine, viewerReview } from './derive.ts'
@@ -328,7 +328,7 @@ export const foldSteps = (steps: readonly StepSlot[], events: readonly StepEvent
 }
 
 // a run never recorded as having stepped reads as five pending slots, never as an error
-export const stepsOf = (run: Pick<Run, 'steps'>): StepSlot[] => run.steps ?? emptySteps()
+export const stepsOf = (run: Pick<Session, 'steps'>): StepSlot[] => run.steps ?? emptySteps()
 
 // the report a done result names: the review's or the fix's report, or the sweep's summary
 export const reportPath = (result: RunResultJson): string | null =>
@@ -1059,22 +1059,22 @@ export type StartRequest = {
   cwd?: string
 }
 
-export type Launcher = {
+export type Launcher<T extends Session = Run> = {
   // identity, clone and one-per-PR checks, then the run directory, request.json and the spawn
-  start: (request: StartRequest) => Promise<Run>
+  start: (request: StartRequest) => Promise<T>
   // SIGTERM to the run's group now, SIGKILL to every descendant's group after the grace period
-  stop: (id: number) => Run
+  stop: (id: number) => T
   // at server start: re-watch live runs, settle the rest
   recover: () => Promise<void>
   // reads every watched run's files now
   check: () => Promise<void>
   // resolves once the run has settled
-  settled: (id: number) => Promise<Run>
+  settled: (id: number) => Promise<T>
   // stops watching; runs keep going
   close: () => void
 }
 
-export type LauncherOptions = {
+export type LauncherOptions<T extends Session = Run> = {
   cache: Cache
   gh: Gh
   // git, for the clone check
@@ -1088,22 +1088,41 @@ export type LauncherOptions = {
   // the config in effect, viewer resolved
   config: () => Config
   home: string
-  // runs live in <stateDir>/runs/<id>
+  // runs live in <stateDir>/runs/<id>, sweeps in <stateDir>/sweeps/<id>
   stateDir: string
   // the environment the child's few variables are picked from
   env: Readonly<Record<string, string | undefined>>
   newSessionId: () => string
   // a run is now this process's to watch: created here (even one whose start fails at once) or
   // adopted at startup because it was still running; called before its first onChange
-  onWatch: (run: Run) => void
+  onWatch: (run: T) => void
   // a run's row changed: started, stepped, or settled
-  onChange: (run: Run) => void
+  onChange: (run: T) => void
   log?: (line: string) => void
   // how often a run's files are read when the folder cannot be watched, and the safety
   // net when it can; a recovered run's liveness is checked as often
   pollMs?: number
   watchedPollMs?: number
   stopGraceMs?: number
+}
+
+// where a launcher keeps what it launches. Review runs live in the runs table, one in flight per PR;
+// sweeps in the sweeps table, one in flight per repository. Everything else about launching is shared
+export type SessionStore<T extends Session> = {
+  // the folder under the state folder, and the word the logs and messages use
+  folder: 'runs' | 'sweeps'
+  noun: 'run' | 'sweep'
+  create: (request: StartRequest, fields: NewSweep, dirOf: (id: number) => string) => T
+  get: (id: number) => T | null
+  update: (id: number, changes: RunChanges) => T
+  running: () => T[]
+  prune: () => T[]
+  // what holds a start to one in flight: the PR for a run, the repository for a sweep
+  key: (request: StartRequest) => string
+  inFlight: (request: StartRequest) => boolean
+  busyText: (request: StartRequest) => string
+  // the schema result.json must carry, when the kind of launch fixes it
+  schema: SweepResult['schema'] | null
 }
 
 // one run being watched
@@ -1139,21 +1158,57 @@ export const remoteNamesRepo = (remotes: string, repo: string): boolean => {
 
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
-export const createLauncher = (options: LauncherOptions): Launcher => {
-  const { cache, gh, git, spawn, fs, kill, procs, clock, timers, home, onChange, onWatch } = options
+// the runs table's store: one run in flight per PR
+export const runStore = (cache: Cache): SessionStore<Run> => ({
+  folder: 'runs',
+  noun: 'run',
+  create: (request, fields, dirOf) => cache.createRun({ ...fields, number: request.number } satisfies NewRun, dirOf),
+  get: cache.getRun,
+  update: cache.updateRun,
+  running: cache.runningRuns,
+  prune: cache.pruneRuns,
+  key: (request) => `${request.repo}#${request.number}`,
+  inFlight: (request) => cache.runsFor(request.repo, request.number, 1)[0]?.status === 'running',
+  busyText: (request) => `a run for #${request.number} is already in flight`,
+  schema: null,
+})
+
+// the sweeps table's store: one sweep in flight per repository, and a result that is a sweep's
+export const sweepStore = (cache: Cache): SessionStore<Sweep> => ({
+  folder: 'sweeps',
+  noun: 'sweep',
+  create: (_request, fields, dirOf) => cache.createSweep(fields, dirOf),
+  get: cache.getSweep,
+  update: cache.updateSweep,
+  running: cache.runningSweeps,
+  prune: cache.pruneSweeps,
+  key: (request) => request.repo,
+  inFlight: (request) => cache.sweepsFor(request.repo, 1)[0]?.status === 'running',
+  busyText: (request) => `a sweep for ${request.repo} is already in flight`,
+  schema: 'pit-crew/sweep-result@1',
+})
+
+// the review runs' launcher and the sweeps' launcher are the one engine over two stores
+export const createLauncher = (options: LauncherOptions): Launcher => createEngine(options, runStore(options.cache))
+
+export const createSweepLauncher = (options: LauncherOptions<Sweep>): Launcher<Sweep> => createEngine(options, sweepStore(options.cache))
+
+const createEngine = <T extends Session>(options: LauncherOptions<T>, store: SessionStore<T>): Launcher<T> => {
+  const { gh, git, spawn, fs, kill, procs, clock, timers, home, onChange, onWatch } = options
+  const noun = store.noun
   const log = options.log ?? (() => {})
   const pollMs = options.pollMs ?? 1000
   const watchedPollMs = options.watchedPollMs ?? 10_000
   const stopGraceMs = options.stopGraceMs ?? 10_000
-  const runsDir = resolve(options.stateDir, 'runs')
+  const runsDir = resolve(options.stateDir, store.folder)
   const live = new Map<number, Live>()
-  const waiters = new Map<number, ((run: Run) => void)[]>()
-  // PRs whose start is between its checks and its row
+  const waiters = new Map<number, ((run: T) => void)[]>()
+  // starts between their checks and their row
   const starting = new Set<string>()
   let closed = false
 
   const now = (): string => iso(clock.now())
-  const changed = (run: Run): void => {
+  const changed = (run: T): void => {
     if (!closed) onChange(run)
   }
 
@@ -1173,8 +1228,6 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
       log(`cannot send ${signal} to process group ${pgid}: ${messageOf(error)}`)
     }
   }
-
-  const inFlight = (repo: string, number: number): boolean => cache.runsFor(repo, number, 1)[0]?.status === 'running'
 
   // the commands post as whichever account gh uses, and this machine may hold more than one
   const checkIdentity = async (config: Config): Promise<void> => {
@@ -1215,7 +1268,7 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
   }
 
   const readNew = async (entry: Live): Promise<void> => {
-    let run = cache.getRun(entry.id)
+    let run = store.get(entry.id)
     if (run === null) return
     const changes: RunChanges = {}
     const eventsBytes = await fs.readFrom(join(entry.dir, 'events.jsonl'), entry.offsets.events)
@@ -1255,16 +1308,16 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
       }
     }
     if (Object.keys(changes).length === 0) return
-    run = cache.updateRun(entry.id, changes)
+    run = store.update(entry.id, changes)
     changed(run)
   }
 
   const pumpOf = (entry: Live): Promise<void> => {
-    entry.pump = entry.pump.then(() => readNew(entry)).catch((error: unknown) => log(`run ${entry.id}: cannot read its files: ${messageOf(error)}`))
+    entry.pump = entry.pump.then(() => readNew(entry)).catch((error: unknown) => log(`${noun} ${entry.id}: cannot read its files: ${messageOf(error)}`))
     return entry.pump
   }
 
-  const specFor = async (run: Pick<Run, 'command' | 'args' | 'cwd' | 'sessionId'>, dir: string): Promise<LaunchSpec> => {
+  const specFor = async (run: Pick<Session, 'command' | 'args' | 'cwd' | 'sessionId'>, dir: string): Promise<LaunchSpec> => {
     const config = options.config()
     return {
       command: run.command,
@@ -1279,7 +1332,7 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
     }
   }
 
-  const resumeFor = (run: Pick<Run, 'runner' | 'cwd'>, sessionId: string, spec: LaunchSpec): string =>
+  const resumeFor = (run: Pick<Session, 'runner' | 'cwd'>, sessionId: string, spec: LaunchSpec): string =>
     runners[run.runner].resume(run.cwd, sessionId, spec, home)
 
   const clear = (entry: Live): void => {
@@ -1291,7 +1344,7 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
     entry.killTimer = null
   }
 
-  const settle = async (entry: Live, exit: Exit | null, restarted: boolean): Promise<Run | null> => {
+  const settle = async (entry: Live, exit: Exit | null, restarted: boolean): Promise<T | null> => {
     if (entry.settling || closed) return null
     entry.settling = true
     clear(entry)
@@ -1299,7 +1352,11 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
     // a server shutting down leaves the run recorded as running, for recovery to find
     if (closed) return null
     const text = await fs.readFile(join(entry.dir, 'result.json')).catch(() => null)
-    const parsed = text === null ? null : parseResult(text)
+    let parsed = text === null ? null : parseResult(text)
+    // a launch of one kind takes only its own kind of result: a review's result in a sweep's folder is no result
+    if (parsed?.ok === true && store.schema !== null && parsed.value.schema !== store.schema) {
+      parsed = { ok: false, error: `result.json: expected ${store.schema}, found ${parsed.value.schema}` }
+    }
     let reportExists: boolean | null = null
     if (parsed?.ok === true && parsed.value.status === 'done') {
       const path = reportPath(parsed.value)
@@ -1317,8 +1374,8 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
     live.delete(entry.id)
     if (entry.stdinOpen && entry.child?.stdin != null) entry.child.stdin.end()
     entry.stdinOpen = false
-    const run = cache.updateRun(entry.id, { ...judgement, finishedAt: now() })
-    log(`run ${run.id} (${run.command} ${run.args.join(' ')}) ${run.status}${run.note === null ? '' : `: ${run.note}`}`)
+    const run = store.update(entry.id, { ...judgement, finishedAt: now() })
+    log(`${noun} ${run.id} (${run.command} ${run.args.join(' ')}) ${run.status}${run.note === null ? '' : `: ${run.note}`}`)
     changed(run)
     for (const resolveWaiter of waiters.get(run.id) ?? []) resolveWaiter(run)
     waiters.delete(run.id)
@@ -1342,7 +1399,7 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
     }, ms)
   }
 
-  const watchRun = (run: Run, dir: string, child: SpawnedProcess | null, stdinOpen: boolean, spec: LaunchSpec | null): Live => {
+  const watchRun = (run: T, dir: string, child: SpawnedProcess | null, stdinOpen: boolean, spec: LaunchSpec | null): Live => {
     const entry: Live = {
       id: run.id,
       dir,
@@ -1366,11 +1423,11 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
         if (!entry.settling) void pumpOf(entry)
       })
     } catch (error) {
-      log(`run ${run.id}: cannot watch ${tildePath(dir, home)}, polling instead: ${messageOf(error)}`)
+      log(`${noun} ${run.id}: cannot watch ${tildePath(dir, home)}, polling instead: ${messageOf(error)}`)
     }
     poll(entry, entry.watcher === null ? pollMs : watchedPollMs)
     if (child !== null) {
-      void child.exited.then((exit) => settle(entry, exit, false)).catch((error: unknown) => log(`run ${run.id}: cannot settle: ${messageOf(error)}`))
+      void child.exited.then((exit) => settle(entry, exit, false)).catch((error: unknown) => log(`${noun} ${run.id}: cannot settle: ${messageOf(error)}`))
     }
     void pumpOf(entry)
     return entry
@@ -1378,22 +1435,21 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
 
   // a pruned run's folder goes with its row, and nothing outside the runs folder is ever removed
   const prune = async (): Promise<void> => {
-    for (const gone of cache.pruneRuns()) {
+    for (const gone of store.prune()) {
       const dir = resolve(expandHome(gone.dir, home))
       if (!dir.startsWith(`${runsDir}${sep}`)) {
-        log(`run ${gone.id}: not removing ${gone.dir}, which is outside the runs folder`)
+        log(`${noun} ${gone.id}: not removing ${gone.dir}, which is outside the ${store.folder} folder`)
         continue
       }
-      await fs.rm(dir).catch((error: unknown) => log(`run ${gone.id}: cannot remove ${gone.dir}: ${messageOf(error)}`))
+      await fs.rm(dir).catch((error: unknown) => log(`${noun} ${gone.id}: cannot remove ${gone.dir}: ${messageOf(error)}`))
     }
   }
 
-  const launch = async (request: StartRequest, config: Config, cwd: string): Promise<Run> => {
+  const launch = async (request: StartRequest, config: Config, cwd: string): Promise<T> => {
     const runner = request.runner ?? config.agent.runner
     const sessionId = runner === 'claude' ? options.newSessionId() : null
-    let run = cache.createRun({
+    let run = store.create(request, {
       repo: request.repo,
-      number: request.number,
       command: request.command,
       args: request.args,
       label: request.label,
@@ -1444,8 +1500,8 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
         stdin: stdin === null ? 'ignore' : 'pipe',
       })
     } catch (error) {
-      run = cache.updateRun(run.id, { status: 'failed', finishedAt: now(), note: `spawnFailed: ${messageOf(error)}` })
-      log(`run ${run.id}: cannot start: ${messageOf(error)}`)
+      run = store.update(run.id, { status: 'failed', finishedAt: now(), note: `spawnFailed: ${messageOf(error)}` })
+      log(`${noun} ${run.id}: cannot start: ${messageOf(error)}`)
       changed(run)
       await prune()
       return run
@@ -1453,21 +1509,21 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
     // from here the process exists, so nothing below may fail the run
     if (stdin !== null) child.stdin?.write(stdin)
     const pidStartedAt = child.pid === null ? null : await procs.startTime(child.pid).catch(() => null)
-    run = cache.updateRun(run.id, {
+    run = store.update(run.id, {
       pid: child.pid,
       pidStartedAt,
       resume: sessionId === null ? null : resumeFor(run, sessionId, spec),
     })
     await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid: child.pid, pidStartedAt }, null, 2)}\n`)
-      .catch((error: unknown) => log(`run ${run.id}: cannot update request.json: ${messageOf(error)}`))
+      .catch((error: unknown) => log(`${noun} ${run.id}: cannot update request.json: ${messageOf(error)}`))
     watchRun(run, dir, child, stdin !== null && child.stdin !== null, spec)
-    log(`run ${run.id} started: ${run.runner} ${run.command} ${run.args.join(' ')} in ${run.cwd}`)
+    log(`${noun} ${run.id} started: ${run.runner} ${run.command} ${run.args.join(' ')} in ${run.cwd}`)
     changed(run)
     await prune()
-    return cache.getRun(run.id) ?? run
+    return store.get(run.id) ?? run
   }
 
-  const start = async (request: StartRequest): Promise<Run> => {
+  const start = async (request: StartRequest): Promise<T> => {
     const config = options.config()
     // a tandem primary launches its secondary in the background, and the fix session is pinned to
     // Claude; the runner is the one asked for or the configured default, so no caller gets around this
@@ -1475,10 +1531,10 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
       if (isTandemRun(request.args)) throw new LaunchError('tandemRunner', 'Review in tandem runs with Claude only; send runner claude or leave it out')
       throw new LaunchError('fixRunner', 'Fix session runs with Claude only; send runner claude or leave it out')
     }
-    const key = `${request.repo}#${request.number}`
-    // one run per PR in flight, counting a start still between its checks and its row
-    if (starting.has(key) || inFlight(request.repo, request.number)) {
-      throw new LaunchError('busy', `a run for #${request.number} is already in flight`)
+    const key = store.key(request)
+    // one run per PR (one sweep per repository) in flight, counting a start still between its checks and its row
+    if (starting.has(key) || store.inFlight(request)) {
+      throw new LaunchError('busy', store.busyText(request))
     }
     starting.add(key)
     try {
@@ -1499,19 +1555,19 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
     try {
       groups = descendantGroups(await procs.list(), entry.pid)
     } catch (error) {
-      log(`run ${entry.id}: cannot list its processes: ${messageOf(error)}`)
+      log(`${noun} ${entry.id}: cannot list its processes: ${messageOf(error)}`)
     }
     for (const group of groups) signalGroup(group, 'SIGKILL')
   }
 
-  const stop = (id: number): Run => {
-    const run = cache.getRun(id)
-    if (run === null) throw new LaunchError('unknownRun', `run ${id} does not exist`)
-    if (run.status !== 'running') throw new LaunchError('notRunning', `run ${id} is not running (${run.status})`)
+  const stop = (id: number): T => {
+    const run = store.get(id)
+    if (run === null) throw new LaunchError('unknownRun', `${noun} ${id} does not exist`)
+    if (run.status !== 'running') throw new LaunchError('notRunning', `${noun} ${id} is not running (${run.status})`)
     const entry = live.get(id)
     if (entry === undefined) {
       // nothing watches it: a run recorded as running with no process behind it
-      const stopped = cache.updateRun(id, { status: 'stopped', finishedAt: now() })
+      const stopped = store.update(id, { status: 'stopped', finishedAt: now() })
       changed(stopped)
       return stopped
     }
@@ -1533,7 +1589,7 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
   type RequestFile = { pid?: unknown, pidStartedAt?: unknown }
 
   const recover = async (): Promise<void> => {
-    for (const run of cache.runningRuns()) {
+    for (const run of store.running()) {
       if (live.has(run.id)) continue
       const dir = expandHome(run.dir, home)
       let request: RequestFile = {}
@@ -1547,7 +1603,7 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
       // a pid alone could have been reused; its start time must match too
       const same = pid !== null && startedAt !== null && alive(pid) && await procs.startTime(pid).catch(() => null) === startedAt
       if (same) {
-        log(`run ${run.id}: still running after the restart (pid ${pid}); watching it again`)
+        log(`${noun} ${run.id}: still running after the restart (pid ${pid}); watching it again`)
         if (!closed) onWatch(run)
         watchRun({ ...run, pid }, dir, null, false, null)
       } else {
@@ -1561,9 +1617,9 @@ export const createLauncher = (options: LauncherOptions): Launcher => {
     await Promise.all([...live.values()].map((entry) => pumpOf(entry)))
   }
 
-  const settled = (id: number): Promise<Run> => {
-    const run = cache.getRun(id)
-    if (run === null) return Promise.reject(new LaunchError('unknownRun', `run ${id} does not exist`))
+  const settled = (id: number): Promise<T> => {
+    const run = store.get(id)
+    if (run === null) return Promise.reject(new LaunchError('unknownRun', `${noun} ${id} does not exist`))
     if (!live.has(id)) return Promise.resolve(run)
     return new Promise((resolveRun) => waiters.set(id, [...(waiters.get(id) ?? []), resolveRun]))
   }

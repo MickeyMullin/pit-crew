@@ -331,3 +331,59 @@ export const fixResult = (patch: Record<string, unknown> = {}): Record<string, u
   error: null,
   ...patch,
 })
+
+// invented sweep rows: two Dependabot PRs of the fixture repo, each at a full 40-character head
+export const sweepHead201 = '2010000000000000000000000000000000000201'
+export const sweepHead202 = '2020000000000000000000000000000000000202'
+
+export const sweepRow = (patch: Record<string, unknown> = {}): Record<string, unknown> => ({
+  number: 201,
+  url: 'https://github.com/octo-example/orbit/pull/201',
+  title: 'build(deps): bump left-pad from 1.2.0 to 1.2.1',
+  head: sweepHead201,
+  bump: 'left-pad 1.2.0 → 1.2.1 (patch)',
+  recommendation: 'approve',
+  ci: 'green',
+  findings: [],
+  escalation: null,
+  posted: { form: 'approve', url: 'https://github.com/octo-example/orbit/pull/201#pullrequestreview-9' },
+  reused: false,
+  report: '~/agents/output/PR-201.md',
+  notes: 'approved',
+  ...patch,
+})
+
+// an invented sweep-result@1: two PRs swept, one approved and one held, with a merge order
+export const sweepResult = (patch: Record<string, unknown> = {}): Record<string, unknown> => ({
+  schema: 'pit-crew/sweep-result@1',
+  command: 'review-dependabot-sweep',
+  status: 'done',
+  repo: 'octo-example/orbit',
+  counts: { swept: 2, fresh: 1, reused: 1, failed: 0 },
+  rows: [
+    sweepRow(),
+    sweepRow({
+      number: 202,
+      url: 'https://github.com/octo-example/orbit/pull/202',
+      title: 'build(deps): bump right-pad from 2.0.0 to 3.0.0',
+      head: sweepHead202,
+      bump: 'right-pad 2.0.0 → 3.0.0 (major)',
+      recommendation: 'hold',
+      ci: 'failed',
+      findings: [{ priority: 'P1', summary: 'Drops the callback form the importer still uses' }],
+      escalation: 'a major version of a runtime dependency',
+      posted: null,
+      reused: true,
+      report: '~/agents/output/PR-202.md',
+      notes: 'CI failed in the importer tests; unchanged since Oct 25',
+    }),
+  ],
+  mergeOrder: [{ action: 'Merge #201', prs: [201] }, { action: 'Hold #202 until the importer moves off the callback form', prs: [202] }],
+  summary: '~/agents/output/dependabot-sweep-octo-example-orbit-2026-10-26.md',
+  question: null,
+  error: null,
+  ...patch,
+})
+
+// a sweep with nothing to sweep: done, every count zero, no rows and no summary
+export const emptySweepResult = (): Record<string, unknown> => sweepResult({ counts: { swept: 0, fresh: 0, reused: 0, failed: 0 }, rows: [], mergeOrder: [], summary: null })
