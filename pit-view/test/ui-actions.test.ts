@@ -1,5 +1,5 @@
 // test/ui-actions.test.ts
-// the drawer's direct actions (public/actionsview.ts and their place in public/drawerview.ts and public/drawer.ts): what each row offers, the confirmation that must come before any request, the request that follows it, and the words for a refusal
+// the drawer's direct actions (public/actionsview.ts, public/drawerview.ts, and public/drawer.ts): what each row offers, the confirmation that must come before any request, the request that follows it, and the words for a refusal
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'

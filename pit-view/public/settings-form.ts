@@ -107,8 +107,7 @@ export const parseIdleMinutes = (text: string): number => {
   return /^\d{1,5}$/.test(value) ? Number(value) : Number.NaN
 }
 
-// the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit
-// (allowedHosts, cloneDir, agent) are carried over from the config it loaded
+// the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit (allowedHosts, cloneDir, agent) are carried over from the config it loaded
 export const toConfig = (form: Form, base: Config): Config => {
   const config: Config = {
     repo: form.repo.trim(),

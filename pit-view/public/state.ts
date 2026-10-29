@@ -48,8 +48,7 @@ export const regroup = (
   }
 }
 
-// one patch onto a view: removed and upserted rows by number, closed replaced when present,
-// tiles, counts, sync, and sweeps replaced whole, repo and viewer only when a config change sent them
+// one patch onto a view: removed and upserted rows by number, closed replaced when present, tiles, counts, sync, and sweeps replaced whole, repo and viewer only when a config change sent them
 export const applyPatch = (view: View, patch: Patch): View => {
   const rows = new Map(openRows(view).map((row) => [row.number, row]))
   for (const number of patch.removed) rows.delete(number)
