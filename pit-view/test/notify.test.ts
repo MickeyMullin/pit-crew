@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { openCache } from '../src/cache.ts'
+import type { RunStatus } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import type { OtherRow } from '../src/derive.ts'
@@ -91,6 +92,20 @@ const asRequested: Edit = (pr, all) => ({ ...pr, reviewRequests: all.get(109)!.r
 const asFailing: Edit = (pr, all) => ({ ...pr, headCommit: all.get(109)!.headCommit })
 
 const only = (events: NotifyEvent[]): [string, number][] => events.map((event) => [event.kind, event.number])
+
+const otherRepo = 'octo-example/elsewhere'
+
+// a cached run of a PR in some repo, `startedAt` as an ISO time
+const makeRun = (cache: ReturnType<typeof openCache>, repo: string, number: number, startedAt: string, status: RunStatus = 'running') =>
+  cache.createRun({
+    repo, number, command: 'review-pr', args: [String(number)], label: 'Review', runner: 'claude', cwd: '~/dev/orbit',
+    sessionId: null, pid: null, pidStartedAt: null, startedAt, lastStepAt: null, step: null, stepState: null,
+    finishedAt: status === 'running' ? null : startedAt, status, result: null, note: null, costUsd: null, resume: null,
+  }, (id) => `~/runs/${id}`)
+
+// a time before the poller's own start, and the poller's start itself
+const earlier = (time: { clock: { now: () => number } }): string => new Date(time.clock.now() - 3_600_000).toISOString()
+const nowIso = (time: { clock: { now: () => number } }): string => new Date(time.clock.now()).toISOString()
 
 test('the scenario rows have the states the edits below rely on', async () => {
   const { poller } = await harness()
@@ -219,7 +234,7 @@ test('the delivery script is the constant on run argv handler and only displays 
   const script = appleScript.join('\n')
   assert.equal((script.match(/display notification/g) ?? []).length, 1)
   for (const word of ['open location', 'activate', 'URL', 'click', 'button', 'do shell script', 'tell ']) assert.equal(script.includes(word), false, word)
-  // only title, subtitle and body reach it, and no more, whatever the notice holds
+  // only title, subtitle, and body reach it, and no more, whatever the notice holds
   assert.equal(osascriptArgs(noticeOf(event('ciFailing'))).length, appleScript.length * 2 + 3)
 })
 
@@ -236,13 +251,9 @@ test('a row marked stale reports nothing', async () => {
 })
 
 test('review session kinds fire when a run that was running settles, and only then', async () => {
-  const { cycle, poller, cache, events } = await harness()
+  const { cycle, poller, cache, events, time } = await harness()
   await cycle()
-  const run = cache.createRun({
-    repo: scenario.repo, number: 106, command: 'review-pr', args: ['106'], label: 'Review', runner: 'claude', cwd: '~/dev/orbit',
-    sessionId: null, pid: null, pidStartedAt: null, startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null,
-    finishedAt: null, status: 'running', result: null, note: null, costUsd: null, resume: null,
-  }, (id) => `~/runs/${id}`)
+  const run = makeRun(cache, scenario.repo, 106, nowIso(time))
   poller.runChanged(scenario.repo, 106)
   assert.deepEqual(events, [])
   cache.updateRun(run.id, { status: 'needsInput' })
@@ -254,14 +265,10 @@ test('review session kinds fire when a run that was running settles, and only th
 })
 
 test('a run whose start fails before it is ever running still fires runFinished once', async () => {
-  const { cycle, poller, cache, events } = await harness()
+  const { cycle, poller, cache, events, time } = await harness()
   await cycle()
-  const run = cache.createRun({
-    repo: scenario.repo, number: 106, command: 'review-pr', args: ['106'], label: 'Review', runner: 'claude', cwd: '~/dev/orbit',
-    sessionId: null, pid: null, pidStartedAt: null, startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null,
-    finishedAt: null, status: 'running', result: null, note: null, costUsd: null, resume: null,
-  }, (id) => `~/runs/${id}`)
-  cache.updateRun(run.id, { status: 'failed', finishedAt: '2026-10-26T14:00:01Z', note: 'spawnFailed: no such file' })
+  const run = makeRun(cache, scenario.repo, 106, nowIso(time))
+  cache.updateRun(run.id, { status: 'failed', finishedAt: nowIso(time), note: 'spawnFailed: no such file' })
   poller.runChanged(scenario.repo, 106)
   assert.deepEqual(only(events), [['runFinished', 106]])
   poller.runChanged(scenario.repo, 106)
@@ -269,20 +276,112 @@ test('a run whose start fails before it is ever running still fires runFinished 
   poller.stop()
 })
 
+test('after a repository switch, a run requested then notifies once and history stays silent', async () => {
+  const { cycle, poller, cache, events, settings, time } = await harness()
+  await cycle()
+  // history in the repo being switched to: settled before this server started
+  makeRun(cache, otherRepo, 7, earlier(time), 'done')
+  makeRun(cache, otherRepo, 8, earlier(time), 'needsInput')
+  const before = settings.current
+  settings.current = { ...before, repo: otherRepo }
+  await poller.configChanged(before)
+  // the run requested after the switch fails to start before the launcher reports it
+  const fresh = makeRun(cache, otherRepo, 9, nowIso(time))
+  cache.updateRun(fresh.id, { status: 'failed', finishedAt: nowIso(time), note: 'spawnFailed: no such file' })
+  for (const number of [7, 8, 9]) poller.runChanged(otherRepo, number)
+  assert.deepEqual(only(events), [['runFinished', 9]])
+  poller.runChanged(otherRepo, 9)
+  assert.equal(events.length, 1)
+  poller.stop()
+})
+
+test('a run already running at a repository switch notifies once when it settles', async () => {
+  const { cycle, poller, cache, events, settings, time } = await harness()
+  await cycle()
+  const running = makeRun(cache, otherRepo, 7, earlier(time))
+  const before = settings.current
+  settings.current = { ...before, repo: otherRepo }
+  await poller.configChanged(before)
+  cache.updateRun(running.id, { status: 'done' })
+  poller.runChanged(otherRepo, 7)
+  poller.runChanged(otherRepo, 7)
+  assert.deepEqual(only(events), [['runFinished', 7]])
+  poller.stop()
+})
+
+test('runs settled at startup are history: nothing fires for them, now or on a later callback', async () => {
+  const time = fakeTime()
+  const cache = openCache({ path: ':memory:', clock: time.clock })
+  const settled = makeRun(cache, scenario.repo, 106, earlier(time), 'failed')
+  const waiting = makeRun(cache, scenario.repo, 107, earlier(time), 'needsInput')
+  const recovered = makeRun(cache, scenario.repo, 108, earlier(time))
+  const events: NotifyEvent[] = []
+  const poller = createPoller({
+    cache,
+    gh: createGh(fakeRunner(async () => failed('no gh')).runner),
+    clock: time.clock,
+    timers: time.timers,
+    config: () => ({ ...defaultConfig(), repo: scenario.repo, viewer: scenario.viewer }),
+    home: nowhere,
+    timeZone: scenario.timeZone,
+    emit: () => {},
+    notify: (found) => events.push(...found),
+  })
+  // startup recovery reports the runs it finds, settled or still going
+  poller.runChanged(scenario.repo, 106)
+  poller.runChanged(scenario.repo, 107)
+  poller.runChanged(scenario.repo, 108)
+  assert.deepEqual(events, [])
+  // one that was running at startup and settles during recovery fires, once
+  cache.updateRun(recovered.id, { status: 'needsInput' })
+  poller.runChanged(scenario.repo, 108)
+  poller.runChanged(scenario.repo, 108)
+  assert.deepEqual(only(events), [['runNeedsInput', 108]])
+  assert.equal(settled.status, 'failed')
+  assert.equal(waiting.status, 'needsInput')
+  poller.stop()
+})
+
+test('a run settling after its PR left the open rows still notifies, by number alone', async () => {
+  const { cycle, poller, cache, events, state, time } = await harness()
+  await cycle()
+  const run = makeRun(cache, scenario.repo, 106, nowIso(time))
+  poller.runChanged(scenario.repo, 106)
+  // the PR leaves the open rows before the run settles
+  state.edits.set(106, (pr) => ({ ...pr, number: 9999 }))
+  await cycle()
+  const left = await poller.view()
+  assert.equal([...left.mine.groups, ...left.others.groups].some((group) => group.rows.some((row) => row.number === 106)), false)
+  cache.updateRun(run.id, { status: 'done', finishedAt: nowIso(time) })
+  poller.runChanged(scenario.repo, 106)
+  const fired = events.filter((found) => found.kind === 'runFinished')
+  assert.equal(fired.length, 1)
+  assert.equal(fired[0]?.number, 106)
+  assert.equal(fired[0]?.title, null)
+  assert.equal(noticeOf(fired[0]!).body, '#106')
+  poller.runChanged(scenario.repo, 106)
+  assert.equal(events.filter((found) => found.kind === 'runFinished').length, 1)
+  poller.stop()
+})
+
 test('runEvent needs a running run of the same id to settle', () => {
   const running = { runId: 3, status: 'running' }
-  const row = { number: 106, title: 'Fix the thing' }
+  const row: { number: number, title: string | null } = { number: 106, title: 'Fix the thing' }
   assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'done' })?.kind, 'runFinished')
   assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'failed' })?.kind, 'runFinished')
   assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'needsInput' })?.kind, 'runNeedsInput')
   assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'stopped' }), null)
   assert.equal(runEvent(scenario.repo, row, running, { runId: 3, status: 'running' }), null)
   // a run never seen running (its start failed first) still reports how it settled, once
-  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'failed' })?.kind, 'runFinished')
-  assert.equal(runEvent(scenario.repo, row, running, { runId: 4, status: 'failed' })?.kind, 'runFinished')
-  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'stopped' }), null)
-  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'running' }), null)
-  assert.equal(runEvent(scenario.repo, row, { runId: 3, status: 'done' }, { runId: 3, status: 'done' }), null)
+  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'failed' }, true)?.kind, 'runFinished')
+  assert.equal(runEvent(scenario.repo, row, running, { runId: 4, status: 'failed' }, true)?.kind, 'runFinished')
+  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'stopped' }, true), null)
+  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'running' }, true), null)
+  assert.equal(runEvent(scenario.repo, row, { runId: 3, status: 'done' }, { runId: 3, status: 'done' }, true), null)
+  // first seen already settled and not requested in this process: history
+  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'failed' }, false), null)
+  assert.equal(runEvent(scenario.repo, row, undefined, { runId: 3, status: 'failed' }), null)
+  assert.equal(runEvent(scenario.repo, { number: 106, title: null }, running, { runId: 3, status: 'done' })?.title, null)
 })
 
 const event = (kind: NotifyEvent['kind']): NotifyEvent => ({ kind, number: 7, title: 'Title', repo: scenario.repo })
@@ -319,7 +418,7 @@ test('a delivery that throws or rejects is logged and never reaches the caller',
   assert.match(logs[0] ?? '', /cannot deliver readyToMerge for #7: no display/)
 })
 
-test('a PR title with quotes, backslashes and newlines reaches osascript only as an argument', async () => {
+test('a PR title with quotes, backslashes, and newlines reaches osascript only as an argument', async () => {
   const hostile = 'Say "hi" \\" & do shell script "touch x"\n-e display dialog \'x\' \\\\'
   const calls: [string, string[]][] = []
   const exec: Exec = async (file, args) => void calls.push([file, args])
@@ -343,6 +442,10 @@ test('notice text is bounded and starts with a character that is never an option
   assert.equal(notice.body.startsWith('#7 '), true)
   assert.equal(notice.title.startsWith('-'), false)
   assert.deepEqual(osascriptArgs(notice).slice(-3), [notice.title, notice.subtitle, notice.body])
+})
+
+test('a notice for a PR without a title is its number alone', () => {
+  assert.equal(noticeOf({ ...event('runFinished'), title: null }).body, '#7')
 })
 
 test('other platforms deliver nothing', async () => {

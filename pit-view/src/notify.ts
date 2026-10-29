@@ -23,7 +23,8 @@ export const rowState = (row: OpenRow): RowState => ({
 
 export const noRowState: RowState = { changesRequested: false, readyToMerge: false, reviewRequested: false, ciFailing: false }
 
-export type NotifyEvent = { kind: NotificationKind, number: number, title: string, repo: string }
+// `title` is null for a run whose PR has left the open rows, so the notice names the number alone
+export type NotifyEvent = { kind: NotificationKind, number: number, title: string | null, repo: string }
 
 const rowKinds = ['changesRequested', 'readyToMerge', 'reviewRequested', 'ciFailing'] as const
 
@@ -70,10 +71,15 @@ export const compareRows = (baseline: RowBaseline, rows: ReadonlyMap<number, Ope
 // the review-session kinds: a run's status as last seen, by PR, and what a new status fires
 export type RunSeen = { runId: number, status: string }
 
-// a run settles once it was running, or once it is first seen already settled (its start failed
-// before it ever ran); a stopped run fires nothing, and a run already settled fires nothing again
-export const runEvent = (repo: string, row: { number: number, title: string }, before: RunSeen | undefined, after: RunSeen): NotifyEvent | null => {
-  if (before !== undefined && before.runId === after.runId && before.status !== 'running') return null
+// a run settles once it was running (the same run, as last seen), or once it is first seen already
+// settled and was requested during this server's lifetime (its start failed before it ever ran);
+// a run first seen already settled that was requested before this server started is history and
+// fires nothing. A stopped run fires nothing, and a run already settled fires nothing again.
+// `title` is null when the PR is no longer among the open rows.
+export const runEvent = (repo: string, row: { number: number, title: string | null }, before: RunSeen | undefined, after: RunSeen, requestedHere = false): NotifyEvent | null => {
+  const wasRunning = before !== undefined && before.runId === after.runId && before.status === 'running'
+  const sameSettled = before !== undefined && before.runId === after.runId && before.status !== 'running'
+  if (sameSettled || !(wasRunning || requestedHere)) return null
   const base = { number: row.number, title: row.title, repo }
   if (after.status === 'done' || after.status === 'failed') return { ...base, kind: 'runFinished' }
   if (after.status === 'needsInput') return { ...base, kind: 'runNeedsInput' }
@@ -103,7 +109,7 @@ const clean = (text: string): string => {
 export const noticeOf = (event: NotifyEvent): Notice => ({
   title: 'Pit View',
   subtitle: headlines[event.kind],
-  body: clean(`#${event.number} ${event.title}`),
+  body: clean(event.title === null ? `#${event.number}` : `#${event.number} ${event.title}`),
 })
 
 // the one platform-specific piece; tests pass a recorder, and only main() passes the real one
@@ -119,7 +125,7 @@ export const systemExec: Exec = (file, args) => new Promise((resolve, reject) =>
 })
 
 // the AppleScript is this constant text and nothing else; the notice reaches it as arguments to
-// `on run argv`, so no quote, backslash or newline in a PR title can change what it does
+// `on run argv`, so no quote, backslash, or newline in a PR title can change what it does
 export const appleScript = [
   'on run argv',
   'display notification (item 3 of argv) with title (item 1 of argv) subtitle (item 2 of argv)',

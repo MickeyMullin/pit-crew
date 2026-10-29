@@ -180,6 +180,9 @@ export const createPoller = (options: PollerOptions): Poller => {
   let baseline: RowBaseline | null = null
   let runsSeen: { repo: string, byNumber: Map<number, RunSeen> } | null = null
 
+  // a run first seen already settled notifies only when it was requested after this poller started
+  const startedMs = clock.now()
+
   const seenRuns = (repo: string): Map<number, RunSeen> => {
     if (runsSeen === null || runsSeen.repo !== repo) {
       const byNumber = new Map<number, RunSeen>()
@@ -546,7 +549,13 @@ export const createPoller = (options: PollerOptions): Poller => {
       counts: next.view.counts,
       sync: syncOf(next.cached, after),
     }
-    if (changed('repo')) body.repo = after.repo
+    if (changed('repo')) {
+      body.repo = after.repo
+      // the new repo's runs as they are at the switch are the baseline, so a run requested after it
+      // is compared against what came before it and not against its own first report
+      runsSeen = null
+      seenRuns(after.repo)
+    }
     if (!same(previous.view.viewer, next.view.viewer)) body.viewer = next.view.viewer
     patch(body)
     if (changed('refreshSeconds')) schedule()
@@ -563,11 +572,13 @@ export const createPoller = (options: PollerOptions): Poller => {
     if (stopped || config().repo !== repo) return
     const row = snapshot(config(), reports).rows.get(number)
     if (row !== undefined) patch({ rows: [row] })
+    // the run itself comes from the cache, so it counts even when its PR has left the open rows
+    const run = cache.latestRuns(repo).get(number)
+    if (run === undefined) return
     const seen = seenRuns(repo)
-    const run = row?.agent
-    if (row === undefined || run == null || run.runId === null || run.status === null) return
-    const now = { runId: run.runId, status: run.status }
-    const event = runEvent(repo, row, seen.get(number), now)
+    const now = { runId: run.id, status: run.status }
+    const requestedHere = Date.parse(run.startedAt) >= startedMs
+    const event = runEvent(repo, { number, title: row?.title ?? null }, seen.get(number), now, requestedHere)
     seen.set(number, now)
     if (event !== null) notify([event])
   }

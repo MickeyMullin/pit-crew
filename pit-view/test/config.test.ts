@@ -243,7 +243,7 @@ test('readConfig keeps an empty viewer, as the file stores it', async () => {
   }
 })
 
-test('notifications validate their kinds, drop repeats and are optional', () => {
+test('notifications validate their kinds, drop repeats, and are optional', () => {
   const base = defaultConfig()
   assert.equal('notifications' in validateConfig(base), false)
   const all = ['changesRequested', 'readyToMerge', 'reviewRequested', 'ciFailing', 'runFinished', 'runNeedsInput']
