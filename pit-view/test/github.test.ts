@@ -3,10 +3,11 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   closedPrsQuery, closedSearchQuery, commandRunner, createGh, fetchClosedPrs, fetchOpenPrs, fetchViewerLogin,
-  GhError, openPrsQuery, searchTime, singlePrQuery,
+  GhError, openPrsQuery, searchTime, singlePrQuery, WriteIdentityError,
 } from '../src/github.ts'
 import type { OpenPage, RawClosedResponse, RawOpenPr, RawOpenResponse } from '../src/github.ts'
 import { closedCases, openCases, scenario } from './fixtures/scenario.ts'
+import type { Call } from './helpers.ts'
 import { closedSearch, failed, fakeRunner, field, fixtureRunner, ok, openPage1, openPage2 } from './helpers.ts'
 
 const graphqlCalls = (calls: { args: string[] }[]) => calls.filter((call) => call.args[1] === 'graphql')
@@ -287,4 +288,75 @@ test('fixture commits agree with each PR\'s head', async () => {
     assert.equal(pr.url, `https://github.com/${scenario.repo}/pull/${pr.number}`)
     assert.match(pr.headRefOid, /^[0-9a-f]{40}$/)
   }
+})
+
+// the write path: the identity check and the write share one token, and a write runs once
+const writeWorld = (options: { account?: string, writeStderr?: string, userStderr?: string } = {}) => {
+  let tokens = 0
+  return fakeRunner((args) => {
+    if (args[0] === 'auth' && args[1] === 'token') {
+      tokens += 1
+      return ok(`gho_token_${tokens}\n`)
+    }
+    if (args[0] === 'api' && args[1] === 'user') {
+      return options.userStderr === undefined ? ok(`${options.account ?? 'vera-quill'}\n`) : failed(options.userStderr)
+    }
+    if (args[0] === 'api' && args[1] === '--method' && args[2] === 'PUT') return options.writeStderr === undefined ? ok('') : failed(options.writeStderr)
+    return failed('unexpected')
+  })
+}
+
+const writesOf = (calls: Call[]) => calls.filter((call) => call.args[0] === 'api' && call.args[1] === '--method')
+
+test('a write confirms the account and writes with the very token that confirmed it', async () => {
+  const { runner, calls } = writeWorld()
+  const gh = createGh(runner)
+  // another call has already read a token, which is the one the write must use
+  await gh.run(['api', 'user', '--jq', '.login'])
+  await gh.write(['api', '--method', 'PUT', 'repos/o/r/pulls/7/merge', '-f', 'merge_method=squash'], 'Vera-Quill')
+  const lookup = calls.filter((call) => call.args[0] === 'api' && call.args[1] === 'user')
+  const writes = writesOf(calls)
+  assert.equal(writes.length, 1)
+  assert.equal(lookup.at(-1)?.options?.env?.GH_TOKEN, 'gho_token_1')
+  assert.equal(writes[0]?.options?.env?.GH_TOKEN, 'gho_token_1')
+  assert.equal(calls.filter((call) => call.args[0] === 'auth').length, 1)
+})
+
+test('a write refused with a 401 is not retried, and a token read again is never substituted for it', async () => {
+  const { runner, calls } = writeWorld({ writeStderr: 'HTTP 401: Bad credentials' })
+  const gh = createGh(runner)
+  await assert.rejects(gh.write(['api', '--method', 'PUT', 'repos/o/r/pulls/7/merge', '-f', 'merge_method=squash'], 'vera-quill'), (error: unknown) => error instanceof GhError && error.kind === 'auth')
+  assert.equal(writesOf(calls).length, 1)
+  assert.equal(calls.filter((call) => call.args[0] === 'auth').length, 1)
+  // reads recover: the next read asks gh for a new token
+  await gh.run(['api', 'user', '--jq', '.login'])
+  assert.equal(calls.filter((call) => call.args[0] === 'auth').length, 2)
+})
+
+test('an account lookup refused with a 401 ends the write: no retry, no write', async () => {
+  const { runner, calls } = writeWorld({ userStderr: 'HTTP 401: Bad credentials' })
+  const gh = createGh(runner)
+  await assert.rejects(gh.write(['api', '--method', 'PUT', 'repos/o/r/pulls/7/merge', '-f', 'merge_method=squash'], 'vera-quill'), WriteIdentityError)
+  assert.equal(calls.filter((call) => call.args[0] === 'api' && call.args[1] === 'user').length, 1)
+  assert.equal(writesOf(calls).length, 0)
+})
+
+test('a write for another account than the one signed in never reaches gh, and names both', async () => {
+  const { runner, calls } = writeWorld({ account: 'someone-else' })
+  const gh = createGh(runner)
+  await assert.rejects(gh.write(['api', '--method', 'PUT', 'repos/o/r/pulls/7/merge', '-f', 'merge_method=squash'], 'vera-quill'), (error: unknown) =>
+    error instanceof WriteIdentityError && error.login === 'someone-else')
+  assert.equal(writesOf(calls).length, 0)
+})
+
+test('a write does not retry when gh fails to start, either', async () => {
+  let writes = 0
+  const gh = createGh(async (args) => {
+    if (args[0] === 'auth') return ok('gho_t\n')
+    if (args[0] === 'api') return ok('vera-quill\n')
+    writes += 1
+    throw new Error('spawn gh ENOENT')
+  })
+  await assert.rejects(gh.write(['pr', 'merge', '7'], 'vera-quill'), /cannot run gh/)
+  assert.equal(writes, 1)
 })

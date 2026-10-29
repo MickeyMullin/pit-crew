@@ -26,7 +26,7 @@ const mine = (mergeState: string, patch: Record<string, unknown> = {}): OpenRow 
   url: 'https://example.test/owner/name/pull/101',
   title: 'fix(retry): back off between attempts',
   author: { login: 'vera-quill', alias: 'You' },
-  headRef: 'fix/retry', baseRef: 'main', headOid: '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7',
+  headRef: 'fix/retry', baseRef: 'main', primaryBase: true, headOid: '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7',
   merge: { state: mergeState, label: mergeState },
   agent: null,
   ...patch,
@@ -76,13 +76,9 @@ test('the confirmation names the PR and the action, and says what happens on Git
   assert.equal(markReady.confirm, 'Mark ready')
   assert.equal(markReady.reviewers, null)
 
-  const merge = actionConfirmModel(mine('ready', { baseRef: 'release' }), { type: 'action', action: 'merge', reviewer: '' }, people)
-  assert.equal(merge?.heading, 'Squash and merge #101 into release?')
-  assert.equal(merge?.title, 'fix(retry): back off between attempts')
-  assert.match(merge?.effect ?? '', /Squashes the PR into one commit on release under your account/)
-  assert.match(merge?.effect ?? '', /head branch is not deleted/)
-  assert.equal(merge?.confirm, 'Squash and merge')
-  assert.equal(merge?.reviewers, null)
+  const merge = actionConfirmModel(mine('ready', { baseRef: 'release', primaryBase: false }), { type: 'action', action: 'merge', reviewer: '' }, people)
+  assert.equal(merge, null)
+  assert.deepEqual(actionOffers(mine('ready', { baseRef: 'release', primaryBase: false }), true).map((offer) => offer.action), ['convertToDraft', 'requestReview'])
   // a state other than ready has no merge confirmation
   for (const state of ['draft', 'blocked', 'needsReview', 'needsApproval', 'checking']) {
     assert.equal(actionConfirmModel(mine(state), { type: 'action', action: 'merge', reviewer: '' }, people), null, state)
@@ -109,7 +105,8 @@ test('a review request chooses from people, never the PR\'s author; a stale choi
   // with no one else listed, there is nothing to send and the model says so
   const empty = actionConfirmModel(mine('ready'), ask, [{ login: 'vera-quill', alias: 'You' }])
   assert.equal(empty?.reviewer, '')
-  assert.match(empty?.effect ?? '', /Add reviewers in Settings/)
+  assert.equal(empty?.canConfirm, false)
+  assert.equal(model?.canConfirm, true)
 })
 
 test('an action the row no longer offers has no confirmation, and the open one is dropped when it stops holding', () => {
@@ -151,7 +148,7 @@ test('a refusal is the server\'s message as a sentence, a reload for the token, 
 })
 
 test('the done line names the PR and says the row is refreshing', () => {
-  assert.equal(actionDoneText(101, { type: 'action', action: 'merge', reviewer: '' }, people), '#101: squash merged. The row is refreshing.')
+  assert.equal(actionDoneText(101, { type: 'action', action: 'merge', reviewer: '' }, people), '#101: merge requested (squash). The row is refreshing.')
   assert.equal(actionDoneText(101, { type: 'action', action: 'markReady', reviewer: '' }, people), '#101: marked ready for review. The row is refreshing.')
   assert.equal(actionDoneText(101, { type: 'action', action: 'convertToDraft', reviewer: '' }, people), '#101: converted to a draft. The row is refreshing.')
   assert.equal(actionDoneText(101, { type: 'action', action: 'requestReview', reviewer: 'sam-tran' }, people), '#101: review requested from Sam. The row is refreshing.')
@@ -173,4 +170,7 @@ test('in drawer.ts an action button only asks, and the request is sent from one 
   assert.match(source, /confirmActions\(ask\.confirm, 'primary', \(\) => void doAction\(\)\)/)
   // doAction sends only an open action confirmation
   assert.match(source, /if \(busy \|\| confirm\?\.type !== 'action' \|\| number === null\) return/)
+  assert.match(source, /if \(action === 'requestReview'\)/)
+  assert.match(source, /getJson<\{ people\?: PersonChoice\[\] \}>\('\/api\/config'\)/)
+  assert.match(source, /model\?\.actionAsk\?\.canConfirm === false/)
 })

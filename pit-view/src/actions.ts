@@ -1,14 +1,15 @@
 // src/actions.ts
 import type { Cache } from './cache.ts'
 import type { Config } from './config.ts'
-import { deriveIssues, deriveMerge } from './derive.ts'
-import { fetchViewerLogin, GhError } from './github.ts'
+import { deriveIssues, deriveMerge, isPrimaryBase } from './derive.ts'
+import { GhError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind } from './github.ts'
 
 // direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs,
 // each through gh with the viewer's own token. This module decides whether an action is allowed
 // and what gh is asked; it never trusts the page, so every rule is checked here again.
-// merge is always a squash into the PR's base branch; the method is fixed, not a setting
+// merge is always a squash into the repository's primary branch; the method is fixed, not a
+// setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused
 export const actionNames = ['merge', 'markReady', 'convertToDraft', 'requestReview'] as const
 export type ActionName = typeof actionNames[number]
 
@@ -56,12 +57,12 @@ export const parseAction = (body: unknown): ActionRequest => {
   return { action: action as 'merge' | 'markReady' | 'convertToDraft' }
 }
 
-// exactly what gh is asked for each action. A merge is a squash into the PR's base branch, with no
-// branch deletion, admin override, auto-merge or message override. A review request goes through
-// gh api for being one REST call with a fixed argument list, not because of any token scope
+// exactly what gh is asked for each action. Merge uses GitHub's REST merge endpoint rather than
+// `gh pr merge`: that endpoint refuses when branch rules require a queue, so one click cannot
+// silently enable auto-merge or enqueue anything. The method is fixed to squash.
 export const ghArgs = (repo: string, number: number, request: ActionRequest): string[] => {
   switch (request.action) {
-    case 'merge': return ['pr', 'merge', String(number), '--squash', '--repo', repo]
+    case 'merge': return ['api', '--method', 'PUT', `repos/${repo}/pulls/${number}/merge`, '-f', 'merge_method=squash']
     case 'markReady': return ['pr', 'ready', String(number), '--repo', repo]
     case 'convertToDraft': return ['pr', 'ready', String(number), '--undo', '--repo', repo]
     case 'requestReview': return ['api', '--method', 'POST', `repos/${repo}/pulls/${number}/requested_reviewers`, '-f', `reviewers[]=${request.reviewer}`]
@@ -75,7 +76,8 @@ export type ActionsOptions = {
   gh: Gh
   // the config in effect, read afresh at every action
   config: () => Config
-  // starts the targeted refresh of one PR (the poller's); not awaited
+  // starts the targeted refresh of one PR that is certain to start after the write (the poller's
+  // refreshPrAfterWrite); not awaited
   refreshPr: (number: number) => Promise<unknown>
   log: (line: string) => void
 }
@@ -98,7 +100,8 @@ export const createActions = (options: ActionsOptions): Actions => {
     const request = parseAction(body)
     const config = options.config()
     const { repo, viewer } = config
-    const row = cache.readView(repo).open.find((entry) => entry.number === number)
+    const cached = cache.readView(repo)
+    const row = cached.open.find((entry) => entry.number === number)
     if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched`)
     const author = row.pr.author?.login ?? ''
     if (viewer === '' || !sameLogin(author, viewer)) throw new ActionError('notYours', `#${number} is not your PR; direct actions apply to your own PRs only`)
@@ -108,6 +111,10 @@ export const createActions = (options: ActionsOptions): Actions => {
       const merge = deriveMerge(row.pr, deriveIssues(row.pr))
       if (merge.state === 'draft') throw new ActionError('notAllowed', `#${number} is a draft; mark it ready for review before merging`)
       if (merge.state !== 'ready') throw new ActionError('notAllowed', `#${number} is not ready to merge: its merge state is ${merge.label}`)
+      const base = row.pr.baseRefName
+      if (!isPrimaryBase(base, cached.defaultBranch)) {
+        throw new ActionError('notAllowed', `#${number} targets ${base}, not the primary branch (${cached.defaultBranch ?? 'master or main'}); Pit View merges only into the primary branch`)
+      }
     }
     if (request.action === 'markReady' && !row.pr.isDraft) throw new ActionError('notAllowed', `#${number} is not a draft`)
     if (request.action === 'convertToDraft' && row.pr.isDraft) throw new ActionError('notAllowed', `#${number} is already a draft`)
@@ -121,18 +128,16 @@ export const createActions = (options: ActionsOptions): Actions => {
     if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
     inFlight.add(key)
     try {
-      // gh writes as whichever account it is signed in as, and this machine holds more than one
-      let login: string
-      try {
-        login = await fetchViewerLogin(gh)
-      } catch (error) {
-        throw new ActionError('identityUnknown', `cannot confirm which account gh uses: ${messageOf(error)}`, error instanceof GhError ? error.kind : null)
-      }
-      if (!sameLogin(login, viewer)) throw new ActionError('identityMismatch', `gh is signed in as ${login || 'nobody'}, but the viewer is ${viewer}; switch with gh auth switch before acting`)
+      // gh writes as whichever account it is signed in as, and this machine holds more than one:
+      // the write confirms the account with the token it then writes with, and runs once
       const checked: ActionRequest = reviewer === undefined ? request : { action: 'requestReview', reviewer }
       try {
-        await gh.run(ghArgs(repo, number, checked))
+        await gh.write(ghArgs(repo, number, checked), viewer)
       } catch (error) {
+        if (error instanceof WriteIdentityError) {
+          if (error.login === null) throw new ActionError('identityUnknown', error.message, error.errorKind)
+          throw new ActionError('identityMismatch', error.message)
+        }
         // the cache may be what is wrong, so the row is read again before the refusal is shown
         refresh(number)
         throw new ActionError('ghFailed', messageOf(error), error instanceof GhError ? error.kind : null)

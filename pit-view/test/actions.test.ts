@@ -6,8 +6,10 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { ghArgs, parseAction } from '../src/actions.ts'
+import { isPrimaryBase } from '../src/derive.ts'
 import type { Config } from '../src/config.ts'
 import type { OpenRow } from '../src/derive.ts'
+import type { RawOpenResponse } from '../src/github.ts'
 import type { Patch, View } from '../src/poller.ts'
 import { startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
@@ -34,6 +36,10 @@ type Behavior = {
   // holds every write until the returned function is called
   gate?: Promise<void>
   single?: (number: number) => Promise<unknown>
+  // the base branch each listed PR has, by number, instead of the fixture's
+  bases?: Record<number, string>
+  // called when a write has been accepted
+  onWrite?: () => void
 }
 
 const isWrite = (args: string[]): boolean =>
@@ -48,13 +54,21 @@ const ghWorld = (behavior: Behavior = {}): FakeRunner => {
   return fakeRunner(async (args) => {
     if (isWrite(args)) {
       await behavior.gate
-      return behavior.writeError === undefined ? ok('') : failed(behavior.writeError)
+      if (behavior.writeError !== undefined) return failed(behavior.writeError)
+      behavior.onWrite?.()
+      return ok('')
     }
     if (args[0] === 'api' && args[1] === 'user') return ok(`${behavior.account ?? scenario.viewer}\n`)
     if (args[0] === 'api' && args[1] === 'graphql' && (field(args, 'query') ?? '').includes('query SinglePullRequest') && behavior.single !== undefined) {
       return ok(JSON.stringify(await behavior.single(Number(field(args, 'number')))))
     }
-    return base.runner(args)
+    const answer = await base.runner(args)
+    if (behavior.bases !== undefined && args[0] === 'api' && args[1] === 'graphql' && (field(args, 'query') ?? '').includes('query OpenPullRequests')) {
+      const parsed = JSON.parse(answer.stdout) as RawOpenResponse
+      for (const node of parsed.data.repository?.pullRequests.nodes ?? []) node.baseRefName = behavior.bases[node.number] ?? node.baseRefName
+      return ok(JSON.stringify(parsed))
+    }
+    return answer
   })
 }
 
@@ -264,7 +278,7 @@ const refusedWithoutGh = async (h: Harness, number: number | string, body: unkno
   assert.equal(writesOf(h.runner).length, 0)
 }
 
-test('merge squashes a ready PR of the viewer\'s own into its base: exactly gh pr merge --squash, with the viewer\'s token', async () => {
+test('merge squashes a ready PR of the viewer\'s own into its primary base through the REST endpoint, with the viewer\'s token', async () => {
   const h = await setup()
   try {
     await filled(h)
@@ -274,7 +288,7 @@ test('merge squashes a ready PR of the viewer\'s own into its base: exactly gh p
     const done = await act(h, 102, { action: 'merge' })
     assert.equal(done.status, 200)
     assert.deepEqual(done.body, { number: 102, action: 'merge', done: true })
-    assert.deepEqual(writesOf(h.runner).map((call) => call.args), [['pr', 'merge', '102', '--squash', '--repo', scenario.repo]])
+    assert.deepEqual(writesOf(h.runner).map((call) => call.args), [['api', '--method', 'PUT', `repos/${scenario.repo}/pulls/102/merge`, '-f', 'merge_method=squash']])
     assert.equal(writesOf(h.runner)[0]?.options?.env?.GH_TOKEN, 'gho_fixture_token')
     // the account was confirmed before the write
     const lookup = h.runner.calls.findIndex((call) => call.args[0] === 'api' && call.args[1] === 'user')
@@ -332,6 +346,46 @@ test('merge is refused for a PR that is not open, and gh is not asked anything',
   } finally {
     await h.cleanup()
   }
+})
+
+test('merge is refused unless the PR targets the primary branch: a stacked PR or a release branch is refused with no gh call', async () => {
+  const h = await setup({ runner: ghWorld({ bases: { 102: 'feat/parent-branch' } }) })
+  try {
+    await filled(h)
+    const row = (await rowOf(h, 102))!
+    assert.equal(row.merge.state, 'ready')
+    assert.equal(row.baseRef, 'feat/parent-branch')
+    await refusedWithoutGh(h, 102, { action: 'merge' }, 422, /feat\/parent-branch.*main|primary branch/)
+  } finally {
+    await h.cleanup()
+  }
+  const release = await setup({ runner: ghWorld({ bases: { 102: 'release/2.4' } }) })
+  try {
+    await filled(release)
+    await refusedWithoutGh(release, 102, { action: 'merge' }, 422, /release\/2\.4/)
+    assert.equal(writesOf(release.runner).length, 0)
+  } finally {
+    await release.cleanup()
+  }
+})
+
+test('merge goes by the default branch the cache holds: master is refused where the repository\'s default is main', async () => {
+  const h = await setup({ runner: ghWorld({ bases: { 102: 'master' } }) })
+  try {
+    await filled(h)
+    await refusedWithoutGh(h, 102, { action: 'merge' }, 422, /master/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the primary branch is the default branch when it is known, and exactly master or main when it is not', () => {
+  assert.equal(isPrimaryBase('main', 'main'), true)
+  assert.equal(isPrimaryBase('master', 'main'), false)
+  assert.equal(isPrimaryBase('develop', 'develop'), true)
+  assert.equal(isPrimaryBase('release/2.4', 'main'), false)
+  for (const name of ['master', 'main']) assert.equal(isPrimaryBase(name, null), true)
+  for (const name of ['Main', 'main2', 'release', 'feat/x', '', 'origin/main', 'main ']) assert.equal(isPrimaryBase(name, null), false, name)
 })
 
 test('merge takes no other field: a method, a branch deletion, admin or auto flag, or a message is refused before gh is asked', async () => {
@@ -557,6 +611,102 @@ test('after an action the PR is refreshed on its own and the updated row arrives
   }
 })
 
+test('a write that fails is not retried, even with a 401, and the write used the viewer\'s token', async () => {
+  const h = await setup({ runner: ghWorld({ writeError: 'HTTP 401: Bad credentials' }) })
+  try {
+    await filled(h)
+    const refused = await act(h, 103, { action: 'markReady' })
+    assert.equal(refused.status, 502)
+    assert.equal(refused.body.errorKind, 'auth')
+    assert.equal(writesOf(h.runner).length, 1)
+    assert.equal(writesOf(h.runner)[0]?.options?.env?.GH_TOKEN, 'gho_fixture_token')
+    await until(() => singleCallsOf(h.runner).length === 1)
+    await h.server.poller.idle()
+    assert.equal(writesOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a refresh already in flight when an action finishes cannot be the post-action answer: one more refresh runs after it, and its row is the one that arrives last', async () => {
+  let written = false
+  let release: () => void = () => {}
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let asked = 0
+  const h = await setup({
+    runner: ghWorld({
+      onWrite: () => {
+        written = true
+      },
+      single: async (number) => {
+        asked += 1
+        // what GitHub says at the moment this read starts; the first one is then held open
+        const stale = !written
+        if (asked === 1) await held
+        return singlePr(number, { patch: { isDraft: stale } })
+      },
+    }),
+  })
+  try {
+    await filled(h)
+    const stream = await collectPatches(h.base)
+    // an earlier refresh of #103 (a page asking) reads the draft, and is still waiting on GitHub
+    const earlier = fetch(`${h.base}/api/prs/103/refresh`, { method: 'POST' })
+    await until(() => singleCallsOf(h.runner).length === 1)
+    const done = await act(h, 103, { action: 'markReady' })
+    assert.equal(done.status, 200)
+    // the held answer arrives only now, after the write, and it still says draft
+    release()
+    await earlier
+    await until(() => singleCallsOf(h.runner).length === 2)
+    await h.server.poller.idle()
+    await until(() => stream.patches.some((patch) => patch.rows.some((row) => row.number === 103 && row.refresh === null && row.merge.state !== 'draft')))
+    const last = [...stream.patches].reverse().find((patch) => patch.rows.some((row) => row.number === 103))
+    assert.notEqual(last?.rows.find((row) => row.number === 103)?.merge.state, 'draft')
+    assert.notEqual((await rowOf(h, 103))?.merge.state, 'draft')
+    assert.equal(singleCallsOf(h.runner).length, 2)
+    stream.close()
+  } finally {
+    release()
+    await h.cleanup()
+  }
+})
+
+test('several post-write refreshes asked while one is in flight coalesce into one more', async () => {
+  let release: () => void = () => {}
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let asked = 0
+  const h = await setup({
+    runner: ghWorld({
+      single: async (number) => {
+        asked += 1
+        if (asked === 1) await held
+        return singlePr(number)
+      },
+    }),
+  })
+  try {
+    await filled(h)
+    const first = h.server.poller.refreshPr(103)
+    await until(() => singleCallsOf(h.runner).length === 1)
+    const after = [h.server.poller.refreshPrAfterWrite(103), h.server.poller.refreshPrAfterWrite(103), h.server.poller.refreshPrAfterWrite(103)]
+    release()
+    await first
+    await Promise.all(after)
+    assert.equal(singleCallsOf(h.runner).length, 2)
+    // with nothing in flight it is simply one refresh
+    await h.server.poller.refreshPrAfterWrite(103)
+    assert.equal(singleCallsOf(h.runner).length, 3)
+  } finally {
+    release()
+    await h.cleanup()
+  }
+})
+
 test('a write GitHub refuses is a 502 with the reason, and the row is read again since the cache may be what is wrong', async () => {
   const h = await setup({ runner: ghWorld({ writeError: 'GraphQL: Pull request is not a draft (markPullRequestReadyForReview)' }) })
   try {
@@ -614,7 +764,7 @@ test('the pure parts: parseAction names what it refuses, and ghArgs is exactly w
   assert.deepEqual(parseAction({ action: 'merge' }), { action: 'merge' })
   assert.throws(() => parseAction({ action: 'merge', method: 'rebase' }), /unknown field method/)
   assert.throws(() => parseAction({ action: 'merge', reviewer: 'sam-tran' }), /takes no reviewer/)
-  assert.deepEqual(ghArgs('o/r', 7, { action: 'merge' }), ['pr', 'merge', '7', '--squash', '--repo', 'o/r'])
+  assert.deepEqual(ghArgs('o/r', 7, { action: 'merge' }), ['api', '--method', 'PUT', 'repos/o/r/pulls/7/merge', '-f', 'merge_method=squash'])
   assert.deepEqual(ghArgs('o/r', 7, { action: 'markReady' }), ['pr', 'ready', '7', '--repo', 'o/r'])
   assert.deepEqual(ghArgs('o/r', 7, { action: 'convertToDraft' }), ['pr', 'ready', '7', '--undo', '--repo', 'o/r'])
 })

@@ -89,6 +89,9 @@ export type Poller = {
   refresh: (trigger: Exclude<Trigger, 'active' | 'interval'>) => RefreshResult
   // fetches one PR and patches its row, outside any cycle; joins a refresh of that PR in flight
   refreshPr: (number: number) => Promise<PrRefreshResult>
+  // the refresh that follows a GitHub write: starts after the write settled, so an earlier one in
+  // flight, which may have read before the write, is followed by exactly one more
+  refreshPrAfterWrite: (number: number) => Promise<PrRefreshResult>
   // the clients changed; returns the cycle started or joined under the active rule, or null
   setActive: (activeCount: number, becameActive: boolean) => number | null
   // a saved config replaced `before`; emits the recomputed rows and starts a config cycle when needed
@@ -525,6 +528,23 @@ export const createPoller = (options: PollerOptions): Poller => {
     return job
   }
 
+  // a refresh in flight may have read GitHub before the write, so joining it could show the old
+  // state; one more starts when it ends, and any number of asks meanwhile share that one
+  const afterWrite = new Map<string, Promise<PrRefreshResult>>()
+  const refreshPrAfterWrite = (number: number): Promise<PrRefreshResult> => {
+    const key = prKey(config().repo, number)
+    const running = prJobs.get(key)
+    if (running === undefined) return refreshPr(number)
+    const queued = afterWrite.get(key)
+    if (queued !== undefined) return queued
+    const next = running.catch(() => undefined).then(() => {
+      afterWrite.delete(key)
+      return refreshPr(number)
+    })
+    afterWrite.set(key, next)
+    return next
+  }
+
   const setActive = (count: number, becameActive: boolean): number | null => {
     activeCount = count
     let joined: number | null = null
@@ -628,5 +648,5 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
-  return { view, refresh, refreshPr, setActive, configChanged, runWatched, runChanged, idle, stop, version: () => version }
+  return { view, refresh, refreshPr, refreshPrAfterWrite, setActive, configChanged, runWatched, runChanged, idle, stop, version: () => version }
 }

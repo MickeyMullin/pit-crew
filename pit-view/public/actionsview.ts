@@ -19,14 +19,14 @@ export type ActionConfirm = { type: 'action', action: ActionKind, reviewer: stri
 
 export type ActionOffer = { action: ActionKind, text: string }
 
-// the actions a row offers: only the viewer's own PRs (Mine rows) have any, and a PR that has left
-// the open tables has none. Merge is offered only while the merge state is ready. The server
-// decides again whatever this says
-export const actionOffers = (row: Pick<OpenRow, 'section' | 'merge'>, open: boolean): ActionOffer[] => {
+// the actions this page offers: only the viewer's own PRs (Mine rows) have any, and a PR that has left
+// the open tables has none. Merge is offered only while the merge state is ready and its base is the
+// cached primary branch. The server decides again whatever this says
+export const actionOffers = (row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase'>, open: boolean): ActionOffer[] => {
   if (!open || row.section !== 'mine') return []
   const draft = row.merge.state === 'draft'
   return [
-    ...row.merge.state === 'ready' ? [{ action: 'merge', text: 'Squash and merge' } as const] : [],
+    ...row.merge.state === 'ready' && row.primaryBase ? [{ action: 'merge', text: 'Squash and merge' } as const] : [],
     draft ? { action: 'markReady', text: 'Mark ready for review' } : { action: 'convertToDraft', text: 'Convert to draft' },
     { action: 'requestReview', text: 'Request review' },
   ]
@@ -46,6 +46,8 @@ export type ActionConfirmModel = {
   // the choice of reviewer for a review request; null for the others
   reviewers: { login: string, label: string }[] | null
   reviewer: string
+  // false when no eligible reviewer exists, so the confirmation control must be disabled
+  canConfirm: boolean
   confirm: string
   busy: string
 }
@@ -56,7 +58,7 @@ const aliasOf = (people: readonly PersonChoice[], login: string): string =>
 // null when the row no longer offers that action. The chosen reviewer is kept when still listed,
 // otherwise the first choice
 export const actionConfirmModel = (
-  row: Pick<OpenRow, 'number' | 'title' | 'author' | 'section' | 'merge' | 'baseRef'>,
+  row: Pick<OpenRow, 'number' | 'title' | 'author' | 'section' | 'merge' | 'baseRef' | 'primaryBase'>,
   ask: ActionConfirm,
   people: readonly PersonChoice[],
 ): ActionConfirmModel | null => {
@@ -70,6 +72,7 @@ export const actionConfirmModel = (
       effect: `Squashes the PR into one commit on ${row.baseRef} under your account. The head branch is not deleted. The merge cannot be undone from Pit View.`,
       reviewers: null,
       reviewer: '',
+      canConfirm: true,
       confirm: 'Squash and merge',
       busy: 'Merging…',
     }
@@ -82,6 +85,7 @@ export const actionConfirmModel = (
       effect: 'Takes the PR out of draft under your account. Its requested reviewers and watchers are notified.',
       reviewers: null,
       reviewer: '',
+      canConfirm: true,
       confirm: 'Mark ready',
       busy: 'Marking ready…',
     }
@@ -94,6 +98,7 @@ export const actionConfirmModel = (
       effect: 'Turns the PR back into a draft under your account. It cannot be merged until it is marked ready again.',
       reviewers: null,
       reviewer: '',
+      canConfirm: true,
       confirm: 'Convert to draft',
       busy: 'Converting…',
     }
@@ -109,6 +114,7 @@ export const actionConfirmModel = (
       : `Asks GitHub to request a review from ${aliasOf(people, reviewer)} (@${reviewer}) under your account. They are notified.`,
     reviewers: choices.map((person) => ({ login: person.login, label: `${person.alias} (@${person.login})` })),
     reviewer,
+    canConfirm: reviewer !== '',
     confirm: 'Request review',
     busy: 'Requesting…',
   }
@@ -116,7 +122,7 @@ export const actionConfirmModel = (
 
 // a confirmation outlives nothing: it is dropped when the PR has left the open tables, or no
 // longer offers its action (a draft marked ready by a patch no longer offers Mark ready)
-export const actionHolds = (ask: ActionConfirm, row: Pick<OpenRow, 'section' | 'merge'>, open: boolean): boolean =>
+export const actionHolds = (ask: ActionConfirm, row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase'>, open: boolean): boolean =>
   actionOffers(row, open).some((offer) => offer.action === ask.action)
 
 // the request the confirmation sends: the token header, and the reviewer for a review request only
@@ -137,10 +143,11 @@ export const actionRefusalText = (status: number, error: string | null): string 
   return sentence(error ?? '') || `Pit View refused with status ${status}.`
 }
 
-// what the live region says, and the note shown in the drawer, once GitHub has accepted the action
+// The row refresh decides whether the REST request merged immediately or was refused by branch
+// rules, so this acknowledgement never claims a merge happened before that evidence arrives.
 export const actionDoneText = (number: number, ask: ActionConfirm, people: readonly PersonChoice[]): string => {
   const done = ask.action === 'merge'
-    ? 'squash merged'
+    ? 'merge requested (squash)'
     : ask.action === 'markReady'
       ? 'marked ready for review'
       : ask.action === 'convertToDraft'

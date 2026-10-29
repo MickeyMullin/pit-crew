@@ -83,7 +83,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   // a start or stop request is on its way
   let busy = false
   let error = ''
-  // the people the config lists, read when a review request is first asked in this drawer's life
+  // the people used for the current confirmation; review requests refresh this list every time
+  // they are asked because Settings can change while the drawer is open
   let people: PersonChoice[] | null = null
   // what the last direct action did, shown under the buttons until the next ask or another PR
   let actionNote = ''
@@ -239,7 +240,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     if (picker !== null) picker.disabled = busy || (model?.actionAsk?.reviewers?.length ?? 0) === 0
     if (cancel !== null) (cancel as HTMLButtonElement).disabled = busy
     if (go !== null) {
-      go.disabled = busy
+      go.disabled = busy || (confirm?.type === 'action' && model?.actionAsk?.canConfirm === false)
       const idleText = confirm?.type === 'stop' ? (model?.stop?.confirm ?? 'Stop run')
         : confirm?.type === 'action' ? (model?.actionAsk?.confirm ?? 'Confirm')
           : (model?.confirm?.confirm ?? 'Start')
@@ -269,7 +270,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     if (n === null || options.rowOf(n) === undefined) return
     actionNote = ''
     actionFail = ''
-    if (action === 'requestReview' && people === null) {
+    if (action === 'requestReview') {
       const answer = await getJson<{ people?: PersonChoice[] }>('/api/config')
       if (n !== number) return
       if (!answer.ok || !Array.isArray(answer.value?.people)) {
