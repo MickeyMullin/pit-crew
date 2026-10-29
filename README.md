@@ -314,7 +314,7 @@ pnpm dev       # the development instance, http://127.0.0.1:4792
 
 The deployed app runs from a clone of `master` at `~/app/pit-crew`, on http://127.0.0.1:4791, kept running by the `com.mickey.pit-view` launch agent; [pit-view/deploy/README.md](pit-view/deploy/README.md) covers deploying and updating it. The two instances keep separate config and state folders, so they run at the same time.
 
-It needs Node 26 or later and a logged-in `gh`; [pit-view/README.md](pit-view/README.md) covers configuration and tests. Its design, rules and progress checklist live in [pit-view/DESIGN.md](pit-view/DESIGN.md), which is the authority for any change to it.
+It needs Node 26 or later and a logged-in `gh`; [pit-view/README.md](pit-view/README.md) covers configuration and tests. Its design and rules live in [pit-view/DESIGN.md](pit-view/DESIGN.md), which is the authority for any change to it.
 
 It is not part of the deploy trees: `scripts/deploy-reviews.sh` and `scripts/sanitize.sh` never touch it, and it uses no `{{HOME}}` placeholders. It writes `~` and resolves it at runtime, and its config and cache live under your home directory, outside the repo. The repo's first rule still applies: no real home path, and no real client data, may be committed under `pit-view/`. Before committing there, `grep -rI --exclude-dir=node_modules "$HOME" pit-view` must print nothing.
 

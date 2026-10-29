@@ -1,6 +1,6 @@
 # Pit View
 
-A local dashboard for the pull requests in one GitHub repository: which PRs need your attention, which of your own are blocked or ready, and what closed today. The design, the rules it follows and the progress checklist are in [DESIGN.md](DESIGN.md).
+A local dashboard for the pull requests in one GitHub repository: which PRs need your attention, which of your own are blocked or ready, and what closed today. The design and the rules it follows are in [DESIGN.md](DESIGN.md).
 
 ## Requirements
 

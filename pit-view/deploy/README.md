@@ -111,7 +111,7 @@ Pit View has no sign-in. Anyone who can reach the proxy can use the whole app, R
 
 ## Checks after the first deployment
 
-These are the open "M13 checks at the first deployment" item in section 12 of DESIGN.md; tick it there once they pass.
+Run these after the first deployment.
 
 1. `pnpm service:status` exits 0, and opening http://127.0.0.1:4791 fills the dashboard, so `gh auth token` works under launchd.
 1. With no page open for an hour, `sqlite3 ~/.local/state/pit-view/cache.sqlite "select count(*) from cycles where started_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour')"` prints 0.
