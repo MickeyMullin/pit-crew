@@ -1443,6 +1443,58 @@ test('starting a sweep needs the token and the Host, Origin and content-type che
   }
 })
 
+test('a sweep start naming a repository that is no longer the one in effect is refused with 409 and starts nothing', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    const url = sweepsUrl(h)
+    const stale = await send(url, 'POST', { runner: 'claude', repo: 'octo-example/other' }, token(h))
+    assert.equal(stale.status, 409)
+    assert.match(String(stale.body.error), /octo-example\/other/)
+    assert.equal((await send(url, 'POST', { repo: 7 }, token(h))).status, 400)
+    assert.equal(h.launch.children.length, 0)
+    assert.deepEqual((await getJson<unknown[]>(url)).body, [])
+    // the repository changes under an open confirmation: the one it showed is stale now
+    const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
+    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, repo: 'octo-example/other' })).status, 200)
+    const moved = await send(url, 'POST', { runner: 'claude', repo: scenario.repo }, token(h))
+    assert.equal(moved.status, 409)
+    assert.equal(h.launch.children.length, 0)
+    assert.deepEqual((await getJson<unknown[]>(url)).body, [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the sweeps the cache prunes leave memory, the list and the feed with the same ids', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    const { cache } = h.server
+    const fields = { command: 'review-dependabot-sweep', args: [scenario.repo, '--parallel', '1'], label: 'Dependabot sweep', runner: 'claude' as const, cwd: '~/dev/orbit', sessionId: null, pid: null, pidStartedAt: null, startedAt: '2026-10-26T17:00:00Z', lastStepAt: null, step: null, stepState: null, finishedAt: '2026-10-26T17:05:00Z', status: 'done' as const, result: null, note: null, costUsd: null, resume: null }
+    const oldest = cache.createSweep({ ...fields, repo: scenario.repo }, (id) => `~/s/${id}`)
+    // memory holds it, as the launcher's change announces it
+    h.server.sweeps.set(oldest)
+    assert.deepEqual((await getJson<{ id: number }[]>(sweepsUrl(h))).body.map((sweep) => sweep.id), [oldest.id])
+    for (let index = 0; index < 49; index += 1) cache.createSweep({ ...fields, repo: 'octo-example/other' }, (id) => `~/s/${id}`)
+    const stream = await openStream(h.base, 'client=tab-1&visible=false&paused=false')
+    // the 51st sweep pushes the oldest out of the table
+    const started = await send(sweepsUrl(h), 'POST', undefined, token(h))
+    assert.equal(started.status, 200)
+    assert.equal(cache.getSweep(oldest.id), null)
+    assert.equal(h.server.sweeps.get(oldest.id), undefined)
+    assert.deepEqual((await getJson<{ id: number }[]>(sweepsUrl(h))).body.map((sweep) => sweep.id), [started.body.id])
+    const view = (await getJson<{ sweeps: { items: { id: number }[] } }>(`${h.base}/api/view`)).body
+    assert.deepEqual(view.sweeps.items.map((sweep) => sweep.id), [started.body.id])
+    // the feed announced the start, then the removal, each with the sweeps whole
+    const first = await stream.patch()
+    assert.deepEqual(first.sweeps?.items.map((sweep) => sweep.id), [started.body.id, oldest.id])
+    const second = await stream.patch()
+    assert.deepEqual(second.sweeps?.items.map((sweep) => sweep.id), [started.body.id])
+    stream.close()
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a sweep start is refused with a clear error: no cloneDir, a folder that is not the clone, another gh account', async () => {
   const unset = await setup()
   try {

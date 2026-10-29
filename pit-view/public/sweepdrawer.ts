@@ -1,10 +1,5 @@
 // public/sweepdrawer.ts
-// the Dependabot sweep drawer: a non-modal panel on the right for the repository's sweeps, not for
-// one PR. It starts a sweep behind an inline confirmation, shows the running, waiting and finished
-// card of the sweep it is on (the whole sweep-result@1: counts, one card per PR, the merge order
-// and the summary's path), and lists the earlier sweeps. It reads the sweeps from the page's feed
-// on every draw, so a patch updates it in place. sweepview.ts says what every part reads; this file
-// makes the elements, keeps the confirmation's state, and moves focus
+// the Dependabot sweep drawer: a non-modal panel on the right for the repository's sweeps, not for one PR. It starts a sweep behind an inline confirmation, shows the running, waiting and finished card of the sweep it is on (the whole sweep-result@1: counts, one card per PR, the merge order and the summary's path), and lists the earlier sweeps. It reads the sweeps from the page's feed on every draw, so a patch updates it in place. sweepview.ts says what every part reads; this file makes the elements, keeps the confirmation's state, and moves focus
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
@@ -14,7 +9,7 @@ import type { ReportPanel } from './reportpanel.ts'
 import { sendRun } from './runapi.ts'
 import { safeHref } from './safeurl.ts'
 import {
-  defaultSweepRunner, shownSweep, sweepCard, sweepConfirmModel, sweepList, sweepRefusal, sweepResultModel, sweepRunningModel, sweepStartRequest,
+  defaultSweepRunner, shownSweep, sweepCards, sweepConfirmModel, sweepConfirmSignature, sweepList, sweepRefusal, sweepResultModel, sweepRunningModel, sweepStartRequest,
   sweepStopModel, sweepStopRefusal, sweepStopRequest, sweepWaitingModel,
 } from './sweepview.ts'
 import type { SweepRowModel, SweepsView, SweepView, Tone } from './sweepview.ts'
@@ -36,8 +31,7 @@ export type SweepDrawerOptions = {
 }
 
 export type SweepDrawer = {
-  // sweepId picks the sweep to show (the newest by default), pr scrolls to and marks that PR's card,
-  // and ask opens the start's confirmation at once
+  // sweepId picks the sweep to show (the newest by default), pr scrolls to and marks that PR's card, and ask opens the start's confirmation at once
   open: (opener: SweepOpener | null, show?: { sweepId?: number, pr?: number, ask?: boolean }) => void
   close: () => void
   update: () => void
@@ -78,6 +72,8 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
   let scrollPending = false
   let confirm: Confirm | null = null
   let confirmFrom: string | null = null
+  // the repository the start confirmation on screen names, which the start request carries
+  let confirmedRepo: string | null = null
   let busy = false
   let error = ''
   // a stop was accepted and the sweep has not settled yet
@@ -128,6 +124,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
 
   const startConfirmBlock = (view: SweepsView, asked: Extract<Confirm, { type: 'start' }>): HTMLElement => {
     const model = sweepConfirmModel(view.start, asked.runner)
+    confirmedRepo = model.repo
     const runner: Node | string = model.runners.length === 1
       ? model.runnerLabel
       : h('span', { class: 'confirm-runners', role: 'radiogroup', 'aria-labelledby': 'sweep-runner-term' },
@@ -164,8 +161,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
       confirmActions(stop.confirm, 'danger', () => void doStop()))
   }
 
-  // the parts that change without a rebuild: the command for the chosen runner, the error line and
-  // the buttons while a request is on its way
+  // the parts that change without a rebuild: the command for the chosen runner, the error line and the buttons while a request is on its way
   const paintConfirm = (): void => {
     const view = sweeps()
     const command = root.querySelector<HTMLElement>('[data-confirm="command"]')
@@ -218,10 +214,11 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
   const doStart = async (): Promise<void> => {
     if (busy || confirm?.type !== 'start') return
     const asked = confirm
+    if (confirmedRepo === null) return
     busy = true
     error = ''
     paintConfirm()
-    const answer = await sendRun(sweepStartRequest(asked.runner, options.token))
+    const answer = await sendRun(sweepStartRequest(asked.runner, confirmedRepo, options.token))
     busy = false
     if (answer.ok) {
       confirm = null
@@ -283,7 +280,8 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
 
   const startPart = (view: SweepsView, latest: SweepView | null): Part => ({
     key: 'start',
-    sig: JSON.stringify([view.start.unavailable, confirm === null ? null : confirm.type, latest?.status === 'running']),
+    // a start confirmation is rebuilt whenever anything it displays changes, so it never shows a repository, viewer or command that is not the one a start would use
+    sig: JSON.stringify([view.start.unavailable, confirm === null ? null : confirm.type, confirm?.type === 'start' ? sweepConfirmSignature(view.start, confirm.runner) : null, latest?.status === 'running']),
     build: () => {
       if (confirm?.type === 'start') return section('start', 'Start', startConfirmBlock(view, confirm))
       if (latest?.status === 'running') return h('section', { hidden: true })
@@ -433,7 +431,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
           model.cost === null ? null : h('span', { class: 'drawer-meta' }, ` · ${model.cost}`)),
         model.note === null ? null : h('p', { class: 'drawer-note' }, model.note),
         model.empty ? h('p', { class: 'muted', role: 'status' }, 'Nothing to sweep: no open Dependabot PRs were found, so nothing was reviewed or posted.') : null,
-        sweep.status !== 'done' ? null : h('dl', { class: 'sweep-counts' },
+        model.counts === null ? null : h('dl', { class: 'sweep-counts' },
           model.counts.map((count) => h('div', { class: 'sweep-count', 'data-count': count.key },
             h('dt', {}, count.label),
             h('dd', { class: 'mono' }, String(count.value))))),
@@ -445,7 +443,8 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
         model.rows.length === 0 ? null : h('div', { class: 'sweep-rows' },
           h('p', { class: 'drawer-label' }, `Pull requests · ${model.rows.length}`),
           h('ul', { class: 'drawer-list sweep-row-list' }, model.rows.map(rowCard))),
-        resumeBlock(sweep.resume))
+        // a waiting sweep's own card carries its resume command
+        sweep.status === 'needsInput' ? null : resumeBlock(sweep.resume))
     },
   })
 
@@ -489,10 +488,11 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
 
     const items: (Part | Keyed)[] = [startPart(view, view.items[0] ?? null)]
     if (current !== null) {
-      const card = sweepCard(current)
-      if (card === 'running') items.push(runningCard(current))
-      else if (card === 'waiting') items.push(waitingCard(current))
-      else items.push(resultCard(current))
+      for (const card of sweepCards(current)) {
+        if (card === 'running') items.push(runningCard(current))
+        else if (card === 'waiting') items.push(waitingCard(current))
+        else items.push(resultCard(current))
+      }
     }
     items.push(listPart(view, current))
     sync(body, items)

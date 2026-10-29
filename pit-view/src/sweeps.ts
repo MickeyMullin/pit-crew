@@ -4,15 +4,12 @@ import type { Config, RunnerName } from './config.ts'
 import { doneText, stepsOf } from './launcher.ts'
 import type { CiState, PostForm, Priority, Recommendation, StartRequest, StepSlot, SweepResult } from './launcher.ts'
 
-// the Dependabot sweep as a concept of its own (section 8 of DESIGN.md, Sweeps): the command line
-// it launches, what the confirmation says, the view the page draws from a sweep record, and the
-// sweeps held in memory beside the runs. Launching is the launcher's: createSweepLauncher
+// the Dependabot sweep as a concept of its own (section 8 of DESIGN.md, Sweeps): the command line it launches, what the confirmation says, the view the page draws from a sweep record, and the sweeps held in memory beside the runs. Launching is the launcher's: createSweepLauncher
 
 export const sweepCommand = 'review-dependabot-sweep'
 export const sweepLabel = 'Dependabot sweep'
 
-// the sweep's arguments, without --emit-json, which the launcher adds: the repository, and one
-// reviewer at a time. Never --no-post: approving and requesting at one stroke is what a sweep is for
+// the sweep's arguments, without --emit-json, which the launcher adds: the repository, and one reviewer at a time. Never --no-post: approving and requesting at one stroke is what a sweep is for
 export const sweepArgs = (repo: string): string[] => [repo, '--parallel', '1']
 
 // a sweep has no PR; the number is ignored by the sweeps store and never written anywhere
@@ -25,8 +22,7 @@ export const sweepRequest = (repo: string, runner?: RunnerName): StartRequest =>
   ...(runner === undefined ? {} : { runner }),
 })
 
-// what the confirmation tells the owner before a sweep starts: the repository, that it runs one
-// reviewer at a time, and that the reviewers post on GitHub as the viewer. Pit View posts nothing itself
+// what the confirmation tells the owner before a sweep starts: the repository, that it runs one reviewer at a time, and that the reviewers post on GitHub as the viewer. Pit View posts nothing itself
 export type SweepStart = {
   heading: string
   repo: string
@@ -54,8 +50,7 @@ export const sweepStartOf = (config: Config, busy: boolean): SweepStart => ({
     : config.cloneDir === undefined ? `set cloneDir in the config to your local clone of ${config.repo} before starting a sweep` : null,
 })
 
-// the parsed sweep-result@1, as far as the page draws it. Rows come through the launcher's check
-// only as a list, so each field is read defensively here; notPostedReason is not read at all
+// the parsed sweep-result@1, as far as the page draws it. Rows come through the launcher's check only as a list, so each field is read defensively here; notPostedReason is not read at all
 export type SweepFinding = { priority: Priority, summary: string }
 
 export type SweepRow = {
@@ -81,7 +76,8 @@ export type SweepAction = { action: string, prs: number[] }
 export type SweepSummary = {
   status: SweepResult['status']
   repo: string | null
-  counts: { swept: number, fresh: number, reused: number, failed: number }
+  // null when the sweep stopped before it had any: the page shows no counts then, not zeros
+  counts: { swept: number, fresh: number, reused: number, failed: number } | null
   rows: SweepRow[]
   mergeOrder: SweepAction[]
   // the Markdown summary's path, written with ~; null when there was nothing to sweep
@@ -134,8 +130,7 @@ const sweepAction = (value: unknown): SweepAction | null => {
 export const sweepSummary = (result: SweepResult): SweepSummary => ({
   status: result.status,
   repo: result.repo,
-  // a sweep that stopped before its summary has no counts
-  counts: result.counts ?? { swept: 0, fresh: 0, reused: 0, failed: 0 },
+  counts: result.counts,
   rows: result.rows.flatMap((row) => sweepRow(row) ?? []),
   mergeOrder: result.mergeOrder.flatMap((action) => sweepAction(action) ?? []),
   summary: result.summary,
@@ -144,8 +139,7 @@ export const sweepSummary = (result: SweepResult): SweepSummary => ({
 const sweepResultOf = (sweep: Pick<Sweep, 'result'>): SweepResult | null =>
   sweep.result?.schema === 'pit-crew/sweep-result@1' ? sweep.result : null
 
-// the sweep as the page and GET /api/sweeps see it: the record, its steps, the parsed result and
-// the words for how it ended
+// the sweep as the page and GET /api/sweeps see it: the record, its steps, the parsed result and the words for how it ended
 export type SweepView = Omit<Sweep, 'result' | 'steps'> & {
   steps: StepSlot[]
   // null while it runs
@@ -176,8 +170,7 @@ export const sweepView = (sweep: Sweep): SweepView => {
   }
 }
 
-// the sweeps in memory, beside the runs state: loaded from the cache, then kept current by the
-// launcher's changes, so a read never waits on the database or on GitHub (section 8, Sweeps)
+// the sweeps in memory, beside the runs state: loaded from the cache, then kept current by the launcher's changes, so a read never waits on the database or on GitHub (section 8, Sweeps)
 export type SweepMemory = {
   // the newest sweeps of a repo, newest first, with their parsed results
   list: (repo: string) => SweepView[]
@@ -186,6 +179,8 @@ export type SweepMemory = {
   set: (sweep: Sweep) => void
   // reads a repo's recorded sweeps from the cache, replacing what memory holds for them
   load: (repo: string) => void
+  // sweeps the cache pruned: memory drops the same ids, so it never holds what the table does not
+  drop: (ids: readonly number[]) => void
 }
 
 export const createSweepMemory = (cache: Cache, keep = 20): SweepMemory => {
@@ -207,12 +202,14 @@ export const createSweepMemory = (cache: Cache, keep = 20): SweepMemory => {
     set: (sweep) => {
       sweeps.set(sweep.id, sweep)
     },
+    drop: (ids) => {
+      for (const id of ids) sweeps.delete(id)
+    },
     load,
   }
 }
 
-// what the page holds about sweeps: how to start one now, and the repo's recent sweeps. Patches carry
-// it whole whenever a sweep or the config behind the start text changes
+// what the page holds about sweeps: how to start one now, and the repo's recent sweeps. Patches carry it whole whenever a sweep or the config behind the start text changes
 export type SweepsView = { start: SweepStart, items: SweepView[] }
 
 export const sweepsView = (config: Config, memory: SweepMemory): SweepsView => {

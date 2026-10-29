@@ -315,8 +315,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   }
 
   const notifier = createNotifier({ config: effective, deliver: options.deliver ?? noDeliver, log })
-  // the sweeps' own memory state, beside the runs: read from the cache here, then kept current by
-  // the sweep launcher's changes (recovery included)
+  // the sweeps' own memory state, beside the runs: read from the cache here, then kept current by the sweep launcher's changes (recovery included)
   const sweeps = createSweepMemory(cache)
   const poller = createPoller({
     cache,
@@ -366,8 +365,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     log(`runs: recovery failed: ${messageOf(error)}`)
   }
 
-  // the same for sweeps, from their own table; memory is loaded first and each change that recovery
-  // makes lands in it
+  // the same for sweeps, from their own table; memory is loaded first and each change that recovery makes lands in it
   const sweepLauncher = createSweepLauncher({
     cache,
     gh,
@@ -387,6 +385,11 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     onChange: (sweep) => {
       sweeps.set(sweep)
       poller.sweepsChanged(sweep.repo)
+    },
+    // the cache pruned old sweeps: memory drops the same ids and the feed announces the removal
+    onPruned: (gone) => {
+      sweeps.drop(gone.map((sweep) => sweep.id))
+      for (const repo of new Set(gone.map((sweep) => sweep.repo))) poller.sweepsChanged(repo)
     },
     log,
     pollMs: options.launch.pollMs,
@@ -552,19 +555,22 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     }
   }
 
-  // the Dependabot sweep (section 8 of DESIGN.md, Sweeps): the repository's sweep, started with the
-  // same token, Host, Origin and content-type rules as a run; the body may name the runner and nothing else
+  // the Dependabot sweep (section 8 of DESIGN.md, Sweeps): the repository's sweep, started with the same token, Host, Origin and content-type rules as a run; the body may name the runner and nothing else
   const startSweep = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     requireToken(req)
-    const usage = 'send { "runner": "claude" | "codex" } or no body'
+    const usage = 'send { "runner": "claude" | "codex", "repo": "owner/name" } or no body'
     const length = Number(req.headers['content-length'] ?? 0)
     const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
-    const { runner: asked, ...rest } = body as Record<string, unknown>
+    const { runner: asked, repo: confirmed, ...rest } = body as Record<string, unknown>
     if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
     if (asked !== undefined && !runnerNames.includes(asked as RunnerName)) throw new HttpError(400, 'runner must be claude or codex')
+    if (confirmed !== undefined && typeof confirmed !== 'string') throw new HttpError(400, 'repo must be a string')
+    const { repo } = effective()
+    // the repository the viewer confirmed must still be the one in effect: a sweep posts on GitHub, so it never starts for another
+    if (confirmed !== undefined && confirmed !== repo) throw new HttpError(409, `the repository is now ${repo}, not ${confirmed}; the confirmation was for ${confirmed}, so nothing was started`)
     try {
-      json(res, 200, sweepView(await sweepLauncher.start(sweepRequest(effective().repo, asked as RunnerName | undefined))))
+      json(res, 200, sweepView(await sweepLauncher.start(sweepRequest(repo, asked as RunnerName | undefined))))
     } catch (error) {
       launchFailure(error)
     }

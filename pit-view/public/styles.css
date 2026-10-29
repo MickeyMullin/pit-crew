@@ -1885,8 +1885,7 @@ button.agent:hover {
   gap: 8px;
 }
 
-/* Dependabot sweeps: the bot group's controls, the broom beside a PR's agent button, and the sweep
-   drawer, which shares the agent drawer's panel and its confirmation */
+/* Dependabot sweeps: the bot group's controls, the broom beside a PR's agent button, and the sweep drawer, which shares the agent drawer's panel and its confirmation */
 
 .sweep-controls {
   display: inline-flex;
@@ -2025,8 +2024,7 @@ button.agent:hover {
   border-top: 0;
 }
 
-/* the card a link from a PR opened the drawer at: marked by a bar and a background, and by
-   aria-current for screen readers, never by color alone */
+/* the card a link from a PR opened the drawer at: marked by a bar and a background, and by aria-current for screen readers, never by color alone */
 .sweep-row-target {
   padding-left: 10px;
   border-left: 3px solid var(--blue-fg);

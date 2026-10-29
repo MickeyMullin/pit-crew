@@ -34,8 +34,7 @@ const fixTitles: Readonly<Record<string, string>> = {
   post: 'Push',
 }
 
-// the sweep records the same five slots too (section 8, the Dependabot sweep): it enumerates, reviews
-// every PR, works out the merge order, writes its summary, and posts nothing itself
+// the sweep records the same five slots too (section 8, the Dependabot sweep): it enumerates, reviews every PR, works out the merge order, writes its summary, and posts nothing itself
 const sweepTitles: Readonly<Record<string, string>> = {
   resolveBase: 'Enumerate',
   review: 'Review PRs',

@@ -8,15 +8,10 @@ import type { ClosedResult, GhErrorKind, OpenPage, RawOpenPr } from './github.ts
 import type { RunResultJson, StepSlot } from './launcher.ts'
 
 // bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since
-// they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a
-// rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps
-// with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row
-// written before it lacks the field, and the rebuild empties prs so no such row is derived.
-// Version 7 added the sweeps table and changed no GitHub table
+// they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table
 export const schemaVersion = 7
 
-// the last version that changed what the GitHub tables hold; a cache at this version or later keeps
-// them through a bump, since a bump after it only adds tables
+// the last version that changed what the GitHub tables hold; a cache at this version or later keeps them through a bump, since a bump after it only adds tables
 export const githubTablesVersion = 6
 
 export class CacheError extends Error {
@@ -222,9 +217,7 @@ const runsSchema = [
   'CREATE INDEX IF NOT EXISTS runs_by_status ON runs (status)',
 ]
 
-// kept across rebuilds like runs: a sweep is a record of its own, with the columns of a run except
-// the PR number. Created when missing (version 7), never altered by a bump that only rebuilds the
-// GitHub tables
+// kept across rebuilds like runs: a sweep is a record of its own, with the columns of a run except the PR number. Created when missing (version 7), never altered by a bump that only rebuilds the GitHub tables
 const sweepsSchema = [
   'CREATE TABLE IF NOT EXISTS sweeps (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT)',
   'CREATE INDEX IF NOT EXISTS sweeps_by_repo ON sweeps (repo, id)',
@@ -393,8 +386,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     const stored = hasMeta ? getMeta<number>('schemaVersion') : null
     if (stored === schemaVersion) return
     transaction(() => {
-      // a cache from before the last change to the GitHub tables has them rebuilt; a later one
-      // (version 6, on its way to 7) keeps every table it has and only gains the new ones
+      // a cache from before the last change to the GitHub tables has them rebuilt; a later one (version 6, on its way to 7) keeps every table it has and only gains the new ones
       if (stored === null || stored < githubTablesVersion) {
         for (const table of tables) db.exec(`DROP TABLE IF EXISTS ${table}`)
         for (const statement of schema) db.exec(statement)

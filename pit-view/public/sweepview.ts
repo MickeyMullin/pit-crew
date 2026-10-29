@@ -1,9 +1,5 @@
 // public/sweepview.ts
-// the Dependabot sweep's words and shapes, as pure functions of the sweeps the view carries: the
-// bot group header's control, the confirmation, the group-level sweep drawer, the broom link on a
-// PR's row and the link in that PR's own drawer. Sweeps are their own concept (section 8 of
-// DESIGN.md, Sweeps), so nothing here reads a row's Agent cell; sweepdrawer.ts turns the models
-// into elements. Nothing here reads the DOM or the clock: every time is passed in
+// the Dependabot sweep's words and shapes, as pure functions of the sweeps the view carries: the bot group header's control, the confirmation, the group-level sweep drawer, the broom link on a PR's row and the link in that PR's own drawer. Sweeps are their own concept (section 8 of DESIGN.md, Sweeps), so nothing here reads a row's Agent cell; sweepdrawer.ts turns the models into elements. Nothing here reads the DOM or the clock: every time is passed in
 import type { SweepRow, SweepStart, SweepView, SweepsView } from '../src/sweeps.ts'
 import { formatDuration, runnerLabels, sentence, tokenHeader } from './agent.ts'
 import type { DoneTone, RunnerName, RunRequest } from './agent.ts'
@@ -15,13 +11,13 @@ export type { SweepRow, SweepStart, SweepView, SweepsView }
 
 export type Tone = DoneTone | 'blue'
 
-// the requests carry the per-start token, like a run's
-export const sweepStartRequest = (runner: RunnerName, token: string): RunRequest => ({
+// the requests carry the per-start token, like a run's. A start also names the repository the confirmation showed, so the server refuses it when that is no longer the repository in effect
+export const sweepStartRequest = (runner: RunnerName, repo: string, token: string): RunRequest => ({
   url: '/api/sweeps',
   init: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', [tokenHeader]: token },
-    body: JSON.stringify({ runner }),
+    body: JSON.stringify({ runner, repo }),
   },
 })
 
@@ -30,15 +26,14 @@ export const sweepStopRequest = (id: number, token: string): RunRequest => ({
   init: { method: 'POST', headers: { [tokenHeader]: token } },
 })
 
-// the color of a sweep's outcome follows what the owner does next; the words carry the meaning. A
-// sweep with nothing to sweep is done, never a failure, so it is gray rather than red
+// the color of a sweep's outcome follows what the owner does next; the words carry the meaning. A sweep with nothing to sweep is done, never a failure, so it is gray rather than red
 export const sweepTone = (sweep: Pick<SweepView, 'status' | 'result'>): Tone => {
   if (sweep.status === 'running') return 'blue'
   if (sweep.status === 'failed') return 'red'
   if (sweep.status === 'needsInput') return 'amber'
   if (sweep.status === 'stopped') return 'gray'
   const counts = sweep.result?.counts
-  if (counts === undefined || counts.swept === 0) return 'gray'
+  if (counts === undefined || counts === null || counts.swept === 0) return 'gray'
   return counts.failed > 0 ? 'amber' : 'green'
 }
 
@@ -48,10 +43,7 @@ export const sweepWhen = (sweep: Pick<SweepView, 'startedAt' | 'finishedAt'>, ti
   return `${formatDay(at, timeZone)} ${formatClock(at, false, timeZone)}`
 }
 
-// the bot group header's two controls: Run sweep, and the current or latest sweep's state, which
-// opens the drawer. The group's own collapse button is not part of this. The status keeps what
-// moves with the clock (the running timer, the finish age) out of its label, so the button is not
-// rebuilt under the pointer while the sweep's state holds: the page sets those in place
+// the bot group header's two controls: Run sweep, and the current or latest sweep's state, which opens the drawer. The group's own collapse button is not part of this. The status keeps what moves with the clock (the running timer, the finish age) out of its label, so the button is not rebuilt under the pointer while the sweep's state holds: the page sets those in place
 export type SweepHeaderModel = {
   start: { label: string, name: string, disabled: boolean, reason: string | null }
   status: null | {
@@ -134,6 +126,12 @@ export const sweepConfirmModel = (start: SweepStart, runner: RunnerName): SweepC
   confirm: 'Start sweep',
   busy: 'Starting sweep…',
 })
+
+// everything the confirmation displays, as one string: the confirmation is rebuilt whenever it changes, so a change of repository, viewer, effect text, command or availability never leaves the old text on screen
+export const sweepConfirmSignature = (start: SweepStart, runner: RunnerName): string => {
+  const model = sweepConfirmModel(start, runner)
+  return JSON.stringify([model.heading, model.repo, model.command, model.serial, model.effect, model.runners.map((choice) => choice.name), start.unavailable])
+}
 
 export const sweepStopModel = (sweep: Pick<SweepView, 'repo' | 'runner'>) => ({
   heading: `Stop the sweep of ${sweep.repo}?`,
@@ -219,7 +217,10 @@ export type SweepResultModel = {
   note: string | null
   // a sweep with nothing to sweep: done, every count zero, no rows and no summary
   empty: boolean
-  counts: CountModel[]
+  // null when the result has none (no result, or a failed or waiting sweep that stopped before it had them): no counts are shown, never zeros
+  counts: CountModel[] | null
+  // the question of a waiting sweep, which its own card shows
+  question: string | null
   rows: SweepRowModel[]
   order: MergeStepModel[]
   // the Markdown summary's path as written, for the owner to copy; null when there is none
@@ -228,7 +229,7 @@ export type SweepResultModel = {
 
 export const sweepResultModel = (sweep: SweepView): SweepResultModel => {
   const result = sweep.result
-  const counts = result?.counts ?? { swept: 0, fresh: 0, reused: 0, failed: 0 }
+  const counts = result?.counts ?? null
   return {
     text: sweep.text ?? 'Done',
     tone: sweepTone(sweep),
@@ -236,8 +237,9 @@ export const sweepResultModel = (sweep: SweepView): SweepResultModel => {
     runnerLabel: runnerLabels[sweep.runner],
     cost: formatCost(sweep.costUsd),
     note: noteText(sweep.note),
-    empty: sweep.status === 'done' && counts.swept === 0 && (result?.rows.length ?? 0) === 0,
-    counts: countLabels.map(([key, label]) => ({ key, label, value: counts[key] })),
+    empty: sweep.status === 'done' && (counts?.swept ?? 0) === 0 && (result?.rows.length ?? 0) === 0,
+    counts: counts === null ? null : countLabels.map(([key, label]) => ({ key, label, value: counts[key] })),
+    question: sweep.question,
     rows: (result?.rows ?? []).map(sweepRowModel),
     order: (result?.mergeOrder ?? []).map((step, index) => ({ index: index + 1, action: step.action, prs: step.prs })),
     summaryPath: result?.summary ?? null,
@@ -258,8 +260,17 @@ export const sweepWaitingModel = (sweep: SweepView): { question: string, resume:
 
 export type SweepCard = 'running' | 'waiting' | 'result'
 
-export const sweepCard = (sweep: Pick<SweepView, 'status'>): SweepCard =>
-  sweep.status === 'running' ? 'running' : sweep.status === 'needsInput' ? 'waiting' : 'result'
+// a settled sweep shows the whole result it carries, whatever its status: counts, rows, merge order and summary. A waiting sweep shows its question first and the result it has so far below it
+export const sweepHasResult = (sweep: Pick<SweepView, 'result'>): boolean => {
+  const result = sweep.result
+  return result !== null && (result.counts !== null || result.rows.length > 0 || result.mergeOrder.length > 0 || result.summary !== null)
+}
+
+export const sweepCards = (sweep: Pick<SweepView, 'status' | 'result'>): SweepCard[] => {
+  if (sweep.status === 'running') return ['running']
+  if (sweep.status === 'needsInput') return sweepHasResult(sweep) ? ['waiting', 'result'] : ['waiting']
+  return ['result']
+}
 
 // the earlier sweeps of the repository, newest first, for choosing which one the drawer shows
 export type SweepListRow = { id: number, label: string, text: string, tone: Tone, startedAt: string, cost: string | null, selected: boolean }
@@ -281,9 +292,7 @@ export const shownSweep = (items: readonly SweepView[], id: number | null): Swee
 
 // ---- the links from a PR to its sweep ----
 
-// the sweep a PR belongs to, derived from the sweeps' rows and not stored: the newest done sweep of
-// the repository whose rows name this PR at this head. A PR that moved on since belongs to none.
-// The row's head is a full SHA and the PR row's a short one (or the same): either may prefix the other
+// the sweep a PR belongs to, derived from the sweeps' rows and not stored: the newest done sweep of the repository whose rows name this PR at this head. A PR that moved on since belongs to none. The row's head is a full SHA and the PR row's a short one (or the same): either may prefix the other
 export type SweepLink = { sweepId: number, number: number, when: string, name: string, tip: string }
 
 export const sweepLinkFor = (items: readonly SweepView[], number: number, headOid: string, timeZone?: string): SweepLink | null => {

@@ -413,3 +413,33 @@ test('a running sweep reads as five pending slots with no text, and memory keeps
   assert.match(sweepsView(baseConfig(), memory).start.unavailable ?? '', /already in flight/)
   cache.close()
 })
+
+test('memory drops the sweeps the cache pruned, and the launcher names them as it prunes', async () => {
+  const pruned: number[] = []
+  const h = await harness()
+  try {
+    const cache = openCache({ path: ':memory:', clock: fakeTime().clock, keepSweeps: 1 })
+    const launcher = createSweepLauncher({
+      cache, gh: createGh(h.gh.runner), git: h.launch.deps.git, spawn: h.launch.deps.spawn, fs: h.launch.deps.fs, kill: h.launch.deps.kill, procs: h.launch.deps.procs,
+      clock: fakeTime().clock, timers: fakeTime().timers, config: () => h.settings.current, home: h.home, stateDir: h.stateDir, env: h.launch.deps.env,
+      newSessionId: h.launch.deps.newSessionId, onWatch: () => {}, onChange: () => {}, onPruned: (gone) => pruned.push(...gone.map((sweep) => sweep.id)),
+    })
+    const memory = createSweepMemory(cache, 5)
+    const first = await launcher.start(start())
+    memory.set(first)
+    h.launch.children[0]!.exit(1)
+    await launcher.settled(first.id)
+    memory.set(cache.getSweep(first.id)!)
+    const second = await launcher.start(start())
+    assert.deepEqual(pruned, [first.id])
+    memory.drop(pruned)
+    assert.equal(memory.get(first.id), undefined)
+    assert.equal(cache.getSweep(first.id), null)
+    memory.set(second)
+    assert.deepEqual(memory.list(scenario.repo).map((sweep) => sweep.id), [second.id])
+    launcher.close()
+    cache.close()
+  } finally {
+    await h.cleanup()
+  }
+})

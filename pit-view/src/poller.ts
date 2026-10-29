@@ -68,8 +68,7 @@ export type Patch = {
   tiles?: Tiles
   counts?: Counts
   sync?: Sync
-  // the sweeps as they now stand, replacing the page's: sent whole whenever a sweep, the repository
-  // or the start text's config changed
+  // the sweeps as they now stand, replacing the page's: sent whole whenever a sweep, the repository or the start text's config changed
   sweeps?: SweepsView
   repo?: string
   viewer?: PersonView

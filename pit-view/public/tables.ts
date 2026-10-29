@@ -41,8 +41,7 @@ const agentColumn = <R extends OpenRow>(): Column<R> => ({
   label: 'Agent',
   width: '196px',
   cell: (row, { view, nowMs }) => {
-    // a Dependabot PR that a settled sweep reviewed at this head gets a broom beside the cell's
-    // button; the link is read from the sweeps' rows, never from the Agent cell
+    // a Dependabot PR that a settled sweep reviewed at this head gets a broom beside the cell's button; the link is read from the sweeps' rows, never from the Agent cell
     const link = sweepLinkFor(view.sweeps.items, row.number, row.headOid)
     return {
       sig: [agentCellSig(row.agent, row.number, nowMs), link],
@@ -342,8 +341,7 @@ export type TableModel<R> = {
   onSort: (key: string) => void
 }
 
-// Run sweep, and the latest sweep's state beside it. The status leaves out the running timer and the
-// finish age, which updateSweepStatus and tickTimers set in place
+// Run sweep, and the latest sweep's state beside it. The status leaves out the running timer and the finish age, which updateSweepStatus and tickTimers set in place
 const sweepControls = (sweep: SweepHeaderModel): HTMLElement => {
   const run = h('button', {
     type: 'button',

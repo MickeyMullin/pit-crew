@@ -1,7 +1,5 @@
 // test/ui-sweep.test.ts
-// the Dependabot sweep's page logic in public/, run under Node: the bot group header's control, the
-// confirmation, the drawer's models, the broom link and the PR drawer's link, against sweeps built
-// the way the server builds them (src/sweeps.ts)
+// the Dependabot sweep's page logic in public/, run under Node: the bot group header's control, the confirmation, the drawer's models, the broom link and the PR drawer's link, against sweeps built the way the server builds them (src/sweeps.ts)
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -16,7 +14,7 @@ import type { SweepsView, SweepView } from '../src/sweeps.ts'
 import { stepTitle } from '../public/agent.ts'
 import { applyPatch } from '../public/state.ts'
 import {
-  defaultSweepRunner, shownSweep, sweepAnnounceKey, sweepAnnouncement, sweepCard, sweepConfirmModel, sweepHeaderModel, sweepLinkFor, sweepList,
+  defaultSweepRunner, shownSweep, sweepAnnounceKey, sweepAnnouncement, sweepCards, sweepConfirmModel, sweepConfirmSignature, sweepHeaderModel, sweepLinkFor, sweepList,
   sweepResultModel, sweepRowModel, sweepRunningModel, sweepStartRequest, sweepStopModel, sweepStopRequest, sweepTone, sweepWaitingModel,
 } from '../public/sweepview.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -39,8 +37,7 @@ const settled = (value: Record<string, unknown>, patch: Partial<Sweep> = {}): Sw
   return sweepView(record({ status: 'done', finishedAt: '2026-10-26T17:55:00Z', result: parsed.value, ...patch }))
 }
 
-// a failed or waiting sweep may carry a null repo and null counts once the launcher's validation allows them;
-// the view tolerates them whether or not it does yet, so these skip the parse
+// a failed or waiting sweep may carry a null repo and null counts once the launcher's validation allows them; the view tolerates them whether or not it does yet, so these skip the parse
 const settledLoose = (value: Record<string, unknown>, patch: Partial<Sweep> = {}): SweepView =>
   sweepView(record({ status: 'done', finishedAt: '2026-10-26T17:55:00Z', result: value as unknown as SweepResult, ...patch }))
 
@@ -117,11 +114,11 @@ test('the confirmation names the repository, says it runs one PR at a time, and 
   assert.equal(sweepStartOf(config({ agent: { runner: 'codex' } }), false).runner, 'codex')
 })
 
-test('a sweep is started and stopped with the token, a runner and nothing else', () => {
-  const start = sweepStartRequest('codex', 'tok-1')
+test('a sweep is started and stopped with the token, a runner and the repository the confirmation showed, and nothing else', () => {
+  const start = sweepStartRequest('codex', scenario.repo, 'tok-1')
   assert.equal(start.url, '/api/sweeps')
   assert.deepEqual(start.init.headers, { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok-1' })
-  assert.deepEqual(JSON.parse(start.init.body ?? ''), { runner: 'codex' })
+  assert.deepEqual(JSON.parse(start.init.body ?? ''), { runner: 'codex', repo: scenario.repo })
   const stop = sweepStopRequest(7, 'tok-1')
   assert.equal(stop.url, '/api/sweeps/7/stop')
   assert.deepEqual(stop.init.headers, { 'X-Pit-View-Token': 'tok-1' })
@@ -135,7 +132,7 @@ test('the drawer shows the whole result: counts, a card per PR, the merge order 
   const sweep = settled(sweepResult())
   const model = sweepResultModel(sweep)
   assert.deepEqual([model.text, model.tone, model.empty], ['Done · 2 swept', 'green', false])
-  assert.deepEqual(model.counts.map((count) => [count.label, count.value]), [['Swept', 2], ['Fresh', 1], ['Reused', 1], ['Failed', 0]])
+  assert.deepEqual(model.counts?.map((count) => [count.label, count.value]), [['Swept', 2], ['Fresh', 1], ['Reused', 1], ['Failed', 0]])
   assert.equal(model.rows.length, 2)
   const [first, second] = model.rows
   assert.deepEqual([first?.number, first?.url, first?.head, first?.bump, first?.recommendation, first?.ci, first?.posted, first?.reused, first?.escalation], [
@@ -162,9 +159,9 @@ test('a report that is not a PR report is shown as a path and never offered to t
 test('a sweep with nothing to sweep renders as done with zero counts, no rows and no summary, and says so', () => {
   const model = sweepResultModel(settled(emptySweepResult()))
   assert.deepEqual([model.text, model.tone, model.empty, model.note], ['Done · nothing to sweep', 'gray', true, null])
-  assert.deepEqual(model.counts.map((count) => count.value), [0, 0, 0, 0])
+  assert.deepEqual(model.counts?.map((count) => count.value), [0, 0, 0, 0])
   assert.deepEqual([model.rows, model.order, model.summaryPath], [[], [], null])
-  assert.equal(sweepCard(settled(emptySweepResult())), 'result')
+  assert.deepEqual(sweepCards(settled(emptySweepResult())), ['result'])
 })
 
 test('a failed sweep shows its note as a sentence, a stopped one says so, and a waiting one shows its question and the resume command', () => {
@@ -175,7 +172,7 @@ test('a failed sweep shows its note as a sentence, a stopped one says so, and a 
   assert.deepEqual([lost.text, lost.note], ['Failed · server restarted', 'Pit View restarted while the run was going and could not tell how it ended.'])
   assert.equal(sweepResultModel(sweepView(record({ status: 'stopped', finishedAt: '2026-10-26T17:50:00Z' }))).text, 'Stopped')
   const waiting = settledLoose(sweepResult({ status: 'needsInput', question: 'Close #202 first? (yes / no)', counts: null, rows: [], mergeOrder: [], summary: null }), { status: 'needsInput' })
-  assert.equal(sweepCard(waiting), 'waiting')
+  assert.deepEqual(sweepCards(waiting), ['waiting'])
   assert.deepEqual(sweepWaitingModel(waiting), { question: 'Close #202 first? (yes / no)', resume: 'cd ~/dev/orbit && claude --resume s-1' })
 })
 
@@ -191,7 +188,7 @@ test('a running sweep shows the sweep\'s five steps under its own names, and the
   const model = sweepRunningModel(running)
   assert.deepEqual(model.steps.map((step) => [step.label, step.state]), [['Enumerate', 'done'], ['Review PRs', 'started'], ['Merge order', 'pending'], ['Write summary', 'pending'], ['Post', 'pending']])
   assert.deepEqual(model.note, { label: 'Review PRs', note: '3 of 7 reviewed' })
-  assert.equal(sweepCard(running), 'running')
+  assert.deepEqual(sweepCards(running), ['running'])
   // a review run's steps keep their own names
   assert.equal(stepTitle('review-pr', 'resolveBase'), 'Resolve base')
 })
@@ -273,4 +270,62 @@ test('the bot group header, the broom and the PR drawer are wired to the sweep m
   assert.match(app, /sweepLink: \(number\) =>/)
   // the Agent cell never carries sweep state
   assert.doesNotMatch(await readFile(join(dir, 'agent.ts'), 'utf8'), /sweeps?\./)
+})
+
+// the confirmation re-renders whenever anything it displays changes
+
+test('the start confirmation\'s signature changes with the repository, the viewer, the effect text, the command and the availability, and with nothing else', () => {
+  const base = config()
+  const sig = (cfg: Config, runner: 'claude' | 'codex' = 'claude', busy = false) => sweepConfirmSignature(sweepStartOf(cfg, busy), runner)
+  const reference = sig(base)
+  assert.equal(sig(config()), reference)
+  assert.notEqual(sig(config({ repo: 'octo-example/other' })), reference)
+  assert.notEqual(sig(config({ viewer: 'someone-else' })), reference)
+  assert.notEqual(sig(base, 'codex'), reference)
+  assert.notEqual(sig(config({ cloneDir: undefined })), reference)
+  assert.notEqual(sig(base, 'claude', true), reference)
+  // a setting the confirmation does not show leaves it alone
+  assert.equal(sig(config({ refreshSeconds: 120 })), reference)
+})
+
+test('the confirmation\'s heading, repository and effect text follow the configuration they are built from', () => {
+  const other = sweepConfirmModel(sweepStartOf(config({ repo: 'octo-example/other', viewer: 'someone-else' }), false), 'claude')
+  assert.match(other.heading, /octo-example\/other/)
+  assert.equal(other.repo, 'octo-example/other')
+  assert.match(other.effect, /@someone-else/)
+  assert.match(other.command, /octo-example\/other/)
+})
+
+test('the drawer\'s start part keys its rebuild on that signature, and the request carries the repository on screen', async () => {
+  const source = await readFile(join(import.meta.dirname, '..', 'public', 'sweepdrawer.ts'), 'utf8')
+  assert.match(source, /sweepConfirmSignature\(view\.start, confirm\.runner\)/)
+  assert.match(source, /sweepStartRequest\(asked\.runner, confirmedRepo, options\.token\)/)
+})
+
+// a settled sweep shows the whole result it carries
+
+test('a failed sweep with counts shows them with its rows, merge order and the error, and a failed one with null counts shows none and no zeros', () => {
+  const withCounts = settled(sweepResult({ status: 'failed', error: 'the summary could not be written', summary: null }), { status: 'failed', note: 'the summary could not be written' })
+  const model = sweepResultModel(withCounts)
+  assert.deepEqual(model.counts?.map((count) => [count.label, count.value]), [['Swept', 2], ['Fresh', 1], ['Reused', 1], ['Failed', 0]])
+  assert.deepEqual(model.rows.map((row) => row.number), [201, 202])
+  assert.equal(model.order.length > 0, true)
+  assert.match(model.note ?? '', /summary could not be written/)
+  assert.deepEqual(sweepCards(withCounts), ['result'])
+  const bare = settledLoose(sweepResult({ status: 'failed', error: 'no clone', repo: null, counts: null, rows: [], mergeOrder: [], summary: null }), { status: 'failed', note: 'no clone' })
+  const empty = sweepResultModel(bare)
+  assert.equal(empty.counts, null)
+  assert.equal(empty.empty, false)
+  assert.deepEqual(sweepCards(bare), ['result'])
+})
+
+test('a waiting sweep shows its question and the result it has so far, and only its question when it has none', () => {
+  const partial = settledLoose(sweepResult({ status: 'needsInput', question: 'Close #202 first? (yes / no)', summary: null }), { status: 'needsInput' })
+  assert.deepEqual(sweepCards(partial), ['waiting', 'result'])
+  const model = sweepResultModel(partial)
+  assert.deepEqual(model.counts?.map((count) => count.value), [2, 1, 1, 0])
+  assert.equal(model.question, 'Close #202 first? (yes / no)')
+  const bare = settledLoose(sweepResult({ status: 'needsInput', question: 'Close #202 first? (yes / no)', counts: null, rows: [], mergeOrder: [], summary: null }), { status: 'needsInput' })
+  assert.deepEqual(sweepCards(bare), ['waiting'])
+  assert.equal(sweepResultModel(bare).counts, null)
 })

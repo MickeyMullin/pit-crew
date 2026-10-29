@@ -160,9 +160,7 @@ const seedRuns = (): void => {
   if (agentKeys === null && feed.view !== null) agentKeys = announcements(null, openRows(feed.view)).next
 }
 
-// the bot group's sweep status, and the drawer's sweeps, say politely when the newest sweep starts or
-// finishes: once per change of its status, never per timer tick, and nothing for what the page
-// showed when it loaded
+// the bot group's sweep status, and the drawer's sweeps, say politely when the newest sweep starts or finishes: once per change of its status, never per timer tick, and nothing for what the page showed when it loaded
 let sweepKey: string | null = null
 const announceSweeps = (view: View): void => {
   const key = sweepAnnounceKey(view.sweeps.items)
@@ -357,8 +355,7 @@ const drawer = createDrawer({
   },
 })
 
-// the sweep drawer is the repository's, not one PR's: the bot group's Run sweep and status open it,
-// and so does the broom beside a Dependabot PR's agent button. It and the PR drawer never show together
+// the sweep drawer is the repository's, not one PR's: the bot group's Run sweep and status open it, and so does the broom beside a Dependabot PR's agent button. It and the PR drawer never show together
 const sweepDrawer = createSweepDrawer({
   root: byId('sweep-drawer'),
   token: readToken(document),

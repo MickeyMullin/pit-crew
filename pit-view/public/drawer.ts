@@ -32,8 +32,7 @@ export type DrawerOptions = {
   // the page's polite live region
   say: (text: string) => void
   reports: ReportPanel
-  // the Dependabot sweep this PR is in at its current head, read from the sweeps' rows; null for a
-  // PR in none, which shows no link
+  // the Dependabot sweep this PR is in at its current head, read from the sweeps' rows; null for a PR in none, which shows no link
   sweepLink: (number: number) => SweepLink | null
   // opens the sweep drawer on that sweep, at this PR's card; this drawer closes
   openSweep: (link: SweepLink) => void

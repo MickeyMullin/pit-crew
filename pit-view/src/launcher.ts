@@ -1098,6 +1098,8 @@ export type LauncherOptions<T extends Session = Run> = {
   onWatch: (run: T) => void
   // a run's row changed: started, stepped, or settled
   onChange: (run: T) => void
+  // rows the cache pruned, called as soon as they are gone from the table and before their folders are removed, so what holds the rows in memory can drop them too
+  onPruned?: (gone: T[]) => void
   log?: (line: string) => void
   // how often a run's files are read when the folder cannot be watched, and the safety
   // net when it can; a recovered run's liveness is checked as often
@@ -1106,8 +1108,7 @@ export type LauncherOptions<T extends Session = Run> = {
   stopGraceMs?: number
 }
 
-// where a launcher keeps what it launches. Review runs live in the runs table, one in flight per PR;
-// sweeps in the sweeps table, one in flight per repository. Everything else about launching is shared
+// where a launcher keeps what it launches. Review runs live in the runs table, one in flight per PR; sweeps in the sweeps table, one in flight per repository. Everything else about launching is shared
 export type SessionStore<T extends Session> = {
   // the folder under the state folder, and the word the logs and messages use
   folder: 'runs' | 'sweeps'
@@ -1435,7 +1436,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   // a pruned run's folder goes with its row, and nothing outside the runs folder is ever removed
   const prune = async (): Promise<void> => {
-    for (const gone of store.prune()) {
+    const pruned = store.prune()
+    if (pruned.length > 0 && !closed) options.onPruned?.(pruned)
+    for (const gone of pruned) {
       const dir = resolve(expandHome(gone.dir, home))
       if (!dir.startsWith(`${runsDir}${sep}`)) {
         log(`${noun} ${gone.id}: not removing ${gone.dir}, which is outside the ${store.folder} folder`)
