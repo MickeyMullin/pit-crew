@@ -1660,6 +1660,15 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   const rereading = new Set<number>()
 
+  // the same target whatever order its keys were written in
+  const sameTarget = (a: { repo: string, pr?: number | null, stack?: number[], top?: number, branch?: string }, b: { repo: string, pr?: number | null, stack?: number[], top?: number, branch?: string }): boolean => {
+    if (a.repo.toLowerCase() !== b.repo.toLowerCase()) return false
+    if ('stack' in a || 'stack' in b) return 'stack' in a && 'stack' in b && a.top === b.top && a.stack?.length === b.stack?.length && (a.stack ?? []).every((n, k) => n === b.stack?.[k])
+    if (a.branch !== undefined && b.branch !== undefined && a.branch !== b.branch) return false
+    // a PR the first result had not worked out yet may be named by a later one
+    return a.pr === null || a.pr === undefined || a.pr === b.pr
+  }
+
   // what a new result must keep of the run: its repository and PR, and the target it first named
   const targetMismatch = (run: T, was: RunResultJson | null, value: RunResultJson): string | null => {
     if (value.schema === 'pit-crew/sweep-result@1') return value.repo !== null && value.repo.toLowerCase() !== run.repo.toLowerCase() ? `result.json is about ${value.repo}, not ${run.repo}` : null
@@ -1672,7 +1681,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if ('stack' in target && number !== undefined && !target.stack.includes(number)) return `result.json targets a stack without #${number}`
     if ('stack' in target !== (value.command === 'review-stack')) return `result.json target does not fit ${value.command}`
     if (value.status === 'done' && number !== undefined && !('stack' in target) && target.pr !== number) return `result.json does not name #${number} as its target`
-    if (first !== null && JSON.stringify(first) !== JSON.stringify(target)) return 'result.json names another target than the run first did'
+    if (first !== null && !sameTarget(first, target)) return 'result.json names another target than the run first did'
     return null
   }
 
