@@ -2,6 +2,8 @@
 // the header's page search (public/pagesearch.ts) and its controls (public/filters.ts), run under Node
 // against rows derived from the invented fixtures
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
@@ -197,4 +199,18 @@ test('a tile press forgets which sections the search opened', () => {
   controls = pressTile(controls, 'yourMove')
   assert.deepEqual(controls.searchOpened, [])
   assert.deepEqual(controls.expanded, { mine: false, others: true, closed: false })
+})
+
+test('the header holds a labeled search field and a clear button, hidden until there is text', async () => {
+  const html = await readFile(join(import.meta.dirname, '..', 'public', 'index.html'), 'utf8')
+  const field = html.match(/<input id="page-search"[^>]*>/)?.[0] ?? ''
+  assert.match(field, /aria-label="[^"]+"/)
+  assert.match(field, /aria-keyshortcuts="\/"/)
+  const clear = html.match(/<button id="page-search-clear"[^>]*>/)?.[0] ?? ''
+  assert.match(clear, /aria-label="Clear page search"/)
+  assert.match(clear, /\shidden[\s>]/)
+  const svg = html.slice(html.indexOf('id="page-search-clear"')).match(/<svg[^>]*>/)?.[0] ?? ''
+  assert.match(svg, /aria-hidden="true"/)
+  assert.ok(html.indexOf('id="page-search"') > html.indexOf('id="sync-live"'))
+  assert.ok(html.indexOf('id="page-search"') < html.indexOf('id="refresh"'))
 })

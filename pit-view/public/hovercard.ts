@@ -23,7 +23,7 @@ const content = (row: OpenRow, view: View, nowMs: number): Node[] => {
       h('span', {}, `opened ${formatAge(row.createdAt, nowMs)} ago`),
       h('span', {}, `+${row.additions} −${row.deletions} · ${row.changedFiles} ${row.changedFiles === 1 ? 'file' : 'files'}`),
       h('span', {}, `head ${shortSha(row.headOid)}`)),
-    row.tickets.length === 0 ? null : h('p', { class: 'hc-tickets' }, h('span', {}, 'Tickets'), row.tickets.map(ticketChip)),
+    row.tickets.length === 0 ? null : h('p', { class: 'hc-tickets' }, h('span', {}, 'Tickets'), row.tickets.map((ticket) => ticketChip(ticket))),
     freshness === 'current' ? null : h('p', { class: 'hc-cached' }, `cached ${formatCached(row.freshness.fetchedAt, nowMs)}`),
   ].filter((node): node is HTMLParagraphElement => node !== null)
 }

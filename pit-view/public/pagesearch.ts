@@ -1,9 +1,12 @@
 // public/pagesearch.ts
-// the header's page search, pure: which words it looks for, which rows match, where a match falls
-// in a piece of text, and when "/" may focus the field; no DOM here beyond the highlight builder
-import type { Ticket } from '../src/derive.ts'
+// the header's page search, pure: which words it looks for, which rows match, where a match falls in a piece of text, and when "/" may focus the field; no DOM here beyond the highlight builder
+import type { ClosedRange, Ticket } from '../src/derive.ts'
+import type { View } from '../src/poller.ts'
 import { h } from './dom.ts'
 import type { Child } from './dom.ts'
+import { matchesClosed, matchesMine, matchesOthers } from './filters.ts'
+import type { Filters } from './filters.ts'
+import type { TableKey } from './tables.ts'
 
 // the fields the search reads, which every open and closed row has
 export type Searchable = {
@@ -33,8 +36,7 @@ const hasTerm = (text: string, terms: readonly string[]): boolean => {
   return terms.some((term) => lower.includes(term))
 }
 
-// matches in fields no cell shows: the branch, a login its alias hides, and the tickets of an
-// open row; the row says so beside its title, so a match never looks arbitrary
+// matches in fields no cell shows: the branch, a login its alias hides, and the tickets of an open row; the row says so beside its title, so a match never looks arbitrary
 export const hiddenHits = (terms: readonly string[], row: Searchable, shown: { tickets: boolean }): Hit[] => {
   const hits: Hit[] = []
   if (hasTerm(row.headRef, terms)) hits.push({ label: 'branch', text: row.headRef })
@@ -88,3 +90,16 @@ export const hitsLine = (hits: readonly Hit[], terms: readonly string[]): HTMLEl
 // "/" focuses the search from anywhere no field has focus; a modified "/" is the browser's or the system's
 export const slashApplies = (event: { key: string, tag: string, editable: boolean, ctrl: boolean, meta: boolean, alt: boolean }): boolean =>
   event.key === '/' && !event.ctrl && !event.meta && !event.alt && !event.editable && !['INPUT', 'TEXTAREA', 'SELECT'].includes(event.tag)
+
+// the rows each table would show for a query: those that pass the page search and the table's own search and filters. The Closed table counts the range it shows
+export const shownCounts = (view: View, range: ClosedRange, filters: Filters, query: string): Record<TableKey, number> => {
+  const page = matchesPage(searchTerms(query))
+  const mine = matchesMine(filters.mine)
+  const others = matchesOthers(filters.others)
+  const closed = matchesClosed(filters.closed)
+  return {
+    mine: view.mine.groups.flatMap((group) => group.rows).filter((row) => mine(row) && page(row)).length,
+    others: view.others.groups.flatMap((group) => group.rows).filter((row) => others(row) && page(row)).length,
+    closed: range.rows.filter((row) => closed(row) && page(row)).length,
+  }
+}

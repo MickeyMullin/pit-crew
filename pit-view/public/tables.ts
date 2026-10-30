@@ -10,6 +10,7 @@ import type { Keyed, Part } from './dom.ts'
 import { closedSortValues, mineSortValues, othersSortValues } from './filters.ts'
 import type { Sort, SortValue } from './filters.ts'
 import { formatAge, formatClock, plural, shortSha } from './format.ts'
+import { hiddenHits, highlighted, hitsLine } from './pagesearch.ts'
 import { safeHref } from './safeurl.ts'
 import { rowFreshness } from './state.ts'
 import { sweepLinkFor } from './sweepview.ts'
@@ -19,8 +20,8 @@ import type { Marker, TableState } from './status.ts'
 
 export type TableKey = 'mine' | 'others' | 'closed'
 
-// what every cell builder can read besides its row; paused is this page's own
-export type CellContext = { view: View, nowMs: number, paused: boolean }
+// what every cell builder can read besides its row; paused is this page's own, and terms are the page search's words, which cells highlight
+export type CellContext = { view: View, nowMs: number, paused: boolean, terms: readonly string[] }
 
 // one column: its header, its width in the colgroup, how a row fills it, and the value it
 // sorts by; a column without one has a plain header
@@ -91,17 +92,21 @@ const refreshColumn = <R extends OpenRow>(): Column<R> => ({
   },
 })
 
-const prCell = <R extends { number: number, url: string }>(hover: boolean): Column<R>['cell'] => (row) => ({
-  sig: [row.number, row.url, hover],
-  build: () => [h('a', { ...newTab, class: 'pr-link mono', href: safeHref(row.url), 'data-focus': 'pr', 'data-hover': hover ? 'pr' : null }, `#${row.number}`)],
+const prCell = <R extends { number: number, url: string }>(hover: boolean): Column<R>['cell'] => (row, { terms }) => ({
+  sig: [row.number, row.url, hover, terms],
+  build: () => [h('a', { ...newTab, class: 'pr-link mono', href: safeHref(row.url), 'data-focus': 'pr', 'data-hover': hover ? 'pr' : null }, highlighted(`#${row.number}`, terms))],
 })
 
-const titleCell = (row: OpenRow): { sig: unknown, build: () => Node[] } => ({
-  sig: [row.title, row.stack],
-  build: () => [h('span', { class: 'title-cell' },
-    h('span', { class: 'title-text', 'data-hover': 'title' }, row.title),
-    row.stack === null ? null : chip(`stack ${row.stack.position}/${row.stack.size}`, 'gray', { class: 'chip chip-small tone-gray', title: 'Stacked PR: its position in the stack' }))],
-})
+const titleCell = (row: OpenRow, { terms }: CellContext): { sig: unknown, build: () => Node[] } => {
+  const hits = hiddenHits(terms, row, { tickets: true })
+  return {
+    sig: [row.title, row.stack, terms, hits],
+    build: () => [h('span', { class: 'title-cell' },
+      h('span', { class: 'title-text', 'data-hover': 'title' }, highlighted(row.title, terms)),
+      row.stack === null ? null : chip(`stack ${row.stack.position}/${row.stack.size}`, 'gray', { class: 'chip chip-small tone-gray', title: 'Stacked PR: its position in the stack' }),
+      hitsLine(hits, terms))],
+  }
+}
 
 const issuesCell = (row: OpenRow): { sig: unknown, build: () => Node[] } => ({
   sig: row.issues,
@@ -192,9 +197,9 @@ export const othersColumns = (agent: boolean): Column<OtherRow>[] => [
     label: 'Author',
     width: '128px',
     sort: othersSortValues.author,
-    cell: (row) => ({
-      sig: row.author,
-      build: () => [h('span', { class: 'person' }, avatar(row.author, 'row'), h('span', { class: 'person-name' }, row.author.alias))],
+    cell: (row, { terms }) => ({
+      sig: [row.author, terms],
+      build: () => [h('span', { class: 'person' }, avatar(row.author, 'row'), h('span', { class: 'person-name' }, highlighted(row.author.alias, terms)))],
     }),
   },
   { key: 'pr', label: 'PR', width: '72px', cell: prCell(true), sort: othersSortValues.pr },
@@ -225,7 +230,7 @@ const ticketColumn = (): Column<ClosedRow> => ({
   label: 'Ticket',
   width: '112px',
   sort: closedSortValues.ticket,
-  cell: (row) => ({ sig: row.tickets, build: () => [h('span', { class: 'tickets' }, row.tickets.map(ticketChip))] }),
+  cell: (row, { terms }) => ({ sig: [row.tickets, terms], build: () => [h('span', { class: 'tickets' }, row.tickets.map((ticket) => ticketChip(ticket, terms)))] }),
 })
 
 export const closedColumns = (range: ClosedRange): Column<ClosedRow>[] => [
@@ -246,19 +251,22 @@ export const closedColumns = (range: ClosedRange): Column<ClosedRow>[] => [
     label: 'Title',
     width: 'auto',
     sort: closedSortValues.title,
-    cell: (row) => ({
-      sig: row.title,
-      build: () => [h('span', { class: 'title-cell' }, h('span', { class: 'title-text', title: row.title }, row.title))],
-    }),
+    cell: (row, { terms }) => {
+      const hits = hiddenHits(terms, row, { tickets: false })
+      return {
+        sig: [row.title, terms, hits],
+        build: () => [h('span', { class: 'title-cell' }, h('span', { class: 'title-text', title: row.title }, highlighted(row.title, terms)), hitsLine(hits, terms))],
+      }
+    },
   },
   {
     key: 'author',
     label: 'Author',
     width: '144px',
     sort: closedSortValues.author,
-    cell: (row) => ({
-      sig: row.author,
-      build: () => [h('span', { class: 'person' }, avatar(row.author, 'closed'), h('span', { class: 'person-name' }, row.author.alias))],
+    cell: (row, { terms }) => ({
+      sig: [row.author, terms],
+      build: () => [h('span', { class: 'person' }, avatar(row.author, 'closed'), h('span', { class: 'person-name' }, highlighted(row.author.alias, terms)))],
     }),
   },
   {
