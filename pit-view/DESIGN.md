@@ -386,7 +386,7 @@ A PR is a bot PR when its author login contains any `config.bots` entry (case-in
 
 ### Reviewer pips
 
-Built from the newest review per reviewer across `latestReviews` and `latestOpinionatedReviews` (compared by `submittedAt`, `latestReviews` winning a tie), plus pending `reviewRequests`. Both connections are read because GitHub drops a reviewer from `latestReviews` once a review is re-requested of them, which would hide the change request or approval the re-request is about; `latestOpinionatedReviews` keeps it. Everywhere this file says a reviewer's "latest review" (the viewer's too, in the flags, groups, and stages below), it means this merged list:
+Built from the newest review per reviewer across `latestReviews` and `latestOpinionatedReviews` (compared by `submittedAt`, `latestReviews` winning a tie), plus pending `reviewRequests`. Both connections are read because GitHub drops a reviewer from `latestReviews` once a review is re-requested of them, which would hide the change request or approval the re-request is about; `latestOpinionatedReviews` keeps it. Everywhere this file says a reviewer's "latest review" (the viewer's too, in the flags, groups, and stages below, except that a comment of the viewer's own counts as their newest review; see the comment-only paragraph below), it means this merged list:
 
 | State | Mark | Color | Source |
 | --- | --- | --- | --- |
@@ -396,6 +396,8 @@ Built from the newest review per reviewer across `latestReviews` and `latestOpin
 | requested | ○ | amber | in `reviewRequests` with no newer review |
 
 A reviewer who has both a past review and a pending re-request shows as `requested`.
+
+A comment-only review (`COMMENTED`) is neither an approval nor a change request. A reviewer whose only review is a comment shows the neutral gray `commented` pip, and the review moves no row between groups and sets no stage, since GitHub's `reviewDecision` ignores it. A comment never displaces the same reviewer's approval or change request: when a reviewer's newest review is a comment and `latestOpinionatedReviews` holds an earlier approval or change request from them, that earlier review is their latest review, so the pip stays ✓ or ✗, the Changes requested banner still names them, and the answered test below still reads that review's commit. A later approval or change request replaces a comment. The viewer's own flags and group read the viewer's newest review of any kind, so a comment at the head commit counts as having looked at it: no Re-review flag, and Waiting on author when nothing else applies. A comment-only review counts as reviewed in Merge state and appears in Last activity as "<actor> commented".
 
 ### Flags (Others' only)
 

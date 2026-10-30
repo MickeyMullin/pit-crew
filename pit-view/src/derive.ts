@@ -226,17 +226,24 @@ const reviewTime = (review: RawReview): number => {
 // their approval or change request, so reading latestReviews alone loses what the reviewer decided. On a
 // tie the review from latestReviews wins, so it stays the one GitHub reports for the reviewer. A review
 // with no author cannot be matched to a reviewer; it counts once, when both lists hold the same one.
-export const latestReviewsOf = (pr: RawOpenPr): RawReview[] => {
+// A comment-only review is neither: unless keepDecision is false, it never displaces the same reviewer's approval or change request, which a comment does not withdraw.
+const newestReviews = (pr: RawOpenPr, keepDecision: boolean): RawReview[] => {
+  const decided = (review: RawReview): boolean => review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED'
   const newest = new Map<string, RawReview>()
   for (const review of [...pr.latestReviews.nodes, ...pr.latestOpinionatedReviews.nodes]) {
     const key = review.author === null
       ? `ghost:${review.state}:${review.submittedAt}:${review.commit?.oid ?? ''}`
       : review.author.login.toLowerCase()
     const seen = newest.get(key)
-    if (seen === undefined || reviewTime(review) > reviewTime(seen)) newest.set(key, review)
+    if (seen === undefined) newest.set(key, review)
+    else if (keepDecision && review.state === 'COMMENTED' && decided(seen)) continue
+    else if (keepDecision && seen.state === 'COMMENTED' && decided(review)) newest.set(key, review)
+    else if (reviewTime(review) > reviewTime(seen)) newest.set(key, review)
   }
   return [...newest.values()]
 }
+
+export const latestReviewsOf = (pr: RawOpenPr): RawReview[] => newestReviews(pr, true)
 
 // reviews by anyone but the author, with a state that counts (not dismissed or pending)
 const countedReviews = (pr: RawOpenPr): RawReview[] =>
@@ -272,7 +279,7 @@ export const reviewerPips = (pr: RawOpenPr, config: Config): Reviewer[] => {
 // flags (Others' only)
 
 export const viewerReview = (pr: RawOpenPr, config: Config): RawReview | undefined =>
-  latestReviewsOf(pr).find((review) => same(review.author?.login, config.viewer) && review.state !== 'PENDING')
+  newestReviews(pr, false).find((review) => same(review.author?.login, config.viewer) && review.state !== 'PENDING')
 
 // a user, not a team, with a pending review request
 const isRequestedOf = (pr: RawOpenPr, login: string | undefined): boolean =>
