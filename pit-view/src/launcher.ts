@@ -202,7 +202,7 @@ const checkReview = (value: Record<string, unknown>): void => {
   for (const field of reviewFields) check(field in value, `${field} is missing`)
   check(['review-pr', 'review-stack', 'review-dependabot'].includes(value.command as string), 'command must be review-pr, review-stack or review-dependabot')
   checkStatus(value)
-  check(value.target === null || isObject(value.target), 'target must be an object or null')
+  check(value.target === null || (isObject(value.target) && typeof value.target.repo === 'string' && (!('pr' in value.target) || value.target.pr === null || isPositiveInteger(value.target.pr)) && (!('stack' in value.target) || (Array.isArray(value.target.stack) && value.target.stack.every(isPositiveInteger)))), 'target must be null or an object with a repo, a pr that is null or a positive integer, and a stack of positive integers')
   check(value.reviewed === null || (isObject(value.reviewed) && value.reviewed.kind === 'commit' && typeof value.reviewed.sha === 'string'), 'reviewed must be null or { kind: commit, sha }')
   check(oneOfOrNull(value.verdict, ['changesRequested', 'clean']), 'verdict must be changesRequested, clean or null')
   check(oneOfOrNull(value.recommendation, ['approve', 'fixBeforeMerge', 'hold', 'doNotMerge']), 'recommendation must be one of the four or null')
@@ -453,9 +453,12 @@ export const claudeInvocation = (spec: LaunchSpec): Invocation => ({
 export const codexModelArgs = (spec: Pick<LaunchSpec, 'codexModel'>): string[] =>
   spec.codexModel === undefined ? [] : ['-m', spec.codexModel]
 
-export const codexSandboxArgs = (spec: Pick<LaunchSpec, 'cwd' | 'reportsDir' | 'worktreesDir'>): string[] => [
+// every folder a Codex run may write: the workspace itself, the checkout's .git, the run directory
+// the request's --emit-json names, and the resolved reports and worktrees folders. A folder left out
+// of this list is a folder the command cannot write, whatever the prompt it runs says to write there
+export const codexSandboxArgs = (spec: Pick<LaunchSpec, 'cwd' | 'runDir' | 'reportsDir' | 'worktreesDir'>): string[] => [
   '-s', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true',
-  '--add-dir', join(spec.cwd, '.git'), '--add-dir', spec.reportsDir, '--add-dir', spec.worktreesDir,
+  '--add-dir', join(spec.cwd, '.git'), '--add-dir', spec.runDir, '--add-dir', spec.reportsDir, '--add-dir', spec.worktreesDir,
 ]
 
 export const codexInvocation = (spec: LaunchSpec): Invocation => ({
@@ -717,6 +720,8 @@ export type AgentCell = {
   question: string | null
   // why it failed: a kind such as noResult, optionally followed by ': ' and detail
   note: string | null
+  // the owner's re-read replaced the outcome recorded at exit; the note is then the original one
+  resolvedByHand: boolean
   resume: string | null
   costUsd: number | null
 }
@@ -772,7 +777,7 @@ const pushRefused = (result: RunResultJson | null): boolean =>
   (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1') && result.notPushedReason === 'pushFailed'
 
 // the cell's text for a finished run, from section 8's mappings: a review's verdict and posted, a fix's push, an update's method
-export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'>, ownDraft: boolean): string => {
+export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'> & { resolvedByHand?: boolean }, ownDraft: boolean): string => {
   if (run.status === 'stopped') return 'Stopped'
   if (run.status === 'needsInput') return 'Needs your answer'
   if (run.status === 'failed') {
@@ -781,15 +786,16 @@ export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'>, ownDraft:
     return pushRefused(run.result) ? 'Failed · push refused' : 'Failed'
   }
   const result = run.result
-  if (result?.schema === 'pit-crew/fix-result@1') return fixText(result)
-  if (result?.schema === 'pit-crew/update-result@1') return updateText(result)
-  if (result === null || result.schema !== 'pit-crew/review-result@1' || result.verdict === null) return 'Done'
+  const byHand = run.resolvedByHand === true ? ' · finished by hand' : ''
+  if (result?.schema === 'pit-crew/fix-result@1') return `${fixText(result)}${byHand}`
+  if (result?.schema === 'pit-crew/update-result@1') return `${updateText(result)}${byHand}`
+  if (result === null || result.schema !== 'pit-crew/review-result@1' || result.verdict === null) return `Done${byHand}`
   let text = 'Clean'
   if (result.verdict === 'changesRequested') text = 'Changes requested'
   else if (ownDraft) text = 'Clean · mark ready?'
   else if (result.posted?.form === 'approve') text = 'Approved'
   else if (result.posted?.form === 'comment') text = 'Clean · CI failed'
-  return result.notPostedReason === 'ghFailed' ? `${text} · post failed` : text
+  return `${result.notPostedReason === 'ghFailed' ? `${text} · post failed` : text}${byHand}`
 }
 
 const countBy = <K extends string>(keys: readonly K[], values: readonly K[]): Record<K, number> =>
@@ -861,7 +867,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     state: 'idle', label: plan.label, action, starts: startOptions(pr, config, stack, run?.status === 'running'), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false,
-    finishedAt: null, text: null, result: null, question: null, note: null, resume: null, costUsd: null,
+    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, resume: null, costUsd: null,
   }
   if (run === undefined) return idle
   const shas = standingShas(run)
@@ -889,6 +895,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     result: agentResult(run.result),
     question: run.status === 'needsInput' ? run.result?.question ?? null : null,
     note: run.note,
+    resolvedByHand: run.resolvedByHand,
     resume: run.resume,
     costUsd: run.costUsd,
   }
@@ -1164,7 +1171,7 @@ export const systemFs: LauncherFs = {
 // the launcher
 
 export type LaunchErrorCode =
-  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner' | 'updateRunner'
+  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner' | 'updateRunner' | 'notRereadable' | 'rereadRefused'
 
 export class LaunchError extends Error {
   override name = 'LaunchError'
@@ -1198,6 +1205,8 @@ export type Launcher<T extends Session = Run> = {
   start: (request: StartRequest) => Promise<T>
   // SIGTERM to the run's group now, SIGKILL to every descendant's group after the grace period
   stop: (id: number) => T
+  // the owner's re-read of a failed or waiting run's folder (section 8, Re-reading a result): the new result.json replaces the recorded outcome when it passes every guard, and a refusal changes nothing
+  reread: (id: number) => Promise<T>
   // at server start: re-watch live runs, settle the rest
   recover: () => Promise<void>
   // reads every watched run's files now
@@ -1206,6 +1215,26 @@ export type Launcher<T extends Session = Run> = {
   settled: (id: number) => Promise<T>
   // stops watching; runs keep going
   close: () => void
+}
+
+// a run directory Pit View cannot write is refused before the runner starts, so a folder the
+//  filesystem forbids names its own failure instead of settling later as an unreadable noResult:
+//  the probe is the same write the command makes to events.jsonl, and it leaves nothing behind
+export const probeRunDir = async (dir: string, fs: Pick<LauncherFs, 'writeFile' | 'rm'>): Promise<void> => {
+  const probe = join(dir, '.write-probe')
+  await fs.writeFile(probe, '')
+  await fs.rm(probe)
+}
+
+// raised by the probe, and by nothing else on the start path, so the failure keeps its own note
+export class UnwritableRunDir extends Error {
+  readonly dir: string
+  readonly reason: unknown
+  constructor(dir: string, reason: unknown) {
+    super(`cannot write ${dir}`)
+    this.dir = dir
+    this.reason = reason
+  }
 }
 
 export type LauncherOptions<T extends Session = Run> = {
@@ -1614,6 +1643,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     let stdin: string | null
     try {
       await fs.mkdir(dir)
+      await probeRunDir(dir, fs).catch((reason: unknown) => {
+        throw new UnwritableRunDir(dir, reason)
+      })
       spec = await specFor(run, dir)
       const invocation = runners[runner].invocation(spec)
       stdin = invocation.stdin
@@ -1637,8 +1669,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         stdin: stdin === null ? 'ignore' : 'pipe',
       })
     } catch (error) {
-      run = store.update(run.id, { status: 'failed', finishedAt: now(), note: `spawnFailed: ${messageOf(error)}` })
-      log(`${noun} ${run.id}: cannot start: ${messageOf(error)}`)
+      const note = error instanceof UnwritableRunDir
+        ? `permissionDenied: ${tildePath(error.dir, home)} cannot be written: ${messageOf(error.reason)}`
+        : `spawnFailed: ${messageOf(error)}`
+      run = store.update(run.id, { status: 'failed', finishedAt: now(), note })
+      log(`${noun} ${run.id}: cannot start: ${note}`)
       changed(run)
       await prune()
       return run
@@ -1750,6 +1785,82 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
+  const rereading = new Set<number>()
+
+  // what a new result must keep of the run: its repository and PR, and the target it first named
+  const targetMismatch = (run: T, was: RunResultJson | null, value: RunResultJson): string | null => {
+    if (value.schema === 'pit-crew/sweep-result@1') return value.repo !== null && value.repo.toLowerCase() !== run.repo.toLowerCase() ? `result.json is about ${value.repo}, not ${run.repo}` : null
+    const first = was === null || was.schema === 'pit-crew/sweep-result@1' ? null : was.target
+    const target = value.target
+    if (target === null) return first !== null ? 'result.json no longer names its target' : value.status === 'done' ? 'result.json names no target, so it cannot show which PR it finished' : null
+    if (target.repo.toLowerCase() !== run.repo.toLowerCase()) return `result.json targets ${target.repo}, not ${run.repo}`
+    const number = (run as Partial<Run>).number
+    if ('pr' in target && target.pr !== null && number !== undefined && target.pr !== number) return `result.json targets #${target.pr}, not #${number}`
+    if ('stack' in target && number !== undefined && !target.stack.includes(number)) return `result.json targets a stack without #${number}`
+    if ('stack' in target !== (value.command === 'review-stack')) return `result.json target does not fit ${value.command}`
+    if (value.status === 'done' && number !== undefined && !('stack' in target) && target.pr !== number) return `result.json does not name #${number} as its target`
+    if (first !== null && JSON.stringify(first) !== JSON.stringify(target)) return 'result.json names another target than the run first did'
+    return null
+  }
+
+  const reviewedMismatch = (was: RunResultJson | null, value: RunResultJson): string | null => {
+    if (was?.schema !== 'pit-crew/review-result@1' || value.schema !== 'pit-crew/review-result@1' || was.reviewed === null) return null
+    if (value.reviewed?.sha.toLowerCase() === was.reviewed.sha.toLowerCase()) return null
+    return `the reviewed commit changed from ${was.reviewed.sha.slice(0, 7)} to ${value.reviewed?.sha.slice(0, 7) ?? 'none'}; start a new review instead`
+  }
+
+  const reread = async (id: number): Promise<T> => {
+    const run = store.get(id)
+    if (run === null) throw new LaunchError('unknownRun', `${noun} ${id} does not exist`)
+    if (store.schema !== null) throw new LaunchError('notRereadable', `a ${noun} cannot be read again`)
+    if (run.status !== 'failed' && run.status !== 'needsInput') throw new LaunchError('notRereadable', `${noun} ${id} is ${run.status}; only a failed ${noun} or one waiting for an answer can be read again`)
+    if (run.resume === null) throw new LaunchError('notRereadable', `${noun} ${id} has no session to resume, so nothing could have finished it by hand`)
+    if (rereading.has(id) || live.has(id)) throw new LaunchError('busy', `${noun} ${id} is being read already`)
+    rereading.add(id)
+    try {
+      const refuse = (why: string): never => {
+        throw new LaunchError('rereadRefused', `${why}; the ${noun} is unchanged`)
+      }
+      const dir = expandHome(run.dir, home)
+      const text = await fs.readFile(join(dir, 'result.json')).catch(() => null)
+      if (text === null) return refuse(`result.json is missing from ${tildePath(dir, home)}`)
+      const parsed = parseResult(text)
+      if (!parsed.ok) return refuse(parsed.error)
+      const value = parsed.value
+      const expected = run.command === 'fix-pr' ? 'pit-crew/fix-result@1' : run.command === 'update-pr' ? 'pit-crew/update-result@1' : 'pit-crew/review-result@1'
+      if (value.schema !== expected) return refuse(`result.json has schema ${value.schema}, but this run's result has schema ${expected}`)
+      if (value.command !== run.command) return refuse(`result.json is for command ${value.command}, not ${run.command}`)
+      const moved = targetMismatch(run, run.result, value) ?? reviewedMismatch(run.result, value)
+      if (moved !== null) return refuse(moved)
+      let reportExists: boolean | null = null
+      const path = value.status === 'done' ? reportPath(value) : null
+      if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
+      // judged on its own: the stream's denials belong to the original attempt, and the owner has resolved them
+      const judgement = judge({ stopped: false, restarted: false, exit: null, parsed, reportExists, denials: [], lastEvent: null })
+      // a guard failure is the launcher's own verdict; a valid failed result carries its own error, whatever words that starts with
+      const ownFailure = value.status === 'failed' && judgement.note === value.error && (value.schema !== 'pit-crew/fix-result@1' || fixMismatch(value) === null) && (value.schema !== 'pit-crew/update-result@1' || updateMismatch(value) === null)
+      if (judgement.status === 'failed' && !ownFailure && noteKind(judgement.note) !== null) return refuse(judgement.note ?? 'the result is not valid')
+      const note = judgement.status === 'failed' ? judgement.note : run.note
+      if (judgement.status === run.status && note === run.note && JSON.stringify(judgement.result) === JSON.stringify(run.result)) {
+        return refuse('result.json has not changed since the run settled')
+      }
+      const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true }
+      // the later steps too: every line of events.jsonl, folded from the start
+      const eventsText = await fs.readFile(join(dir, 'events.jsonl')).catch(() => null)
+      const events = (eventsText ?? '').split('\n').map(parseStepEvent).filter((event) => event !== null)
+      const latest = events.at(-1)
+      if (latest !== undefined) {
+        Object.assign(changes, { steps: foldSteps(emptySteps(), events), lastStepAt: latest.at, step: latest.step, stepState: latest.state })
+      }
+      const updated = store.update(id, changes)
+      log(`${noun} ${id} read again by hand: ${updated.status}${updated.note === null ? '' : ` (${updated.note})`}`)
+      changed(updated)
+      return updated
+    } finally {
+      rereading.delete(id)
+    }
+  }
+
   const checkAll = async (): Promise<void> => {
     await Promise.all([...live.values()].map((entry) => pumpOf(entry)))
   }
@@ -1766,5 +1877,5 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     for (const entry of live.values()) clear(entry)
   }
 
-  return { start, stop, recover, check: checkAll, settled, close }
+  return { start, stop, reread, recover, check: checkAll, settled, close }
 }

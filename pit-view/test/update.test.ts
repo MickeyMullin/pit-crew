@@ -26,7 +26,7 @@ const updateRun = (result: Record<string, unknown> | null, patch: Partial<Run> =
   cwd: '~/dev/orbit', dir: '~/.local/state/pit-view/runs/9', sessionId: 'sess-9', pid: 4009, pidStartedAt: 'start-4009',
   startedAt: '2026-10-28T14:00:00Z', lastStepAt: null, step: null, stepState: null, steps: null, finishedAt: '2026-10-28T14:05:00Z',
   status: (result?.status as Run['status'] | undefined) ?? 'done', result: result as unknown as RunResultJson | null, note: null, costUsd: null,
-  resume: 'cd ~/dev/orbit && claude --resume sess-9', ...patch,
+  resume: 'cd ~/dev/orbit && claude --resume sess-9', resolvedByHand: false, ...patch,
 })
 
 const parsedUpdate = (patch: Record<string, unknown> = {}): UpdateResult => {
