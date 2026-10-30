@@ -1422,6 +1422,7 @@ test('a re-read that breaks a guard leaves the row as it was and says why: chang
     await refused(JSON.stringify(approvedByHand({ target: {} })), /target must be null or an object with a repo/)
     await refused(JSON.stringify(approvedByHand({ target: { repo: 'octo-example/orbit', pr: null } })), /does not name #106/)
     await refused(JSON.stringify(approvedByHand({ target: { repo: 'octo-example/orbit' } })), /does not name #106/)
+    await refused(JSON.stringify(approvedByHand({ target: { repo: 'octo-example/orbit', stack: [106], top: 106 } })), /target does not fit review-pr/)
     await refused(JSON.stringify(approvedByHand({ command: 'review-stack', target: { repo: 'octo-example/orbit', stack: null, top: 106 } })), /target must be null or an object with a repo/)
     await refused(JSON.stringify(approvedByHand({ target: { repo: 7, pr: 106 } })), /target must be null or an object with a repo/)
     await refused(JSON.stringify(approvedByHand({ command: 'review-stack', target: { repo: 'octo-example/orbit', stack: [106], top: 106 } })), /command review-stack, not review-pr/)

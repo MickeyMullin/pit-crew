@@ -1670,6 +1670,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     const number = (run as Partial<Run>).number
     if ('pr' in target && target.pr !== null && number !== undefined && target.pr !== number) return `result.json targets #${target.pr}, not #${number}`
     if ('stack' in target && number !== undefined && !target.stack.includes(number)) return `result.json targets a stack without #${number}`
+    if ('stack' in target !== (value.command === 'review-stack')) return `result.json target does not fit ${value.command}`
     if (value.status === 'done' && number !== undefined && !('stack' in target) && target.pr !== number) return `result.json does not name #${number} as its target`
     if (first !== null && JSON.stringify(first) !== JSON.stringify(target)) return 'result.json names another target than the run first did'
     return null
