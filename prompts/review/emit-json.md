@@ -1,4 +1,4 @@
-Machine-readable output: a review invoked with `--emit-json=<run-dir>` records its progress and its outcome as JSON files in `<run-dir>`, for the program that started the run and is watching it. This file is loaded by `review-pr.md`, `review-stack.md`, `review-dependabot.md`, and `review-dependabot-sweep.md`, and by `prompts/fix/fix-pr.md`, when the invocation carries the flag. It adds two files and changes nothing else: everything in the calling prompt applies as written, and the human-readable report is written, printed, and posted, or not posted, exactly as it would be without the flag (for `fix-pr`, the fixes are pushed, or not pushed, exactly as they would be).
+Machine-readable output: a review invoked with `--emit-json=<run-dir>` records its progress and its outcome as JSON files in `<run-dir>`, for the program that started the run and is watching it. This file is loaded by `review-pr.md`, `review-stack.md`, `review-dependabot.md`, and `review-dependabot-sweep.md`, by `prompts/fix/fix-pr.md`, and by `prompts/update/update-pr.md`, when the invocation carries the flag. It adds two files and changes nothing else: everything in the calling prompt applies as written, and the human-readable report is written, printed, and posted, or not posted, exactly as it would be without the flag (for `fix-pr`, the fixes are pushed, or not pushed, exactly as they would be, and for `update-pr`, which writes no report, the update is pushed, or not pushed, exactly as it would be).
 
 The flag:
 
@@ -155,6 +155,53 @@ The fix's response, `pit-crew/fix-result@1`:
 - `report`: `~/agents/output/FIX-<number>.md`, with the home directory written as `~`. Null when no report was written, as at a stop to ask before touching code.
 - `question`, `error`: as in `review-result@1`; `error` also carries git's error for a refused push.
 
+The update's response, `pit-crew/update-result@1`:
+
+- This schema applies only to `prompts/update/update-pr.md`, which loads this file when its invocation carries the flag. That prompt says what each of the five steps above covers in an update, and where each is recorded; its step meanings replace the single-review ones above, so an update records `review` for choosing the method, `consolidate` for the rebase or merge with its conflicts and checks, `writeReport` always as `skipped` (it writes no report file), and `post` for the push.
+- `update-pr`'s stops to ask (a conflict that needs judgment, a failed check, or checks that cannot run) are stops to ask under "Stopping to ask" below. Its instructions to stop and say so are failures under "Failing" below, and so is a refused push: for `update-pr`, the rule that a failed post is not a failure of the run does not apply.
+- `result.json` is written as the run's last act, under the rules above: after any push, and after the worktree is removed. Every field is always present, with null where it does not apply:
+
+```json
+{
+  "schema": "pit-crew/update-result@1",
+  "command": "update-pr",
+  "status": "done",
+  "target": { "repo": "owner/name", "pr": 101, "branch": "fix/example", "base": "main" },
+  "head": { "sha": "755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7" },
+  "upstream": { "sha": "1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d" },
+  "method": "rebase",
+  "methodReason": "only your commits are on the branch, and no open PR is based on it",
+  "conflicts": [ { "path": "src/retry.ts", "resolution": "kept the backoff from the PR and the renamed logger from main" } ],
+  "checks": [ { "name": "pnpm test", "result": "passed" } ],
+  "pushed": { "branch": "fix/example", "head": "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432", "forced": true },
+  "notPushedReason": null,
+  "worktree": null,
+  "question": null,
+  "error": null
+}
+```
+
+- `schema`: `"pit-crew/update-result@1"`.
+- `command`: `"update-pr"`.
+- `status`: `"done"` when the run reached its end: the update was pushed, the branch was already up to date, or the owner, answering a stop, told it to discard the update. `"needsInput"` when it stopped to ask; `"failed"` when it cannot complete, a refused push included.
+- `target`: `{ "repo": "<owner>/<name>", "pr": <number>, "branch": "<the PR's head branch>", "base": "<the primary branch>" }`. Null when the run stopped before resolving it.
+- `head`: `{ "sha": "<full SHA>" }`, the PR head the run read, which a rebase's lease names. Null when the run stopped before reading it.
+- `upstream`: `{ "sha": "<full SHA>" }`, the primary branch's commit the run updated onto. Null when the run stopped before reading it.
+- `method`: `"rebase"` or `"merge"`, as `update-pr.md` chooses it; null when the branch was already up to date, or the run stopped before choosing.
+- `methodReason`: the reason for the method in one line: for a merge, the rule that made it one. Null when `method` is.
+- `conflicts`: one object per file whose conflict the run resolved, in the order resolved: `{ "path": "<repo-relative path>", "resolution": "<one line on how>" }`. `[]` when there was none, and at a stop to ask, where nothing was resolved.
+- `checks`: as in `fix-result@1`. `[]` when no conflict was resolved, since no check is run then.
+- `pushed`: `{ "branch": "<branch>", "head": "<full SHA of the new head>", "forced": <true for a rebase, pushed with --force-with-lease; false for a merge> }` when the push landed; otherwise null.
+- `notPushedReason`: null when the push landed. Otherwise exactly one of:
+  - `"upToDate"`: the head already contained the upstream SHA, and the run finished `"done"`.
+  - `"awaitingAnswer"`: the run stopped to ask about a conflict.
+  - `"checksFailed"`: a check failed after conflicts were resolved.
+  - `"checksNotRun"`: the checks could not run.
+  - `"pushFailed"`: the push was refused. `status` is `"failed"`, and git's error goes in `error`.
+  - A run the owner told to discard the update keeps the reason of the stop it answered. It is null as well when the run failed before deciding the push; `error` says why.
+- `worktree`: the throwaway worktree's path, with the home directory written as `~`, when the run left one behind: an update not pushed, or a removal that refused. Otherwise null.
+- `question`, `error`: as in `review-result@1`; `error` also carries git's error for a refused push.
+
 Stopping to ask:
 
 - **Wherever the calling prompt, or `tandem.md`, says to stop and ask, a run with the flag stops there too.** That includes a closed or merged PR under `review-pr.md`; a missing stack identity with more than one stack open; whether to fix, and at which model or effort; the one-attempt bound when the re-review after a fix finds anything; a tandem secondary that failed, or a draft that fails its checks; an unreachable pinned SHA; a prior invocation that cannot be repeated as written; and `review-stack`'s closing offer to post, which waits for an explicit yes.
@@ -177,5 +224,6 @@ What the flag never changes:
 - `review-pr` fixing only the viewer's own PR, confirmed by matching `gh api user` against the PR author login, never inferred from a checked-out branch.
 - `review-stack` never fixing, on any stack, under any authorship.
 - `fix-pr` acting only on the viewer's own PR, confirmed the same way; its push as its only GitHub write; its one fix attempt; and its report written before the push.
+- `update-pr` acting only on the viewer's own PR, confirmed the same way; its push of the PR's branch as its only GitHub write, a rebase only with `--force-with-lease` on the head it read; and its never rewriting a commit of the primary branch.
 - Where the report goes, what it says, and when it is written. The JSON describes the run; it never replaces the report or the chat response.
 - The no-attribution rules, which apply to both files exactly as to the report: no model, provider, or agent names anywhere in them, and escalation is reported by its trigger, never by which model ran.
