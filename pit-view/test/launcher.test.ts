@@ -124,7 +124,7 @@ test('the resume command starts in the run\'s folder; Codex\'s carries its model
   assert.equal(shellPath(`/tmp/it's`), `'/tmp/it'\\''s'`)
 })
 
-test('the child environment is built from scratch: home, user, shell, language, temp, PATH and the git credential config only', () => {
+test('the child environment is built from scratch: home, user, shell, language, temp, PATH, and the git credential config only', () => {
   const env = childEnv({
     PATH: '/opt/bin:/usr/bin', USER: 'tester', LOGNAME: 'tester', SHELL: '/bin/zsh', LANG: 'en_US.UTF-8', TMPDIR: '/tmp/x/',
     HOME: '/elsewhere', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'desktop', ANTHROPIC_API_KEY: 'sk-fake', GH_TOKEN: 'gho_fake', SSH_AUTH_SOCK: '/var/run/com.apple.launchd.abc/Listeners', GIT_CONFIG_COUNT: '9', EMPTY: '',

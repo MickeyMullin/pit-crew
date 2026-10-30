@@ -430,12 +430,7 @@ export const runners: Readonly<Record<RunnerName, RunnerEntry>> = {
 // not pass on that session's variables
 export const childEnvKeys = ['USER', 'LOGNAME', 'SHELL', 'LANG', 'TMPDIR', 'PATH'] as const
 
-// a run's git traffic, and the credentials it carries. The command's own fetch runs inside the
-// runner's sandbox, where an ssh identity cannot be unlocked (Codex refuses /dev/tty) and where
-// depending on an agent's socket would make the run's success a property of what is listening
-// outside it. Redirecting an SSH remote to HTTPS and letting gh's helper answer means no key, no
-// socket and no prompt is involved: the run authenticates with the same gh login the launcher
-// already requires for its API reads, and the helper is asked for the token rather than given it
+// a run's git traffic, and the credentials it carries: the command's own fetch runs inside the runner's sandbox, where an ssh identity cannot be unlocked (Codex refuses /dev/tty) and where depending on an agent's socket would make the run's success a property of what is listening outside it. Redirecting an SSH remote to HTTPS and letting gh's helper answer means no key, no socket, and no prompt is involved: the run authenticates with the same gh login the launcher already requires for its API reads, and the helper is asked for the token rather than given it
 export const gitConfigEnv = {
   GIT_CONFIG_COUNT: '2',
   GIT_CONFIG_KEY_0: 'url.https://github.com/.insteadOf',
