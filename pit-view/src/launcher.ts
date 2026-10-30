@@ -1530,6 +1530,13 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (parsed?.ok === true && store.schema !== null && parsed.value.schema !== store.schema) {
       parsed = { ok: false, error: `result.json: expected ${store.schema}, found ${parsed.value.schema}` }
     }
+    // a run takes only the result of its own command and of its own PR: an update's result in a review's folder, or one about another PR, is no result
+    const started = store.get(entry.id) as Partial<Run> | null
+    if (parsed?.ok === true && store.schema === null && parsed.value.schema !== 'pit-crew/sweep-result@1' && started?.command !== undefined) {
+      const found = parsed.value
+      const wrong = found.command !== started.command ? `result.json is for command ${found.command}, not ${started.command}` : found.target === null ? null : targetMismatch(store.get(entry.id) as T, null, found)
+      if (wrong !== null) parsed = { ok: false, error: wrong }
+    }
     let reportExists: boolean | null = null
     if (parsed?.ok === true && parsed.value.status === 'done') {
       const path = reportPath(parsed.value)
@@ -1797,10 +1804,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const rereading = new Set<number>()
 
   // the same target whatever order its keys were written in
-  const sameTarget = (a: { repo: string, pr?: number | null, stack?: number[], top?: number, branch?: string }, b: { repo: string, pr?: number | null, stack?: number[], top?: number, branch?: string }): boolean => {
+  const sameTarget = (a: { repo: string, pr?: number | null, stack?: number[], top?: number, branch?: string, base?: string }, b: { repo: string, pr?: number | null, stack?: number[], top?: number, branch?: string, base?: string }): boolean => {
     if (a.repo.toLowerCase() !== b.repo.toLowerCase()) return false
     if ('stack' in a || 'stack' in b) return 'stack' in a && 'stack' in b && a.top === b.top && a.stack?.length === b.stack?.length && (a.stack ?? []).every((n, k) => n === b.stack?.[k])
     if (a.branch !== undefined && b.branch !== undefined && a.branch !== b.branch) return false
+    if (a.base !== undefined && b.base !== undefined && a.base !== b.base) return false
     // a PR the first result had not worked out yet may be named by a later one
     return a.pr === null || a.pr === undefined || a.pr === b.pr
   }

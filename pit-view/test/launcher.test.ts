@@ -1517,6 +1517,48 @@ test('a fix run is held to fixMismatch on a re-read, and a run that is running, 
   }
 })
 
+test('a run settles only on the result of its own command and its own PR', async () => {
+  const h = await harness()
+  try {
+    const wrongCommand = await h.launcher.start(request(101, { command: 'review-pr', args: ['101'], label: 'Re-review' }))
+    const first = h.launch.children.at(-1)!
+    await first.result(updateResult())
+    const settledFirst = h.launcher.settled(wrongCommand.id)
+    first.exit(0)
+    const failedFirst = await settledFirst
+    assert.equal(failedFirst.status, 'failed')
+    assert.match(failedFirst.note ?? '', /result\.json is for command update-pr, not review-pr/)
+    const otherPr = await h.launcher.start(request(102, { command: 'update-pr', args: ['102', `--head=${updateHead}`], label: 'Update branch' }))
+    const second = h.launch.children.at(-1)!
+    await second.result(updateResult())
+    const settledSecond = h.launcher.settled(otherPr.id)
+    second.exit(0)
+    const failedSecond = await settledSecond
+    assert.equal(failedSecond.status, 'failed')
+    assert.match(failedSecond.note ?? '', /result\.json targets/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('an update re-read keeps the base the run first named', async () => {
+  const h = await harness()
+  try {
+    const run = await h.launcher.start(request(101, { command: 'update-pr', args: ['101', `--head=${updateHead}`], label: 'Update branch' }))
+    const child = h.launch.children.at(-1)!
+    await child.result(updateResult({ status: 'needsInput', question: 'Checks failed; push anyway? (yes / no)', pushed: null, notPushedReason: 'awaitingAnswer', worktree: '~/agents/worktrees/orbit-update-101-x' }))
+    const settled = h.launcher.settled(run.id)
+    child.exit(0)
+    const waiting = await settled
+    const file = join(h.home, '.local', 'state', 'pit-view', 'runs', String(run.id), 'result.json')
+    await writeFile(file, JSON.stringify(updateResult({ target: { repo: 'octo-example/orbit', pr: 101, branch: 'fix/webhook-retry', base: 'develop' } })))
+    await assert.rejects(h.launcher.reread(run.id), (error: unknown) => error instanceof LaunchError && error.code === 'rereadRefused')
+    assert.deepEqual(h.cache.getRun(run.id), waiting)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('an Update session that stopped to ask is read again against the update schema and updateMismatch, and reads as its method finished by hand', async () => {
   const h = await harness()
   try {
