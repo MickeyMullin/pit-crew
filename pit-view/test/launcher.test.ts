@@ -1403,6 +1403,19 @@ test('a run that stopped to ask and was answered in Open session settles done af
   }
 })
 
+test('a re-read accepts the same target written with its keys in another order', async () => {
+  const h = await harness()
+  try {
+    const denied = await deniedRun(h)
+    const file = join(h.home, '.local', 'state', 'pit-view', 'runs', String(denied.id), 'result.json')
+    await writeFile(file, JSON.stringify(approvedByHand({ target: { pr: 106, repo: 'octo-example/orbit' } })))
+    const run = await h.launcher.reread(denied.id)
+    assert.deepEqual([run.status, run.resolvedByHand], ['done', true])
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a re-read keeps a valid failed result whose own error starts with a reserved failure word', async () => {
   const h = await harness()
   try {
@@ -1411,6 +1424,19 @@ test('a re-read keeps a valid failed result whose own error starts with a reserv
     await writeFile(file, JSON.stringify(reviewResult({ status: 'failed', error: 'noReport: the owner could not write the report', verdict: null, findings: [], posted: null })))
     const run = await h.launcher.reread(denied.id)
     assert.deepEqual([run.status, run.note, run.resolvedByHand], ['failed', 'noReport: the owner could not write the report', true])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a re-read may name the PR that the original result had not worked out', async () => {
+  const h = await harness()
+  try {
+    const denied = await deniedRun(h, reviewResult({ status: 'failed', error: 'could not find the PR', target: { repo: 'octo-example/orbit', pr: null }, verdict: null, findings: [], posted: null }))
+    const file = join(h.home, '.local', 'state', 'pit-view', 'runs', String(denied.id), 'result.json')
+    await writeFile(file, JSON.stringify(approvedByHand()))
+    const run = await h.launcher.reread(denied.id)
+    assert.deepEqual([run.status, run.resolvedByHand], ['done', true])
   } finally {
     await h.cleanup()
   }
