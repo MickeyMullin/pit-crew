@@ -580,6 +580,30 @@ test('a version 5 cache lacks latestOpinionatedReviews, so its cached PRs are dr
   }
 })
 
+test('a version 7 cache gains runs.resolved_by_hand in place: its runs stay, not resolved by hand, and the flag is stored', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const created = first.createRun(newRun(106), (id) => `~/runs/${id}`)
+    first.close()
+    const old = new DatabaseSync(path)
+    old.exec('ALTER TABLE runs DROP COLUMN resolved_by_hand')
+    old.exec('UPDATE meta SET value = \'7\' WHERE key = \'schemaVersion\'')
+    old.close()
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.equal(cache.getRun(created.id)?.resolvedByHand, false)
+    assert.equal(cache.updateRun(created.id, { resolvedByHand: true }).resolvedByHand, true)
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
+    cache.close()
+    const again = openCache({ path, clock: handClock().clock })
+    assert.equal(again.getRun(created.id)?.resolvedByHand, true)
+    again.close()
+  } finally {
+    await cleanup()
+  }
+})
+
 const newSweep = (patch: Partial<NewSweep> = {}): NewSweep => ({
   repo: scenario.repo, command: 'review-dependabot-sweep', args: [scenario.repo, '--parallel', '1'], label: 'Dependabot sweep', runner: 'claude', cwd: '~/dev/orbit',
   sessionId: null, pid: null, pidStartedAt: null, startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null,
@@ -605,7 +629,7 @@ test('a version 6 cache gains sweeps in place: its GitHub tables and its runs ar
     assert.equal(count(cache, 'prs'), 1)
     assert.equal(cache.getRun(created.id)?.id, created.id)
     assert.equal(count(cache, 'sweeps'), 0)
-    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, '7')
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
     // a sweep is no run: runs.number stays NOT NULL, and a sweep row has no number at all
     const columns = cache.db.prepare('PRAGMA table_info(runs)').all()
     assert.equal(columns.find((column) => column.name === 'number')?.notnull, 1)

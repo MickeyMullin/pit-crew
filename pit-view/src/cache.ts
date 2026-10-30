@@ -8,7 +8,7 @@ import type { ClosedResult, GhErrorKind, OpenPage, RawOpenPr } from './github.ts
 import type { RunResultJson, StepSlot } from './launcher.ts'
 
 // bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table
-export const schemaVersion = 7
+export const schemaVersion = 8
 
 // the last version that changed what the GitHub tables hold; a cache at this version or later keeps them through a bump, since a bump after it only adds tables
 export const githubTablesVersion = 6
@@ -129,15 +129,15 @@ export type Session = {
   resume: string | null
 }
 
-// one review session Pit View started (section 8 of DESIGN.md, Launching runs)
-export type Run = Session & { number: number }
+// one review session Pit View started (section 8 of DESIGN.md, Launching runs); resolvedByHand is set when the owner's re-read replaced the outcome recorded at exit
+export type Run = Session & { number: number, resolvedByHand: boolean }
 
 // one Dependabot sweep Pit View started (section 8, Sweeps): a record of its own with no PR number
 export type Sweep = Session
 
-export type NewRun = Omit<Run, 'id' | 'dir' | 'steps'>
+export type NewRun = Omit<Run, 'id' | 'dir' | 'steps' | 'resolvedByHand'>
 export type NewSweep = Omit<Sweep, 'id' | 'dir' | 'steps'>
-export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>>
+export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>> & { resolvedByHand?: boolean }
 
 export type Cache = {
   // starts a cycle; only one may run at a time across all repos
@@ -211,7 +211,7 @@ const schema = [
 
 // kept across rebuilds: no status CHECK, so phase 4's queued and skipped need no rebuild
 const runsSchema = [
-  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT)',
+  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, resolved_by_hand INTEGER NOT NULL DEFAULT 0)',
   'CREATE INDEX IF NOT EXISTS runs_by_pr ON runs (repo, number, id)',
   'CREATE INDEX IF NOT EXISTS runs_by_status ON runs (status)',
 ]
@@ -266,7 +266,7 @@ const toSession = (row: Row): Session => {
   }
 }
 
-const toRun = (row: Row): Run => ({ ...toSession(row), number: int(row, 'number') })
+const toRun = (row: Row): Run => ({ ...toSession(row), number: int(row, 'number'), resolvedByHand: int(row, 'resolved_by_hand') === 1 })
 
 // a Run's fields to their columns; JSON columns are stored as text
 const runColumns: Record<keyof RunChanges, string> = {
@@ -290,10 +290,12 @@ const runColumns: Record<keyof RunChanges, string> = {
   note: 'note',
   costUsd: 'cost_usd',
   resume: 'resume',
+  resolvedByHand: 'resolved_by_hand',
 }
 
 const runValue = (key: keyof RunChanges, value: unknown): SQLInputValue => {
   if (key === 'args' || key === 'result' || key === 'steps') return value === null || value === undefined ? null : JSON.stringify(value)
+  if (key === 'resolvedByHand') return value === true ? 1 : 0
   return (value ?? null) as SQLInputValue
 }
 
@@ -395,6 +397,8 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       // version 5 added runs.steps; a table made before it lacks the column
       const columns = db.prepare('PRAGMA table_info(runs)').all().map((column) => String(column.name))
       if (!columns.includes('steps')) db.exec('ALTER TABLE runs ADD COLUMN steps TEXT')
+      // version 8 added runs.resolved_by_hand
+      if (!columns.includes('resolved_by_hand')) db.exec('ALTER TABLE runs ADD COLUMN resolved_by_hand INTEGER NOT NULL DEFAULT 0')
       // version 7 added sweeps
       for (const statement of sweepsSchema) db.exec(statement)
       setMeta('schemaVersion', schemaVersion)
