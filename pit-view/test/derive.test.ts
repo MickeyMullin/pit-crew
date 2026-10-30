@@ -567,6 +567,7 @@ test('closed rows say who merged or closed them, and carry their tickets', async
     outcome: 'merged',
     closedBy: { alias: 'You', login: 'vera-quill', text: 'merged by you' },
     closedAt: '2026-10-26T13:10:00Z',
+    headRef: 'fix/orb-266-timeout',
     tickets: [{ system: 'Jira', label: 'ORB-266' }],
   })
 })
