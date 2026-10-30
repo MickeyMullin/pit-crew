@@ -171,7 +171,7 @@ const checkReview = (value: Record<string, unknown>): void => {
   for (const field of reviewFields) check(field in value, `${field} is missing`)
   check(['review-pr', 'review-stack', 'review-dependabot'].includes(value.command as string), 'command must be review-pr, review-stack or review-dependabot')
   checkStatus(value)
-  check(value.target === null || (isObject(value.target) && typeof value.target.repo === 'string' && (!('pr' in value.target) || value.target.pr === null || isPositiveInteger(value.target.pr)) && (!('stack' in value.target) || (Array.isArray(value.target.stack) && value.target.stack.every(isPositiveInteger)))), 'target must be null or an object with a repo, a pr that is null or a positive integer, and a stack of positive integers')
+  check(value.target === null || (isObject(value.target) && typeof value.target.repo === 'string' && (!('pr' in value.target) || value.target.pr === null || isPositiveInteger(value.target.pr)) && (!('stack' in value.target) || (Array.isArray(value.target.stack) && value.target.stack.every(isPositiveInteger) && value.target.stack.length > 0 && value.target.top === value.target.stack.at(-1)))), 'target must be null or an object with a repo, a pr that is null or a positive integer, and a stack of positive integers that ends with its top')
   check(value.reviewed === null || (isObject(value.reviewed) && value.reviewed.kind === 'commit' && typeof value.reviewed.sha === 'string'), 'reviewed must be null or { kind: commit, sha }')
   check(oneOfOrNull(value.verdict, ['changesRequested', 'clean']), 'verdict must be changesRequested, clean or null')
   check(oneOfOrNull(value.recommendation, ['approve', 'fixBeforeMerge', 'hold', 'doNotMerge']), 'recommendation must be one of the four or null')
@@ -430,8 +430,17 @@ export const runners: Readonly<Record<RunnerName, RunnerEntry>> = {
 // not pass on that session's variables
 export const childEnvKeys = ['USER', 'LOGNAME', 'SHELL', 'LANG', 'TMPDIR', 'PATH'] as const
 
+// a run's git traffic, and the credentials it carries: the command's own fetch runs inside the runner's sandbox, where an ssh identity cannot be unlocked (Codex refuses /dev/tty) and where depending on an agent's socket would make the run's success a property of what is listening outside it. Redirecting an SSH remote to HTTPS and letting gh's helper answer means no key, no socket, and no prompt is involved: the run authenticates with the same gh login the launcher already requires for its API reads, and the helper is asked for the token rather than given it
+export const gitConfigEnv = {
+  GIT_CONFIG_COUNT: '2',
+  GIT_CONFIG_KEY_0: 'url.https://github.com/.insteadOf',
+  GIT_CONFIG_VALUE_0: 'git@github.com:',
+  GIT_CONFIG_KEY_1: 'credential.helper',
+  GIT_CONFIG_VALUE_1: '!gh auth git-credential',
+} as const
+
 export const childEnv = (source: Readonly<Record<string, string | undefined>>, home: string): Record<string, string> => {
-  const env: Record<string, string> = { HOME: home }
+  const env: Record<string, string> = { HOME: home, ...gitConfigEnv }
   for (const key of childEnvKeys) {
     const value = source[key]
     if (value !== undefined && value !== '') env[key] = value

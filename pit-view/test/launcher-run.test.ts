@@ -105,7 +105,7 @@ const setup = async (config: Partial<Config> = {}) => {
     home,
     stateDir: join(home, '.local', 'state', 'pit-view'),
     // a server started inside an agent session must not pass that session on
-    env: { PATH: `${bin}:/usr/bin:/bin`, USER: 'tester', LANG: 'en_US.UTF-8', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'desktop', ANTHROPIC_API_KEY: 'sk-fake' },
+    env: { PATH: `${bin}:/usr/bin:/bin`, USER: 'tester', LANG: 'en_US.UTF-8', SSH_AUTH_SOCK: '/var/run/com.apple.launchd.test/Listeners', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'desktop', ANTHROPIC_API_KEY: 'sk-fake' },
     newSessionId: () => '00000000-0000-4000-8000-0000000000e2',
     onWatch: () => {},
     onChange: (run) => changes.push(run),
@@ -128,6 +128,12 @@ const callOf = async (dir: string): Promise<{ argv: string[], cwd: string, env: 
 const checkEnv = (env: Record<string, string>, home: string): void => {
   assert.equal(env.HOME, home)
   assert.equal(env.USER, 'tester')
+  // the child's own git fetch carries the launcher's credential config, and no agent socket
+  assert.equal(env.GIT_CONFIG_KEY_0, 'url.https://github.com/.insteadOf')
+  assert.equal(env.GIT_CONFIG_VALUE_0, 'git@github.com:')
+  assert.equal(env.GIT_CONFIG_KEY_1, 'credential.helper')
+  assert.equal(env.GIT_CONFIG_VALUE_1, '!gh auth git-credential')
+  assert.equal(env.SSH_AUTH_SOCK, undefined)
   assert.ok(Object.keys(env).every((key) => !key.startsWith('CLAUDE') && !key.startsWith('ANTHROPIC')), Object.keys(env).join(', '))
 }
 
