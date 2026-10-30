@@ -47,6 +47,10 @@ export type Controls = {
   grouped: { mine: boolean, others: boolean }
   // the tile whose preset is applied, until a filter is changed by hand
   tile: TileKey | null
+  // the header search's text, applied on top of each table's own search and filters
+  pageSearch: string
+  // sections the page search opened, so it can close them again (setPageSearch)
+  searchOpened: TableKey[]
 }
 
 export const noFilters = (): Filters => ({
@@ -62,6 +66,8 @@ export const initialControls = (): Controls => ({
   sort: { mine: null, others: null, closed: null },
   grouped: { mine: true, others: true },
   tile: null,
+  pageSearch: '',
+  searchOpened: [],
 })
 
 export const isFiltered = (table: TableKey, filters: Filters): boolean =>
@@ -287,13 +293,40 @@ export const tilePresets: Record<TileKey, Preset> = {
   closedToday: { target: 'closed', apply: (f) => f, range: 'today' },
 }
 
-// a tile clears every filter, opens its section alone and applies its preset; pressing the
-// active tile again clears every filter and reopens all three sections
+// a tile clears every filter, the page search included, opens its section alone and applies its
+// preset; pressing the active tile again clears every filter and reopens all three sections
 export const pressTile = (controls: Controls, tile: TileKey): Controls => {
-  if (controls.tile === tile) return { ...controls, tile: null, filters: noFilters(), expanded: allOpen() }
+  if (controls.tile === tile) return { ...controls, tile: null, filters: noFilters(), pageSearch: '', searchOpened: [], expanded: allOpen() }
   const preset = tilePresets[tile]
-  return { ...controls, tile, filters: preset.apply(noFilters()), expanded: only(preset.target), closedRange: preset.range ?? controls.closedRange }
+  return { ...controls, tile, filters: preset.apply(noFilters()), pageSearch: '', searchOpened: [], expanded: only(preset.target), closedRange: preset.range ?? controls.closedRange }
 }
+
+// the page search changed: it releases a tile, as any filter does, and the sections follow it.
+// matches counts the rows each section would show for the new text. A collapsed section with a
+// match opens and is remembered; a section the search opened closes again when nothing in it
+// matches any more, or the search is emptied
+export const setPageSearch = (controls: Controls, pageSearch: string, matches: Record<TableKey, number>): Controls => {
+  const expanded = { ...controls.expanded }
+  const opened = new Set(controls.searchOpened)
+  const searching = pageSearch.trim() !== ''
+  for (const table of ['mine', 'others', 'closed'] as const) {
+    if (searching && matches[table] > 0) {
+      if (!expanded[table]) opened.add(table)
+      expanded[table] = true
+    } else if (opened.has(table)) {
+      opened.delete(table)
+      expanded[table] = false
+    }
+  }
+  return { ...controls, tile: null, pageSearch, expanded, searchOpened: [...opened] }
+}
+
+// opening or closing a section by hand is the viewer's choice; the page search no longer owns it
+export const toggleSection = (controls: Controls, table: TableKey): Controls => ({
+  ...controls,
+  expanded: { ...controls.expanded, [table]: !controls.expanded[table] },
+  searchOpened: controls.searchOpened.filter((key) => key !== table),
+})
 
 // a filter changed by hand releases the tile; the filters stay as they are
 export const setFilter = <T extends TableKey>(controls: Controls, table: T, change: Partial<Filters[T]>): Controls => ({
