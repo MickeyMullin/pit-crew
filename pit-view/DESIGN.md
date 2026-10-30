@@ -395,6 +395,8 @@ Built from the newest review per reviewer across `latestReviews` and `latestOpin
 
 A reviewer who has both a past review and a pending re-request shows as `requested`.
 
+A comment-only review (`COMMENTED`) is neither an approval nor a change request. A reviewer whose only review is a comment shows the neutral gray `commented` pip, and the review moves no row between groups and sets no stage, since GitHub's `reviewDecision` ignores it. A comment never displaces the same reviewer's approval or change request: when a reviewer's newest review is a comment and `latestOpinionatedReviews` holds an earlier approval or change request from them, that earlier review is their latest review, so the pip stays ✓ or ✗, the Changes requested banner still names them, and the answered test below still reads that review's commit. A later approval or change request replaces a comment. The viewer's own flags and group read the viewer's newest review of any kind, so a comment at the head commit counts as having looked at it: no Re-review flag, and Waiting on author when nothing else applies. A comment-only review counts as reviewed in Merge state and appears in Last activity as "<actor> commented".
+
 ### Flags (Others' only)
 
 - **Re-review · n pushes since yours**: the viewer has a latest review, and the head commit differs from that review's `commit.oid`. `n` is the number of commits after the reviewed commit in `commits(last: 30)`; if the reviewed commit is not in that window (force push or rebase), show `Re-review · new commits`.

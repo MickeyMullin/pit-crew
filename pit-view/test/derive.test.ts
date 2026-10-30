@@ -718,11 +718,11 @@ test('latestReviewsOf keeps the newest review per reviewer across both connectio
     ({ latestReviews: { nodes: reviews }, latestOpinionatedReviews: { nodes: opinionated } }) as RawOpenPr
   const summary = (value: RawOpenPr) => latestReviewsOf(value).map((found) => [found.author?.login, found.state, found.commit?.oid])
 
-  // a later comment beats an earlier change request, and a later approval beats an earlier comment
+  // a later comment does not displace an earlier change request, and a later approval beats an earlier comment
   assert.deepEqual(summary(pr(
     [review('ana', 'COMMENTED', '2026-10-26T12:00:00Z', 'c2'), review('bo', 'APPROVED', '2026-10-26T12:00:00Z', 'c2')],
     [review('ana', 'CHANGES_REQUESTED', '2026-10-26T10:00:00Z', 'c1'), review('bo', 'APPROVED', '2026-10-26T12:00:00Z', 'c2')],
-  )), [['ana', 'COMMENTED', 'c2'], ['bo', 'APPROVED', 'c2']])
+  )), [['ana', 'CHANGES_REQUESTED', 'c1'], ['bo', 'APPROVED', 'c2']])
   // the opinionated list wins when it holds the newer review
   assert.deepEqual(summary(pr(
     [review('ana', 'COMMENTED', '2026-10-26T10:00:00Z', 'c1')],
@@ -733,11 +733,11 @@ test('latestReviewsOf keeps the newest review per reviewer across both connectio
     [review('Ana', 'COMMENTED', '2026-10-26T10:00:00Z')],
     [review('bo', 'CHANGES_REQUESTED', '2026-10-26T09:00:00Z'), review('ANA', 'APPROVED', '2026-10-26T11:00:00Z', 'c3')],
   )), [['ANA', 'APPROVED', 'c3'], ['bo', 'CHANGES_REQUESTED', 'c1']])
-  // a tie keeps the review latestReviews reported
+  // a tie between two decisions keeps the review latestReviews reported
   assert.deepEqual(summary(pr(
-    [review('ana', 'COMMENTED', '2026-10-26T10:00:00Z', 'c1')],
-    [review('ana', 'APPROVED', '2026-10-26T10:00:00Z', 'c2')],
-  )), [['ana', 'COMMENTED', 'c1']])
+    [review('ana', 'APPROVED', '2026-10-26T10:00:00Z', 'c1')],
+    [review('ana', 'CHANGES_REQUESTED', '2026-10-26T10:00:00Z', 'c2')],
+  )), [['ana', 'APPROVED', 'c1']])
   // a review with no date loses to one with a date; two lists holding the same ghost review count it once
   assert.deepEqual(summary(pr(
     [review('ana', 'APPROVED', null)],
@@ -745,4 +745,81 @@ test('latestReviewsOf keeps the newest review per reviewer across both connectio
   )), [['ana', 'CHANGES_REQUESTED', 'c1']])
   assert.equal(latestReviewsOf(pr([review(null, 'APPROVED', '2026-10-26T10:00:00Z')], [review(null, 'APPROVED', '2026-10-26T10:00:00Z')])).length, 1)
   assert.deepEqual(summary(pr([], [])), [])
+})
+
+// a comment-only review (COMMENTED) is neither an approval nor a change request: GitHub reports it as
+// the reviewer's newest review but keeps their earlier decision in latestOpinionatedReviews and in reviewDecision
+const commentedAfter = (pr: RawOpenPr, login: string, submittedAt: string): RawOpenPr => {
+  const decided = pr.latestOpinionatedReviews.nodes.find((review) => review.author?.login === login)
+  assert.ok(decided)
+  const comment = { author: { login }, state: 'COMMENTED' as const, submittedAt, commit: decided.commit }
+  return variant(pr, {
+    latestReviews: { nodes: [...pr.latestReviews.nodes.filter((review) => review.author?.login !== login), comment] },
+  })
+}
+
+test('a later comment from a reviewer who requested changes keeps the change request on yours', async () => {
+  const { asked, pushed, reRequested } = await answered()
+  const commented = commentedAfter(asked, 'alex-mendez', '2026-10-25T23:00:00Z')
+  const pip = (pr: RawOpenPr) => mineOf(pr).reviewers.find((found) => found.login === 'alex-mendez')?.state
+  assert.equal(pip(commented), 'changes')
+  assert.deepEqual([mineOf(commented).group, mineOf(commented).stage], ['changesRequested', 'changesRequested'])
+  assert.deepEqual(mineOf(commented).changesRequested, { login: 'alex-mendez', alias: 'Alex', at: '2026-10-25T22:14:00Z' })
+  // a push past the change request still answers it, and so does a re-request
+  const pushedAfter = commentedAfter(pushed, 'alex-mendez', '2026-10-25T23:00:00Z')
+  assert.deepEqual([mineOf(pushedAfter).group, mineOf(pushedAfter).stage], ['awaitingReview', 'updatedNotRequested'])
+  const reRequestedAfter = commentedAfter(reRequested, 'alex-mendez', '2026-10-25T23:00:00Z')
+  assert.deepEqual([mineOf(reRequestedAfter).group, mineOf(reRequestedAfter).stage], ['awaitingReview', 'reReviewRequested'])
+})
+
+test('a later comment after an approval keeps the approval pip, and a comment alone is a neutral pip', async () => {
+  const base = find(await allOpen(), 104)
+  const approved = variant(base, {
+    reviewDecision: 'APPROVED',
+    latestReviews: { nodes: [{ author: { login: 'alex-mendez' }, state: 'APPROVED', submittedAt: '2026-10-25T10:00:00Z', commit: { oid: base.headRefOid } }] },
+    latestOpinionatedReviews: { nodes: [{ author: { login: 'alex-mendez' }, state: 'APPROVED', submittedAt: '2026-10-25T10:00:00Z', commit: { oid: base.headRefOid } }] },
+    reviewRequests: { nodes: [] },
+  })
+  const commented = commentedAfter(approved, 'alex-mendez', '2026-10-25T11:00:00Z')
+  assert.deepEqual(reviewerPips(commented, config).map((pip) => [pip.login, pip.state]), [['alex-mendez', 'approved']])
+  const only = variant(base, {
+    reviewDecision: null,
+    latestReviews: { nodes: [{ author: { login: 'alex-mendez' }, state: 'COMMENTED', submittedAt: '2026-10-25T11:00:00Z', commit: { oid: base.headRefOid } }] },
+    latestOpinionatedReviews: { nodes: [] },
+    reviewRequests: { nodes: [] },
+  })
+  assert.deepEqual(reviewerPips(only, config).map((pip) => [pip.login, pip.state]), [['alex-mendez', 'commented']])
+  // it is not an approval: the PR stays in Awaiting review with a neutral stage
+  assert.deepEqual([mineOf(variant(only, { author: { __typename: 'User', login: scenario.viewer, avatarUrl: '' } })).group], ['awaitingReview'])
+})
+
+test('on others\' PRs a comment after a change request keeps the author\'s turn until they push', async () => {
+  const base = find(await page1(), 107)
+  const moved = reRequestedOfViewer
+  const kept = await moved()
+  // vera-quill is the viewer here, so use another reviewer: lee-park requested changes at the old commit, then commented
+  const review = { author: { login: 'lee-park' }, state: 'CHANGES_REQUESTED' as const, submittedAt: '2026-10-23T14:12:00Z', commit: { oid: base.headRefOid } }
+  const unmoved = variant(kept, {
+    reviewRequests: { nodes: [] },
+    latestReviews: { nodes: [{ ...review, state: 'COMMENTED', submittedAt: '2026-10-23T15:00:00Z' }, { ...kept.latestReviews.nodes[0]!, commit: { oid: base.headRefOid } }] },
+    latestOpinionatedReviews: { nodes: [review] },
+  })
+  const row = othersRow(unmoved)
+  assert.equal(row.group, 'waitingOnAuthor')
+  assert.equal(row.reviewers.find((pip) => pip.login === 'lee-park')?.state, 'changes')
+})
+
+test('latestReviewsOf never lets a comment displace the same reviewer\'s approval or change request', () => {
+  const review = (login: string, state: RawOpenPr['latestReviews']['nodes'][number]['state'], submittedAt: string) =>
+    ({ author: { login }, state, submittedAt, commit: { oid: 'c1' } })
+  const pr = { latestReviews: { nodes: [review('ana', 'COMMENTED', '2026-10-26T12:00:00Z')] }, latestOpinionatedReviews: { nodes: [review('ana', 'CHANGES_REQUESTED', '2026-10-26T10:00:00Z')] } } as RawOpenPr
+  assert.deepEqual(latestReviewsOf(pr).map((found) => found.state), ['CHANGES_REQUESTED'])
+})
+
+test('last activity names a comment-only review and a comment is no change request', async () => {
+  const base = find(await page1(), 113)
+  const timeline = variant(base, {
+    timelineItems: { nodes: [{ __typename: 'PullRequestReview', author: { login: 'sam-tran' }, state: 'COMMENTED', submittedAt: '2026-10-26T10:00:00Z', createdAt: '2026-10-26T10:00:00Z' } as RawTimelineItem] },
+  })
+  assert.deepEqual(deriveLastActivity(timeline, config), { at: '2026-10-26T10:00:00Z', actor: 'Sam', text: 'Sam commented' })
 })
