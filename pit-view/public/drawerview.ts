@@ -17,6 +17,8 @@ export type Loadable<T> = { state: 'loading' } | { state: 'error', message: stri
 export type Confirm =
   | { type: 'start', kind: StartKind, runner: RunnerName }
   | { type: 'stop', andOpen: boolean, runId: number }
+  // a re-read of the latest run's result, with everything its confirmation showed
+  | { type: 'reread', runId: number, repo: string, viewer: string, headSha: string, baseRef: string }
   | ActionConfirm
 
 // the control that opened the drawer, named by its data-focus-key, so focus can go back to it
@@ -200,6 +202,37 @@ export const stopModel = (number: number, cell: Pick<AgentCell, 'label' | 'runne
   busy: 'Stopping…',
 })
 
+// the Re-read result action on the latest-run card: for a failed run or one waiting for an answer that has a session to resume, since only a session someone resumed can have changed its result.json
+export type RereadOffer = { button: string, disabled: boolean, reason: string | null, runId: number }
+
+export const rereadOffer = (cell: AgentCell, open: boolean, number: number): RereadOffer | null => {
+  if (cell.runId === null || cell.resume === null || (cell.status !== 'failed' && cell.status !== 'needsInput') || cell.starts.length === 0) return null
+  return { button: 'Re-read result', disabled: !open, reason: open ? null : `Re-reading is off: ${goneText(number)}.`, runId: cell.runId }
+}
+
+// the confirmation: what is read, what it can replace, and the commit and base it is bound to
+export type RereadAskModel = {
+  heading: string
+  title: string
+  detail: string
+  reads: string
+  effect: string
+  bound: string
+  confirm: string
+  busy: string
+}
+
+export const rereadAskModel = (row: Pick<OpenRow, 'number' | 'title'>, cell: Pick<AgentCell, 'label' | 'runner' | 'text'>, ask: Extract<Confirm, { type: 'reread' }>): RereadAskModel => ({
+  heading: `Read the result of #${row.number} again?`,
+  title: row.title,
+  detail: `${cell.label} in ${cell.runner === null ? 'its runner' : runnerLabels[cell.runner]}, recorded as ${cell.text ?? 'finished'}`,
+  reads: 'The run\'s result.json and events.jsonl, as your resumed session left them. Nothing is posted to GitHub.',
+  effect: 'Replaces the recorded outcome when the new result passes the same checks (same PR, command, and reviewed commit, and its report exists). The run keeps the note of what first went wrong and is marked finished by hand. If a check fails, the run stays as it is and this says why.',
+  bound: `For the head ${shortSha(ask.headSha)} on ${ask.baseRef} in ${ask.repo}, as ${ask.viewer}.`,
+  confirm: 'Re-read result',
+  busy: 'Reading…',
+})
+
 export type WaitingModel = { question: string, resume: string | null, copyName: string }
 
 export const waitingModel = (cell: AgentCell, number: number): WaitingModel => ({
@@ -333,6 +366,16 @@ export type ResultModel = {
   fix: FixModel | null
   // set when the PR's head moved past the commit this run reviewed
   stale: string | null
+  // set when the owner's re-read replaced this run's recorded outcome, and why it had one
+  byHand: string | null
+}
+
+// how the original failure reads beside a result the owner finished by hand
+const byHandText = (note: string | null): string => {
+  const was = noteText(note)
+  const reread = 'Pit View read the result again at your request.'
+  if (note === null || was === null) return `Finished by hand: ${reread}`
+  return note.startsWith('permissionDenied') ? `Finished by hand after a denied tool call (${note.slice(note.indexOf(':') + 1).trim() || 'unnamed'}): ${reread}` : `Finished by hand after an earlier failure (${was.replace(/\.$/, '')}): ${reread}`
 }
 
 export const resultModel = (cell: AgentCell, number: number): ResultModel => ({
@@ -340,7 +383,8 @@ export const resultModel = (cell: AgentCell, number: number): ResultModel => ({
   tone: doneTone({ status: cell.status, text: cell.text }),
   runnerLabel: cell.runner === null ? 'its runner' : runnerLabels[cell.runner],
   finishedAt: cell.finishedAt,
-  note: noteText(cell.note),
+  // a run finished by hand keeps the note of its first failure, which byHand tells instead
+  note: cell.resolvedByHand && cell.status !== 'failed' ? null : noteText(cell.note),
   cost: formatCost(cell.costUsd),
   resume: cell.resume,
   copyName: `Copy resume command for #${number}`,
@@ -349,6 +393,7 @@ export const resultModel = (cell: AgentCell, number: number): ResultModel => ({
   stale: cell.state !== 'idle' ? null : cell.command === 'fix-pr'
     ? 'The head has moved since this run, so it covers an earlier commit.'
     : 'The head has moved since this run, so it covers an earlier commit. Start a new review for the current one.',
+  byHand: cell.resolvedByHand && cell.status === 'done' ? byHandText(cell.note) : null,
 })
 
 // which card the latest run gets
@@ -393,7 +438,12 @@ const fixDoneText = (result: Pick<FixResultJson, 'pushed' | 'notPushedReason'>):
   return result.notPushedReason === null ? 'Done' : notPushedTexts[result.notPushedReason] ?? 'Not pushed'
 }
 
-export const runText = (run: Pick<RunView, 'status' | 'result' | 'note'>): { text: string, tone: Tone } => {
+export const runText = (run: Pick<RunView, 'status' | 'result' | 'note'> & { resolvedByHand?: boolean }): { text: string, tone: Tone } => {
+  const outcome = outcomeText(run)
+  return run.status === 'done' && run.resolvedByHand === true ? { ...outcome, text: `${outcome.text} · finished by hand` } : outcome
+}
+
+const outcomeText = (run: Pick<RunView, 'status' | 'result' | 'note'>): { text: string, tone: Tone } => {
   if (run.status === 'running') return { text: 'Running', tone: 'blue' }
   if (run.status === 'needsInput') return { text: 'Needs your answer', tone: 'amber' }
   if (run.status === 'stopped') return { text: 'Stopped', tone: 'gray' }
@@ -484,6 +534,9 @@ export type DrawerModel = {
   card: CardKind
   running: RunningModel | null
   stop: StopModel | null
+  // the latest-run card's Re-read result, and its confirmation while asked
+  reread: RereadOffer | null
+  rereadAsk: RereadAskModel | null
   // false for a PR that left the open tables until its latest run has been read again: a
   // running card there may be stale, and Stop must not be offered on a guess
   stopsEnabled: boolean
@@ -510,6 +563,8 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
     card,
     running: cell !== null && card === 'running' ? runningModel(row, cell) : null,
     stop: cell !== null && card === 'running' ? stopModel(row.number, cell, confirm?.type === 'stop' && confirm.andOpen) : null,
+    reread: cell !== null && (card === 'result' || card === 'waiting') ? rereadOffer(cell, input.open, row.number) : null,
+    rereadAsk: cell !== null && confirm?.type === 'reread' && (card === 'result' || card === 'waiting') && rereadOffer(cell, input.open, row.number)?.disabled === false ? rereadAskModel(row, cell, confirm) : null,
     stopsEnabled: input.open || input.runs.state === 'ready',
     waiting: cell !== null && card === 'waiting' ? waitingModel(cell, row.number) : null,
     result: cell !== null && card === 'result' ? resultModel(cell, row.number) : null,
@@ -580,6 +635,7 @@ export const cellFromRun = (cell: AgentCell, run: RunView): AgentCell => {
     result: summaryOf(run.result),
     question: run.status === 'needsInput' ? run.result?.question ?? null : null,
     note: run.note,
+    resolvedByHand: run.resolvedByHand,
     resume: run.resume,
     costUsd: run.costUsd,
   }
@@ -600,10 +656,16 @@ export const confirmHolds = (confirm: Confirm, cell: AgentCell | null, open: boo
   if (confirm.type === 'action') return true
   if (cell === null) return false
   if (confirm.type === 'stop') return cell.state === 'running' && cell.runId === confirm.runId
+  // a re-read is about one finished run that still has the status it was asked for, on a PR still open; the head and base it is bound to are judged by rereadBound
+  if (confirm.type === 'reread') return open && rereadOffer(cell, open, 0)?.runId === confirm.runId
   if (!open) return false
   const option = optionOf(cell, confirm.kind)
   return option !== undefined && option.unavailable === null
 }
+
+// a re-read's confirmation is dropped when what it showed no longer holds: the head or base of the PR, the repository the page shows, or the viewer
+export const rereadBound = (ask: Extract<Confirm, { type: 'reread' }>, row: Pick<OpenRow, 'headSha' | 'baseRef' | 'agent'>, repo: string): boolean =>
+  ask.repo === repo && ask.headSha === row.headSha && ask.baseRef === row.baseRef && row.agent?.starts[0]?.viewer === ask.viewer
 
 // when to ask the server again: the runs when the row's run changes in a way the list shows, the
 // reports when a run starts or ends. A timer tick or a step's time moving changes neither key

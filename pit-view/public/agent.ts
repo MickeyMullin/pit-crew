@@ -161,6 +161,18 @@ export const stopRequest = (runId: number, token: string): RunRequest => ({
   init: { method: 'POST', headers: { [tokenHeader]: token } },
 })
 
+// what a re-read's confirmation showed, which the request carries back whole: the server refuses with 409 and reads nothing when any of it differs from what is in effect now
+export type RereadAsk = { repo: string, viewer: string, number: number, headSha: string, base: string }
+
+export const rereadRequest = (runId: number, ask: RereadAsk, token: string): RunRequest => ({
+  url: `/api/runs/${runId}/reread`,
+  init: {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', [tokenHeader]: token },
+    body: JSON.stringify(ask),
+  },
+})
+
 // a server message as a sentence: a capital and a full stop, but never a capital on a name such
 // as gh or cloneDir
 export const sentence = (text: string): string => {
@@ -173,8 +185,8 @@ export const sentence = (text: string): string => {
 
 // a refusal in the owner's words: the server's own message, except for the token, where the fix
 // is a reload; status 0 means Pit View did not answer at all
-export const refusalText = (kind: 'start' | 'stop', status: number, error: string | null): string => {
-  if (status === 403) return `Reload the page to ${kind} runs: Pit View has restarted since this page loaded.`
+export const refusalText = (kind: 'start' | 'stop' | 'reread', status: number, error: string | null): string => {
+  if (status === 403) return `Reload the page to ${kind === 'reread' ? 're-read' : kind} runs: Pit View has restarted since this page loaded.`
   if (status === 0) return 'Pit View did not answer. Check that it is running, then try again.'
   return sentence(error ?? '') || `Pit View refused with status ${status}.`
 }

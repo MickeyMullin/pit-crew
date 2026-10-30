@@ -8,13 +8,13 @@ import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
 import { actionBound, actionDoneText, actionRefusalText, actionRequest } from './actionsview.ts'
 import type { ActionConfirmModel, ActionKind, PersonChoice } from './actionsview.ts'
-import { refusalText, startRequest, stopRequest } from './agent.ts'
+import { refusalText, rereadRequest, startRequest, stopRequest } from './agent.ts'
 import type { AgentCell, RunView, StartKind } from './agent.ts'
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import {
-  confirmHolds, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, refetchKeys,
+  confirmHolds, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, refetchKeys, rereadBound,
   resumeReadyText, returnSelector,
 } from './drawerview.ts'
 import type { Confirm, DrawerModel, Loadable, Opener, StartConfirmModel, StopModel } from './drawerview.ts'
@@ -249,10 +249,12 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       go.disabled = busy || (confirm?.type === 'action' && model?.actionAsk?.canConfirm === false)
       const idleText = confirm?.type === 'stop' ? (model?.stop?.confirm ?? 'Stop run')
         : confirm?.type === 'action' ? (model?.actionAsk?.confirm ?? 'Confirm')
-          : (model?.confirm?.confirm ?? 'Start')
+          : confirm?.type === 'reread' ? (model?.rereadAsk?.confirm ?? 'Re-read result')
+            : (model?.confirm?.confirm ?? 'Start')
       const busyText = confirm?.type === 'stop' ? (model?.stop?.busy ?? 'Stopping…')
         : confirm?.type === 'action' ? (model?.actionAsk?.busy ?? 'Working…')
-          : (model?.confirm?.busy ?? 'Starting…')
+          : confirm?.type === 'reread' ? (model?.rereadAsk?.busy ?? 'Reading…')
+            : (model?.confirm?.busy ?? 'Starting…')
       setText(go, busy ? busyText : idleText)
     }
   }
@@ -335,6 +337,17 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     byKey('confirm-cancel')?.focus({ preventScroll: true })
   }
 
+  const askReread = (): void => {
+    const cell = latest()
+    const who = cell?.starts[0]
+    if (cell === null || cell.runId === null || who === undefined || last === null) return
+    confirm = { type: 'reread', runId: cell.runId, repo: who.repo, viewer: who.viewer, headSha: last.headSha, baseRef: last.baseRef }
+    confirmFrom = 'reread'
+    error = ''
+    render()
+    byKey('confirm-cancel')?.focus({ preventScroll: true })
+  }
+
   const cancelConfirm = (): void => {
     const back = confirmFrom
     confirm = null
@@ -370,6 +383,31 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       return
     }
     error = refusalText('start', answer.status, answer.error)
+    paintConfirm()
+    byKey('confirm-go')?.focus({ preventScroll: true })
+  }
+
+  const doReread = async (): Promise<void> => {
+    if (busy || confirm?.type !== 'reread' || number === null) return
+    const asked = confirm
+    const n = number
+    busy = true
+    error = ''
+    paintConfirm()
+    const answer = await sendRun(rereadRequest(asked.runId, { repo: asked.repo, viewer: asked.viewer, number: n, headSha: asked.headSha, base: asked.baseRef }, options.token))
+    busy = false
+    if (n !== number) return
+    if (answer.ok) {
+      confirm = null
+      confirmFrom = null
+      error = ''
+      render()
+      // the row arrives as a patch and the card follows it; the heading holds focus meanwhile, and the page's live region announces the new outcome
+      focusKey(null)
+      void loadRuns()
+      return
+    }
+    error = refusalText('reread', answer.status, answer.error)
     paintConfirm()
     byKey('confirm-go')?.focus({ preventScroll: true })
   }
@@ -546,21 +584,40 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     },
   })
 
+  // the latest-run card's Re-read result: a button, or its confirmation once asked
+  const rereadBlock = (model: DrawerModel): HTMLElement | null => {
+    if (model.rereadAsk !== null) {
+      const ask = model.rereadAsk
+      return h('div', { class: 'confirm', role: 'group', 'aria-labelledby': 'drawer-confirm-heading' },
+        h('h4', { id: 'drawer-confirm-heading', class: 'confirm-heading' }, ask.heading),
+        h('p', { class: 'confirm-title' }, ask.title),
+        facts([['Run', ask.detail], ['Reads', ask.reads], ['Replaces', ask.effect], ['Bound to', ask.bound]]),
+        errorLine(),
+        confirmActions(ask.confirm, 'primary', () => void doReread()))
+    }
+    const offer = model.reread
+    if (offer === null) return null
+    const button = h('button', { type: 'button', class: 'button', disabled: offer.disabled, 'data-focus-key': 'reread' }, offer.button)
+    button.addEventListener('click', () => askReread())
+    return h('div', { class: 'drawer-run-actions' }, button, offer.reason === null ? null : h('p', { class: 'drawer-note' }, offer.reason))
+  }
+
   const waitingCard = (model: DrawerModel, n: number): Part => ({
     key: 'waiting',
-    sig: JSON.stringify(model.waiting),
+    sig: JSON.stringify([model.waiting, model.reread, model.rereadAsk]),
     build: () => {
       const waiting = model.waiting
       return h('section', { class: 'drawer-section drawer-card drawer-waiting', 'aria-labelledby': 'drawer-waiting-title' },
         h('h3', { id: 'drawer-waiting-title', class: 'drawer-section-title' }, 'Waiting for your answer'),
         h('p', { class: 'drawer-question' }, waiting?.question ?? ''),
-        waiting === null ? null : resumeBlock(waiting.resume, waiting.copyName, n))
+        waiting === null ? null : resumeBlock(waiting.resume, waiting.copyName, n),
+        rereadBlock(model))
     },
   })
 
   const resultCard = (model: DrawerModel, n: number): Part => ({
     key: 'result',
-    sig: JSON.stringify(model.result === null ? null : { ...model.result, finishedAt: model.result.finishedAt !== null }),
+    sig: JSON.stringify([model.result === null ? null : { ...model.result, finishedAt: model.result.finishedAt !== null }, model.reread, model.rereadAsk]),
     build: () => {
       const result = model.result
       if (result === null) return h('section')
@@ -585,6 +642,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           h('span', { class: 'drawer-meta' }, ` · ${result.runnerLabel}`),
           result.cost === null ? null : h('span', { class: 'drawer-meta' }, ` · ${result.cost}`)),
         result.note === null ? null : h('p', { class: 'drawer-note' }, result.note),
+        result.byHand === null ? null : h('p', { class: 'drawer-note', 'data-by-hand': '' }, result.byHand),
         result.stale === null ? null : h('p', { class: 'drawer-note' }, result.stale),
         fix?.pushed == null ? null : h('div', { class: 'drawer-pushed' },
           h('p', { class: 'drawer-label' }, 'Pushed to ', h('code', { class: 'mono' }, fix.pushed.branch)),
@@ -593,7 +651,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
         parts.length === 0 ? null : h('dl', { class: 'drawer-facts' }, parts),
         fix?.worktree == null ? null : h('p', { class: 'drawer-notice' }, fix.worktree),
         fix?.report == null ? null : reportButton(fix.report.name, fix.report.openName, 'Open report'),
-        resumeBlock(result.resume, result.copyName, n))
+        resumeBlock(result.resume, result.copyName, n),
+        rereadBlock(model))
     },
   })
 
@@ -788,7 +847,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     const live = number === null ? undefined : options.rowOf(number)
     if (confirm.type === 'action') {
       if (last !== null && actionBound(confirm, last, live !== undefined, options.repo())) return
-    } else if (confirmHolds(confirm, latest(), live !== undefined)) {
+    } else if (confirmHolds(confirm, latest(), live !== undefined) && (confirm.type !== 'reread' || (last !== null && rereadBound(confirm, last, options.repo())))) {
       return
     }
     confirm = null

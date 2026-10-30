@@ -8,9 +8,10 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
+import { rereadRequest } from '../public/agent.ts'
 import type { AgentCell, RunView, StartOption, StepSlot } from '../public/agent.ts'
 import {
-  cardKind, cellFromRun, confirmHolds, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
+  cardKind, cellFromRun, confirmHolds, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
   reportName, reportRows, resumeReadyText, returnSelector, runRows, runText, startConfirmModel, startsModel, stepModels, stepsName, stopModel, summaryOf,
 } from '../public/drawerview.ts'
 import type { DrawerInput, Loadable } from '../public/drawerview.ts'
@@ -708,4 +709,100 @@ test('a run start names the repository and viewer of the option the confirmation
   // the confirmation's signature holds every option, so a change of repository rebuilds it too
   assert.match(source, /sig: JSON\.stringify\(\[model\.starts,/)
   assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token\)/)
+})
+
+// Re-read result, on the latest-run card (section 8, Drawer)
+
+const deniedCell = (patch: Partial<AgentCell> = {}): AgentCell => finished({
+  status: 'failed', text: 'Failed · permission denied', note: 'permissionDenied: Bash',
+  result: { kind: 'review', verdict: 'clean', recommendation: null, findings: 0, ci: 'green', posted: null, notPostedReason: 'ghFailed', report: '~/agents/output/PR-101.md' },
+  ...patch,
+})
+
+test('a failed run, or one waiting for an answer, that has a session offers Re-read result; nothing else does', () => {
+  const failed = drawerModel(input(deniedCell()))
+  assert.deepEqual(failed.reread, { button: 'Re-read result', disabled: false, reason: null, runId: 7 })
+  assert.equal(failed.rereadAsk, null)
+  const waiting = drawerModel(input(finished({ status: 'needsInput', text: 'Needs your answer', question: 'Post it?' })))
+  assert.equal(waiting.card, 'waiting')
+  assert.equal(waiting.reread?.button, 'Re-read result')
+  // a run that finished, one still going, and one with no session to resume were not finished by hand
+  assert.equal(drawerModel(input(finished())).reread, null)
+  assert.equal(drawerModel(input(running())).reread, null)
+  assert.equal(drawerModel(input(deniedCell({ resume: null }))).reread, null)
+  assert.equal(drawerModel(input(deniedCell({ status: 'stopped', text: 'Stopped' }))).reread, null)
+  assert.equal(drawerModel(input(idle())).reread, null)
+  // a PR that left the open tables has no head and base to bind the request to: shown off, with the reason as text
+  const gone = drawerModel(input(deniedCell(), { open: false }))
+  assert.deepEqual([gone.reread?.disabled, gone.reread?.reason], [true, 'Re-reading is off: #101 is no longer open.'])
+  assert.equal(rereadOffer(deniedCell({ starts: [] }), true, 101), null)
+})
+
+test('the re-read confirmation names the PR, the run, what is read and replaced, and the head and base it is bound to', () => {
+  const ask = { type: 'reread', runId: 7, repo: 'octo-example/orbit', viewer: 'viewer', headSha: '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7', baseRef: 'main' } as const
+  const model = drawerModel(input(deniedCell(), { confirm: ask }))
+  assert.equal(model.rereadAsk?.heading, 'Read the result of #101 again?')
+  assert.equal(model.rereadAsk?.title, 'fix(retry): back off between attempts')
+  assert.match(model.rereadAsk?.detail ?? '', /^Re-review in Claude Code, recorded as Failed · permission denied$/)
+  assert.match(model.rereadAsk?.reads ?? '', /Nothing is posted to GitHub/)
+  assert.match(model.rereadAsk?.effect ?? '', /stays as it is and this says why/)
+  assert.equal(model.rereadAsk?.bound, 'For the head 755b78b on main in octo-example/orbit, as viewer.')
+  assert.deepEqual([model.rereadAsk?.confirm, model.rereadAsk?.busy], ['Re-read result', 'Reading…'])
+  // no confirmation unless asked, and none on a card that has no Re-read
+  assert.equal(drawerModel(input(deniedCell())).rereadAsk, null)
+  assert.equal(drawerModel(input(finished(), { confirm: ask })).rereadAsk, null)
+})
+
+test('a re-read confirmation is dropped when its run changed, the PR left, or the head, base, repository or viewer it showed no longer holds', () => {
+  const ask = { type: 'reread', runId: 7, repo: 'octo-example/orbit', viewer: 'viewer', headSha: 'a'.repeat(40), baseRef: 'main' } as const
+  assert.equal(confirmHolds(ask, deniedCell(), true), true)
+  assert.equal(confirmHolds(ask, deniedCell(), false), false, 'the PR left the open tables')
+  assert.equal(confirmHolds(ask, deniedCell({ runId: 8 }), true), false, 'another run now')
+  assert.equal(confirmHolds(ask, finished(), true), false, 'the run finished after all')
+  assert.equal(confirmHolds(ask, null, true), false)
+  const bound = (patch: Record<string, unknown>, repo = 'octo-example/orbit'): boolean => rereadBound(ask, { headSha: 'a'.repeat(40), baseRef: 'main', agent: deniedCell(), ...patch } as never, repo)
+  assert.equal(bound({}), true)
+  assert.equal(bound({ headSha: 'b'.repeat(40) }), false, 'new commits')
+  assert.equal(bound({ baseRef: 'release/1' }), false, 'retargeted')
+  assert.equal(bound({}, 'octo-example/other'), false, 'another repository')
+  assert.equal(bound({ agent: deniedCell({ starts: options({ default: { viewer: 'someone-else' } }) }) }), false, 'another viewer')
+})
+
+test('the re-read request carries the token and everything the confirmation showed', async () => {
+  const request = rereadRequest(7, { repo: 'octo-example/orbit', viewer: 'viewer', number: 101, headSha: 'a'.repeat(40), base: 'main' }, 'tok')
+  assert.equal(request.url, '/api/runs/7/reread')
+  assert.equal(request.init.method, 'POST')
+  assert.equal(request.init.headers['X-Pit-View-Token'], 'tok')
+  assert.deepEqual(JSON.parse(request.init.body ?? ''), { repo: 'octo-example/orbit', viewer: 'viewer', number: 101, headSha: 'a'.repeat(40), base: 'main' })
+  const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
+  assert.match(source, /rereadRequest\(asked\.runId, \{ repo: asked\.repo, viewer: asked\.viewer, number: n, headSha: asked\.headSha, base: asked\.baseRef \}, options\.token\)/)
+  // the same confirmation machinery as every other: Cancel first, a role="alert" line, labeled group
+  assert.match(source, /rereadBlock[\s\S]*role: 'group', 'aria-labelledby': 'drawer-confirm-heading'[\s\S]*errorLine\(\)/)
+  assert.match(source, /askReread[\s\S]*byKey\('confirm-cancel'\)\?\.focus/)
+})
+
+test('a run finished by hand reads as its new outcome with the original failure told in words, in the card and in the runs list', () => {
+  const approved = finished({
+    text: 'Approved · finished by hand', resolvedByHand: true, note: 'permissionDenied: Bash',
+    result: { kind: 'review', verdict: 'clean', recommendation: null, findings: 0, ci: 'green', posted: { form: 'approve', url: 'https://example.test/owner/name/pull/101#pullrequestreview-9' }, notPostedReason: null, report: '~/agents/output/PR-101.md' },
+  })
+  const model = drawerModel(input(approved))
+  assert.equal(model.result?.text, 'Approved · finished by hand')
+  assert.equal(model.result?.tone, 'green')
+  assert.equal(model.result?.note, null)
+  assert.equal(model.result?.byHand, 'Finished by hand after a denied tool call (Bash): Pit View read the result again at your request.')
+  assert.deepEqual(model.result?.facts.find((fact) => fact.label === 'Posted'), { label: 'Posted', value: 'an approval', href: 'https://example.test/owner/name/pull/101#pullrequestreview-9' })
+  assert.equal(model.reread, null)
+  // an answered run kept no note; one that failed another way names it
+  assert.equal(drawerModel(input(approved.note === null ? approved : { ...approved, note: null })).result?.byHand, 'Finished by hand: Pit View read the result again at your request.')
+  assert.match(drawerModel(input({ ...approved, note: 'no PR exists for this branch' })).result?.byHand ?? '', /^Finished by hand after an earlier failure \(no PR exists for this branch\): /)
+  // a run never finished by hand has no such line, and a run that failed again shows its failure
+  assert.equal(drawerModel(input(finished())).result?.byHand, null)
+  const again = drawerModel(input(deniedCell({ resolvedByHand: true, note: 'gh pr review failed' })))
+  assert.deepEqual([again.result?.byHand, again.result?.note], [null, 'gh pr review failed'])
+  // the PR left the open tables: the card is rebuilt from the runs list, which carries the flag
+  const run = { id: 7, label: 'Re-review', runner: 'claude', status: 'done', note: 'permissionDenied: Bash', resolvedByHand: true, result: null, steps: slots(), tandem: false } as unknown as RunView
+  assert.equal(cellFromRun(deniedCell(), run).resolvedByHand, true)
+  assert.equal(runText(run).text, 'Done · finished by hand')
+  assert.equal(runText({ ...run, status: 'failed', note: null }).text, 'Failed')
 })
