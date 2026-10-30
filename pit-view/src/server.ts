@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net'
 import { homedir } from 'node:os'
 import { extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ActionError, createActions } from './actions.ts'
+import { ActionError, createActions, createUpdateWatch } from './actions.ts'
 import type { ActionErrorCode } from './actions.ts'
 import { openCache } from './cache.ts'
 import type { Cache } from './cache.ts'
@@ -20,7 +20,7 @@ import type { Clock, Config, RunnerName } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner } from './github.ts'
 import { deriveStacks, latestReviewsOf } from './derive.ts'
-import { createLauncher, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn } from './launcher.ts'
+import { createLauncher, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Spawn, StartKind } from './launcher.ts'
 import { renderMarkdown } from './markdown.ts'
 import { createNotifier, noDeliver, systemDeliver, systemExec } from './notify.ts'
@@ -206,6 +206,7 @@ const launchStatus: Readonly<Record<LaunchErrorCode, number>> = {
   unknownRun: 404,
   tandemRunner: 400,
   fixRunner: 400,
+  updateRunner: 400,
   notRunning: 409,
 }
 
@@ -354,6 +355,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     },
   })
 
+  // an Update session's PR is read again once the session settles, and its row arrives as a patch
+  const updates = createUpdateWatch((repo, number) => poller.refreshPrAfterWrite(repo, number), log)
   const launcher = createLauncher({
     cache,
     gh,
@@ -369,8 +372,14 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     stateDir: options.stateDir,
     env: options.launch.env,
     newSessionId: options.launch.newSessionId,
-    onWatch: (run) => poller.runWatched(run),
-    onChange: (run) => poller.runChanged(run.repo, run.number),
+    onWatch: (run) => {
+      poller.runWatched(run)
+      updates.watch(run)
+    },
+    onChange: (run) => {
+      poller.runChanged(run.repo, run.number)
+      updates.change(run)
+    },
     log,
     pollMs: options.launch.pollMs,
     watchedPollMs: options.launch.watchedPollMs,
@@ -571,6 +580,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     gh,
     config: effective,
     refreshPr: (repo, number) => poller.refreshPrAfterWrite(repo, number),
+    startUpdate: async (repo, number, headSha) => runView(await launcher.start(updateRequest(repo, number, headSha))),
     log,
   })
 
@@ -583,6 +593,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     try {
       json(res, 200, await actions.run(number, body))
     } catch (error) {
+      // an update's session start was refused by the launcher's own checks, with a run start's statuses
+      if (error instanceof LaunchError) launchFailure(error)
       if (!(error instanceof ActionError)) throw error
       json(res, actionStatus[error.code], { error: error.message, ...(error.errorKind === null ? {} : { errorKind: error.errorKind }) })
     }

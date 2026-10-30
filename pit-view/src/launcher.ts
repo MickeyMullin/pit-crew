@@ -117,7 +117,37 @@ export type FixResult = {
   error: string | null
 }
 
-export type RunResultJson = ReviewResult | SweepResult | FixResult
+// update-pr's response, pinned with it as pit-crew/update-result@1 (section 8 of DESIGN.md): how the PR's branch was brought up to date with the primary branch
+export type UpdateMethod = 'rebase' | 'merge'
+export const updateMethods: readonly UpdateMethod[] = ['rebase', 'merge']
+export type NotUpdatedReason = 'upToDate' | 'awaitingAnswer' | 'checksFailed' | 'checksNotRun' | 'pushFailed'
+export const notUpdatedReasons: readonly NotUpdatedReason[] = ['upToDate', 'awaitingAnswer', 'checksFailed', 'checksNotRun', 'pushFailed']
+export type UpdateConflict = { path: string, resolution: string }
+// a rebase is pushed with --force-with-lease, a merge without force
+export type UpdatePushed = { branch: string, head: string, forced: boolean }
+
+export type UpdateResult = {
+  schema: 'pit-crew/update-result@1'
+  command: 'update-pr'
+  status: ResultStatus
+  // base is the primary branch the run updated from
+  target: { repo: string, pr: number, branch: string, base: string } | null
+  // the PR head the run read, which is also its lease
+  head: { sha: string } | null
+  // the primary branch's commit the run updated onto
+  upstream: { sha: string } | null
+  method: UpdateMethod | null
+  methodReason: string | null
+  conflicts: UpdateConflict[]
+  checks: FixCheck[]
+  pushed: UpdatePushed | null
+  notPushedReason: NotUpdatedReason | null
+  worktree: string | null
+  question: string | null
+  error: string | null
+}
+
+export type RunResultJson = ReviewResult | SweepResult | FixResult | UpdateResult
 
 export type Parsed<T> = { ok: true, value: T } | { ok: false, error: string }
 
@@ -136,6 +166,7 @@ const check = (ok: boolean, message: string): void => {
   if (!ok) throw new Invalid(message)
 }
 
+const updateFields = ['schema', 'command', 'status', 'target', 'head', 'upstream', 'method', 'methodReason', 'conflicts', 'checks', 'pushed', 'notPushedReason', 'worktree', 'question', 'error']
 const fixFields = ['schema', 'command', 'status', 'target', 'head', 'requests', 'checks', 'pushed', 'notPushedReason', 'worktree', 'report', 'question', 'error']
 const reviewFields = ['schema', 'command', 'status', 'target', 'reviewed', 'verdict', 'recommendation', 'findings', 'ci', 'fixAttempts', 'posted', 'notPostedReason', 'report', 'question', 'error']
 // notPostedReason is absent from a sweep result written before the field existed, so it is not required here
@@ -249,6 +280,46 @@ const checkFix = (value: Record<string, unknown>): void => {
   check(isStringOrNull(value.report), 'report must be a path or null')
 }
 
+const checkUpdate = (value: Record<string, unknown>): void => {
+  for (const field of updateFields) check(field in value, `${field} is missing`)
+  check(value.command === 'update-pr', 'command must be update-pr')
+  checkStatus(value)
+  const target = value.target
+  check(target === null || (isObject(target) && typeof target.repo === 'string' && isPositiveInteger(target.pr) && typeof target.branch === 'string' && target.branch !== '' &&
+    typeof target.base === 'string' && target.base !== ''), 'target must be null or { repo, pr, branch, base }')
+  for (const field of ['head', 'upstream']) {
+    const sha = value[field]
+    check(sha === null || (isObject(sha) && isFullSha(sha.sha)), `${field} must be null or { sha } with a full 40-character SHA`)
+  }
+  check(oneOfOrNull(value.method, updateMethods), 'method must be rebase, merge or null')
+  check(isStringOrNull(value.methodReason), 'methodReason must be a string or null')
+  check(Array.isArray(value.conflicts) && value.conflicts.every((entry) =>
+    isObject(entry) && typeof entry.path === 'string' && entry.path !== '' && typeof entry.resolution === 'string'), 'conflicts must be a list of { path, resolution }')
+  check(Array.isArray(value.checks) && value.checks.every((entry) =>
+    isObject(entry) && typeof entry.name === 'string' && ['passed', 'failed', 'notRun'].includes(entry.result as string)), 'checks must be a list of { name, result: passed, failed or notRun }')
+  const pushed = value.pushed
+  check(pushed === null || (isObject(pushed) && typeof pushed.branch === 'string' && pushed.branch !== '' && isFullSha(pushed.head) && typeof pushed.forced === 'boolean'),
+    'pushed must be null or { branch, head, forced } with a full SHA')
+  check(oneOfOrNull(value.notPushedReason, notUpdatedReasons), 'notPushedReason must be upToDate, awaitingAnswer, checksFailed, checksNotRun, pushFailed or null')
+  check(value.pushed === null || value.notPushedReason === null, 'notPushedReason must be null when pushed')
+  check(isStringOrNull(value.worktree), 'worktree must be a path or null')
+}
+
+// a well-formed update result whose fields contradict each other: the run fails, keeping the result for the drawer. Null when they agree
+export const updateMismatch = (result: UpdateResult): string | null => {
+  const target = result.target
+  if (target !== null && target.branch === target.base) return `the PR's branch ${target.branch} is the primary branch it updates from`
+  const pushed = result.pushed
+  if (pushed !== null) {
+    if (pushed.branch !== target?.branch) return `pushed.branch ${pushed.branch} is not the target branch ${target?.branch ?? '(none)'}`
+    if (result.method === null) return 'pushed carries no method'
+    // a rebase rewrites the PR's own commits, so it is pushed with --force-with-lease; a merge adds a commit and needs no force
+    if (pushed.forced !== (result.method === 'rebase')) return `a ${result.method} was pushed ${pushed.forced ? 'with' : 'without'} force`
+  }
+  if (result.status === 'done' && pushed === null && result.notPushedReason === null) return 'a done update result carries neither pushed nor notPushedReason'
+  return null
+}
+
 // the file name a fix's report must have: FIX-<the PR's number>.md
 const fixReportFile = (result: FixResult): string | null => result.target === null ? null : `FIX-${result.target.pr}.md`
 
@@ -288,6 +359,8 @@ export const parseResult = (text: string): Parsed<RunResultJson> => {
       checkSweep(result)
     } else if (result.schema === 'pit-crew/fix-result@1') {
       checkFix(result)
+    } else if (result.schema === 'pit-crew/update-result@1') {
+      checkUpdate(result)
     } else {
       throw new Invalid(`unknown schema ${String(result.schema)}`)
     }
@@ -330,9 +403,11 @@ export const foldSteps = (steps: readonly StepSlot[], events: readonly StepEvent
 // a run never recorded as having stepped reads as five pending slots, never as an error
 export const stepsOf = (run: Pick<Session, 'steps'>): StepSlot[] => run.steps ?? emptySteps()
 
-// the report a done result names: the review's or the fix's report, or the sweep's summary
-export const reportPath = (result: RunResultJson): string | null =>
-  result.schema === 'pit-crew/sweep-result@1' ? result.summary : result.report
+// the report a done result names: the review's or the fix's report, or the sweep's summary; an update writes none
+export const reportPath = (result: RunResultJson): string | null => {
+  if (result.schema === 'pit-crew/update-result@1') return null
+  return result.schema === 'pit-crew/sweep-result@1' ? result.summary : result.report
+}
 
 // command lines, one table entry per runner
 
@@ -494,8 +569,8 @@ export const isTandemRun = (args: readonly string[]): boolean => args.includes('
 export const offersFix = (pr: RawOpenPr, config: Config): boolean =>
   isMine(pr, config) && pr.author?.__typename !== 'Bot' && !isBotLogin(pr.author?.login, config)
 
-// the commands that only Claude can run: a tandem primary, and the fix session
-export const claudeOnly = (command: string, args: readonly string[]): boolean => isTandemRun(args) || command === 'fix-pr'
+// the commands that only Claude can run: a tandem primary, the fix session, and the update session
+export const claudeOnly = (command: string, args: readonly string[]): boolean => isTandemRun(args) || command === 'fix-pr' || command === 'update-pr'
 
 // null when the kind is offered for this PR, otherwise why it is not
 export const notOffered = (kind: StartKind, pr: RawOpenPr, config: Config, stack: Stack | null): string | null => {
@@ -591,8 +666,24 @@ export type FixSummary = {
   report: string | null
 }
 
+// the cell's summary of an update's result.json
+export type UpdateSummary = {
+  kind: 'update'
+  // the primary branch it updated from, and its commit, short
+  base: string | null
+  upstream: string | null
+  method: UpdateMethod | null
+  methodReason: string | null
+  conflicts: UpdateConflict[]
+  checks: FixCheck[]
+  // the head as a full SHA
+  pushed: UpdatePushed | null
+  notPushedReason: NotUpdatedReason | null
+  worktree: string | null
+}
+
 // null for a sweep, whose rows the bot group's drawer renders (P2.7)
-export type AgentResult = ReviewSummary | FixSummary
+export type AgentResult = ReviewSummary | FixSummary | UpdateSummary
 
 export type AgentCell = {
   // running while a run is in flight; done while its latest run's outcome still stands; idle
@@ -662,18 +753,36 @@ const fixText = (result: FixResult): string => {
   return result.notPushedReason === null ? 'Done' : notPushedTexts[result.notPushedReason]
 }
 
-// the cell's text for a finished run, from section 8's mappings: a review's verdict and posted, a
-// fix's push
+// a finished update that pushed nothing: already up to date, or the owner discarded the update at a stop
+const notUpdatedTexts: Readonly<Record<NotUpdatedReason, string>> = {
+  upToDate: 'Already up to date',
+  awaitingAnswer: 'Not pushed',
+  checksFailed: 'Not pushed · checks failed',
+  checksNotRun: 'Not pushed · checks not run',
+  pushFailed: 'Not pushed · push refused',
+}
+
+const updateText = (result: UpdateResult): string => {
+  const base = result.target?.base ?? 'the primary branch'
+  if (result.pushed !== null) return result.method === 'rebase' ? `Rebased onto ${base}` : `Merged ${base} in`
+  return result.notPushedReason === null ? 'Done' : notUpdatedTexts[result.notPushedReason]
+}
+
+const pushRefused = (result: RunResultJson | null): boolean =>
+  (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1') && result.notPushedReason === 'pushFailed'
+
+// the cell's text for a finished run, from section 8's mappings: a review's verdict and posted, a fix's push, an update's method
 export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'>, ownDraft: boolean): string => {
   if (run.status === 'stopped') return 'Stopped'
   if (run.status === 'needsInput') return 'Needs your answer'
   if (run.status === 'failed') {
     const kind = noteKind(run.note)
     if (kind !== null) return `Failed · ${failureTexts[kind]}`
-    return run.result?.schema === 'pit-crew/fix-result@1' && run.result.notPushedReason === 'pushFailed' ? 'Failed · push refused' : 'Failed'
+    return pushRefused(run.result) ? 'Failed · push refused' : 'Failed'
   }
   const result = run.result
   if (result?.schema === 'pit-crew/fix-result@1') return fixText(result)
+  if (result?.schema === 'pit-crew/update-result@1') return updateText(result)
   if (result === null || result.schema !== 'pit-crew/review-result@1' || result.verdict === null) return 'Done'
   let text = 'Clean'
   if (result.verdict === 'changesRequested') text = 'Changes requested'
@@ -704,8 +813,22 @@ const fixSummary = (result: FixResult): FixSummary => ({
   report: result.report !== null && baseName(result.report) === fixReportFile(result) ? result.report : null,
 })
 
+const updateSummary = (result: UpdateResult): UpdateSummary => ({
+  kind: 'update',
+  base: result.target?.base ?? null,
+  upstream: result.upstream === null ? null : result.upstream.sha.slice(0, 7),
+  method: result.method,
+  methodReason: result.methodReason,
+  conflicts: result.conflicts,
+  checks: result.checks,
+  pushed: result.pushed,
+  notPushedReason: result.notPushedReason,
+  worktree: result.worktree,
+})
+
 const agentResult = (result: RunResultJson | null): AgentResult | null => {
   if (result?.schema === 'pit-crew/fix-result@1') return fixSummary(result)
+  if (result?.schema === 'pit-crew/update-result@1') return updateSummary(result)
   if (result === null || result.schema !== 'pit-crew/review-result@1') return null
   return {
     kind: 'review',
@@ -719,13 +842,13 @@ const agentResult = (result: RunResultJson | null): AgentResult | null => {
   }
 }
 
-// the heads a finished run's outcome is about: the commit a review read; the head a fix pushed,
-// and the head it read, since the cached row keeps that one until the PR is next fetched. Empty
-// when the run stopped first, so its outcome stands
+// the heads a finished run's outcome is about: the commit a review read; the head a fix or an update pushed, and the head it read, since the cached row keeps that one until the PR is next fetched. Empty when the run stopped first, so its outcome stands
 const standingShas = (run: Run): string[] => {
   const result = run.result
   if (result?.schema === 'pit-crew/review-result@1') return result.reviewed === null ? [] : [result.reviewed.sha]
-  if (result?.schema === 'pit-crew/fix-result@1') return [result.pushed?.head, result.head?.sha].filter((sha) => sha !== undefined)
+  if (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1') {
+    return [result.pushed?.head, result.head?.sha].filter((sha) => sha !== undefined)
+  }
   return []
 }
 
@@ -860,15 +983,14 @@ export const judge = (input: JudgeInput): Judgement => {
     return { status: 'failed', note: `noResult: ${why}; ${exitText(input.exit)}; last event: ${input.lastEvent ?? 'none'}`, result: null }
   }
   const value = input.parsed.value
-  if (value.schema === 'pit-crew/fix-result@1') {
-    const mismatch = fixMismatch(value)
-    if (mismatch !== null) return { status: 'failed', note: `badResult: ${mismatch}`, result: value }
-  }
+  const mismatch = value.schema === 'pit-crew/fix-result@1' ? fixMismatch(value) : value.schema === 'pit-crew/update-result@1' ? updateMismatch(value) : null
+  if (mismatch !== null) return { status: 'failed', note: `badResult: ${mismatch}`, result: value }
   if (value.status === 'failed') return { status: 'failed', note: value.error, result: value }
   if (value.status === 'needsInput') return { status: 'needsInput', note: null, result: value }
   const path = reportPath(value)
-  // a sweep with nothing to sweep writes no summary and is still done
-  if (path === null && !(value.schema === 'pit-crew/sweep-result@1' && value.counts !== null && value.counts.swept === 0)) {
+  // a sweep with nothing to sweep writes no summary and is still done, and an update writes no report at all
+  const reportless = value.schema === 'pit-crew/update-result@1' || (value.schema === 'pit-crew/sweep-result@1' && value.counts !== null && value.counts.swept === 0)
+  if (path === null && !reportless) {
     return { status: 'failed', note: 'noReport: result.json names no report', result: value }
   }
   if (path !== null && input.reportExists === false) return { status: 'failed', note: `noReport: ${path} does not exist`, result: value }
@@ -1042,7 +1164,7 @@ export const systemFs: LauncherFs = {
 // the launcher
 
 export type LaunchErrorCode =
-  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner'
+  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner' | 'updateRunner'
 
 export class LaunchError extends Error {
   override name = 'LaunchError'
@@ -1065,6 +1187,11 @@ export type StartRequest = {
   // cloneDir when left out; phase 4 passes its worktree
   cwd?: string
 }
+
+// the Update session (section 9 of DESIGN.md, Direct actions): update-pr with Claude, given the full head SHA the confirmation showed, which the command takes as its lease, so a push made since the confirmation is never overwritten
+export const updateRequest = (repo: string, number: number, headSha: string): StartRequest => ({
+  repo, number, command: 'update-pr', args: [String(number), `--head=${headSha}`], label: 'Update branch', runner: 'claude',
+})
 
 export type Launcher<T extends Session = Run> = {
   // identity, clone and one-per-PR checks, then the run directory, request.json and the spawn
@@ -1535,10 +1662,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   const start = async (request: StartRequest): Promise<T> => {
     const config = options.config()
-    // a tandem primary launches its secondary in the background, and the fix session is pinned to
-    // Claude; the runner is the one asked for or the configured default, so no caller gets around this
+    // a tandem primary launches its secondary in the background, and the fix and update sessions are pinned to Claude; the runner is the one asked for or the configured default, so no caller gets around this
     if (claudeOnly(request.command, request.args) && (request.runner ?? config.agent.runner) !== 'claude') {
       if (isTandemRun(request.args)) throw new LaunchError('tandemRunner', 'Review in tandem runs with Claude only; send runner claude or leave it out')
+      if (request.command === 'update-pr') throw new LaunchError('updateRunner', 'Update session runs with Claude only')
       throw new LaunchError('fixRunner', 'Fix session runs with Claude only; send runner claude or leave it out')
     }
     const key = store.key(request)

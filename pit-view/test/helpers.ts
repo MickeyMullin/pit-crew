@@ -387,3 +387,27 @@ export const sweepResult = (patch: Record<string, unknown> = {}): Record<string,
 
 // a sweep with nothing to sweep: done, every count zero, no rows, and no summary
 export const emptySweepResult = (): Record<string, unknown> => sweepResult({ counts: { swept: 0, fresh: 0, reused: 0, failed: 0 }, rows: [], mergeOrder: [], summary: null })
+
+// an invented update-pr result: #101 rebased onto main and pushed with --force-with-lease, after one conflict was resolved
+export const updateHead = 'dddddddddddddddddddddddddddddddddddddd01'
+export const updatePushedHead = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee02'
+export const updateUpstream = 'ffffffffffffffffffffffffffffffffffffff03'
+
+export const updateResult = (patch: Record<string, unknown> = {}): Record<string, unknown> => ({
+  schema: 'pit-crew/update-result@1',
+  command: 'update-pr',
+  status: 'done',
+  target: { repo: 'octo-example/orbit', pr: 101, branch: 'fix/webhook-retry', base: 'main' },
+  head: { sha: updateHead },
+  upstream: { sha: updateUpstream },
+  method: 'rebase',
+  methodReason: 'only your commits are on the branch, and no open PR is based on it',
+  conflicts: [{ path: 'src/retry.ts', resolution: 'kept the backoff from the PR and the renamed logger from main' }],
+  checks: [{ name: 'pnpm test', result: 'passed' }],
+  pushed: { branch: 'fix/webhook-retry', head: updatePushedHead, forced: true },
+  notPushedReason: null,
+  worktree: null,
+  question: null,
+  error: null,
+  ...patch,
+})

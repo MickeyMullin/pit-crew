@@ -14,12 +14,12 @@ import type { Patch, View } from '../src/poller.ts'
 import { startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
 import { scenario } from './fixtures/scenario.ts'
-import { failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, ok, singlePr, tempDir } from './helpers.ts'
-import type { Call, FakeRunner } from './helpers.ts'
+import { failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, ok, singlePr, tempDir, updateResult } from './helpers.ts'
+import type { Call, FakeLaunch, FakeRunner } from './helpers.ts'
 
 // every GitHub write below goes to a fake gh; nothing here can reach a real PR
 
-type Harness = { server: PitServer, runner: FakeRunner, base: string, cleanup: () => Promise<void> }
+type Harness = { server: PitServer, runner: FakeRunner, launch: FakeLaunch, base: string, cleanup: () => Promise<void> }
 
 const people = [
   { login: 'alex-mendez', alias: 'Alex', initials: 'AM', color: '#0F766E', avatar: 'github' },
@@ -102,6 +102,7 @@ const setup = async ({ config = {}, runner = ghWorld() }: { config?: Partial<Con
   await mkdir(join(configPath, '..'), { recursive: true })
   await writeFile(configPath, JSON.stringify({ repo: scenario.repo, viewer: scenario.viewer, people, ...config }), 'utf8')
   const time = fakeTime()
+  const launch = fakeLaunch()
   const server = await startServer({
     home,
     port: 0,
@@ -113,7 +114,7 @@ const setup = async ({ config = {}, runner = ghWorld() }: { config?: Partial<Con
     cachePath: join(home, '.local', 'state', 'pit-view', 'cache.sqlite'),
     stateDir: join(home, '.local', 'state', 'pit-view'),
     publicDir: join(home, 'public'),
-    launch: fakeLaunch().deps,
+    launch: launch.deps,
     log: () => {},
     pageSize: scenario.pageSize,
   })
@@ -121,7 +122,7 @@ const setup = async ({ config = {}, runner = ghWorld() }: { config?: Partial<Con
     await server.close()
     await removeHome()
   }
-  return { server, runner, base: server.url, cleanup }
+  return { server, runner, launch, base: server.url, cleanup }
 }
 
 const filled = async (h: Harness): Promise<void> => {
@@ -1108,5 +1109,141 @@ test('orList joins one, two, and three or more items as plain English', () => {
 })
 
 test('an unknown action names the allowed actions with a final "or"', () => {
-  assert.throws(() => parseAction({ action: 'comment', repo: 'o/r' }), /action must be one of merge, markReady, convertToDraft, or requestReview;/)
+  assert.throws(() => parseAction({ action: 'comment', repo: 'o/r' }), /action must be one of merge, markReady, convertToDraft, requestReview, or update;/)
+})
+
+// Update (section 9 of DESIGN.md, Direct actions): an agent session through the launcher, never a gh write of its own. The runner is the fake launch, so no git command runs and no branch is rebased or pushed
+
+const updateBody = async (number: number): Promise<{ action: 'update', viewer: string, headSha: string, base: string }> => {
+  const { sha, base } = await listed(number)
+  return { action: 'update', viewer: scenario.viewer, headSha: sha, base }
+}
+
+const withClone: Partial<Config> = { cloneDir: '~/dev/orbit' }
+
+const userCalls = (runner: FakeRunner): number => runner.calls.filter((call) => call.args[0] === 'api' && call.args[1] === 'user').length
+
+test('an update starts update-pr with Claude in an agent session, bound to the head it showed, and its settled run reads the PR again as a patch', async () => {
+  // the configured runner is Codex: an update session is Claude's all the same
+  const h = await setup({ config: { ...withClone, agent: { runner: 'codex', claudeModel: 'sonnet' } } })
+  const stream = await collectPatches(h.base)
+  try {
+    await filled(h)
+    const body = await updateBody(101)
+    const started = await act(h, 101, body)
+    assert.equal(started.status, 200, JSON.stringify(started.body))
+    const run = started.body.run as { id: number, command: string, args: string[], runner: string, label: string, status: string }
+    assert.deepEqual([started.body.number, started.body.action, started.body.started], [101, 'update', true])
+    assert.deepEqual([run.command, run.args, run.runner, run.label, run.status], ['update-pr', ['101', `--head=${body.headSha}`], 'claude', 'Update branch', 'running'])
+    const child = h.launch.children[0]!
+    assert.equal(child.request.command, 'claude')
+    assert.match(JSON.parse(child.writes[0]!).message.content as string, new RegExp(`^/update-pr 101 --head=${body.headSha} --emit-json=\\S+$`))
+    // the account is checked once, by the launcher; Pit View itself writes nothing to GitHub
+    assert.equal(userCalls(h.runner), 1)
+    assert.equal(writesOf(h.runner).length, 0)
+    // never two at once: the action is still settling, and then the PR's run is in flight
+    const again = await act(h, 101, body)
+    assert.equal(again.status, 409)
+    assert.equal(h.launch.children.length, 1)
+    assert.equal((await rowOf(h, 101))?.agent?.state, 'running')
+
+    const reads = singleCallsOf(h.runner).length
+    await child.result(updateResult({ head: { sha: body.headSha } }))
+    child.exit(0)
+    await until(() => singleCallsOf(h.runner).length === reads + 1)
+    await until(() => stream.patches.some((patch) => patch.rows.some((row) => row.number === 101 && row.refresh?.state === 'running')))
+    await until(() => stream.patches.some((patch) => patch.rows.some((row) => row.number === 101 && row.refresh === null && row.agent?.status === 'done')))
+    await h.server.poller.idle()
+    const row = await rowOf(h, 101)
+    assert.deepEqual([row?.agent?.state, row?.agent?.text, row?.agent?.result?.kind], ['done', 'Rebased onto main', 'update'])
+    // exactly one read after the session; a merge is still a gh write of its own, which nothing here made
+    assert.equal(singleCallsOf(h.runner).length, reads + 1)
+    assert.equal(writesOf(h.runner).length, 0)
+  } finally {
+    stream.close()
+    await h.cleanup()
+  }
+})
+
+test('an update needs the full binding the confirmation showed, and a request that differs from what is in effect now starts nothing', async () => {
+  const h = await setup({ config: withClone })
+  try {
+    await filled(h)
+    const body = await updateBody(101)
+    const { viewer: _viewer, ...noViewer } = body
+    const { headSha: _headSha, ...noHead } = body
+    const { base: _base, ...noBase } = body
+    for (const bad of [noViewer, noHead, noBase, { ...body, headSha: body.headSha.slice(0, 7) }, { ...body, viewer: '' }, { ...body, reviewer: 'sam-tran' }, { ...body, runner: 'codex' }]) {
+      assert.equal((await act(h, 101, bad)).status, 400, JSON.stringify(bad))
+    }
+    // the other actions take no viewer
+    assert.equal((await act(h, 103, { action: 'markReady', viewer: scenario.viewer })).status, 400)
+    // Origin and token, as for every action
+    assert.equal((await act(h, 101, body, { Origin: '' })).status, 403)
+    assert.equal((await act(h, 101, body, { 'X-Pit-View-Token': 'not-the-token' })).status, 403)
+
+    // the repository or the viewer changed while the confirmation was open: nothing is looked up or started
+    const otherRepo = await act(h, 101, { ...body, repo: 'octo-example/other' })
+    assert.equal(otherRepo.status, 409)
+    assert.match(String(otherRepo.body.error), /the repository is now octo-example\/orbit, not octo-example\/other/)
+    const otherViewer = await act(h, 101, { ...body, viewer: 'someone-else' })
+    assert.equal(otherViewer.status, 409)
+    assert.match(String(otherViewer.body.error), /the viewer is now vera-quill, not someone-else; .*nothing was started/)
+    // the viewer is compared as the identity check compares it
+    assert.equal(userCalls(h.runner), 0)
+
+    // the head or base moved in the cache since the confirmation was shown: refused, and the row is read again
+    const reads = singleCallsOf(h.runner).length
+    const moved = await act(h, 101, { ...body, headSha: 'a'.repeat(40) })
+    assert.equal(moved.status, 409)
+    assert.match(String(moved.body.error), /#101 changed since you saw it \(it has new commits\); nothing was started/)
+    const retargeted = await act(h, 101, { ...body, base: 'master' })
+    assert.equal(retargeted.status, 409)
+    assert.match(String(retargeted.body.error), /it now targets main, not master/)
+    await until(() => singleCallsOf(h.runner).length >= reads + 1)
+
+    // someone else's PR, and one that is not open
+    const others = await act(h, 113, await updateBody(113))
+    assert.equal(others.status, 422)
+    assert.match(String(others.body.error), /not your PR/)
+    assert.equal((await act(h, 999, { ...body })).status, 422)
+    assert.equal(h.launch.children.length, 0)
+    assert.equal(userCalls(h.runner), 0)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('an update is refused on a PR that does not target the primary branch, without cloneDir, and when gh is signed in as someone else', async () => {
+  const retargeted = await setup({ config: withClone, runner: ghWorld({ bases: { 104: 'release/2026-10' } }) })
+  try {
+    await filled(retargeted)
+    const refused = await act(retargeted, 104, { ...(await updateBody(104)), base: 'release/2026-10' })
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /#104 targets release\/2026-10, not the primary branch \(main\); Pit View updates only PRs that target the primary branch/)
+    assert.equal(retargeted.launch.children.length, 0)
+  } finally {
+    await retargeted.cleanup()
+  }
+  const noClone = await setup()
+  try {
+    await filled(noClone)
+    const refused = await act(noClone, 101, await updateBody(101))
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /set cloneDir/)
+    assert.equal(noClone.launch.children.length, 0)
+  } finally {
+    await noClone.cleanup()
+  }
+  const otherAccount = await setup({ config: withClone, runner: ghWorld({ account: 'someone-else' }) })
+  try {
+    await filled(otherAccount)
+    const refused = await act(otherAccount, 101, await updateBody(101))
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /gh is signed in as someone-else, but the viewer is vera-quill/)
+    assert.equal(otherAccount.launch.children.length, 0)
+    assert.equal(writesOf(otherAccount.runner).length, 0)
+  } finally {
+    await otherAccount.cleanup()
+  }
 })
