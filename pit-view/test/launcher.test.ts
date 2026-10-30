@@ -11,7 +11,7 @@ import type { OpenRow } from '../src/derive.ts'
 import { createGh } from '../src/github.ts'
 import type { RawOpenPr } from '../src/github.ts'
 import {
-  agentCell, childEnv, claudeInvocation, codexInvocation, codexNote, createLauncher, defaultRun, descendantGroups, doneText, emptyStream,
+  agentCell, childEnv, claudeInvocation, codexInvocation, codexNote, createLauncher, defaultRun, descendantGroups, doneText, emptyStream, gitConfigEnv,
   emptySteps, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, remoteNamesRepo,
   requestText, runners, runView, shellPath, startOptions, stepsOf,
 } from '../src/launcher.ts'
@@ -124,13 +124,21 @@ test('the resume command starts in the run\'s folder; Codex\'s carries its model
   assert.equal(shellPath(`/tmp/it's`), `'/tmp/it'\\''s'`)
 })
 
-test('the child environment is built from scratch: home, user, shell, language, temp and PATH only', () => {
+test('the child environment is built from scratch: home, user, shell, language, temp, PATH, and the git credential config only', () => {
   const env = childEnv({
     PATH: '/opt/bin:/usr/bin', USER: 'tester', LOGNAME: 'tester', SHELL: '/bin/zsh', LANG: 'en_US.UTF-8', TMPDIR: '/tmp/x/',
-    HOME: '/elsewhere', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'desktop', ANTHROPIC_API_KEY: 'sk-fake', GH_TOKEN: 'gho_fake', EMPTY: '',
+    HOME: '/elsewhere', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'desktop', ANTHROPIC_API_KEY: 'sk-fake', GH_TOKEN: 'gho_fake', SSH_AUTH_SOCK: '/var/run/com.apple.launchd.abc/Listeners', GIT_CONFIG_COUNT: '9', EMPTY: '',
   }, '/home/tester')
-  assert.deepEqual(env, { HOME: '/home/tester', USER: 'tester', LOGNAME: 'tester', SHELL: '/bin/zsh', LANG: 'en_US.UTF-8', TMPDIR: '/tmp/x/', PATH: '/opt/bin:/usr/bin' })
-  assert.deepEqual(childEnv({ LANG: '' }, '/home/tester'), { HOME: '/home/tester' })
+  assert.deepEqual(env, {
+    HOME: '/home/tester', USER: 'tester', LOGNAME: 'tester', SHELL: '/bin/zsh', LANG: 'en_US.UTF-8', TMPDIR: '/tmp/x/', PATH: '/opt/bin:/usr/bin',
+    ...gitConfigEnv,
+  })
+  // no token, no agent socket: the run's git asks the helper for credentials instead of holding any
+  assert.equal(Object.keys(env).includes('GH_TOKEN'), false)
+  assert.equal(Object.keys(env).includes('SSH_AUTH_SOCK'), false)
+  // the git config is the launcher's, never the server's own
+  assert.equal(env.GIT_CONFIG_COUNT, '2')
+  assert.deepEqual(childEnv({ LANG: '' }, '/home/tester'), { HOME: '/home/tester', ...gitConfigEnv })
 })
 
 // default runs
@@ -586,7 +594,8 @@ test('a start checks gh\'s account, spawns Claude in cloneDir with a clean envir
     assert.equal(child.request.command, 'claude')
     assert.deepEqual(child.request.args, claudeInvocation(spec({ home: h.home, sessionId: '00000000-0000-4000-8000-000000000001' })).args)
     assert.equal(child.request.cwd, join(h.home, 'dev', 'orbit'))
-    assert.deepEqual(child.request.env, { HOME: h.home, USER: 'tester', LANG: 'en_US.UTF-8', PATH: '/usr/bin:/bin' })
+    // the git credential config rides along with the clean environment, so the child's own fetch works
+    assert.deepEqual(child.request.env, { HOME: h.home, ...gitConfigEnv, USER: 'tester', LANG: 'en_US.UTF-8', PATH: '/usr/bin:/bin' })
     assert.equal(child.request.stdoutPath, join(runDir, 'stream.jsonl'))
     assert.equal(child.request.stderrPath, join(runDir, 'stderr.log'))
     assert.equal(child.request.stdin, 'pipe')
@@ -1464,6 +1473,9 @@ test('a re-read that breaks a guard leaves the row as it was and says why: chang
     await refused(JSON.stringify(approvedByHand({ target: { repo: 'octo-example/orbit', stack: [106], top: 106 } })), /target does not fit review-pr/)
     await refused(JSON.stringify(approvedByHand({ command: 'review-stack', target: { repo: 'octo-example/orbit', stack: null, top: 106 } })), /target must be null or an object with a repo/)
     await refused(JSON.stringify(approvedByHand({ target: { repo: 7, pr: 106 } })), /target must be null or an object with a repo/)
+    await refused(JSON.stringify(approvedByHand({ command: 'review-stack', target: { repo: 'octo-example/orbit', stack: [106] } })), /ends with its top/)
+    await refused(JSON.stringify(approvedByHand({ command: 'review-stack', target: { repo: 'octo-example/orbit', stack: [106], top: 107 } })), /ends with its top/)
+    await refused(JSON.stringify(approvedByHand({ command: 'review-stack', target: { repo: 'octo-example/orbit', stack: [106, 107], top: 106 } })), /ends with its top/)
     await refused(JSON.stringify(approvedByHand({ command: 'review-stack', target: { repo: 'octo-example/orbit', stack: [106], top: 106 } })), /command review-stack, not review-pr/)
     await refused(JSON.stringify(approvedByHand({ reviewed: { kind: 'commit', sha: '0123456789abcdef0123456789abcdef01234567' } })), /reviewed commit/)
     await refused(JSON.stringify(approvedByHand({ reviewed: null })), /reviewed commit/)
