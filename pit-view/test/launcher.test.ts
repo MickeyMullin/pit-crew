@@ -1403,6 +1403,19 @@ test('a run that stopped to ask and was answered in Open session settles done af
   }
 })
 
+test('a re-read accepts the same target written with its keys in another order', async () => {
+  const h = await harness()
+  try {
+    const denied = await deniedRun(h)
+    const file = join(h.home, '.local', 'state', 'pit-view', 'runs', String(denied.id), 'result.json')
+    await writeFile(file, JSON.stringify(approvedByHand({ target: { pr: 106, repo: 'octo-example/orbit' } })))
+    const run = await h.launcher.reread(denied.id)
+    assert.deepEqual([run.status, run.resolvedByHand], ['done', true])
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a re-read keeps a valid failed result whose own error starts with a reserved failure word', async () => {
   const h = await harness()
   try {
