@@ -1788,10 +1788,12 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const rereading = new Set<number>()
 
   // the same target whatever order its keys were written in
-  const sameTarget = (a: { repo: string, pr?: number | null, stack?: number[], top?: number }, b: { repo: string, pr?: number | null, stack?: number[], top?: number }): boolean => {
+  const sameTarget = (a: { repo: string, pr?: number | null, stack?: number[], top?: number, branch?: string }, b: { repo: string, pr?: number | null, stack?: number[], top?: number, branch?: string }): boolean => {
     if (a.repo.toLowerCase() !== b.repo.toLowerCase()) return false
     if ('stack' in a || 'stack' in b) return 'stack' in a && 'stack' in b && a.top === b.top && a.stack?.length === b.stack?.length && (a.stack ?? []).every((n, k) => n === b.stack?.[k])
-    return a.pr === b.pr
+    if (a.branch !== undefined && b.branch !== undefined && a.branch !== b.branch) return false
+    // a PR the first result had not worked out yet may be named by a later one
+    return a.pr === null || a.pr === undefined || a.pr === b.pr
   }
 
   // what a new result must keep of the run: its repository and PR, and the target it first named
