@@ -1532,9 +1532,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
     // a run takes only the result of its own command and of its own PR: an update's result in a review's folder, or one about another PR, is no result
     const started = store.get(entry.id) as Partial<Run> | null
-    if (parsed?.ok === true && store.schema === null && parsed.value.schema !== 'pit-crew/sweep-result@1' && started?.command !== undefined) {
+    if (parsed?.ok === true && store.schema === null && started?.command !== undefined) {
       const found = parsed.value
-      const wrong = found.command !== started.command ? `result.json is for command ${found.command}, not ${started.command}` : found.target === null ? null : targetMismatch(store.get(entry.id) as T, null, found)
+      const wrong = found.schema === 'pit-crew/sweep-result@1' ? 'result.json is a sweep result, not the result of a run' : found.command !== started.command ? `result.json is for command ${found.command}, not ${started.command}` : found.target === null ? null : targetMismatch(store.get(entry.id) as T, null, found)
       if (wrong !== null) parsed = { ok: false, error: wrong }
     }
     let reportExists: boolean | null = null

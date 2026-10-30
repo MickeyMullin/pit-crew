@@ -1222,6 +1222,11 @@ test('an update is refused on a PR that does not target the primary branch, with
     assert.equal(refused.status, 422)
     assert.match(String(refused.body.error), /#104 targets release\/2026-10, not the primary branch \(main\); Pit View updates only PRs that target the primary branch/)
     assert.equal(retargeted.launch.children.length, 0)
+    // a confirmation that showed the primary base while the cache has since moved to another branch is stale, not merely refused
+    const stale = await act(retargeted, 104, { ...(await updateBody(104)), base: 'main' })
+    assert.equal(stale.status, 409)
+    assert.match(String(stale.body.error), /it now targets release\/2026-10, not main/)
+    assert.equal(retargeted.launch.children.length, 0)
   } finally {
     await retargeted.cleanup()
   }

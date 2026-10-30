@@ -136,13 +136,13 @@ export const createActions = (options: ActionsOptions): Actions => {
     // the session pushes to the PR's branch, and a bot's PR is never the viewer's to rewrite
     if (!offersFix(pr, config)) throw new ActionError('notYours', `#${number} is not your PR; direct actions apply to your own PRs only`)
     const base = pr.baseRefName
-    if (!isPrimaryBase(base, defaultBranch)) {
-      throw new ActionError('notAllowed', `#${number} targets ${base}, not the primary branch (${defaultBranch ?? 'master or main'}); Pit View updates only PRs that target the primary branch`)
-    }
     // the cache can have moved on before the page was patched, and then the viewer never saw what is cached: nothing is started
     if (request.base !== base || request.headSha !== pr.headRefOid.toLowerCase()) {
       refresh(repo, number)
       throw new ActionError('stale', `#${number} changed since you saw it (${request.base !== base ? `it now targets ${base}, not ${request.base}` : 'it has new commits'}); nothing was started. Reload its confirmation to see the current state`)
+    }
+    if (!isPrimaryBase(base, defaultBranch)) {
+      throw new ActionError('notAllowed', `#${number} targets ${base}, not the primary branch (${defaultBranch ?? 'master or main'}); Pit View updates only PRs that target the primary branch`)
     }
     const key = `${repo}#${number}`
     if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)

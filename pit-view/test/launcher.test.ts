@@ -1541,6 +1541,22 @@ test('a run settles only on the result of its own command and its own PR', async
   }
 })
 
+test('a review, fix, or update run does not settle on a sweep result left in its folder', async () => {
+  const h = await harness()
+  try {
+    const run = await h.launcher.start(request(101, { command: 'review-pr', args: ['101'], label: 'Re-review' }))
+    const child = h.launch.children.at(-1)!
+    await child.result({ schema: 'pit-crew/sweep-result@1', command: 'review-dependabot-sweep', status: 'done', repo: 'octo-example/orbit', counts: { swept: 0, fresh: 0, reused: 0, failed: 0 }, notPostedReason: null, rows: [], mergeOrder: [], summary: null, question: null, error: null })
+    const settled = h.launcher.settled(run.id)
+    child.exit(0)
+    const failed = await settled
+    assert.equal(failed.status, 'failed')
+    assert.match(failed.note ?? '', /sweep result, not the result of a run/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('an update re-read keeps the base the run first named', async () => {
   const h = await harness()
   try {
