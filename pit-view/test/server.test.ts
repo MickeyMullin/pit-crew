@@ -14,7 +14,7 @@ import { iso } from '../src/time.ts'
 import { scenario } from './fixtures/scenario.ts'
 import type { MineRow, OpenRow } from '../src/derive.ts'
 import type { RunResult } from '../src/github.ts'
-import { emptySweepResult, failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, gatedRunner, githubCalls, ok, singlePr, sweepResult, tempDir } from './helpers.ts'
+import { emptySweepResult, failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, gatedRunner, githubCalls, ok, reviewResult, singlePr, sweepResult, tempDir } from './helpers.ts'
 import type { FakeLaunch, FakeRunner, FakeTime } from './helpers.ts'
 
 type Harness = { server: PitServer, time: FakeTime, runner: FakeRunner, launch: FakeLaunch, home: string, configPath: string, base: string, cleanup: () => Promise<void> }
@@ -1084,6 +1084,102 @@ test('the view carries each row\'s Agent cell, and a start on the viewer\'s own 
     assert.match(h.launch.children[0]!.writes[0] ?? '', /\/review-pr 101 --no-post --emit-json=/)
     const after = rowIn((await getJson<View>(`${h.base}/api/view`)).body, 101)
     assert.deepEqual([after?.agent?.state, after?.agent?.runId, after?.agent?.label], ['running', Number(own.body.id), 'Self-review'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// the owner's re-read of a failed run (section 8, Launching runs, Re-reading a result)
+
+test('POST /api/runs/<id>/reread needs the token and carries what the confirmation showed; a differing repository, viewer, PR, head or base is 409 and reads nothing', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const row = rowIn((await getJson<View>(`${h.base}/api/view`)).body, 106)!
+    const shown = { repo: scenario.repo, viewer: scenario.viewer, number: 106, headSha: row.headSha, base: row.baseRef }
+    // a run that was denied a tool, then finished by hand in its resumed session
+    await mkdir(join(h.home, 'agents', 'output'), { recursive: true })
+    await writeFile(join(h.home, 'agents', 'output', 'PR-106.md'), 'Reviewed commit: `x` @ `f00dfac`\n')
+    const started = await send(`${h.base}/api/prs/106/runs`, 'POST', { repo: scenario.repo }, token(h))
+    const id = Number(started.body.id)
+    const child = h.launch.children.at(-1)!
+    await child.stream({ type: 'result', total_cost_usd: 0.5, permission_denials: [{ tool_name: 'Bash', tool_use_id: 'b1' }] })
+    await child.result(reviewResult({ posted: null, notPostedReason: 'ghFailed', verdict: 'clean', findings: [] }))
+    const settled = h.server.launcher.settled(id)
+    child.exit(0)
+    assert.deepEqual([(await settled).status, (await settled).note], ['failed', 'permissionDenied: Bash'])
+    const approved = reviewResult({ verdict: 'clean', findings: [], notPostedReason: null, posted: { form: 'approve', url: 'https://github.com/octo-example/orbit/pull/106#pullrequestreview-9' } })
+    await writeFile(join(child.runDir, 'result.json'), JSON.stringify(approved))
+
+    const url = `${h.base}/api/runs/${id}/reread`
+    const unchanged = (): string | undefined => h.server.cache.getRun(id)?.status
+    // the same token, Host and Origin checks as starting a run
+    assert.equal((await send(url, 'POST', shown)).status, 403)
+    assert.match(String((await send(url, 'POST', shown, { 'X-Pit-View-Token': 'not-the-token' })).body.error), /token/)
+    assert.equal((await send(url, 'POST', shown, { ...token(h), Origin: 'http://attacker.test' })).status, 403)
+    assert.equal((await raw(h.server.port, `/api/runs/${id}/reread`, { ...token(h), Host: 'pit-view.attacker.test' }, 'POST')).status, 403)
+    assert.equal(unchanged(), 'failed')
+    // the request must name all five things and nothing else
+    for (const body of [{}, { ...shown, repo: undefined }, { ...shown, viewer: undefined }, { ...shown, number: '106' }, { ...shown, headSha: row.headSha.slice(0, 7) }, { ...shown, base: '' }, { ...shown, extra: 1 }]) {
+      assert.equal((await send(url, 'POST', body, token(h))).status, 400, JSON.stringify(body))
+    }
+    assert.equal((await send(`${h.base}/api/runs/abc/reread`, 'POST', shown, token(h))).status, 400)
+    assert.equal((await send(`${h.base}/api/runs/999/reread`, 'POST', shown, token(h))).status, 404)
+    // anything that differs from what is in effect now: 409, nothing read
+    for (const [patch, message] of [
+      [{ repo: 'octo-example/other' }, /repository is now/],
+      [{ viewer: 'someone-else' }, /viewer is now/],
+      [{ number: 107 }, /not a run of #107/],
+      [{ headSha: 'a'.repeat(40) }, /new commits/],
+      [{ base: 'release/1' }, /now targets main, not release\/1/],
+    ] as const) {
+      const refused = await send(url, 'POST', { ...shown, ...patch }, token(h))
+      assert.equal(refused.status, 409, JSON.stringify(patch))
+      assert.match(String(refused.body.error), message)
+      assert.equal(unchanged(), 'failed')
+    }
+    assert.equal(h.server.cache.getRun(id)?.resolvedByHand, false)
+
+    const ok = await send(url, 'POST', shown, { ...token(h), Origin: h.base })
+    assert.equal(ok.status, 200)
+    assert.deepEqual([ok.body.status, ok.body.resolvedByHand, ok.body.note], ['done', true, 'permissionDenied: Bash'])
+    // the cell is patched in place and reads Approved, finished by hand
+    const cell = rowIn((await getJson<View>(`${h.base}/api/view`)).body, 106)?.agent
+    assert.deepEqual([cell?.text, cell?.resolvedByHand], ['Approved · finished by hand', true])
+    // a settled run is not read twice
+    assert.equal((await send(url, 'POST', shown, token(h))).status, 409)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a re-read refused by a guard is 422 with the reason, and a PR that left the open tables is 409', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const row = rowIn((await getJson<View>(`${h.base}/api/view`)).body, 106)!
+    const shown = { repo: scenario.repo, viewer: scenario.viewer, number: 106, headSha: row.headSha, base: row.baseRef }
+    const started = await send(`${h.base}/api/prs/106/runs`, 'POST', { repo: scenario.repo }, token(h))
+    const id = Number(started.body.id)
+    const child = h.launch.children.at(-1)!
+    await child.result(reviewResult({ status: 'failed', error: 'no PR exists for this branch', reviewed: null, verdict: null, findings: [], posted: null, report: null }))
+    const settled = h.server.launcher.settled(id)
+    child.exit(0)
+    await settled
+    // result.json now names another PR
+    await writeFile(join(child.runDir, 'result.json'), JSON.stringify(reviewResult({ target: { repo: scenario.repo, pr: 107 }, report: null, status: 'failed', error: 'other', reviewed: null, verdict: null, findings: [], posted: null })))
+    const refused = await send(`${h.base}/api/runs/${id}/reread`, 'POST', shown, token(h))
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /targets #107, not #106; the run is unchanged/)
+    assert.equal(h.server.cache.getRun(id)?.status, 'failed')
+    // a PR Pit View does not hold as open has nothing to compare the confirmation with
+    const stray = h.server.cache.createRun({
+      repo: scenario.repo, number: 9000, command: 'review-pr', args: ['9000'], label: 'Review', runner: 'claude', cwd: '~/dev/orbit', sessionId: 's', pid: null, pidStartedAt: null,
+      startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, finishedAt: '2026-10-26T14:05:00Z', status: 'failed', result: null, note: 'noResult', costUsd: null, resume: 'cd ~/dev/orbit && claude --resume s',
+    }, (runId) => `~/runs/${runId}`)
+    const closed = await send(`${h.base}/api/runs/${stray.id}/reread`, 'POST', { ...shown, number: 9000 }, token(h))
+    assert.equal(closed.status, 409)
+    assert.match(String(closed.body.error), /not an open PR/)
   } finally {
     await h.cleanup()
   }
