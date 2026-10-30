@@ -413,6 +413,10 @@ button {
   cursor: pointer;
 }
 
+.page-search-clear[hidden] {
+  display: none;
+}
+
 .page-search-clear:hover {
   color: var(--ink);
 }

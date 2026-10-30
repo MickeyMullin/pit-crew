@@ -57,7 +57,7 @@ let feed = emptyFeed()
 let skewMs = 0
 // the shipped defaults until the config loads
 let settings: Settings = { density: 'comfortable', showAgentColumn: false, idleMinutes: 90 }
-// filters, the page search, sort, grouping and the active tile are kept in memory only: a reload starts clean
+// filters, the page search, sort, grouping, and the active tile are kept in memory only: a reload starts clean
 const ui: UiState = {
   ...initialControls(),
   openGroups: new Set(),

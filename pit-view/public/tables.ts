@@ -97,8 +97,8 @@ const prCell = <R extends { number: number, url: string }>(hover: boolean): Colu
   build: () => [h('a', { ...newTab, class: 'pr-link mono', href: safeHref(row.url), 'data-focus': 'pr', 'data-hover': hover ? 'pr' : null }, highlighted(`#${row.number}`, terms))],
 })
 
-const titleCell = (row: OpenRow, { terms }: CellContext): { sig: unknown, build: () => Node[] } => {
-  const hits = hiddenHits(terms, row, { tickets: true })
+const titleCell = (aliasShown: boolean) => (row: OpenRow, { terms }: CellContext): { sig: unknown, build: () => Node[] } => {
+  const hits = hiddenHits(terms, row, { tickets: true, alias: aliasShown })
   return {
     sig: [row.title, row.stack, terms, hits],
     build: () => [h('span', { class: 'title-cell' },
@@ -156,7 +156,7 @@ const selfReviewParts = (row: MineRow): { label: string, detail: string } => {
 
 export const mineColumns = (agent: boolean): Column<MineRow>[] => [
   { key: 'pr', label: 'PR', width: '72px', cell: prCell(true), sort: mineSortValues.pr },
-  { key: 'title', label: 'Title', width: 'auto', cell: titleCell, sort: mineSortValues.title },
+  { key: 'title', label: 'Title', width: 'auto', cell: titleCell(false), sort: mineSortValues.title },
   {
     key: 'review',
     label: 'Review',
@@ -203,7 +203,7 @@ export const othersColumns = (agent: boolean): Column<OtherRow>[] => [
     }),
   },
   { key: 'pr', label: 'PR', width: '72px', cell: prCell(true), sort: othersSortValues.pr },
-  { key: 'title', label: 'Title', width: 'auto', cell: titleCell, sort: othersSortValues.title },
+  { key: 'title', label: 'Title', width: 'auto', cell: titleCell(true), sort: othersSortValues.title },
   {
     key: 'review',
     label: 'Review',
@@ -252,7 +252,7 @@ export const closedColumns = (range: ClosedRange): Column<ClosedRow>[] => [
     width: 'auto',
     sort: closedSortValues.title,
     cell: (row, { terms }) => {
-      const hits = hiddenHits(terms, row, { tickets: false })
+      const hits = hiddenHits(terms, row, { tickets: false, alias: true })
       return {
         sig: [row.title, terms, hits],
         build: () => [h('span', { class: 'title-cell' }, h('span', { class: 'title-text', title: row.title }, highlighted(row.title, terms)), hitsLine(hits, terms))],

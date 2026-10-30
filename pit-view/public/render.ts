@@ -16,7 +16,7 @@ import {
 } from './filters.ts'
 import type { Arrangement, ClosedRangeKey, Controls, TileKey } from './filters.ts'
 import { formatAge, shortSha } from './format.ts'
-import { hiddenHits, highlighted, hitsLine, matchesPage, searchTerms } from './pagesearch.ts'
+import { emptyMessage, hiddenHits, highlighted, hitsLine, matchesPage, searchTerms } from './pagesearch.ts'
 import { safeHref } from './safeurl.ts'
 import { sweepHeaderModel } from './sweepview.ts'
 import { offlineBadge, offlineBanner, sectionMarker, syncStatus, tableState } from './status.ts'
@@ -186,7 +186,7 @@ const renderBanner = (frame: Frame, terms: readonly string[]): void => {
     const phrase = selfReviewPhrase(row)
     // the Fix session sits beside Open agent while the row offers one, available or not
     const fix = fixStart(row.agent) !== null
-    const hits = hiddenHits(terms, row, { tickets: true })
+    const hits = hiddenHits(terms, row, { tickets: true, alias: false })
     return {
       key: `pr-${row.number}`,
       sig: JSON.stringify([who, age, row.url, row.title, phrase, fix, terms, hits]),
@@ -255,12 +255,6 @@ const sortOf = <R>(table: TableKey, columns: readonly Column<R>[], ui: UiState) 
   const sort = ui.sort[table]
   const value = sort === null ? undefined : columns.find((column) => column.key === sort.key)?.sort
   return { sortValue: value ?? null, dir: sort?.dir ?? 'asc' }
-}
-
-// with rows in the table but none matching, the empty text says the filters hid them, or that the page search matched nothing in this section
-const emptyText = (arranged: Arrangement<unknown>, empty: string, pageMatches: number | null): string => {
-  if (arranged.total > 0 && arranged.matched === 0) return pageMatches === 0 ? 'Nothing in this section matches the page search.' : 'No PRs match these filters.'
-  return empty
 }
 
 // the section heading while the page search is set: the rows shown of the rows held, and a plain word when the page search finds nothing in the section
@@ -341,7 +335,7 @@ export const render = (frame: Frame, actions: Actions): void => {
     groups: mine.groups,
     ctx,
     state: openTable,
-    emptyText: emptyText(mine, 'You have no open PRs.', minePage),
+    emptyText: emptyMessage(mine.total, mine.matched, minePage, 'You have no open PRs.'),
     numberOf: (row) => row.number,
     rowClass: (row) => row.group === 'changesRequested' ? 'row row-changes' : 'row',
     freshnessOf: freshness,
@@ -375,7 +369,7 @@ export const render = (frame: Frame, actions: Actions): void => {
     groups: others.groups,
     ctx,
     state: openTable,
-    emptyText: emptyText(others, 'No open PRs from anyone else.', othersPage),
+    emptyText: emptyMessage(others.total, others.matched, othersPage, 'No open PRs from anyone else.'),
     numberOf: (row) => row.number,
     rowClass: () => 'row',
     freshnessOf: freshness,
@@ -409,7 +403,7 @@ export const render = (frame: Frame, actions: Actions): void => {
     groups: closed.groups,
     ctx,
     state: tableState(view.sync.sections.closed, view.sync, ui.paused),
-    emptyText: emptyText(closed, ui.closedRange === 'today' ? 'Nothing merged or closed yet today.' : 'Nothing merged or closed in this range.', closedPage),
+    emptyText: emptyMessage(closed.total, closed.matched, closedPage, ui.closedRange === 'today' ? 'Nothing merged or closed yet today.' : 'Nothing merged or closed in this range.'),
     numberOf: (row) => row.number,
     rowClass: () => 'row',
     freshnessOf: () => null,

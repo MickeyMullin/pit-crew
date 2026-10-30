@@ -1,6 +1,5 @@
 // test/ui-pagesearch.test.ts
-// the header's page search (public/pagesearch.ts) and its controls (public/filters.ts), run under Node
-// against rows derived from the invented fixtures
+// the header's page search (public/pagesearch.ts) and its controls (public/filters.ts), run under Node against rows derived from the invented fixtures
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -10,7 +9,7 @@ import type { Config } from '../src/config.ts'
 import { deriveClosed, deriveOpenRows } from '../src/derive.ts'
 import type { MineRow, OtherRow } from '../src/derive.ts'
 import { clearFilters, initialControls, pressTile, setFilter, setPageSearch, toggleSection } from '../public/filters.ts'
-import { hiddenHits, matchesPage, searchTerms, slashApplies, splitMatches } from '../public/pagesearch.ts'
+import { emptyMessage, hiddenHits, matchesPage, searchTerms, slashApplies, splitMatches } from '../public/pagesearch.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { closedSearch, fakeTime, openPage1, openPage2 } from './helpers.ts'
 
@@ -39,7 +38,7 @@ test('no terms match every row', async () => {
   assert.equal([...open, ...closed].every(matchesPage([])), true)
 })
 
-test('a term matches the number, title, author alias or login, branch or ticket, any case', () => {
+test('a term matches the number, title, author alias, login, branch, or ticket, in any case', () => {
   const row = {
     number: 118,
     title: 'Fix the Orbit cache',
@@ -90,14 +89,14 @@ test('hidden hits name the branch, the login the alias hides, and tickets that n
     headRef: 'fix/orb-266-timeout',
     tickets: [{ system: 'Jira', label: 'ORB-266' }],
   }
-  const hits = (query: string, tickets = true) => hiddenHits(searchTerms(query), row, { tickets })
+  const hits = (query: string, tickets = true) => hiddenHits(searchTerms(query), row, { tickets, alias: true })
   assert.deepEqual(hits('timeout'), [{ label: 'branch', text: 'fix/orb-266-timeout' }])
   assert.deepEqual(hits('mendez'), [{ label: 'login', text: 'alex-mendez' }])
   assert.deepEqual(hits('alex'), [])
   assert.deepEqual(hits('orb-266'), [{ label: 'branch', text: 'fix/orb-266-timeout' }, { label: 'ticket', text: 'ORB-266' }])
   assert.deepEqual(hits('orb-266', false), [{ label: 'branch', text: 'fix/orb-266-timeout' }])
   assert.deepEqual(hits('plain'), [])
-  assert.deepEqual(hiddenHits([], row, { tickets: true }), [])
+  assert.deepEqual(hiddenHits([], row, { tickets: true, alias: true }), [])
 })
 
 test('splitMatches marks every term occurrence and merges overlaps', () => {
@@ -213,4 +212,54 @@ test('the header holds a labeled search field and a clear button, hidden until t
   assert.match(svg, /aria-hidden="true"/)
   assert.ok(html.indexOf('id="page-search"') > html.indexOf('id="sync-live"'))
   assert.ok(html.indexOf('id="page-search"') < html.indexOf('id="refresh"'))
+})
+
+test('an author the row does not show is named by an author hit, and a login hit survives another term matching the alias', () => {
+  const row = { number: 9, title: 'Plain', author: { alias: 'Sam', login: 'sam-mendez' }, headRef: 'main-fix', tickets: [] }
+  const shown = (query: string) => hiddenHits(searchTerms(query), row, { tickets: true, alias: true })
+  const hidden = (query: string) => hiddenHits(searchTerms(query), row, { tickets: true, alias: false })
+  assert.deepEqual(shown('sam mendez'), [{ label: 'login', text: 'sam-mendez' }])
+  assert.deepEqual(shown('sam'), [])
+  assert.deepEqual(hidden('sam'), [{ label: 'author', text: 'Sam' }, { label: 'login', text: 'sam-mendez' }])
+  assert.deepEqual(hidden('mendez'), [{ label: 'login', text: 'sam-mendez' }])
+  assert.deepEqual(hidden('plain'), [])
+})
+
+test('splitMatches slices the original text when lowercasing changes its length', () => {
+  assert.deepEqual(splitMatches('İx', ['x']), [{ text: 'İ', hit: false }, { text: 'x', hit: true }])
+  assert.deepEqual(splitMatches('aİb', ['b']), [{ text: 'aİ', hit: false }, { text: 'b', hit: true }])
+  assert.deepEqual(splitMatches('İx', ['i̇x']), [{ text: 'İx', hit: true }])
+})
+
+test('a section with no rows at all says the page search matched nothing in it', () => {
+  assert.equal(emptyMessage(0, 0, 0, 'You have no open PRs.'), 'Nothing in this section matches the page search.')
+  assert.equal(emptyMessage(4, 0, 0, 'x'), 'Nothing in this section matches the page search.')
+  assert.equal(emptyMessage(4, 0, 2, 'x'), 'No PRs match these filters.')
+  assert.equal(emptyMessage(0, 0, null, 'You have no open PRs.'), 'You have no open PRs.')
+  assert.equal(emptyMessage(4, 3, 3, 'x'), 'x')
+})
+
+test('a section closed or opened by hand during a search is never reopened or re-closed by it until the search is cleared', () => {
+  let controls = { ...initialControls(), expanded: { mine: false, others: true, closed: true } }
+  controls = setPageSearch(controls, 'a', counts(1, 1, 1))
+  controls = toggleSection(controls, 'mine')
+  assert.equal(controls.expanded.mine, false)
+  controls = setPageSearch(controls, 'ab', counts(1, 1, 1))
+  assert.equal(controls.expanded.mine, false)
+  assert.deepEqual(controls.searchOpened, [])
+  controls = toggleSection(controls, 'others')
+  controls = setPageSearch(controls, 'abc', counts(0, 0, 0))
+  assert.equal(controls.expanded.others, false)
+  controls = toggleSection(controls, 'others')
+  controls = setPageSearch(controls, 'abcd', counts(0, 0, 0))
+  assert.equal(controls.expanded.others, true)
+  controls = setPageSearch(controls, '', none)
+  controls = setPageSearch(controls, 'a', counts(1, 0, 0))
+  assert.equal(controls.expanded.mine, true)
+  assert.deepEqual(controls.searchOpened, ['mine'])
+})
+
+test('the clear button has a display rule for its hidden state', async () => {
+  const css = await readFile(join(import.meta.dirname, '..', 'public', 'styles.css'), 'utf8')
+  assert.match(css, /\.page-search-clear\[hidden\]\s*\{\s*display:\s*none/)
 })
