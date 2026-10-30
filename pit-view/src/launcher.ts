@@ -1710,7 +1710,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
       // judged on its own: the stream's denials belong to the original attempt, and the owner has resolved them
       const judgement = judge({ stopped: false, restarted: false, exit: null, parsed, reportExists, denials: [], lastEvent: null })
-      if (judgement.status === 'failed' && noteKind(judgement.note) !== null) return refuse(judgement.note ?? 'the result is not valid')
+      // a guard failure is the launcher's own verdict; a valid failed result carries its own error, whatever words that starts with
+      const ownFailure = value.status === 'failed' && judgement.note === value.error && (value.schema !== 'pit-crew/fix-result@1' || fixMismatch(value) === null)
+      if (judgement.status === 'failed' && !ownFailure && noteKind(judgement.note) !== null) return refuse(judgement.note ?? 'the result is not valid')
       const note = judgement.status === 'failed' ? judgement.note : run.note
       if (judgement.status === run.status && note === run.note && JSON.stringify(judgement.result) === JSON.stringify(run.result)) {
         return refuse('result.json has not changed since the run settled')
