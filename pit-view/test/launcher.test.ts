@@ -1423,7 +1423,37 @@ test('a re-read keeps a valid failed result whose own error starts with a reserv
     const file = join(h.home, '.local', 'state', 'pit-view', 'runs', String(denied.id), 'result.json')
     await writeFile(file, JSON.stringify(reviewResult({ status: 'failed', error: 'noReport: the owner could not write the report', verdict: null, findings: [], posted: null })))
     const run = await h.launcher.reread(denied.id)
-    assert.deepEqual([run.status, run.note, run.resolvedByHand], ['failed', 'noReport: the owner could not write the report', true])
+    assert.deepEqual([run.status, run.note, run.resolvedByHand], ['failed', 'permissionDenied: Bash', true])
+    assert.equal(run.result?.schema === 'pit-crew/review-result@1' && run.result.status === 'failed' ? run.result.error : null, 'noReport: the owner could not write the report')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a failed re-read keeps the original denial note, so a later successful re-read still explains it', async () => {
+  const h = await harness()
+  try {
+    const denied = await deniedRun(h)
+    const file = join(h.home, '.local', 'state', 'pit-view', 'runs', String(denied.id), 'result.json')
+    await writeFile(file, JSON.stringify(reviewResult({ status: 'failed', error: 'could not reach GitHub', verdict: null, findings: [], posted: null })))
+    const again = await h.launcher.reread(denied.id)
+    assert.equal(again.note, 'permissionDenied: Bash')
+    await writeFile(file, JSON.stringify(approvedByHand()))
+    const done = await h.launcher.reread(denied.id)
+    assert.deepEqual([done.status, done.note, done.resolvedByHand], ['done', 'permissionDenied: Bash', true])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a re-read may name the PR that the original result had not worked out', async () => {
+  const h = await harness()
+  try {
+    const denied = await deniedRun(h, reviewResult({ status: 'failed', error: 'could not find the PR', target: { repo: 'octo-example/orbit', pr: null }, verdict: null, findings: [], posted: null }))
+    const file = join(h.home, '.local', 'state', 'pit-view', 'runs', String(denied.id), 'result.json')
+    await writeFile(file, JSON.stringify(approvedByHand()))
+    const run = await h.launcher.reread(denied.id)
+    assert.deepEqual([run.status, run.resolvedByHand], ['done', true])
   } finally {
     await h.cleanup()
   }

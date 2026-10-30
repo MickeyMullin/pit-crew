@@ -1661,10 +1661,12 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const rereading = new Set<number>()
 
   // the same target whatever order its keys were written in
-  const sameTarget = (a: { repo: string, pr?: number | null, stack?: number[], top?: number }, b: { repo: string, pr?: number | null, stack?: number[], top?: number }): boolean => {
+  const sameTarget = (a: { repo: string, pr?: number | null, stack?: number[], top?: number, branch?: string }, b: { repo: string, pr?: number | null, stack?: number[], top?: number, branch?: string }): boolean => {
     if (a.repo.toLowerCase() !== b.repo.toLowerCase()) return false
     if ('stack' in a || 'stack' in b) return 'stack' in a && 'stack' in b && a.top === b.top && a.stack?.length === b.stack?.length && (a.stack ?? []).every((n, k) => n === b.stack?.[k])
-    return a.pr === b.pr
+    if (a.branch !== undefined && b.branch !== undefined && a.branch !== b.branch) return false
+    // a PR the first result had not worked out yet may be named by a later one
+    return a.pr === null || a.pr === undefined || a.pr === b.pr
   }
 
   // what a new result must keep of the run: its repository and PR, and the target it first named
@@ -1720,7 +1722,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       // a guard failure is the launcher's own verdict; a valid failed result carries its own error, whatever words that starts with
       const ownFailure = value.status === 'failed' && judgement.note === value.error && (value.schema !== 'pit-crew/fix-result@1' || fixMismatch(value) === null)
       if (judgement.status === 'failed' && !ownFailure && noteKind(judgement.note) !== null) return refuse(judgement.note ?? 'the result is not valid')
-      const note = judgement.status === 'failed' ? judgement.note : run.note
+      // the original denial note stays, whatever a later failed read says; the result carries the newer error
+      const note = run.note ?? (judgement.status === 'failed' ? judgement.note : null)
       if (judgement.status === run.status && note === run.note && JSON.stringify(judgement.result) === JSON.stringify(run.result)) {
         return refuse('result.json has not changed since the run settled')
       }
