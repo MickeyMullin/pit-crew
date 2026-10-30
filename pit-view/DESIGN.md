@@ -384,7 +384,7 @@ A PR is a bot PR when its author login contains any `config.bots` entry (case-in
 
 ### Reviewer pips
 
-Built from the newest review per reviewer across `latestReviews` and `latestOpinionatedReviews` (compared by `submittedAt`, `latestReviews` winning a tie), plus pending `reviewRequests`. Both connections are read because GitHub drops a reviewer from `latestReviews` once a review is re-requested of them, which would hide the change request or approval the re-request is about; `latestOpinionatedReviews` keeps it. Everywhere this file says a reviewer's "latest review" (the viewer's too, in the flags, groups, and stages below), it means this merged list:
+Built from the newest review per reviewer across `latestReviews` and `latestOpinionatedReviews` (compared by `submittedAt`, `latestReviews` winning a tie), plus pending `reviewRequests`. Both connections are read because GitHub drops a reviewer from `latestReviews` once a review is re-requested of them, which would hide the change request or approval the re-request is about; `latestOpinionatedReviews` keeps it. Everywhere this file says a reviewer's "latest review" (the viewer's too, in the flags, groups, and stages below, except that a comment of the viewer's own counts as their newest review; see the comment-only paragraph below), it means this merged list:
 
 | State | Mark | Color | Source |
 | --- | --- | --- | --- |

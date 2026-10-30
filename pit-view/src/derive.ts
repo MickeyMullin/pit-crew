@@ -226,8 +226,7 @@ const reviewTime = (review: RawReview): number => {
 // their approval or change request, so reading latestReviews alone loses what the reviewer decided. On a
 // tie the review from latestReviews wins, so it stays the one GitHub reports for the reviewer. A review
 // with no author cannot be matched to a reviewer; it counts once, when both lists hold the same one.
-// A comment-only review is neither: unless keepDecision is false, it never displaces the same
-// reviewer's approval or change request, which a comment does not withdraw.
+// A comment-only review is neither: unless keepDecision is false, it never displaces the same reviewer's approval or change request, which a comment does not withdraw.
 const newestReviews = (pr: RawOpenPr, keepDecision: boolean): RawReview[] => {
   const decided = (review: RawReview): boolean => review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED'
   const newest = new Map<string, RawReview>()

@@ -747,8 +747,7 @@ test('latestReviewsOf keeps the newest review per reviewer across both connectio
   assert.deepEqual(summary(pr([], [])), [])
 })
 
-// a comment-only review (COMMENTED) is neither an approval nor a change request: GitHub reports it as
-// the reviewer's newest review but keeps their earlier decision in latestOpinionatedReviews and in reviewDecision
+// a comment-only review (COMMENTED) is neither an approval nor a change request: GitHub reports it as the reviewer's newest review but keeps their earlier decision in latestOpinionatedReviews and in reviewDecision
 const commentedAfter = (pr: RawOpenPr, login: string, submittedAt: string): RawOpenPr => {
   const decided = pr.latestOpinionatedReviews.nodes.find((review) => review.author?.login === login)
   assert.ok(decided)
@@ -807,6 +806,18 @@ test('on others\' PRs a comment after a change request keeps the author\'s turn 
   const row = othersRow(unmoved)
   assert.equal(row.group, 'waitingOnAuthor')
   assert.equal(row.reviewers.find((pip) => pip.login === 'lee-park')?.state, 'changes')
+})
+
+test('on others\' PRs a comment-only review from another user shows a neutral pip and changes neither group nor stage', async () => {
+  const base = find(await page1(), 107)
+  const bare = variant(base, { reviewDecision: null, reviewRequests: { nodes: [] }, latestReviews: { nodes: [] }, latestOpinionatedReviews: { nodes: [] } })
+  const commented = variant(bare, {
+    latestReviews: { nodes: [{ author: { login: 'lee-park' }, state: 'COMMENTED', submittedAt: '2026-10-26T09:00:00Z', commit: { oid: base.headRefOid } }] },
+  })
+  const row = othersRow(commented)
+  assert.deepEqual(row.reviewers.map((pip) => [pip.login, pip.state]), [['lee-park', 'commented']])
+  assert.equal(row.group, othersRow(bare).group)
+  assert.equal(row.issues.some((issue) => issue.kind === 'changesRequested'), false)
 })
 
 test('latestReviewsOf never lets a comment displace the same reviewer\'s approval or change request', () => {
