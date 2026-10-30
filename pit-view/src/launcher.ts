@@ -1722,8 +1722,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       // a guard failure is the launcher's own verdict; a valid failed result carries its own error, whatever words that starts with
       const ownFailure = value.status === 'failed' && judgement.note === value.error && (value.schema !== 'pit-crew/fix-result@1' || fixMismatch(value) === null)
       if (judgement.status === 'failed' && !ownFailure && noteKind(judgement.note) !== null) return refuse(judgement.note ?? 'the result is not valid')
-      // the original denial note stays, whatever a later failed read says; the result carries the newer error
-      const note = run.note ?? (judgement.status === 'failed' ? judgement.note : null)
+      const note = judgement.status === 'failed' ? judgement.note : run.note
       if (judgement.status === run.status && note === run.note && JSON.stringify(judgement.result) === JSON.stringify(run.result)) {
         return refuse('result.json has not changed since the run settled')
       }
