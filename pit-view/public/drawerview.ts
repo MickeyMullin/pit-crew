@@ -239,8 +239,34 @@ const notPostedWords: Readonly<Record<string, string>> = {
 
 export type Fact = { label: string, value: string, href: string | null }
 
+type UpdateSummary = Extract<AgentResult, { kind: 'update' }>
+
+const checkFact = (checks: UpdateSummary['checks']): string =>
+  checks.length === 0 ? 'none run: no conflict needed resolving' : checks.map((check) => `${check.name} ${checkWords[check.result]?.text ?? check.result}`).join(', ')
+
+// a finished Update session: the method and why, the push, the conflicts it resolved, the checks, and a worktree it left behind
+const updateFacts = (result: UpdateSummary): Fact[] => {
+  const base = result.base ?? 'the primary branch'
+  const facts: Fact[] = []
+  if (result.method !== null) {
+    const what = result.method === 'rebase' ? `rebase onto ${base}` : `merge of ${base}`
+    facts.push({ label: 'Method', value: `${what}${result.upstream === null ? '' : ` at ${result.upstream}`}${result.methodReason === null ? '' : `: ${result.methodReason}`}`, href: null })
+  }
+  if (result.pushed !== null) {
+    facts.push({ label: 'Pushed', value: `${result.pushed.branch} at ${shortSha(result.pushed.head)}${result.pushed.forced ? ', with --force-with-lease' : ''}`, href: null })
+  }
+  if (result.method !== null) {
+    const count = result.conflicts.length
+    facts.push({ label: 'Conflicts', value: count === 0 ? 'none' : `${count} resolved: ${result.conflicts.map((conflict) => `${conflict.path} (${conflict.resolution})`).join('; ')}`, href: null })
+    facts.push({ label: 'Checks', value: checkFact(result.checks), href: null })
+  }
+  if (result.worktree !== null) facts.push({ label: 'Worktree', value: result.pushed === null ? `The update not pushed is in ${result.worktree}` : `Its worktree was left behind in ${result.worktree}`, href: null })
+  return facts
+}
+
 const resultFacts = (cell: AgentCell): Fact[] => {
   const result = cell.result
+  if (result?.kind === 'update') return updateFacts(result)
   // a fix's summary has a block of its own
   if (result === null || result.kind !== 'review') return []
   const facts: Fact[] = []
@@ -346,7 +372,7 @@ export const resultModel = (cell: AgentCell, number: number): ResultModel => ({
   copyName: `Copy resume command for #${number}`,
   facts: resultFacts(cell),
   fix: cell.result?.kind === 'fix' ? fixModel(cell.result) : null,
-  stale: cell.state !== 'idle' ? null : cell.command === 'fix-pr'
+  stale: cell.state !== 'idle' ? null : cell.command === 'fix-pr' || cell.command === 'update-pr'
     ? 'The head has moved since this run, so it covers an earlier commit.'
     : 'The head has moved since this run, so it covers an earlier commit. Start a new review for the current one.',
 })
@@ -384,6 +410,15 @@ const notPushedTexts: Readonly<Record<string, string>> = {
 }
 
 type FixResultJson = Extract<NonNullable<RunView['result']>, { schema: 'pit-crew/fix-result@1' }>
+type UpdateResultJson = Extract<NonNullable<RunView['result']>, { schema: 'pit-crew/update-result@1' }>
+
+// a finished update's text, a client copy of the server's (section 8, the update-result@1 reading)
+const updateDoneText = (result: Pick<UpdateResultJson, 'pushed' | 'notPushedReason' | 'method' | 'target'>): string => {
+  const base = result.target?.base ?? 'the primary branch'
+  if (result.pushed !== null) return result.method === 'rebase' ? `Rebased onto ${base}` : `Merged ${base} in`
+  if (result.notPushedReason === 'upToDate') return 'Already up to date'
+  return result.notPushedReason === null ? 'Done' : notPushedTexts[result.notPushedReason] ?? 'Not pushed'
+}
 
 const fixDoneText = (result: Pick<FixResultJson, 'pushed' | 'notPushedReason'>): string => {
   if (result.pushed !== null) {
@@ -400,12 +435,12 @@ export const runText = (run: Pick<RunView, 'status' | 'result' | 'note'>): { tex
   if (run.status === 'failed') {
     const short = failureShort[(run.note ?? '').split(':')[0] ?? '']
     if (short !== undefined) return { text: `Failed · ${short}`, tone: 'red' }
-    const pushRefused = run.result?.schema === 'pit-crew/fix-result@1' && run.result.notPushedReason === 'pushFailed'
+    const pushRefused = (run.result?.schema === 'pit-crew/fix-result@1' || run.result?.schema === 'pit-crew/update-result@1') && run.result.notPushedReason === 'pushFailed'
     return { text: pushRefused ? 'Failed · push refused' : 'Failed', tone: 'red' }
   }
   const result = run.result
-  if (result?.schema === 'pit-crew/fix-result@1') {
-    const text = fixDoneText(result)
+  if (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1') {
+    const text = result.schema === 'pit-crew/fix-result@1' ? fixDoneText(result) : updateDoneText(result)
     return { text, tone: doneTone({ status: 'done', text }) }
   }
   if (result === null || result.schema !== 'pit-crew/review-result@1' || result.verdict === null) return { text: 'Done', tone: 'gray' }
@@ -551,6 +586,20 @@ export const summaryOf = (result: RunView['result']): AgentResult | null => {
       checks: result.checks,
       worktree: result.worktree,
       report: result.report,
+    }
+  }
+  if (result?.schema === 'pit-crew/update-result@1') {
+    return {
+      kind: 'update',
+      base: result.target?.base ?? null,
+      upstream: result.upstream === null ? null : result.upstream.sha.slice(0, 7),
+      method: result.method,
+      methodReason: result.methodReason,
+      conflicts: result.conflicts,
+      checks: result.checks,
+      pushed: result.pushed,
+      notPushedReason: result.notPushedReason,
+      worktree: result.worktree,
     }
   }
   if (result?.schema !== 'pit-crew/review-result@1') return null

@@ -33,6 +33,8 @@ export type DrawerOptions = {
   rowOf: (number: number) => OpenRow | undefined
   // the repository the page shows now, from the page's feed; empty before the first view
   repo: () => string
+  // the viewer's login the page shows now, from the page's feed; empty before the first view
+  viewer: () => string
   // the page's polite live region
   say: (text: string) => void
   reports: ReportPanel
@@ -217,12 +219,22 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     ])
     if (picker !== null) list.querySelector('dt')?.setAttribute('id', 'drawer-reviewer-term')
     picker?.setAttribute('aria-labelledby', 'drawer-reviewer-term')
-    return h('div', { class: 'confirm', role: 'group', 'aria-labelledby': 'drawer-confirm-heading' },
-      h('h4', { id: 'drawer-confirm-heading', class: 'confirm-heading' }, ask.heading),
+    // an action that rewrites the branch gets the Fix session's caution treatment and a plain line about it
+    const caution = ask.caution !== null
+    return h('div', {
+      class: caution ? 'confirm confirm-caution' : 'confirm',
+      role: 'group',
+      'aria-labelledby': 'drawer-confirm-heading',
+      'aria-describedby': caution ? 'drawer-confirm-caution' : null,
+    },
+      h('h4', { id: 'drawer-confirm-heading', class: 'confirm-heading' },
+        caution ? svg([['path', { d: 'M12 3l10 18H2z' }], ['path', { d: 'M12 10v5' }], ['path', { d: 'M12 18h.01' }]], { size: 16, stroke: '2.2', className: 'confirm-caution-icon' }) : null,
+        ask.heading),
       h('p', { class: 'confirm-title' }, ask.title),
       list,
+      caution ? h('p', { id: 'drawer-confirm-caution', class: 'confirm-caution-line' }, ask.caution) : null,
       errorLine(),
-      confirmActions(ask.confirm, 'primary', () => void doAction()))
+      confirmActions(ask.confirm, caution ? 'caution' : 'primary', () => void doAction()))
   }
 
   // the parts of the confirmation that change without a rebuild: the command for the chosen
@@ -285,10 +297,10 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       }
       people = answer.value.people.map((person) => ({ login: person.login, alias: person.alias }))
     }
-    // the head and base shown now are the ones a merge is bound to
+    // the head and base shown now are the ones a merge or an update is bound to
     const row = options.rowOf(n)
     if (row === undefined) return
-    confirm = { type: 'action', action, repo: options.repo(), reviewer: '', headSha: row.headSha, baseRef: row.baseRef }
+    confirm = { type: 'action', action, repo: options.repo(), viewer: options.viewer(), reviewer: '', headSha: row.headSha, baseRef: row.baseRef }
     confirmFrom = `action:${action}`
     error = ''
     render()
@@ -787,7 +799,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     if (confirm === null || busy) return
     const live = number === null ? undefined : options.rowOf(number)
     if (confirm.type === 'action') {
-      if (last !== null && actionBound(confirm, last, live !== undefined, options.repo())) return
+      if (last !== null && actionBound(confirm, last, live !== undefined, options.repo(), options.viewer())) return
     } else if (confirmHolds(confirm, latest(), live !== undefined)) {
       return
     }

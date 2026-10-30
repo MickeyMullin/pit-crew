@@ -43,9 +43,24 @@ const sweepTitles: Readonly<Record<string, string>> = {
   post: 'Post',
 }
 
+// the Update session records them too (section 8, the update command): it resolves the PR and the primary branch, chooses rebase or merge, makes the update with its conflicts and checks, writes no report, and pushes
+const updateTitles: Readonly<Record<string, string>> = {
+  resolveBase: 'Resolve',
+  review: 'Choose method',
+  consolidate: 'Update and check',
+  writeReport: 'Write report',
+  post: 'Push',
+}
+
+const titlesByCommand: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  'fix-pr': fixTitles,
+  'update-pr': updateTitles,
+  'review-dependabot-sweep': sweepTitles,
+}
+
 // a step's label for a run of this command
 export const stepTitle = (command: string | null, step: string): string =>
-  (command === 'fix-pr' ? fixTitles : command === 'review-dependabot-sweep' ? sweepTitles : reviewTitles)[step] ?? step
+  (titlesByCommand[command ?? ''] ?? reviewTitles)[step] ?? step
 
 // how long a run has gone: seconds under a minute, minutes under an hour, then hours and minutes
 export const formatDuration = (fromIso: string, nowMs: number): string => {
@@ -71,13 +86,12 @@ export const stepText = (step: AgentCell['step'], command: string | null = null)
 
 export type DoneTone = 'red' | 'amber' | 'green' | 'gray'
 
-// the done text's color follows what the owner should do next; the words carry the meaning. A fix
-// that left requests unpushed wants a look (amber); one with nothing to fix needs nothing (gray)
+// the done text's color follows what the owner should do next; the words carry the meaning. A fix or an update that left something unpushed wants a look (amber); one with nothing to fix, or a branch already up to date, needs nothing (gray)
 export const doneTone = (cell: Pick<AgentCell, 'status' | 'text'>): DoneTone => {
   const text = cell.text ?? ''
   if (cell.status === 'failed') return 'red'
   if (cell.status === 'needsInput' || text.endsWith('post failed') || text === 'Clean · CI failed' || text.startsWith('Not pushed')) return 'amber'
-  if (cell.status === 'stopped' || text === 'Done' || text === 'Nothing to fix') return 'gray'
+  if (cell.status === 'stopped' || text === 'Done' || text === 'Nothing to fix' || text === 'Already up to date') return 'gray'
   return text === 'Changes requested' ? 'red' : 'green'
 }
 

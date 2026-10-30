@@ -709,3 +709,77 @@ test('a run start names the repository and viewer of the option the confirmation
   assert.match(source, /sig: JSON\.stringify\(\[model\.starts,/)
   assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token\)/)
 })
+
+// an Update session's finished run: its method and why, the push, and its conflicts and checks
+type UpdateSummary = Extract<NonNullable<AgentCell['result']>, { kind: 'update' }>
+
+const updateSummary = (patch: Partial<UpdateSummary> = {}): UpdateSummary => ({
+  kind: 'update',
+  base: 'main',
+  upstream: '1c2d3e4',
+  method: 'rebase',
+  methodReason: 'only your commits are on the branch, and no open PR is based on it',
+  conflicts: [{ path: 'src/retry.ts', resolution: 'kept the backoff and the renamed logger' }],
+  checks: [{ name: 'pnpm test', result: 'passed' }],
+  pushed: { branch: 'fix/retry', head: '9f8e7d6c5b4a39281706f5e4d3c2b1a098765432', forced: true },
+  notPushedReason: null,
+  worktree: null,
+  ...patch,
+})
+
+const updated = (patch: Partial<AgentCell> = {}, summary: Partial<UpdateSummary> = {}): AgentCell => own({
+  state: 'done', runId: 11, runner: 'claude', command: 'update-pr', args: ['101', `--head=${'d'.repeat(40)}`], status: 'done', label: 'Update branch',
+  startedAt: ago(6 * m), lastStepAt: ago(m), step: { name: 'post', state: 'done' }, finishedAt: ago(m),
+  text: 'Rebased onto main', result: updateSummary(summary), costUsd: 0.8, resume: 'cd ~/dev/orbit && claude --resume 7c6d',
+  ...patch,
+})
+
+test('a finished Update session shows its method and why, the push with its lease, the conflicts it resolved, and the checks', () => {
+  const result = drawerModel(input(updated())).result
+  assert.ok(result !== null)
+  assert.deepEqual([result.text, result.tone, result.fix], ['Rebased onto main', 'green', null])
+  assert.deepEqual(result.facts.map((fact) => [fact.label, fact.value]), [
+    ['Method', 'rebase onto main at 1c2d3e4: only your commits are on the branch, and no open PR is based on it'],
+    ['Pushed', 'fix/retry at 9f8e7d6, with --force-with-lease'],
+    ['Conflicts', '1 resolved: src/retry.ts (kept the backoff and the renamed logger)'],
+    ['Checks', 'pnpm test passed'],
+  ])
+  const merged = drawerModel(input(updated({ text: 'Merged main in' }, {
+    method: 'merge', methodReason: 'sam-tran has commits on the branch', conflicts: [], checks: [],
+    pushed: { branch: 'fix/retry', head: '9f8e7d6c5b4a39281706f5e4d3c2b1a098765432', forced: false },
+  }))).result
+  assert.deepEqual(merged?.facts.map((fact) => fact.value), [
+    'merge of main at 1c2d3e4: sam-tran has commits on the branch', 'fix/retry at 9f8e7d6', 'none', 'none run: no conflict needed resolving',
+  ])
+  // already up to date: nothing to say beyond the text, which needs nothing (gray)
+  const current = drawerModel(input(updated({ text: 'Already up to date' }, { method: null, methodReason: null, conflicts: [], checks: [], pushed: null, notPushedReason: 'upToDate' }))).result
+  assert.deepEqual([current?.tone, current?.facts], ['gray', []])
+  // a failed check leaves the update in its worktree, which wants a look
+  const unpushed = drawerModel(input(updated({ status: 'needsInput', state: 'done', text: 'Needs your answer' }, { pushed: null, notPushedReason: 'checksFailed', checks: [{ name: 'pnpm test', result: 'failed' }], worktree: '~/agents/worktrees/orbit-update-101-x' })))
+  assert.equal(unpushed.card, 'waiting')
+  const left = drawerModel(input(updated({ text: 'Not pushed · checks failed' }, { pushed: null, notPushedReason: 'checksFailed', checks: [{ name: 'pnpm test', result: 'failed' }], worktree: '~/agents/worktrees/orbit-update-101-x' }))).result
+  assert.deepEqual([left?.tone, left?.facts.at(-1)?.value], ['amber', 'The update not pushed is in ~/agents/worktrees/orbit-update-101-x'])
+  // the head moved on: the run is shown as the last run, with the fix run's note
+  assert.equal(drawerModel(input(updated({ state: 'idle' }))).result?.stale, 'The head has moved since this run, so it covers an earlier commit.')
+})
+
+const updateJson = (patch: Record<string, unknown> = {}): RunView['result'] => ({
+  schema: 'pit-crew/update-result@1', command: 'update-pr', status: 'done',
+  target: { repo: 'owner/name', pr: 101, branch: 'fix/retry', base: 'main' }, head: { sha: 'd'.repeat(40) }, upstream: { sha: '1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d' },
+  method: 'rebase', methodReason: 'only your commits', conflicts: [], checks: [],
+  pushed: { branch: 'fix/retry', head: '9f8e7d6c5b4a39281706f5e4d3c2b1a098765432', forced: true }, notPushedReason: null, worktree: null, question: null, error: null,
+  ...patch,
+} as unknown as RunView['result'])
+
+test('an Update run read from the runs list gets the server\'s texts and summary, client side', () => {
+  const run = (patch: Partial<RunView>): RunView => runView({ command: 'update-pr', label: 'Update branch', status: 'done', finishedAt: ago(s), ...patch })
+  assert.deepEqual(runText(run({ result: updateJson() })), { text: 'Rebased onto main', tone: 'green' })
+  assert.deepEqual(runText(run({ result: updateJson({ method: 'merge', pushed: { branch: 'fix/retry', head: '9f8e7d6c5b4a39281706f5e4d3c2b1a098765432', forced: false } }) })).text, 'Merged main in')
+  assert.deepEqual(runText(run({ result: updateJson({ method: null, pushed: null, notPushedReason: 'upToDate' }) })), { text: 'Already up to date', tone: 'gray' })
+  assert.deepEqual(runText(run({ result: updateJson({ pushed: null, notPushedReason: 'checksNotRun' }) })), { text: 'Not pushed · checks not run', tone: 'amber' })
+  assert.deepEqual(runText(run({ status: 'failed', note: 'rejected', result: updateJson({ status: 'failed', pushed: null, notPushedReason: 'pushFailed', error: 'rejected' }) })), { text: 'Failed · push refused', tone: 'red' })
+  assert.deepEqual(summaryOf(updateJson()), {
+    kind: 'update', base: 'main', upstream: '1c2d3e4', method: 'rebase', methodReason: 'only your commits', conflicts: [], checks: [],
+    pushed: { branch: 'fix/retry', head: '9f8e7d6c5b4a39281706f5e4d3c2b1a098765432', forced: true }, notPushedReason: null, worktree: null,
+  })
+})

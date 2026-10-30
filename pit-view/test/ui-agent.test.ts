@@ -211,3 +211,14 @@ test('a cell rebuilds when its state changes, never because the clock moved or a
   assert.notEqual(sig(done(), now), sig(done({ text: 'Approved' }), now))
   assert.equal(agentCellSig(null, 101, now), null)
 })
+
+test('an Update session\'s steps read as its own, and a branch already up to date needs nothing', () => {
+  assert.deepEqual(['resolveBase', 'review', 'consolidate', 'writeReport', 'post'].map((step) => stepTitle('update-pr', step)), [
+    'Resolve', 'Choose method', 'Update and check', 'Write report', 'Push',
+  ])
+  assert.equal(stepText({ name: 'consolidate', state: 'started' }, 'update-pr'), 'Step: update and check, started')
+  assert.equal(doneTone({ status: 'done', text: 'Already up to date' }), 'gray')
+  assert.equal(doneTone({ status: 'done', text: 'Rebased onto main' }), 'green')
+  assert.equal(doneTone({ status: 'done', text: 'Merged main in' }), 'green')
+  assert.equal(doneTone({ status: 'done', text: 'Not pushed · checks failed' }), 'amber')
+})
