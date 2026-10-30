@@ -171,7 +171,7 @@ const checkReview = (value: Record<string, unknown>): void => {
   for (const field of reviewFields) check(field in value, `${field} is missing`)
   check(['review-pr', 'review-stack', 'review-dependabot'].includes(value.command as string), 'command must be review-pr, review-stack or review-dependabot')
   checkStatus(value)
-  check(value.target === null || (isObject(value.target) && typeof value.target.repo === 'string'), 'target must be null or an object with a repo')
+  check(value.target === null || (isObject(value.target) && typeof value.target.repo === 'string' && (!('pr' in value.target) || value.target.pr === null || isPositiveInteger(value.target.pr)) && (!('stack' in value.target) || (Array.isArray(value.target.stack) && value.target.stack.every(isPositiveInteger)))), 'target must be null or an object with a repo, a pr that is null or a positive integer, and a stack of positive integers')
   check(value.reviewed === null || (isObject(value.reviewed) && value.reviewed.kind === 'commit' && typeof value.reviewed.sha === 'string'), 'reviewed must be null or { kind: commit, sha }')
   check(oneOfOrNull(value.verdict, ['changesRequested', 'clean']), 'verdict must be changesRequested, clean or null')
   check(oneOfOrNull(value.recommendation, ['approve', 'fixBeforeMerge', 'hold', 'doNotMerge']), 'recommendation must be one of the four or null')
@@ -1670,6 +1670,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     const number = (run as Partial<Run>).number
     if ('pr' in target && target.pr !== null && number !== undefined && target.pr !== number) return `result.json targets #${target.pr}, not #${number}`
     if ('stack' in target && number !== undefined && !target.stack.includes(number)) return `result.json targets a stack without #${number}`
+    if (value.status === 'done' && number !== undefined && !('stack' in target) && target.pr !== number) return `result.json does not name #${number} as its target`
     if (first !== null && JSON.stringify(first) !== JSON.stringify(target)) return 'result.json names another target than the run first did'
     return null
   }
