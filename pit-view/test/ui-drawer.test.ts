@@ -776,7 +776,7 @@ test('the re-read request carries the token and everything the confirmation show
   assert.deepEqual(JSON.parse(request.init.body ?? ''), { repo: 'octo-example/orbit', viewer: 'viewer', number: 101, headSha: 'a'.repeat(40), base: 'main' })
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
   assert.match(source, /rereadRequest\(asked\.runId, \{ repo: asked\.repo, viewer: asked\.viewer, number: n, headSha: asked\.headSha, base: asked\.baseRef \}, options\.token\)/)
-  // the same confirmation machinery as every other: Cancel first, a role="alert" line, labeled group
+  // the same confirmation machinery as every other: Cancel first, a role="alert" line, and a labeled group
   assert.match(source, /rereadBlock[\s\S]*role: 'group', 'aria-labelledby': 'drawer-confirm-heading'[\s\S]*errorLine\(\)/)
   assert.match(source, /askReread[\s\S]*byKey\('confirm-cancel'\)\?\.focus/)
 })

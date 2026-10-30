@@ -1113,7 +1113,7 @@ test('POST /api/runs/<id>/reread needs the token and carries what the confirmati
 
     const url = `${h.base}/api/runs/${id}/reread`
     const unchanged = (): string | undefined => h.server.cache.getRun(id)?.status
-    // the same token, Host and Origin checks as starting a run
+    // the same token, Host, and Origin checks as starting a run
     assert.equal((await send(url, 'POST', shown)).status, 403)
     assert.match(String((await send(url, 'POST', shown, { 'X-Pit-View-Token': 'not-the-token' })).body.error), /token/)
     assert.equal((await send(url, 'POST', shown, { ...token(h), Origin: 'http://attacker.test' })).status, 403)

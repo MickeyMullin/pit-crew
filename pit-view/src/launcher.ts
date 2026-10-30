@@ -171,7 +171,7 @@ const checkReview = (value: Record<string, unknown>): void => {
   for (const field of reviewFields) check(field in value, `${field} is missing`)
   check(['review-pr', 'review-stack', 'review-dependabot'].includes(value.command as string), 'command must be review-pr, review-stack or review-dependabot')
   checkStatus(value)
-  check(value.target === null || isObject(value.target), 'target must be an object or null')
+  check(value.target === null || (isObject(value.target) && typeof value.target.repo === 'string'), 'target must be null or an object with a repo')
   check(value.reviewed === null || (isObject(value.reviewed) && value.reviewed.kind === 'commit' && typeof value.reviewed.sha === 'string'), 'reviewed must be null or { kind: commit, sha }')
   check(oneOfOrNull(value.verdict, ['changesRequested', 'clean']), 'verdict must be changesRequested, clean or null')
   check(oneOfOrNull(value.recommendation, ['approve', 'fixBeforeMerge', 'hold', 'doNotMerge']), 'recommendation must be one of the four or null')
@@ -1665,7 +1665,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (value.schema === 'pit-crew/sweep-result@1') return value.repo !== null && value.repo.toLowerCase() !== run.repo.toLowerCase() ? `result.json is about ${value.repo}, not ${run.repo}` : null
     const first = was === null || was.schema === 'pit-crew/sweep-result@1' ? null : was.target
     const target = value.target
-    if (target === null) return first === null ? null : 'result.json no longer names its target'
+    if (target === null) return first !== null ? 'result.json no longer names its target' : value.status === 'done' ? 'result.json names no target, so it cannot show which PR it finished' : null
     if (target.repo.toLowerCase() !== run.repo.toLowerCase()) return `result.json targets ${target.repo}, not ${run.repo}`
     const number = (run as Partial<Run>).number
     if ('pr' in target && target.pr !== null && number !== undefined && target.pr !== number) return `result.json targets #${target.pr}, not #${number}`
