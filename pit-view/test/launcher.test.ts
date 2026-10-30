@@ -1,6 +1,6 @@
 // test/launcher.test.ts
 import assert from 'node:assert/strict'
-import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { openCache } from '../src/cache.ts'
@@ -1326,4 +1326,144 @@ test('a well-formed fix result that contradicts itself fails the run but keeps t
   assert.deepEqual([cell.state, cell.text], ['done', 'Failed · bad result'])
   assert.deepEqual([cell.result?.kind === 'fix' ? cell.result.pushed?.count : null, cell.result?.kind === 'fix' ? cell.result.report : 'x'], [2, null])
   assert.equal(agentCell({ ...pr, headRefOid: '0123456789abcdef0123456789abcdef01234567' }, config, fixRun(fixResult({ report: null }), { status: 'failed', note: unnamed.note }), undefined).state, 'idle')
+})
+
+// reading a finished run again (section 8, Launching runs, Re-reading a result)
+
+const eventsLines = (...lines: Record<string, unknown>[]): string => lines.map((line) => `${JSON.stringify(line)}\n`).join('')
+
+// a review run that settles failed on a denied tool, with a result.json that would have passed
+const deniedRun = async (h: Awaited<ReturnType<typeof harness>>, result: Record<string, unknown> = reviewResult({ verdict: 'clean', findings: [], posted: null, notPostedReason: 'ghFailed' })): Promise<Run> => {
+  await h.report(106)
+  const run = await h.launcher.start(request())
+  const child = h.launch.children.at(-1)!
+  await child.events(step('review', 'done'), step('post', 'started', '2026-10-26T14:07:00Z'), step('post', 'done', '2026-10-26T14:08:00Z', 'gh pr review was denied'))
+  await child.stream({ type: 'result', total_cost_usd: 0.5, permission_denials: [{ tool_name: 'Bash', tool_use_id: 'b1' }] })
+  await child.result(result)
+  const settled = h.launcher.settled(run.id)
+  child.exit(0)
+  return settled
+}
+
+const approvedByHand = (patch: Record<string, unknown> = {}): Record<string, unknown> =>
+  reviewResult({ verdict: 'clean', findings: [], notPostedReason: null, posted: { form: 'approve', url: 'https://github.com/octo-example/orbit/pull/106#pullrequestreview-9' }, ...patch })
+
+test('a run denied a tool and finished by hand reads as Approved after a re-read, keeping the denial note and the later post step', async () => {
+  const h = await harness()
+  try {
+    const denied = await deniedRun(h)
+    assert.deepEqual([denied.status, denied.note, denied.resolvedByHand], ['failed', 'permissionDenied: Bash', false])
+    const dir = join(h.home, '.local', 'state', 'pit-view', 'runs', String(denied.id))
+    // the owner resumed the session, approved by hand, and the session rewrote result.json and appended a post event
+    await writeFile(join(dir, 'result.json'), JSON.stringify(approvedByHand()))
+    await writeFile(join(dir, 'events.jsonl'), `${await readFile(join(dir, 'events.jsonl'), 'utf8')}${eventsLines(step('post', 'done', '2026-10-26T15:00:00Z', 'approval posted manually'))}`)
+    const before = h.changes.length
+    const run = await h.launcher.reread(denied.id)
+    assert.deepEqual([run.status, run.resolvedByHand, run.note], ['done', true, 'permissionDenied: Bash'])
+    assert.equal(run.result?.schema === 'pit-crew/review-result@1' ? run.result.posted?.form : null, 'approve')
+    assert.equal(run.finishedAt, denied.finishedAt)
+    assert.equal(stepsOf(run).find((slot) => slot.step === 'post')?.note, 'approval posted manually')
+    assert.equal(run.lastStepAt, '2026-10-26T15:00:00Z')
+    // the row is stored, announced as a change, and the cell reads Approved with the note that it was finished by hand
+    assert.equal(h.cache.getRun(denied.id)?.resolvedByHand, true)
+    assert.equal(h.changes.length, before + 1)
+    const cell = agentCell(await prOf(106), baseConfig(), run, undefined)
+    assert.equal(cell.text, 'Approved · finished by hand')
+    assert.equal(cell.resolvedByHand, true)
+    assert.equal(cell.note, 'permissionDenied: Bash')
+    // a settled run that is done cannot be read again
+    await assert.rejects(h.launcher.reread(denied.id), (error: unknown) => error instanceof LaunchError && error.code === 'notRereadable')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a run that stopped to ask and was answered in Open session settles done after a re-read', async () => {
+  const h = await harness()
+  try {
+    await h.report(106)
+    const run = await h.launcher.start(request())
+    const child = h.launch.children.at(-1)!
+    await child.result(reviewResult({ status: 'needsInput', question: 'Post the approval? (yes / no)', posted: null, notPostedReason: 'awaitingAnswer' }))
+    const settled = h.launcher.settled(run.id)
+    child.exit(0)
+    const waiting = await settled
+    assert.deepEqual([waiting.status, waiting.note], ['needsInput', null])
+    // nothing changed on disk: refused, row as it was
+    await assert.rejects(h.launcher.reread(run.id), (error: unknown) => error instanceof LaunchError && error.code === 'rereadRefused' && /has not changed/.test(error.message))
+    assert.deepEqual(h.cache.getRun(run.id), waiting)
+    // the answered session finished and wrote a new result
+    await writeFile(join(h.home, '.local', 'state', 'pit-view', 'runs', String(run.id), 'result.json'), JSON.stringify(approvedByHand()))
+    const done = await h.launcher.reread(run.id)
+    assert.deepEqual([done.status, done.note, done.resolvedByHand], ['done', null, true])
+    assert.equal(agentCell(await prOf(106), baseConfig(), done, undefined).text, 'Approved · finished by hand')
+    assert.equal(agentCell(await prOf(106), baseConfig(), done, undefined).question, null)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a re-read that breaks a guard leaves the row as it was and says why: changed target, other command, other commit, missing report, bad file', async () => {
+  const h = await harness()
+  try {
+    const denied = await deniedRun(h)
+    const file = join(h.home, '.local', 'state', 'pit-view', 'runs', String(denied.id), 'result.json')
+    const refused = async (text: string | null, message: RegExp): Promise<void> => {
+      if (text === null) await rm(file)
+      else await writeFile(file, text)
+      await assert.rejects(h.launcher.reread(denied.id), (error: unknown) => error instanceof LaunchError && error.code === 'rereadRefused' && message.test(error.message), String(message))
+      assert.deepEqual(h.cache.getRun(denied.id), denied)
+    }
+    await refused(null, /result\.json is missing/)
+    await refused('{"schema":', /not valid JSON/)
+    await refused(JSON.stringify(approvedByHand({ target: { repo: 'octo-example/orbit', pr: 107 } })), /targets #107, not #106/)
+    await refused(JSON.stringify(approvedByHand({ target: { repo: 'octo-example/other', pr: 106 } })), /targets octo-example\/other/)
+    await refused(JSON.stringify(approvedByHand({ target: null })), /no longer names its target/)
+    await refused(JSON.stringify(approvedByHand({ command: 'review-stack', target: { repo: 'octo-example/orbit', stack: [106], top: 106 } })), /command review-stack, not review-pr/)
+    await refused(JSON.stringify(approvedByHand({ reviewed: { kind: 'commit', sha: '0123456789abcdef0123456789abcdef01234567' } })), /reviewed commit/)
+    await refused(JSON.stringify(approvedByHand({ reviewed: null })), /reviewed commit/)
+    await refused(JSON.stringify({ ...fixResult(), target: { repo: 'octo-example/orbit', pr: 106, branch: 'x' } }), /schema pit-crew\/fix-result@1/)
+    await refused(JSON.stringify(approvedByHand({ report: '~/agents/output/PR-999.md' })), /noReport: ~\/agents\/output\/PR-999\.md does not exist/)
+    await refused(JSON.stringify(approvedByHand({ report: null })), /names no report/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a fix run is held to fixMismatch on a re-read, and a run that is running, has no session, or does not exist is not read', async () => {
+  const h = await harness()
+  try {
+    const fix = request(101, { command: 'fix-pr', args: ['101'], label: 'Fix session' })
+    const run = await h.launcher.start(fix)
+    await assert.rejects(h.launcher.reread(run.id), (error: unknown) => error instanceof LaunchError && error.code === 'notRereadable' && /running/.test(error.message))
+    const child = h.launch.children.at(-1)!
+    await child.result(fixResult({ status: 'failed', error: 'push refused', pushed: null, notPushedReason: 'pushFailed', report: null }))
+    const settled = h.launcher.settled(run.id)
+    child.exit(0)
+    const failed = await settled
+    assert.equal(failed.status, 'failed')
+    const file = join(h.home, '.local', 'state', 'pit-view', 'runs', String(run.id), 'result.json')
+    await writeFile(file, JSON.stringify(fixResult({ report: '~/agents/output/PR-101.md' })))
+    await assert.rejects(h.launcher.reread(run.id), (error: unknown) => error instanceof LaunchError && error.code === 'rereadRefused' && /badResult: report .* is not FIX-101\.md/.test(error.message))
+    assert.deepEqual(h.cache.getRun(run.id), failed)
+    await writeFile(join(h.home, 'agents', 'output', 'FIX-101.md'), 'Fix report\n')
+    await writeFile(file, JSON.stringify(fixResult()))
+    const resolved = await h.launcher.reread(run.id)
+    assert.deepEqual([resolved.status, resolved.resolvedByHand], ['done', true])
+    assert.equal(doneText(resolved, false), 'Fixed · pushed 2 commits · finished by hand')
+    // a run with no resume command was never a session someone could have finished
+    const bare = h.cache.updateRun((await h.launcher.start(request(110))).id, { status: 'failed', resume: null })
+    await assert.rejects(h.launcher.reread(bare.id), (error: unknown) => error instanceof LaunchError && error.code === 'notRereadable' && /no session/.test(error.message))
+    await assert.rejects(h.launcher.reread(9999), (error: unknown) => error instanceof LaunchError && error.code === 'unknownRun')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the done text adds the finished-by-hand note only to a done run, and a run that failed again shows its new failure', () => {
+  const clean = reviewResult({ verdict: 'clean', findings: [], posted: null, notPostedReason: 'noPost' }) as unknown as RunResultJson
+  assert.equal(doneText({ status: 'done', result: clean, note: 'permissionDenied: Bash', resolvedByHand: true }, false), 'Clean · finished by hand')
+  assert.equal(doneText({ status: 'done', result: clean, note: null, resolvedByHand: false }, false), 'Clean')
+  assert.equal(doneText({ status: 'failed', result: clean, note: 'ghFailed', resolvedByHand: true }, false), 'Failed')
+  assert.equal(doneText({ status: 'needsInput', result: clean, note: null, resolvedByHand: true }, false), 'Needs your answer')
 })

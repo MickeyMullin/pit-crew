@@ -629,6 +629,8 @@ export type AgentCell = {
   question: string | null
   // why it failed: a kind such as noResult, optionally followed by ': ' and detail
   note: string | null
+  // the owner's re-read replaced the outcome recorded at exit; the note is then the original one
+  resolvedByHand: boolean
   resume: string | null
   costUsd: number | null
 }
@@ -667,7 +669,7 @@ const fixText = (result: FixResult): string => {
 
 // the cell's text for a finished run, from section 8's mappings: a review's verdict and posted, a
 // fix's push
-export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'>, ownDraft: boolean): string => {
+export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'> & { resolvedByHand?: boolean }, ownDraft: boolean): string => {
   if (run.status === 'stopped') return 'Stopped'
   if (run.status === 'needsInput') return 'Needs your answer'
   if (run.status === 'failed') {
@@ -676,14 +678,15 @@ export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'>, ownDraft:
     return run.result?.schema === 'pit-crew/fix-result@1' && run.result.notPushedReason === 'pushFailed' ? 'Failed · push refused' : 'Failed'
   }
   const result = run.result
-  if (result?.schema === 'pit-crew/fix-result@1') return fixText(result)
-  if (result === null || result.schema !== 'pit-crew/review-result@1' || result.verdict === null) return 'Done'
+  const byHand = run.resolvedByHand === true ? ' · finished by hand' : ''
+  if (result?.schema === 'pit-crew/fix-result@1') return `${fixText(result)}${byHand}`
+  if (result === null || result.schema !== 'pit-crew/review-result@1' || result.verdict === null) return `Done${byHand}`
   let text = 'Clean'
   if (result.verdict === 'changesRequested') text = 'Changes requested'
   else if (ownDraft) text = 'Clean · mark ready?'
   else if (result.posted?.form === 'approve') text = 'Approved'
   else if (result.posted?.form === 'comment') text = 'Clean · CI failed'
-  return result.notPostedReason === 'ghFailed' ? `${text} · post failed` : text
+  return `${result.notPostedReason === 'ghFailed' ? `${text} · post failed` : text}${byHand}`
 }
 
 const countBy = <K extends string>(keys: readonly K[], values: readonly K[]): Record<K, number> =>
@@ -741,7 +744,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     state: 'idle', label: plan.label, action, starts: startOptions(pr, config, stack, run?.status === 'running'), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false,
-    finishedAt: null, text: null, result: null, question: null, note: null, resume: null, costUsd: null,
+    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, resume: null, costUsd: null,
   }
   if (run === undefined) return idle
   const shas = standingShas(run)
@@ -769,6 +772,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     result: agentResult(run.result),
     question: run.status === 'needsInput' ? run.result?.question ?? null : null,
     note: run.note,
+    resolvedByHand: run.resolvedByHand,
     resume: run.resume,
     costUsd: run.costUsd,
   }
@@ -1045,7 +1049,7 @@ export const systemFs: LauncherFs = {
 // the launcher
 
 export type LaunchErrorCode =
-  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner'
+  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner' | 'notRereadable' | 'rereadRefused'
 
 export class LaunchError extends Error {
   override name = 'LaunchError'
@@ -1074,6 +1078,8 @@ export type Launcher<T extends Session = Run> = {
   start: (request: StartRequest) => Promise<T>
   // SIGTERM to the run's group now, SIGKILL to every descendant's group after the grace period
   stop: (id: number) => T
+  // the owner's re-read of a failed or waiting run's folder (section 8, Re-reading a result): the new result.json replaces the recorded outcome when it passes every guard, and a refusal changes nothing
+  reread: (id: number) => Promise<T>
   // at server start: re-watch live runs, settle the rest
   recover: () => Promise<void>
   // reads every watched run's files now
@@ -1652,6 +1658,78 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
+  const rereading = new Set<number>()
+
+  // what a new result must keep of the run: its repository and PR, and the target it first named
+  const targetMismatch = (run: T, was: RunResultJson | null, value: RunResultJson): string | null => {
+    if (value.schema === 'pit-crew/sweep-result@1') return value.repo !== null && value.repo.toLowerCase() !== run.repo.toLowerCase() ? `result.json is about ${value.repo}, not ${run.repo}` : null
+    const first = was === null || was.schema === 'pit-crew/sweep-result@1' ? null : was.target
+    const target = value.target
+    if (target === null) return first === null ? null : 'result.json no longer names its target'
+    if (target.repo.toLowerCase() !== run.repo.toLowerCase()) return `result.json targets ${target.repo}, not ${run.repo}`
+    const number = (run as Partial<Run>).number
+    if ('pr' in target && target.pr !== null && number !== undefined && target.pr !== number) return `result.json targets #${target.pr}, not #${number}`
+    if ('stack' in target && number !== undefined && !target.stack.includes(number)) return `result.json targets a stack without #${number}`
+    if (first !== null && JSON.stringify(first) !== JSON.stringify(target)) return 'result.json names another target than the run first did'
+    return null
+  }
+
+  const reviewedMismatch = (was: RunResultJson | null, value: RunResultJson): string | null => {
+    if (was?.schema !== 'pit-crew/review-result@1' || value.schema !== 'pit-crew/review-result@1' || was.reviewed === null) return null
+    if (value.reviewed?.sha.toLowerCase() === was.reviewed.sha.toLowerCase()) return null
+    return `the reviewed commit changed from ${was.reviewed.sha.slice(0, 7)} to ${value.reviewed?.sha.slice(0, 7) ?? 'none'}; start a new review instead`
+  }
+
+  const reread = async (id: number): Promise<T> => {
+    const run = store.get(id)
+    if (run === null) throw new LaunchError('unknownRun', `${noun} ${id} does not exist`)
+    if (store.schema !== null) throw new LaunchError('notRereadable', `a ${noun} cannot be read again`)
+    if (run.status !== 'failed' && run.status !== 'needsInput') throw new LaunchError('notRereadable', `${noun} ${id} is ${run.status}; only a failed ${noun} or one waiting for an answer can be read again`)
+    if (run.resume === null) throw new LaunchError('notRereadable', `${noun} ${id} has no session to resume, so nothing could have finished it by hand`)
+    if (rereading.has(id) || live.has(id)) throw new LaunchError('busy', `${noun} ${id} is being read already`)
+    rereading.add(id)
+    try {
+      const refuse = (why: string): never => {
+        throw new LaunchError('rereadRefused', `${why}; the ${noun} is unchanged`)
+      }
+      const dir = expandHome(run.dir, home)
+      const text = await fs.readFile(join(dir, 'result.json')).catch(() => null)
+      if (text === null) return refuse(`result.json is missing from ${tildePath(dir, home)}`)
+      const parsed = parseResult(text)
+      if (!parsed.ok) return refuse(parsed.error)
+      const value = parsed.value
+      const expected = run.command === 'fix-pr' ? 'pit-crew/fix-result@1' : 'pit-crew/review-result@1'
+      if (value.schema !== expected) return refuse(`result.json has schema ${value.schema}, but this run's result has schema ${expected}`)
+      if (value.command !== run.command) return refuse(`result.json is for command ${value.command}, not ${run.command}`)
+      const moved = targetMismatch(run, run.result, value) ?? reviewedMismatch(run.result, value)
+      if (moved !== null) return refuse(moved)
+      let reportExists: boolean | null = null
+      const path = value.status === 'done' ? reportPath(value) : null
+      if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
+      // judged on its own: the stream's denials belong to the original attempt, and the owner has resolved them
+      const judgement = judge({ stopped: false, restarted: false, exit: null, parsed, reportExists, denials: [], lastEvent: null })
+      if (judgement.status === 'failed' && noteKind(judgement.note) !== null) return refuse(judgement.note ?? 'the result is not valid')
+      const note = judgement.status === 'failed' ? judgement.note : run.note
+      if (judgement.status === run.status && note === run.note && JSON.stringify(judgement.result) === JSON.stringify(run.result)) {
+        return refuse('result.json has not changed since the run settled')
+      }
+      const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true }
+      // the later steps too: every line of events.jsonl, folded from the start
+      const eventsText = await fs.readFile(join(dir, 'events.jsonl')).catch(() => null)
+      const events = (eventsText ?? '').split('\n').map(parseStepEvent).filter((event) => event !== null)
+      const latest = events.at(-1)
+      if (latest !== undefined) {
+        Object.assign(changes, { steps: foldSteps(emptySteps(), events), lastStepAt: latest.at, step: latest.step, stepState: latest.state })
+      }
+      const updated = store.update(id, changes)
+      log(`${noun} ${id} read again by hand: ${updated.status}${updated.note === null ? '' : ` (${updated.note})`}`)
+      changed(updated)
+      return updated
+    } finally {
+      rereading.delete(id)
+    }
+  }
+
   const checkAll = async (): Promise<void> => {
     await Promise.all([...live.values()].map((entry) => pumpOf(entry)))
   }
@@ -1668,5 +1746,5 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     for (const entry of live.values()) clear(entry)
   }
 
-  return { start, stop, recover, check: checkAll, settled, close }
+  return { start, stop, reread, recover, check: checkAll, settled, close }
 }

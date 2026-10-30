@@ -207,6 +207,8 @@ const launchStatus: Readonly<Record<LaunchErrorCode, number>> = {
   tandemRunner: 400,
   fixRunner: 400,
   notRunning: 409,
+  notRereadable: 409,
+  rereadRefused: 422,
 }
 
 // why a direct action was refused, as an HTTP status
@@ -657,6 +659,36 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     }
   }
 
+  // the owner's re-read of a failed or waiting run (section 8 of DESIGN.md, Re-reading a result): it replaces a recorded failure, so it carries what its confirmation showed, like a write, and the server refuses with 409 and reads nothing when any of it differs from what is in effect now
+  const rereadRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
+    requireToken(req)
+    if (!/^[1-9]\d{0,9}$/.test(raw)) throw new HttpError(400, 'the run id must be a positive integer')
+    const usage = 'send { "repo": "owner/name", "viewer": "login", "number": 106, "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, all five as the confirmation showed them'
+    const body = await readJson(req)
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
+    const { repo: confirmedRepo, viewer: confirmedViewer, number, headSha, base, ...rest } = body as Record<string, unknown>
+    if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
+    if (typeof confirmedRepo !== 'string' || typeof confirmedViewer !== 'string' || typeof base !== 'string' || base === '' || typeof headSha !== 'string' || !/^[0-9a-f]{40}$/i.test(headSha) ||
+      typeof number !== 'number' || !Number.isInteger(number) || number < 1) throw new HttpError(400, usage)
+    const config = effective()
+    if (confirmedRepo !== config.repo) throw new HttpError(409, `the repository is now ${config.repo}, not ${confirmedRepo}; the confirmation was for ${confirmedRepo}, so nothing was read`)
+    staleViewer(confirmedViewer, config.viewer)
+    const id = Number(raw)
+    const run = cache.getRun(id)
+    if (run === null) throw new HttpError(404, `run ${id} does not exist`)
+    if (run.repo !== config.repo || run.number !== number) throw new HttpError(409, `run ${id} is not a run of #${number} in ${config.repo}; the confirmation was for #${number}, so nothing was read`)
+    const row = cache.readView(config.repo).open.find((entry) => entry.number === number)
+    if (row === undefined) throw new HttpError(409, `#${number} is not an open PR in ${config.repo} that Pit View has fetched, so what the confirmation showed no longer holds; nothing was read`)
+    if (row.pr.baseRefName !== base || row.pr.headRefOid.toLowerCase() !== headSha.toLowerCase()) {
+      throw new HttpError(409, `#${number} changed since you saw it (${row.pr.baseRefName !== base ? `it now targets ${row.pr.baseRefName}, not ${base}` : 'it has new commits'}); nothing was read. Reload its confirmation to see the current state`)
+    }
+    try {
+      json(res, 200, runView(await launcher.reread(id)))
+    } catch (error) {
+      launchFailure(error)
+    }
+  }
+
   const putConfig = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const body = await readJson(req)
     let saved: Config
@@ -792,6 +824,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'GET', pattern: /^\/api\/prs\/([^/]+)\/reports$/, handle: (_req, res, _url, match) => listReportsFor(res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/reports\/([^/]+)$/, handle: (_req, res, _url, match) => serveReport(res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/runs\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopRun(req, res, match[1] ?? '') },
+    { method: 'POST', pattern: /^\/api\/runs\/([^/]+)\/reread$/, handle: (req, res, _url, match) => rereadRun(req, res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/sweeps$/, handle: (req, res) => startSweep(req, res) },
     { method: 'GET', pattern: /^\/api\/sweeps$/, handle: (_req, res) => json(res, 200, sweeps.list(effective().repo)) },
     { method: 'POST', pattern: /^\/api\/sweeps\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopSweep(req, res, match[1] ?? '') },
