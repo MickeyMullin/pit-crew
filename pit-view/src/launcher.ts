@@ -171,7 +171,7 @@ const checkReview = (value: Record<string, unknown>): void => {
   for (const field of reviewFields) check(field in value, `${field} is missing`)
   check(['review-pr', 'review-stack', 'review-dependabot'].includes(value.command as string), 'command must be review-pr, review-stack or review-dependabot')
   checkStatus(value)
-  check(value.target === null || (isObject(value.target) && typeof value.target.repo === 'string' && (!('pr' in value.target) || value.target.pr === null || isPositiveInteger(value.target.pr)) && (!('stack' in value.target) || (Array.isArray(value.target.stack) && value.target.stack.every(isPositiveInteger)))), 'target must be null or an object with a repo, a pr that is null or a positive integer, and a stack of positive integers')
+  check(value.target === null || (isObject(value.target) && typeof value.target.repo === 'string' && (!('pr' in value.target) || value.target.pr === null || isPositiveInteger(value.target.pr)) && (!('stack' in value.target) || (Array.isArray(value.target.stack) && value.target.stack.every(isPositiveInteger) && isPositiveInteger(value.target.top) && value.target.stack.includes(value.target.top)))), 'target must be null or an object with a repo, a pr that is null or a positive integer, and a stack of positive integers that includes its top')
   check(value.reviewed === null || (isObject(value.reviewed) && value.reviewed.kind === 'commit' && typeof value.reviewed.sha === 'string'), 'reviewed must be null or { kind: commit, sha }')
   check(oneOfOrNull(value.verdict, ['changesRequested', 'clean']), 'verdict must be changesRequested, clean or null')
   check(oneOfOrNull(value.recommendation, ['approve', 'fixBeforeMerge', 'hold', 'doNotMerge']), 'recommendation must be one of the four or null')
