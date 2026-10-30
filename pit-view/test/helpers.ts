@@ -245,7 +245,8 @@ export const fakeLaunch = ({ remotes = fakeRemotes('octo-example/orbit'), fs = {
       // tests read the files when they say so, through launcher.check
       watch: () => ({ close: () => {} }),
       rm: async (path) => {
-        fake.removed.push(path)
+        // the pre-spawn write probe cleans up after itself; only folder removals are recorded
+        if (!path.endsWith('.write-probe')) fake.removed.push(path)
         await systemFs.rm(path)
       },
       ...fs,

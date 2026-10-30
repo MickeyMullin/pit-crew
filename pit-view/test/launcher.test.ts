@@ -85,7 +85,7 @@ test('Codex starts exactly as Launching runs pins it: a $ skill, the sandbox, th
   const runDir = '/home/tester/.local/state/pit-view/runs/3'
   const base = [
     '-C', '/home/tester/dev/orbit', '-s', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true',
-    '--add-dir', '/home/tester/dev/orbit/.git', '--add-dir', '/Volumes/Data/agents/output', '--add-dir', '/Volumes/Data/agents/worktrees',
+    '--add-dir', '/home/tester/dev/orbit/.git', '--add-dir', runDir, '--add-dir', '/Volumes/Data/agents/output', '--add-dir', '/Volumes/Data/agents/worktrees',
   ]
   const prompt = `$review-pr 106 --no-post --emit-json=${runDir}\n\n${codexNote('/Volumes/Data/agents/output')}`
   const without = codexInvocation(spec({ args: ['106', '--no-post'], sessionId: null }))
@@ -95,6 +95,15 @@ test('Codex starts exactly as Launching runs pins it: a $ skill, the sandbox, th
   const withModel = codexInvocation(spec({ args: ['106', '--no-post'], sessionId: null, codexModel: 'gpt-6.1-terra' }))
   assert.deepEqual(withModel.args, ['exec', '--json', '-m', 'gpt-6.1-terra', ...base, prompt])
   assert.match(codexNote('/Volumes/Data/agents/output'), /\/Volumes\/Data\/agents\/output/)
+})
+
+test('the folder a run is told to write its JSON to is one of the Codex writable roots', () => {
+  const invocation = codexInvocation(spec())
+  const prompt = invocation.args.at(-1) ?? ''
+  const runDir = /--emit-json=(\S+)/.exec(prompt)?.[1]
+  assert.equal(runDir, spec().runDir)
+  const roots = invocation.args.filter((arg, index) => invocation.args[index - 1] === '--add-dir')
+  assert.ok(roots.includes(runDir ?? ''), `expected ${String(runDir)} among ${roots.join(', ')}`)
 })
 
 test('a request is the command, its arguments and --emit-json, with / for Claude and $ for Codex', () => {
@@ -108,7 +117,7 @@ test('the resume command starts in the run\'s folder; Codex\'s carries its model
   assert.equal(runners.claude.resume('~/dev/orbit', 'sess-1', spec({ claudeModel: 'opus' }), '/home/tester'), 'cd ~/dev/orbit && claude --resume sess-1')
   assert.equal(
     runners.codex.resume('~/dev/orbit', 'th-9', spec({ codexModel: 'gpt-6.1-terra', reportsDir: '/home/tester/agents/output', worktreesDir: '/home/tester/agents/worktrees' }), '/home/tester'),
-    'cd ~/dev/orbit && codex resume th-9 -m gpt-6.1-terra -s workspace-write -c sandbox_workspace_write.network_access=true --add-dir ~/dev/orbit/.git --add-dir ~/agents/output --add-dir ~/agents/worktrees',
+    'cd ~/dev/orbit && codex resume th-9 -m gpt-6.1-terra -s workspace-write -c sandbox_workspace_write.network_access=true --add-dir ~/dev/orbit/.git --add-dir ~/.local/state/pit-view/runs/3 --add-dir ~/agents/output --add-dir ~/agents/worktrees',
   )
   // a folder with a space is quoted, ~ left bare
   assert.equal(shellPath('~/dev/my orbit'), `~/'dev/my orbit'`)
@@ -831,7 +840,7 @@ test('a Codex run takes its session from thread.started, has no stdin, and is ju
     await h.launcher.check()
     const stored = h.cache.getRun(run.id)!
     assert.equal(stored.sessionId, 'th-104')
-    assert.equal(stored.resume, 'cd ~/dev/orbit && codex resume th-104 -m gpt-6.1-terra -s workspace-write -c sandbox_workspace_write.network_access=true --add-dir ~/dev/orbit/.git --add-dir ~/agents/output --add-dir ~/agents/worktrees')
+    assert.equal(stored.resume, `cd ~/dev/orbit && codex resume th-104 -m gpt-6.1-terra -s workspace-write -c sandbox_workspace_write.network_access=true --add-dir ~/dev/orbit/.git --add-dir ~/.local/state/pit-view/runs/${run.id} --add-dir ~/agents/output --add-dir ~/agents/worktrees`)
     await h.report(104)
     await child.result(reviewResult({ target: { repo: scenario.repo, pr: 104 }, verdict: 'clean', findings: [], posted: null, notPostedReason: 'noPost', report: '~/agents/output/PR-104.md' }))
     const settled = h.launcher.settled(run.id)
@@ -974,6 +983,30 @@ test('a run that cannot spawn fails as spawnFailed and frees its PR', async () =
     // announced as watched before it settled in the same call
     assert.deepEqual(h.watched, [run.id])
     launch.spawnError = null
+    assert.equal((await h.launcher.start(request())).status, 'running')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a run directory Pit View cannot write is refused before the runner starts, as permissionDenied', async () => {
+  let blocked = true
+  const launch = fakeLaunch({
+    fs: {
+      writeFile: async (path, text) => {
+        if (blocked && path.endsWith('.write-probe')) throw new Error('EACCES: permission denied')
+        await writeFile(path, text)
+      },
+    },
+  })
+  const h = await harness({ launch })
+  try {
+    const run = await h.launcher.start(request())
+    assert.equal(run.status, 'failed')
+    assert.equal(run.note, `permissionDenied: ~/.local/state/pit-view/runs/${run.id} cannot be written: EACCES: permission denied`)
+    // nothing was spawned, and the PR is free once the folder can be written again
+    assert.deepEqual(launch.children, [])
+    blocked = false
     assert.equal((await h.launcher.start(request())).status, 'running')
   } finally {
     await h.cleanup()

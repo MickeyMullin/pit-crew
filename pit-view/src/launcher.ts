@@ -378,9 +378,12 @@ export const claudeInvocation = (spec: LaunchSpec): Invocation => ({
 export const codexModelArgs = (spec: Pick<LaunchSpec, 'codexModel'>): string[] =>
   spec.codexModel === undefined ? [] : ['-m', spec.codexModel]
 
-export const codexSandboxArgs = (spec: Pick<LaunchSpec, 'cwd' | 'reportsDir' | 'worktreesDir'>): string[] => [
+// every folder a Codex run may write: the workspace itself, the checkout's .git, the run directory
+// the request's --emit-json names, and the resolved reports and worktrees folders. A folder left out
+// of this list is a folder the command cannot write, whatever the prompt it runs says to write there
+export const codexSandboxArgs = (spec: Pick<LaunchSpec, 'cwd' | 'runDir' | 'reportsDir' | 'worktreesDir'>): string[] => [
   '-s', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true',
-  '--add-dir', join(spec.cwd, '.git'), '--add-dir', spec.reportsDir, '--add-dir', spec.worktreesDir,
+  '--add-dir', join(spec.cwd, '.git'), '--add-dir', spec.runDir, '--add-dir', spec.reportsDir, '--add-dir', spec.worktreesDir,
 ]
 
 export const codexInvocation = (spec: LaunchSpec): Invocation => ({
@@ -1081,6 +1084,26 @@ export type Launcher<T extends Session = Run> = {
   close: () => void
 }
 
+// a run directory Pit View cannot write is refused before the runner starts, so a folder the
+//  filesystem forbids names its own failure instead of settling later as an unreadable noResult:
+//  the probe is the same write the command makes to events.jsonl, and it leaves nothing behind
+export const probeRunDir = async (dir: string, fs: Pick<LauncherFs, 'writeFile' | 'rm'>): Promise<void> => {
+  const probe = join(dir, '.write-probe')
+  await fs.writeFile(probe, '')
+  await fs.rm(probe)
+}
+
+// raised by the probe, and by nothing else on the start path, so the failure keeps its own note
+export class UnwritableRunDir extends Error {
+  readonly dir: string
+  readonly reason: unknown
+  constructor(dir: string, reason: unknown) {
+    super(`cannot write ${dir}`)
+    this.dir = dir
+    this.reason = reason
+  }
+}
+
 export type LauncherOptions<T extends Session = Run> = {
   cache: Cache
   gh: Gh
@@ -1487,6 +1510,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     let stdin: string | null
     try {
       await fs.mkdir(dir)
+      await probeRunDir(dir, fs).catch((reason: unknown) => {
+        throw new UnwritableRunDir(dir, reason)
+      })
       spec = await specFor(run, dir)
       const invocation = runners[runner].invocation(spec)
       stdin = invocation.stdin
@@ -1510,8 +1536,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         stdin: stdin === null ? 'ignore' : 'pipe',
       })
     } catch (error) {
-      run = store.update(run.id, { status: 'failed', finishedAt: now(), note: `spawnFailed: ${messageOf(error)}` })
-      log(`${noun} ${run.id}: cannot start: ${messageOf(error)}`)
+      const note = error instanceof UnwritableRunDir
+        ? `permissionDenied: ${tildePath(error.dir, home)} cannot be written: ${messageOf(error.reason)}`
+        : `spawnFailed: ${messageOf(error)}`
+      run = store.update(run.id, { status: 'failed', finishedAt: now(), note })
+      log(`${noun} ${run.id}: cannot start: ${note}`)
       changed(run)
       await prune()
       return run
