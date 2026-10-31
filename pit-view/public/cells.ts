@@ -2,6 +2,7 @@
 // the small pieces rows are made of: avatars, chips, reviewer pips and icons
 import type { Issue, IssueKind, MergeStateKind, PersonView, Reviewer, ReviewerState, Ticket } from '../src/derive.ts'
 import { h, newTab, svg } from './dom.ts'
+import { highlighted } from './pagesearch.ts'
 import { safeHref, safeImage } from './safeurl.ts'
 import type { Shape } from './dom.ts'
 
@@ -88,9 +89,9 @@ export const pip = (reviewer: Reviewer): HTMLSpanElement => {
 }
 
 // a ticket chip, linked when its system gives it a URL
-export const ticketChip = (ticket: Ticket): HTMLElement => {
+export const ticketChip = (ticket: Ticket, terms: readonly string[] = []): HTMLElement => {
   const tip = ticket.system === 'none' ? 'Description carries the no-ticket marker' : `${ticket.system} ${ticket.label}`
   const href = safeHref(ticket.url)
-  if (href === null) return h('span', { class: 'ticket', title: tip }, ticket.label)
-  return h('a', { ...newTab, class: 'ticket', href, title: `Open ${tip}` }, ticket.label)
+  if (href === null) return h('span', { class: 'ticket', title: tip }, highlighted(ticket.label, terms))
+  return h('a', { ...newTab, class: 'ticket', href, title: `Open ${tip}` }, highlighted(ticket.label, terms))
 }

@@ -119,6 +119,8 @@ export type ClosedRow = {
   outcome: 'merged' | 'closed'
   closedBy: ClosedBy
   closedAt: string
+  // the head branch, which the page search reads
+  headRef: string
   tickets: Ticket[]
 }
 
@@ -736,6 +738,7 @@ export const deriveClosedRow = (pr: RawClosedPr, config: Config): ClosedRow => (
   outcome: pr.merged ? 'merged' : 'closed',
   closedBy: deriveClosedBy(pr, config),
   closedAt: pr.closedAt,
+  headRef: pr.headRefName,
   tickets: deriveTickets(pr, isBotLogin(pr.author?.login, config), config),
 })
 

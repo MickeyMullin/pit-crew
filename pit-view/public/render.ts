@@ -16,6 +16,7 @@ import {
 } from './filters.ts'
 import type { Arrangement, ClosedRangeKey, Controls, TileKey } from './filters.ts'
 import { formatAge, shortSha } from './format.ts'
+import { emptyMessage, hiddenHits, highlighted, hitsLine, matchesPage, searchTerms } from './pagesearch.ts'
 import { safeHref } from './safeurl.ts'
 import { sweepHeaderModel } from './sweepview.ts'
 import { offlineBadge, offlineBanner, sectionMarker, syncStatus, tableState } from './status.ts'
@@ -64,6 +65,10 @@ const header = (frame: Frame): void => {
   const running = view.sync.cycle?.state === 'running'
   const refresh = byId('refresh')
   refresh.toggleAttribute('data-running', running)
+  const search = byId<HTMLInputElement>('page-search')
+  // typing already put the text there; a tile press or a clear changes it from outside
+  if (search.value !== ui.pageSearch) search.value = ui.pageSearch
+  byId('page-search-clear').hidden = ui.pageSearch === ''
   const pause = byId('pause')
   const label = ui.paused ? 'Resume updates' : 'Pause updates'
   if (pause.getAttribute('aria-label') !== label) {
@@ -158,9 +163,18 @@ const selfReviewPhrase = (row: MineRow): string => {
 }
 
 // the red call-out above Mine: announced as an alert only when it first appears, never per patch
-const renderBanner = (frame: Frame): void => {
+const renderBanner = (frame: Frame, terms: readonly string[]): void => {
   const slot = byId('mine-banner')
-  const rows = frame.view.mine.groups.find((group) => group.key === 'changesRequested')?.rows ?? []
+  const all = frame.view.mine.groups.find((group) => group.key === 'changesRequested')?.rows ?? []
+  // the page search hides the entries it does not match; the banner element stays, so it is not announced again when they return
+  const page = matchesPage(terms)
+  const rows = all.filter(page)
+  if (all.length > 0 && rows.length === 0) {
+    slot.hidden = true
+    const list = slot.querySelector('.banner-list')
+    if (list !== null) sync(list, [])
+    return
+  }
   if (rows.length === 0) {
     slot.replaceChildren()
     slot.hidden = true
@@ -172,13 +186,14 @@ const renderBanner = (frame: Frame): void => {
     const phrase = selfReviewPhrase(row)
     // the Fix session sits beside Open agent while the row offers one, available or not
     const fix = fixStart(row.agent) !== null
+    const hits = hiddenHits(terms, row, { tickets: true, alias: false })
     return {
       key: `pr-${row.number}`,
-      sig: JSON.stringify([who, age, row.url, row.title, phrase, fix]),
+      sig: JSON.stringify([who, age, row.url, row.title, phrase, fix, terms, hits]),
       build: () => h('li', { class: 'banner-entry' },
         h('span', { class: 'banner-text' },
-          h('span', { class: 'banner-lead' }, `${who} requested changes on `, h('a', { ...newTab, href: safeHref(row.url) }, `#${row.number}`), age === null ? '' : ` · ${age} ago`),
-          h('span', { class: 'banner-detail' }, `${row.title} · ${phrase}`)),
+          h('span', { class: 'banner-lead' }, `${who} requested changes on `, h('a', { ...newTab, href: safeHref(row.url) }, highlighted(`#${row.number}`, terms)), age === null ? '' : ` · ${age} ago`),
+          h('span', { class: 'banner-detail' }, highlighted(row.title, terms), ` · ${phrase}`, hitsLine(hits, terms))),
         h('span', { class: 'banner-actions' },
           h('button', {
             type: 'button',
@@ -201,10 +216,10 @@ const renderBanner = (frame: Frame): void => {
   if (banner === null) {
     banner = h('div', { class: 'banner banner-changes', role: 'alert' }, svg(icons.alert, { size: 20, stroke: '2.2', className: 'banner-icon' }), h('ul', { class: 'banner-list' }))
     slot.appendChild(banner)
-    slot.hidden = false
   } else {
     banner.removeAttribute('role')
   }
+  slot.hidden = false
   const list = banner.querySelector('.banner-list')
   if (list !== null) sync(list, entries)
 }
@@ -242,9 +257,9 @@ const sortOf = <R>(table: TableKey, columns: readonly Column<R>[], ui: UiState) 
   return { sortValue: value ?? null, dir: sort?.dir ?? 'asc' }
 }
 
-// with rows in the table but none matching, the empty text says the filters hid them
-const emptyText = (arranged: Arrangement<unknown>, empty: string): string =>
-  arranged.total > 0 && arranged.matched === 0 ? 'No PRs match these filters.' : empty
+// the section heading while the page search is set: the rows shown of the rows held, and a plain word when the page search finds nothing in the section
+const searchCount = (arranged: Arrangement<unknown>, pageMatches: number): string =>
+  `${arranged.matched} of ${arranged.total}${pageMatches === 0 ? ' · no match' : ''}`
 
 const filterBar = (table: TableKey, ui: UiState, arranged: Arrangement<unknown>, selects: SelectModel[], actions: Actions): void => {
   renderFilterBar(byId(`${table}-box`), {
@@ -284,26 +299,30 @@ export const render = (frame: Frame, actions: Actions): void => {
   header(frame)
   renderOffline(frame)
   renderTiles(frame, actions)
-  const ctx: CellContext = { view, nowMs, paused: ui.paused }
+  const terms = searchTerms(ui.pageSearch)
+  const searching = terms.length > 0
+  const page = matchesPage(terms)
+  const ctx: CellContext = { view, nowMs, paused: ui.paused, terms }
   const range = closedRangeOf(view, ui)
   const freshness = openFreshness(view)
   const openTable = tableState(view.sync.sections.open, view.sync, ui.paused)
 
   const { mine: mineFilters, others: othersFilters, closed: closedFilters } = ui.filters
 
-  sectionChrome('mine', frame, countText('mine', view, range), actions)
-  renderBanner(frame)
+  renderBanner(frame, terms)
   const mineCols = mineColumns(settings.showAgentColumn)
   const mine = arrange<MineRow>({
     table: 'mine',
     groups: view.mine.groups,
-    match: matchesMine(mineFilters),
+    match: (row) => matchesMine(mineFilters)(row) && page(row),
     ...sortOf('mine', mineCols, ui),
     grouped: ui.grouped.mine,
-    filtered: isFiltered('mine', ui.filters),
+    filtered: isFiltered('mine', ui.filters) || searching,
     openGroups: ui.openGroups,
     attention: openAttention,
   })
+  const minePage = searching ? view.mine.groups.flatMap((group) => group.rows).filter(page).length : null
+  sectionChrome('mine', frame, searching ? searchCount(mine, minePage ?? 0) : countText('mine', view, range), actions)
   filterBar('mine', ui, mine, [
     { field: 'status', label: 'Filter Mine by status group', value: mineFilters.status, options: statusOptions(view.mine.groups) },
     { field: 'issues', label: 'Filter Mine by issue', value: mineFilters.issues, options: mineIssueOptions },
@@ -316,7 +335,7 @@ export const render = (frame: Frame, actions: Actions): void => {
     groups: mine.groups,
     ctx,
     state: openTable,
-    emptyText: emptyText(mine, 'You have no open PRs.'),
+    emptyText: emptyMessage(mine.total, mine.matched, minePage, 'You have no open PRs.'),
     numberOf: (row) => row.number,
     rowClass: (row) => row.group === 'changesRequested' ? 'row row-changes' : 'row',
     freshnessOf: freshness,
@@ -325,18 +344,19 @@ export const render = (frame: Frame, actions: Actions): void => {
     onSort: (key) => actions.sortBy('mine', key),
   })
 
-  sectionChrome('others', frame, countText('others', view, range), actions)
   const othersCols = othersColumns(settings.showAgentColumn)
   const others = arrange<OtherRow>({
     table: 'others',
     groups: view.others.groups,
-    match: matchesOthers(othersFilters),
+    match: (row) => matchesOthers(othersFilters)(row) && page(row),
     ...sortOf('others', othersCols, ui),
     grouped: ui.grouped.others,
-    filtered: isFiltered('others', ui.filters),
+    filtered: isFiltered('others', ui.filters) || searching,
     openGroups: ui.openGroups,
     attention: openAttention,
   })
+  const othersPage = searching ? view.others.groups.flatMap((group) => group.rows).filter(page).length : null
+  sectionChrome('others', frame, searching ? searchCount(others, othersPage ?? 0) : countText('others', view, range), actions)
   filterBar('others', ui, others, [
     { field: 'status', label: 'Filter Others\' by status group', value: othersFilters.status, options: statusOptions(view.others.groups) },
     { field: 'author', label: 'Filter Others\' by author', value: othersFilters.author, options: authorOptions(view.others.groups.flatMap((group) => group.rows), othersFilters.author) },
@@ -349,7 +369,7 @@ export const render = (frame: Frame, actions: Actions): void => {
     groups: others.groups,
     ctx,
     state: openTable,
-    emptyText: emptyText(others, 'No open PRs from anyone else.'),
+    emptyText: emptyMessage(others.total, others.matched, othersPage, 'No open PRs from anyone else.'),
     numberOf: (row) => row.number,
     rowClass: () => 'row',
     freshnessOf: freshness,
@@ -360,18 +380,19 @@ export const render = (frame: Frame, actions: Actions): void => {
     onSort: (key) => actions.sortBy('others', key),
   })
 
-  sectionChrome('closed', frame, closedSummary(range), actions)
   renderRange(frame, actions)
   const closedCols = closedColumns(range)
   const closed = arrange<ClosedRow>({
     table: 'closed',
     groups: [{ key: 'all', label: range.label, sub: '', collapsible: false, rows: range.rows }],
-    match: matchesClosed(closedFilters),
+    match: (row) => matchesClosed(closedFilters)(row) && page(row),
     ...sortOf('closed', closedCols, ui),
     grouped: false,
-    filtered: isFiltered('closed', ui.filters),
+    filtered: isFiltered('closed', ui.filters) || searching,
     openGroups: ui.openGroups,
   })
+  const closedPage = searching ? range.rows.filter(page).length : null
+  sectionChrome('closed', frame, searching ? searchCount(closed, closedPage ?? 0) : closedSummary(range), actions)
   filterBar('closed', ui, closed, [
     { field: 'author', label: 'Filter Closed by author', value: closedFilters.author, options: authorOptions(range.rows, closedFilters.author) },
     { field: 'outcome', label: 'Filter Closed by outcome', value: closedFilters.outcome, options: outcomeOptions },
@@ -382,7 +403,7 @@ export const render = (frame: Frame, actions: Actions): void => {
     groups: closed.groups,
     ctx,
     state: tableState(view.sync.sections.closed, view.sync, ui.paused),
-    emptyText: emptyText(closed, ui.closedRange === 'today' ? 'Nothing merged or closed yet today.' : 'Nothing merged or closed in this range.'),
+    emptyText: emptyMessage(closed.total, closed.matched, closedPage, ui.closedRange === 'today' ? 'Nothing merged or closed yet today.' : 'Nothing merged or closed in this range.'),
     numberOf: (row) => row.number,
     rowClass: () => 'row',
     freshnessOf: () => null,

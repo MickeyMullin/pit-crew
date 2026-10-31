@@ -8,14 +8,15 @@ import { tickTimers, updateAgentCells } from './agentcell.ts'
 import { byId, setText } from './dom.ts'
 import { createDrawer } from './drawer.ts'
 import { escapeApplies } from './drawerview.ts'
-import { clearFilters, cycleSort, initialControls, pressTile, setClosedRange, setFilter, setGrouped } from './filters.ts'
+import { clearFilters, cycleSort, initialControls, pressTile, setClosedRange, setFilter, setGrouped, setPageSearch, toggleSection } from './filters.ts'
 import type { ClosedRangeKey, Controls, Filters } from './filters.ts'
 import { createHoverCard } from './hovercard.ts'
 import { createIdleTracker } from './idle.ts'
 import { loadInstance, showInstance } from './instance.ts'
 import { createLive } from './live.ts'
+import { shownCounts, slashApplies } from './pagesearch.ts'
 import { createReportPanel } from './reportpanel.ts'
-import { render } from './render.ts'
+import { closedRangeOf, render } from './render.ts'
 import type { Settings, UiState } from './render.ts'
 import { readToken } from './runapi.ts'
 import { emptyFeed, findOpenRow, openRows, receivePatch, receiveView, restartFeed } from './state.ts'
@@ -56,7 +57,7 @@ let feed = emptyFeed()
 let skewMs = 0
 // the shipped defaults until the config loads
 let settings: Settings = { density: 'comfortable', showAgentColumn: false, idleMinutes: 90 }
-// filters, sort, grouping and the active tile are kept in memory only: a reload starts clean
+// filters, the page search, sort, grouping, and the active tile are kept in memory only: a reload starts clean
 const ui: UiState = {
   ...initialControls(),
   openGroups: new Set(),
@@ -214,10 +215,13 @@ const actions = {
   },
   clear: (table: TableKey): void => update(clearFilters(ui, table)),
   sortBy: (table: TableKey, key: string): void => update(cycleSort(ui, table, key)),
-  toggleSection: (table: TableKey): void => {
-    ui.expanded[table] = !ui.expanded[table]
-    draw()
+  // the page search follows the view it was typed against, so sections open for what it finds now
+  setPageSearch: (query: string): void => {
+    const view = feed.view
+    const counts = view === null ? { mine: 0, others: 0, closed: 0 } : shownCounts(view, closedRangeOf(view, ui), ui.filters, query)
+    update(setPageSearch(ui, query, counts))
   },
+  toggleSection: (table: TableKey): void => update(toggleSection(ui, table)),
   toggleGroup: (table: TableKey, key: string): void => {
     const id = `${table}:${key}`
     if (ui.openGroups.has(id)) ui.openGroups.delete(id)
@@ -309,6 +313,36 @@ const idleTracker = createIdleTracker({
 for (const name of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'scroll', 'touchstart', 'focus']) {
   window.addEventListener(name, idleTracker.activity, { capture: true, passive: true })
 }
+
+// the header's page search: typing filters at once; Escape or the clear button empties it, and "/" brings the cursor there from anywhere no field has focus
+const pageSearch = byId<HTMLInputElement>('page-search')
+pageSearch.addEventListener('input', () => actions.setPageSearch(pageSearch.value))
+pageSearch.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || pageSearch.value === '') return
+  actions.setPageSearch('')
+  event.preventDefault()
+})
+byId('page-search-clear').addEventListener('click', () => {
+  actions.setPageSearch('')
+  // the button hides itself, so focus goes back to the field
+  pageSearch.focus()
+})
+document.addEventListener('keydown', (event) => {
+  if (event.defaultPrevented) return
+  const target = event.target instanceof Element ? event.target : null
+  const applies = slashApplies({
+    key: event.key,
+    tag: target?.tagName ?? '',
+    editable: target instanceof HTMLElement && target.isContentEditable,
+    ctrl: event.ctrlKey,
+    meta: event.metaKey,
+    alt: event.altKey,
+  })
+  if (!applies) return
+  event.preventDefault()
+  pageSearch.focus()
+  pageSearch.select()
+})
 
 byId('refresh').addEventListener('click', () => {
   void fetch('/api/refresh', { method: 'POST' }).catch(() => {})

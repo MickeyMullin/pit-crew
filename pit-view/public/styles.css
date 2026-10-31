@@ -368,6 +368,78 @@ button {
   font-weight: 500;
 }
 
+/* the header's page search: one field over all three tables; the browser's own clear button is hidden for ours, which works in every browser */
+.page-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 1 240px;
+  min-width: 140px;
+}
+
+.page-search-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 30px 0 10px;
+  border: 1px solid var(--line-control);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 400 13px var(--font-ui);
+}
+
+.page-search-input::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+.page-search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.page-search-clear {
+  position: absolute;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.page-search-clear[hidden] {
+  display: none;
+}
+
+.page-search-clear:hover {
+  color: var(--ink);
+}
+
+/* a page-search match; the weight and edge keep it from resting on color alone */
+.search-hit {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: var(--amber-bg);
+  box-shadow: 0 0 0 1px var(--amber-edge);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* a match in a field the row does not show, beside the title */
+.search-hits {
+  display: inline-flex;
+  flex: none;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .sync-status {
   color: var(--muted);
   font-size: 12px;
@@ -2203,6 +2275,11 @@ button.agent:hover {
 
   .site-header .spacer {
     display: none;
+  }
+
+  /* the field takes a line of its own when the header wraps */
+  .page-search {
+    flex: 1 1 100%;
   }
 
   .offline-badge {
