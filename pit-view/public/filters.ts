@@ -296,7 +296,7 @@ export const tilePresets: Record<TileKey, Preset> = {
   closedToday: { target: 'closed', apply: (f) => f, range: 'today' },
 }
 
-// a tile clears every filter, the page search included, opens its section alone and applies its preset; pressing the active tile again clears every filter and reopens all three sections
+// a tile clears every filter, the page search included, opens its section alone, and applies its preset; pressing the active tile again clears every filter and reopens all three sections
 export const pressTile = (controls: Controls, tile: TileKey): Controls => {
   if (controls.tile === tile) return { ...controls, tile: null, filters: noFilters(), pageSearch: '', searchOpened: [], searchTouched: [], expanded: allOpen() }
   const preset = tilePresets[tile]

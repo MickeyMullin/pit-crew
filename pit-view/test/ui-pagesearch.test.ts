@@ -99,6 +99,14 @@ test('hidden hits name the branch, the login the alias hides, and tickets that n
   assert.deepEqual(hiddenHits([], row, { tickets: true, alias: true }), [])
 })
 
+test('matching and highlighting agree on context-sensitive lowercase', () => {
+  const title = 'ΟΣ cache'
+  const terms = searchTerms(title)
+  const row = { number: 1, title, author: { alias: 'Sam', login: 'sam' }, headRef: 'x', tickets: [] }
+  assert.equal(matchesPage(terms)(row), true)
+  assert.equal(splitMatches(title, terms).some((piece) => piece.hit), true)
+})
+
 test('splitMatches marks every term occurrence and merges overlaps', () => {
   assert.deepEqual(splitMatches('Fix the Orbit cache', []), [{ text: 'Fix the Orbit cache', hit: false }])
   assert.deepEqual(splitMatches('Fix the Orbit cache', ['orbit']), [

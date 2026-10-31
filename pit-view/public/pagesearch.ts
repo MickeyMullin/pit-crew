@@ -17,15 +17,18 @@ export type Searchable = {
   tickets: readonly Ticket[]
 }
 
+// lowercase one character at a time, the way highlighting does, so matching and highlighting agree on context-sensitive letters
+export const foldCase = (text: string): string => Array.from(text, (char) => char.toLowerCase()).join('')
+
 // lowercase words; each loses a leading hash mark, so a PR number typed with one still finds it
 export const searchTerms = (query: string): string[] =>
-  query.toLowerCase().split(/\s+/).map((word) => word.replace(/^#/, '')).filter((word) => word !== '')
+  foldCase(query).split(/\s+/).map((word) => word.replace(/^#/, '')).filter((word) => word !== '')
 
 // every word must appear in some field
 export const matchesPage = (terms: readonly string[]) => (row: Searchable): boolean => {
   if (terms.length === 0) return true
   const fields = [String(row.number), row.title, row.author.alias, row.author.login, row.headRef, ...row.tickets.map((ticket) => ticket.label)]
-    .map((field) => field.toLowerCase())
+    .map(foldCase)
   return terms.every((term) => fields.some((field) => field.includes(term)))
 }
 
