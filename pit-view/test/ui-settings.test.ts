@@ -3,6 +3,7 @@
 // back, the checks before saving, the server's refusals placed on fields, people suggestions and
 // colors, and ticket samples checked against the dashboard's own derivation
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
 import { ConfigError, defaultConfig, idleRange, validateConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
@@ -394,4 +395,35 @@ test('notifications round-trip: absent stays absent until the form leaves its de
   assert.equal(isDirty(formOf(off), off), false)
   // the server accepts what the page sends
   assert.deepEqual(validateConfig(toConfig(form, config)).notifications, { enabled: true, kinds: ['readyToMerge', 'ciFailing'] })
+})
+
+// the Settings page's card layout, read from public/settings.html: which fields sit in which card, in what order, under which labels
+const settingsHtml = async (): Promise<string> => readFile(new URL('../public/settings.html', import.meta.url), 'utf8')
+
+const cardOf = (html: string, id: string): string => {
+  const start = html.indexOf(`<section id="${id}"`)
+  assert.notEqual(start, -1, `the ${id} card exists`)
+  return html.slice(start, html.indexOf('</section>', start))
+}
+
+const fieldsIn = (card: string): string[] => [...card.matchAll(/id="f-([A-Za-z]+)"/g)].map((match) => match[1] as string).filter((name, at, all) => all.indexOf(name) === at)
+
+test('the Agent card holds the Agent column switch, then Concurrent reviews, then Self-review over limit, and none of them stays in Behavior', async () => {
+  const html = await settingsHtml()
+  const agent = cardOf(html, 'agent')
+  assert.match(agent, /<h2 id="agent-heading" class="card-title">Agent<\/h2>/)
+  assert.match(agent, /aria-labelledby="agent-heading"/)
+  assert.deepEqual(fieldsIn(agent), ['showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap'])
+  assert.match(agent, /Show the Agent column/)
+  assert.match(agent, /<label for="f-maxConcurrentReviews">Concurrent reviews<\/label>/)
+  assert.match(agent, /<span class="field-label">Self-review over limit<\/span>/)
+  const behavior = fieldsIn(cardOf(html, 'behavior'))
+  assert.deepEqual(behavior, ['refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density'])
+})
+
+test('the Agent card sits right after Behavior and before Notifications, and no old label survives anywhere on the page', async () => {
+  const html = await settingsHtml()
+  const order = ['repository', 'people', 'tickets', 'behavior', 'agent', 'notifications'].map((id) => html.indexOf(`<section id="${id}"`))
+  assert.ok(order.every((at, index) => at !== -1 && (index === 0 || at > (order[index - 1] as number))), order.join(','))
+  assert.doesNotMatch(html, /Reviews at once|Self-review over the limit/i)
 })
