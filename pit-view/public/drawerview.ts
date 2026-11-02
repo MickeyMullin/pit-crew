@@ -409,7 +409,15 @@ export type ResultModel = {
   stale: string | null
   // set when the owner's re-read replaced this run's recorded outcome, and why it had one
   byHand: string | null
+  // set when the run's ask is "Clean · mark ready?" and the drawer offers Mark ready for review: says where the action is, and does nothing itself
+  ready: string | null
 }
+
+// the quiet line that points the "Clean · mark ready?" ask at the Actions section; null unless the done text is that ask and Mark ready for review is offered now, which already means the viewer's own open draft
+export const readyPointer = (text: string | null, offers: readonly ActionOffer[]): string | null =>
+  text !== null && text.startsWith('Clean · mark ready?') && offers.some((offer) => offer.action === 'markReady')
+    ? 'Mark it ready from the Actions section above: Mark ready for review.'
+    : null
 
 // how the original failure reads beside a result the owner finished by hand
 const byHandText = (note: string | null): string => {
@@ -419,7 +427,7 @@ const byHandText = (note: string | null): string => {
   return note.startsWith('permissionDenied') ? `Finished by hand after a denied tool call (${note.slice(note.indexOf(':') + 1).trim() || 'unnamed'}): ${reread}` : `Finished by hand after an earlier failure (${was.replace(/\.$/, '')}): ${reread}`
 }
 
-export const resultModel = (cell: AgentCell, number: number, headOid: string): ResultModel => ({
+export const resultModel = (cell: AgentCell, number: number, headOid: string, offers: readonly ActionOffer[]): ResultModel => ({
   text: cell.text ?? 'Done',
   tone: doneTone({ status: cell.status, text: cell.text }),
   runnerLabel: cell.runner === null ? 'its runner' : runnerLabels[cell.runner],
@@ -436,6 +444,7 @@ export const resultModel = (cell: AgentCell, number: number, headOid: string): R
     ? 'The head has moved since this run, so it covers an earlier commit.'
     : 'The head has moved since this run, so it covers an earlier commit. Start a new review for the current one.',
   byHand: cell.resolvedByHand && cell.status === 'done' ? byHandText(cell.note) : null,
+  ready: readyPointer(cell.text, offers),
 })
 
 // which card the latest run gets
@@ -618,7 +627,7 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
     rereadAsk: cell !== null && confirm?.type === 'reread' && (card === 'result' || card === 'waiting') && rereadOffer(cell, input.open, row.number)?.disabled === false ? rereadAskModel(row, cell, confirm) : null,
     stopsEnabled: input.open || input.runs.state === 'ready',
     waiting: cell !== null && card === 'waiting' ? waitingModel(cell, row.number) : null,
-    result: cell !== null && card === 'result' ? resultModel(cell, row.number, row.headOid) : null,
+    result: cell !== null && card === 'result' ? resultModel(cell, row.number, row.headOid, actionOffers(row, input.open)) : null,
     runs: {
       state: runs.state,
       message: runs.state === 'error' ? runs.message : null,
