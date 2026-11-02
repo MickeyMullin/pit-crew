@@ -784,6 +784,16 @@ button {
   font-weight: 700;
 }
 
+/* the sections' disclosure at the group header's size; the label inside keeps its tone */
+.group-bar .disclosure {
+  gap: 6px;
+  font-size: 14px;
+}
+
+.group-bar .disclosure .group-label {
+  font-size: inherit;
+}
+
 .group-count,
 .group-sub {
   color: var(--muted);
