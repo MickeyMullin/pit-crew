@@ -1438,7 +1438,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   let attempts = 0
   // queued reviews taken out of the queue whose launch has not returned yet; none behind them starts until it has, so they spawn in the order they were queued
   let opening = 0
-  // reviews failed here whose row could not be written and still reads queued, each as it was failed, for whoever awaits it; the next server start fails the row
+  // runs that ended here whose ending could not be written, each as it ended, for whoever awaits it; the row still reads queued or running until a Stop records it or the next server start settles it
   const unrecorded = new Map<number, T>()
   let closed = false
 
@@ -1611,13 +1611,34 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     waiters.delete(id)
   }
 
+  // a run's ending written to its row, the write tried twice since the database may refuse it, and whoever awaits the run given the ending either way. When both tries fail the run still ends here: it is given as ended to whoever awaits it, its caller releases its slot and its place in the queue, and its row keeps reading as it did (queued or running) until a Stop records it or the next server start settles it
+  const end = (run: T, changes: RunChanges, what: string): T => {
+    const write = (): T | null => {
+      try {
+        return store.update(run.id, changes)
+      } catch (failure) {
+        log(`${noun} ${run.id}: cannot record that it ${what}: ${messageOf(failure)}`)
+        return null
+      }
+    }
+    const recorded = write() ?? write()
+    if (recorded === null) {
+      const ended = { ...run, ...changes } as T
+      unrecorded.set(run.id, ended)
+      log(`${noun} ${run.id}: ${what}, but its row stays ${run.status} until a Stop records it or the server restarts`)
+      wake(run.id, ended)
+      return ended
+    }
+    unrecorded.delete(run.id)
+    changed(recorded)
+    wake(run.id, recorded)
+    return recorded
+  }
+
   // a queued review that will never start is recorded as failed to start, with the reason
-  const failQueued = (id: number, note: string): void => {
-    const run = store.update(id, { status: 'failed', finishedAt: now(), note })
-    unrecorded.delete(id)
-    log(`${noun} ${id}: queued, not started: ${note}`)
-    changed(run)
-    wake(id, run)
+  const failQueued = (run: T, note: string): void => {
+    log(`${noun} ${run.id}: queued, not started: ${note}`)
+    end(run, { status: 'failed', finishedAt: now(), note }, 'failed in the queue')
   }
 
   // takes a review out of the queue, and releases the slot an attempt to start it held
@@ -1631,22 +1652,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   // a queued review that will never start, never to be tried again: its row is recorded as failed before it leaves the queue and its slot is released, so the row, the queue, the slot, and its waiters change together. A record that fails twice, the database unwritable, leaves the row queued for the next server start to fail as serverRestarted, while the review still leaves the queue here and whoever awaits it is given it as failed
   const failInQueue = (item: Queued, note: string): void => {
-    const record = (): boolean => {
-      try {
-        failQueued(item.id, note)
-        return true
-      } catch (failure) {
-        log(`${noun} ${item.id}: cannot record that it failed in the queue: ${messageOf(failure)}`)
-        return false
-      }
-    }
-    const recorded = record() || record()
+    failQueued(item.run, note)
     dequeue(item)
-    if (recorded) return
-    const run = { ...item.run, status: 'failed', finishedAt: now(), note } as T
-    unrecorded.set(item.id, run)
-    log(`${noun} ${item.id}: taken out of the queue as ${note}, but its row stays queued until the server restarts`)
-    wake(item.id, run)
   }
 
   // gives a slot to every queued review that fits now, earliest first, each then making its checks in the background, still in the queue; and launches each whose checks have passed once no review ahead of it is still making its checks or being launched, so they start in the order they were queued
@@ -1795,10 +1802,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     live.delete(entry.id)
     if (entry.stdinOpen && entry.child?.stdin != null) entry.child.stdin.end()
     entry.stdinOpen = false
-    const run = store.update(entry.id, { ...judgement, finishedAt: now() })
+    // the process has ended, so the run ends here even when the database refuses the write: whoever awaits it is woken and its slot is freed
+    const run = end((started ?? { id: entry.id }) as unknown as T, { ...judgement, finishedAt: now() }, `settled as ${judgement.status}`)
     log(`${noun} ${run.id} (${run.command} ${run.args.join(' ')}) ${run.status}${run.note === null ? '' : `: ${run.note}`}`)
-    changed(run)
-    wake(run.id, run)
     // a review that ended, however it ended, frees its slot for the next in line
     if (entry.slot !== null) admit()
     return run
@@ -1859,7 +1865,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   // a pruned run's folder goes with its row, and nothing outside the runs folder is ever removed
   const prune = async (): Promise<void> => {
-    const pruned = store.prune()
+    let pruned: T[]
+    try {
+      pruned = store.prune()
+    } catch (error) {
+      // a prune the database refuses is tried again after the next start; the start itself stands
+      log(`cannot prune old ${store.folder}: ${messageOf(error)}`)
+      return
+    }
     if (pruned.length > 0 && !closed) options.onPruned?.(pruned)
     for (const gone of pruned) {
       const dir = resolve(expandHome(gone.dir, home))
@@ -1947,32 +1960,48 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         ? `permissionDenied: ${tildePath(error.dir, home)} cannot be written: ${messageOf(error.reason)}`
         : `spawnFailed: ${messageOf(error)}`
       launching.delete(run.id)
-      run = store.update(run.id, { status: 'failed', finishedAt: now(), note })
       log(`${noun} ${run.id}: cannot start: ${note}`)
-      changed(run)
-      // a queued review someone awaits ends here
-      wake(run.id, run)
+      // a queued review someone awaits ends here, and so does a start whose failure the database refuses to record
+      run = end(run, { status: 'failed', finishedAt: now(), note }, 'failed to start')
       await prune()
       return run
     }
-    // from here the process exists, so nothing below may fail the run
-    if (stdin !== null) child.stdin?.write(stdin)
-    const pidStartedAt = child.pid === null ? null : await procs.startTime(child.pid).catch(() => null)
-    run = store.update(run.id, {
-      pid: child.pid,
-      pidStartedAt,
-      resume: sessionId === null ? null : resumeFor(run, sessionId, spec),
-    })
-    await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid: child.pid, pidStartedAt }, null, 2)}\n`)
-      .catch((error: unknown) => log(`${noun} ${run.id}: cannot update request.json: ${messageOf(error)}`))
+    // from here the process exists: nothing is awaited and nothing may throw until it is watched, so it is never left running unwatched, uncounted, or out of Stop's reach
+    const pid = child.pid
+    if (stdin !== null) {
+      try {
+        child.stdin?.write(stdin)
+      } catch (error) {
+        log(`${noun} ${run.id}: cannot write its request to stdin: ${messageOf(error)}`)
+      }
+    }
+    const resume = sessionId === null ? null : resumeFor(run, sessionId, spec)
+    try {
+      // Codex's resume command is written once its session id is read from the stream, so it is left out here
+      run = store.update(run.id, { pid, ...(resume === null ? {} : { resume }) })
+    } catch (error) {
+      // the row keeps no pid, but the watch below has it, so Stop still signals the process and its end still settles it
+      log(`${noun} ${run.id}: cannot record its pid ${pid ?? 'unknown'}: ${messageOf(error)}`)
+      run = { ...run, pid, resume } as T
+    }
     watchRun(run, dir, child, stdin !== null && child.stdin !== null, spec, admitted?.slot ?? null)
     // the watched run holds its slot from here, so the attempt's is released at once and the slot never counts twice
     if (admitted !== null) admitting.delete(admitted.attempt)
     const stopAsked = launching.get(run.id) === true
     launching.delete(run.id)
-    log(`${noun} ${run.id} started: ${run.runner} ${run.command} ${run.args.join(' ')} in ${run.cwd}`)
-    changed(run)
     if (stopAsked) stop(run.id)
+    // the start time, which a restart needs to tell this process from one that reused its pid, comes after the watch, since reading it is awaited
+    const pidStartedAt = pid === null ? null : await procs.startTime(pid).catch(() => null)
+    try {
+      run = store.update(run.id, { pidStartedAt })
+    } catch (error) {
+      log(`${noun} ${run.id}: cannot record its start time: ${messageOf(error)}`)
+    }
+    await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid, pidStartedAt }, null, 2)}\n`)
+      .catch((error: unknown) => log(`${noun} ${run.id}: cannot update request.json: ${messageOf(error)}`))
+    log(`${noun} ${run.id} started: ${run.runner} ${run.command} ${run.args.join(' ')} in ${run.cwd}`)
+    // a run that settled while its start time was read was announced by its settle, which this older row must not follow
+    if (live.has(run.id)) changed(run)
     await prune()
     return store.get(run.id) ?? run
   }
@@ -2048,10 +2077,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (run === null) throw new LaunchError('unknownRun', `${noun} ${id} does not exist`)
     // a queued review leaves the queue at once: nothing has started, so there is nothing to signal
     if (run.status === 'queued') {
+      // recorded before it leaves the queue, so a write the database refuses throws with the review still queued in its place, as if the Stop had not been asked
+      const stopped = store.update(id, { status: 'stopped', finishedAt: now() })
       const item = queue.find((entry) => entry.id === id)
       // an attempt to start it whose checks still run ends here, and the slot it held goes to the next in line
       if (item !== undefined) dequeue(item)
-      const stopped = store.update(id, { status: 'stopped', finishedAt: now() })
       unrecorded.delete(id)
       log(`${noun} ${id}: taken out of the queue`)
       changed(stopped)
@@ -2067,8 +2097,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
     const entry = live.get(id)
     if (entry === undefined) {
-      // nothing watches it: a run recorded as running with no process behind it
+      // nothing watches it: a run recorded as running with no process behind it, or one that ended here without its ending recorded
       const stopped = store.update(id, { status: 'stopped', finishedAt: now() })
+      unrecorded.delete(id)
       changed(stopped)
       return stopped
     }
@@ -2096,7 +2127,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     // a start of the server makes no GitHub call and starts no process, so a review still queued when it stopped is not started now
     for (const run of store.queued()) {
       if (queue.some((item) => item.id === run.id)) continue
-      failQueued(run.id, 'serverRestarted: it was still queued, so it never started')
+      // a failure the database refuses to record never keeps the live runs below from being watched again
+      failQueued(run, 'serverRestarted: it was still queued, so it never started')
     }
     for (const run of store.running()) {
       if (live.has(run.id)) continue

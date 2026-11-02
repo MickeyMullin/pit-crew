@@ -1119,21 +1119,22 @@ test('a slot is released however a review ends: failed, stopped, waiting for an 
 
 test('a stop asked while a run is still being launched signals it once it is watched, so no process is left holding a slot', async () => {
   const launch = fakeLaunch()
-  // the launch waits on the process's start time until the test lets it go
+  // the launch waits on its run folder until the test lets it go
   let release: () => void = () => {}
   const held = new Promise<void>((resolveHeld) => {
     release = resolveHeld
   })
-  const startTime = launch.deps.procs.startTime
-  launch.deps.procs = { ...launch.deps.procs, startTime: async (pid) => held.then(() => startTime(pid)) }
+  const mkdirRun = launch.deps.fs.mkdir
+  launch.deps.fs = { ...launch.deps.fs, mkdir: async (path) => held.then(() => mkdirRun(path)) }
   const h = await harness({ launch, config: { maxConcurrentReviews: 1 } })
   try {
     const starting = h.launcher.start(request(106))
-    await waitFor(() => h.launch.children.length === 1)
+    await waitFor(() => h.watched.length === 1)
     const id = h.watched[0]!
     const queued = await h.launcher.start(request(113, { label: 'Review' }))
     assert.equal(queued.status, 'queued')
-    // the run has its row and its process, but nothing watches it yet
+    // the run has its row, but no process yet, so nothing watches it
+    assert.equal(h.launch.children.length, 0)
     assert.equal(h.launcher.stop(id).status, 'running')
     const settled = h.launcher.settled(id)
     release()
@@ -1692,6 +1693,239 @@ test('a queued review whose row cannot be marked running fails with the error an
   }
 })
 
+// the writes a launch makes once its process exists: the pid, its start time, and the resume command
+const pidWrite = (changes: RunChanges): boolean => 'pid' in changes || 'pidStartedAt' in changes
+
+// a run's request.json as the launcher wrote it
+const requestFile = async (h: Awaited<ReturnType<typeof harness>>, id: number): Promise<{ pid: unknown, pidStartedAt: unknown }> =>
+  JSON.parse(await readFile(join(h.stateDir, 'runs', String(id), 'request.json'), 'utf8')) as { pid: unknown, pidStartedAt: unknown }
+
+test('a start whose pid cannot be written after its spawn is still watched, counted under the cap, and stoppable, and its end settles it', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  let unwritable = true
+  const launcher = failingWrites(h, (_id, changes) => unwritable && pidWrite(changes))
+  try {
+    const run = await within(launcher.start(request(106)))
+    unwritable = false
+    assert.equal(run.status, 'running')
+    assert.equal(h.launch.children.length, 1)
+    const pid = h.launch.children[0]!.pid
+    // the row has no pid, while request.json has it for a restart to find
+    assert.equal(h.cache.getRun(run.id)?.pid, null)
+    assert.equal((await requestFile(h, run.id)).pid, pid)
+    // it holds the one slot: the next review queues
+    const next = await launcher.start(request(113, { label: 'Review' }))
+    assert.equal(next.status, 'queued')
+    assert.equal(h.launch.children.length, 1)
+    // Stop signals its process group from memory, and its end settles it for whoever awaits it
+    const settled = launcher.settled(run.id)
+    launcher.stop(run.id)
+    assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }])
+    assert.equal((await within(settled)).status, 'stopped')
+    assert.equal(h.cache.getRun(run.id)?.status, 'stopped')
+    // and its slot goes to the next in line
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(next.id)?.status, 'running')
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a queued review whose pid cannot be written after its spawn keeps its slot until its process ends, so no later review starts over the cap', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  let unwritable = 0
+  const launcher = failingWrites(h, (id, changes) => id === unwritable && pidWrite(changes))
+  try {
+    const running = await launcher.start(request(106))
+    const broken = await launcher.start(request(113, { label: 'Review' }))
+    const next = await launcher.start(request(118, { label: 'Review' }))
+    unwritable = broken.id
+    h.launch.children[0]!.exit(1)
+    await launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length >= 2)
+    await quiet()
+    // the one spawned is watched and counted, so the next in line waits
+    assert.equal(h.cache.getRun(broken.id)?.status, 'running')
+    assert.equal(h.cache.getRun(next.id)?.status, 'queued')
+    assert.equal(h.launch.children.length, 2)
+    // its end settles it from its files, wakes whoever awaits it, and hands the slot on
+    const settled = launcher.settled(broken.id)
+    h.launch.children[1]!.exit(1)
+    const ended = await within(settled)
+    assert.equal(ended.status, 'failed')
+    assert.equal(noteKind(ended.note), 'noResult')
+    await waitFor(() => h.launch.children.length === 3)
+    assert.deepEqual(startOrder(h), [106, 113, 118])
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a start that fails before its spawn and cannot record the failure is still given to whoever awaits it as failed, never as the running row', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  let unwritable = true
+  const launcher = failingWrites(h, (_id, changes) => unwritable && changes.status === 'failed')
+  try {
+    h.launch.spawnError = new Error('spawn claude ENOENT')
+    const run = await within(launcher.start(request(106)))
+    h.launch.spawnError = null
+    unwritable = false
+    assert.equal(run.status, 'failed')
+    assert.equal(run.note, 'spawnFailed: spawn claude ENOENT')
+    // the row could not be written, so it still reads running, while every wait for the run is given its failure
+    assert.equal(h.cache.getRun(run.id)?.status, 'running')
+    const settled = await within(launcher.settled(run.id))
+    assert.equal(settled.status, 'failed')
+    assert.equal(settled.note, 'spawnFailed: spawn claude ENOENT')
+    // it holds no slot: another review starts at once
+    assert.equal((await launcher.start(request(113, { label: 'Review' }))).status, 'running')
+    // the next server start settles the row, since no process stands behind it
+    launcher.close()
+    const restarted = h.make()
+    await restarted.recover()
+    restarted.close()
+    assert.equal(noteKind(h.cache.getRun(run.id)?.note ?? null), 'serverRestarted')
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a queued review whose launch fails before its spawn and cannot record the failure still wakes whoever awaits it, and the queue moves on', async () => {
+  // the run folder of the review the test names cannot be made
+  let blocked = ''
+  const launch = fakeLaunch({
+    fs: {
+      mkdir: async (path) => {
+        if (blocked !== '' && path.endsWith(blocked)) throw new Error('EACCES: permission denied')
+        await mkdir(path, { recursive: true })
+      },
+    },
+  })
+  const h = await harness({ launch, config: { maxConcurrentReviews: 1 } })
+  let unwritable = 0
+  const launcher = failingWrites(h, (id, changes) => id === unwritable && changes.status === 'failed')
+  try {
+    const running = await launcher.start(request(106))
+    const broken = await launcher.start(request(113, { label: 'Review' }))
+    const next = await launcher.start(request(118, { label: 'Review' }))
+    unwritable = broken.id
+    blocked = join('runs', String(broken.id))
+    const settled = launcher.settled(broken.id)
+    h.launch.children[0]!.exit(1)
+    await launcher.settled(running.id)
+    const failed = await within(settled)
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.note, 'spawnFailed: EACCES: permission denied')
+    assert.equal((await within(launcher.settled(broken.id))).status, 'failed')
+    // its row was marked running as it left the queue and stays so; the next in line starts
+    assert.equal(h.cache.getRun(broken.id)?.status, 'running')
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(next.id)?.status, 'running')
+    assert.deepEqual(startOrder(h), [106, 118])
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a review whose end cannot be recorded still settles for whoever awaits it and frees its slot, its row left running for a restart to settle', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  let unwritable = 0
+  const launcher = failingWrites(h, (id, changes) => id === unwritable && changes.finishedAt !== undefined)
+  try {
+    const running = await launcher.start(request(106))
+    const next = await launcher.start(request(113, { label: 'Review' }))
+    unwritable = running.id
+    const settled = launcher.settled(running.id)
+    h.launch.children[0]!.exit(1)
+    const ended = await within(settled)
+    assert.equal(ended.status, 'failed')
+    assert.equal(noteKind(ended.note), 'noResult')
+    assert.equal((await within(launcher.settled(running.id))).status, 'failed')
+    // the row still reads running, and the slot is the next review's
+    assert.equal(h.cache.getRun(running.id)?.status, 'running')
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(next.id)?.status, 'running')
+    // a Stop records the row once the database takes the write
+    unwritable = 0
+    assert.equal(launcher.stop(running.id).status, 'stopped')
+    assert.equal(h.cache.getRun(running.id)?.status, 'stopped')
+    assert.equal((await within(launcher.settled(running.id))).status, 'stopped')
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a Stop of a queued review whose write is refused changes nothing: the review stays queued in its place and starts when a slot is free', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  let unwritable = 0
+  const launcher = failingWrites(h, (id, changes) => id === unwritable && changes.status === 'stopped')
+  try {
+    const running = await launcher.start(request(106))
+    const queued = await launcher.start(request(113, { label: 'Review' }))
+    unwritable = queued.id
+    assert.throws(() => launcher.stop(queued.id), /readonly database/)
+    assert.equal(h.cache.getRun(queued.id)?.status, 'queued')
+    h.launch.children[0]!.exit(1)
+    await launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(queued.id)?.status, 'running')
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a restart that cannot record a queued review\'s failure still watches every live run again, and gives the queued one as failed to whoever awaits it', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    const queued = await h.launcher.start(request(113, { label: 'Review' }))
+    h.launcher.close()
+    const restarted = failingWrites(h, (id, changes) => id === queued.id && changes.status === 'failed')
+    try {
+      await within(restarted.recover())
+      const failed = await within(restarted.settled(queued.id))
+      assert.equal(failed.status, 'failed')
+      assert.equal(noteKind(failed.note), 'serverRestarted')
+      assert.equal(h.cache.getRun(queued.id)?.status, 'queued')
+      // the live run is watched again, so Stop signals it
+      const settled = restarted.settled(running.id)
+      restarted.stop(running.id)
+      assert.deepEqual(h.launch.kills, [{ pid: -h.launch.children[0]!.pid, signal: 'SIGTERM' }])
+      // a run watched again has no child handle, so its end is found on the timer
+      h.time.advance(10 * second)
+      assert.equal((await within(settled)).status, 'stopped')
+    } finally {
+      restarted.close()
+    }
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a start whose pruning fails afterward still answers with its run', async () => {
+  const h = await harness()
+  const pruneRuns = h.cache.pruneRuns
+  h.cache.pruneRuns = () => {
+    throw new Error('attempt to write a readonly database')
+  }
+  const launcher = h.make()
+  h.cache.pruneRuns = pruneRuns
+  try {
+    const run = await within(launcher.start(request(106)))
+    assert.equal(run.status, 'running')
+    assert.equal(h.launch.children.length, 1)
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
 test('a queued review is classed as a self-review when it starts, from the cache then, not when it was queued', async () => {
   const h = await harness({ config: { maxConcurrentReviews: 1, selfReviewOverCap: true } })
   try {
@@ -1723,12 +1957,12 @@ test('a stop during a queued review\'s dequeue checks ends that attempt and free
   const login = { current: scenario.viewer as string }
   const launch = fakeLaunch()
   const starts = gate()
-  const startTime = launch.deps.procs.startTime
-  launch.deps.procs = {
-    ...launch.deps.procs,
-    startTime: async (pid) => {
+  const mkdirRun = launch.deps.fs.mkdir
+  launch.deps.fs = {
+    ...launch.deps.fs,
+    mkdir: async (path) => {
       await starts.wait()
-      return startTime(pid)
+      await mkdirRun(path)
     },
   }
   const h = await harness({ gh: gatedGh(accounts, login), launch })
@@ -1746,20 +1980,21 @@ test('a stop during a queued review\'s dequeue checks ends that attempt and free
     const stopped = h.launcher.stop(queued.id)
     assert.equal(stopped.status, 'stopped')
     assert.equal((await h.launcher.settled(queued.id)).status, 'stopped')
-    // a new run of the same PR starts and is held before it is watched
+    // a new run of the same PR starts and is held before its spawn
     starts.arm()
     const again = h.launcher.start(request(113, { label: 'Review' }))
     await waitFor(() => starts.held() === 1)
     // the stopped attempt's checks end late: they release nothing of the new run's
     accounts.open(0)
     await quiet()
-    assert.equal(h.launch.children.length, 3)
+    assert.equal(h.launch.children.length, 2)
     const other = await h.launcher.start(request(118, { label: 'Review' }))
     const beyond = await h.launcher.start(request(109, { label: 'Review' }))
     assert.deepEqual([other.status, beyond.status], ['running', 'queued'])
-    assert.equal(h.launch.children.length, 4)
+    assert.equal(h.launch.children.length, 3)
     starts.open(0)
     assert.equal((await again).status, 'running')
+    assert.equal(h.launch.children.length, 4)
   } finally {
     await h.cleanup()
   }
