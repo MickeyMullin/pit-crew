@@ -1623,6 +1623,16 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     item.attempt = null
   }
 
+  // an unexpected failure, such as a cache read that throws, fails the queued review with the error rather than leaving it in line to fail again, and a failure to record that still takes it out of the queue
+  const abandon = (item: Queued, error: unknown): void => {
+    dequeue(item)
+    try {
+      failQueued(item.id, `spawnFailed: ${messageOf(error)}`)
+    } catch (failure) {
+      log(`${noun} ${item.id}: taken out of the queue, but cannot record why: ${messageOf(failure)}`)
+    }
+  }
+
   // gives a slot to every queued review that fits now, earliest first; each then makes its checks in the background, still in the queue
   const admit = (): void => {
     if (closed) return
@@ -1636,8 +1646,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     for (const item of [...queue]) {
       // one whose checks are running already holds its slot
       if (item.attempt !== null) continue
-      // whether it is a self-review is read from the cache now, as it is about to start
-      const slot = store.slot(item.request, config)
+      let slot: ReviewSlot | null
+      try {
+        // whether it is a self-review is read from the cache now, as it is about to start
+        slot = store.slot(item.request, config)
+      } catch (error) {
+        abandon(item, error)
+        continue
+      }
       if (slot === null || !fitsInLine(item, slot, config)) continue
       const attempt = reserve(slot)
       item.attempt = attempt
@@ -1649,6 +1665,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const begin = async (item: Queued, attempt: number): Promise<void> => {
     // false once a Stop, a failure, or a lowered cap ended this attempt
     const ours = (): boolean => !closed && item.attempt === attempt && queue.includes(item)
+    // true once the launch has taken it out of the queue; until then a failure leaves it in line for this attempt to fail
+    let launched = false
     try {
       let cloneDir: string
       try {
@@ -1662,8 +1680,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         }
         return
       }
+      if (!ours()) return
       const run = store.get(item.id)
-      if (!ours() || run === null) return
+      if (run === null) throw new Error('its row is gone')
       // a config saved during the checks is the one admission reads, with nothing awaited between the reading and the slot held or given back
       const config = options.config()
       const why = unbound(item.request.repo, item.viewer, config)
@@ -1681,8 +1700,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       }
       admitting.set(attempt, slot)
       queue.splice(queue.indexOf(item), 1)
+      launched = true
       await launch(item.request, config, item.request.cwd ?? cloneDir, run, { slot, attempt, viewer: item.viewer })
+    } catch (error) {
+      // an unexpected failure after the checks fails the review, so it is never left in line holding an attempt nothing will finish, nor retried to fail again
+      if (!launched && ours()) abandon(item, error)
+      else log(`${noun} ${item.id}: cannot start from the queue: ${messageOf(error)}`)
     } finally {
+      if (item.attempt === attempt) item.attempt = null
       admitting.delete(attempt)
       // the queue is read again however the start went: one that ended at once hands its slot on, and a run that settled before its start returned was still counted here when it settled
       admit()

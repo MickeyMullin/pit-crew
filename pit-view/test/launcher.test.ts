@@ -1298,6 +1298,12 @@ const gatedGh = (accounts: ReturnType<typeof gate>, login: { current: string }):
 // long enough for a start the queue let go to reach its spawn, had it been let go
 const quiet = (): Promise<void> => new Promise((resolveWait) => setTimeout(resolveWait, 50))
 
+// what a promise settles to, failing the test if it has not settled within a short while
+const within = <V>(promise: Promise<V>, ms = 2000): Promise<V> => Promise.race([
+  promise,
+  new Promise<never>((_resolveLate, rejectLate) => setTimeout(() => rejectLate(new Error('timed out waiting for the queue')), ms)),
+])
+
 test('a queued review whose viewer changes during its dequeue checks fails and never starts, since it stays in the queue a save reads', async () => {
   const accounts = gate()
   const login = { current: scenario.viewer as string }
@@ -1458,6 +1464,74 @@ test('a queued review sent back by a lowered cap keeps its place: a slot freed w
     await quiet()
     assert.equal(h.cache.getRun(later.id)?.status, 'queued')
     assert.equal(h.launch.children.length, 2)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('an unexpected failure after a queued review\'s checks fails that review with the error, so it never stays queued, and the queue moves on', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    const broken = await h.launcher.start(request(113, { label: 'Review' }))
+    const next = await h.launcher.start(request(118, { label: 'Review' }))
+    // the running review ends and the first queued one's account check is held
+    accounts.arm()
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => accounts.held() === 1)
+    // the cache read that decides its fit throws once, after the checks
+    const readView = h.cache.readView
+    let failures = 1
+    h.cache.readView = (repo) => {
+      if (failures > 0) {
+        failures -= 1
+        throw new Error('database is locked')
+      }
+      return readView(repo)
+    }
+    const settled = h.launcher.settled(broken.id)
+    accounts.open(0)
+    const failed = await within(settled)
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.note, 'spawnFailed: database is locked')
+    // the next in line takes the slot, and the failed one is never tried again
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(next.id)?.status, 'running')
+    h.launcher.drain()
+    await quiet()
+    assert.equal(h.cache.getRun(broken.id)?.status, 'failed')
+    assert.equal(h.launch.children.length, 2)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('an unexpected failure while the queue is read fails only the review it was reading, and the next in line still starts', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    const broken = await h.launcher.start(request(113, { label: 'Review' }))
+    const next = await h.launcher.start(request(118, { label: 'Review' }))
+    // the cache read that decides the first queued review's fit throws once, as the queue is read
+    const readView = h.cache.readView
+    let failures = 1
+    h.cache.readView = (repo) => {
+      if (failures > 0) {
+        failures -= 1
+        throw new Error('database is locked')
+      }
+      return readView(repo)
+    }
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    const failed = await within(h.launcher.settled(broken.id))
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.note, 'spawnFailed: database is locked')
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(next.id)?.status, 'running')
   } finally {
     await h.cleanup()
   }
