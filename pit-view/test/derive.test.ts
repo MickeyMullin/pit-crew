@@ -862,7 +862,7 @@ test('last activity names a comment-only review and a comment is no change reque
   assert.deepEqual(deriveLastActivity(timeline, config), { at: '2026-10-26T10:00:00Z', actor: 'Sam', text: 'Sam commented', anchor: null })
 })
 
-// invented rows for the Your move order: only group, flags, last activity and number matter to it
+// invented rows for the Your move order: only group, flags, last activity, and number matter to it
 const moveRow = (base: OtherRow, number: number, at: string, flag: 'reReview' | 'requestedOfYou' | null, group: OtherRow['group'] = 'yourMove'): OtherRow => ({
   ...base,
   number,
