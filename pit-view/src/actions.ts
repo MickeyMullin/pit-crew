@@ -5,24 +5,30 @@ import { deriveIssues, deriveMerge, isPrimaryBase } from './derive.ts'
 import { GhError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr } from './github.ts'
 import { offersFix } from './launcher.ts'
-import type { RunView } from './launcher.ts'
+import type { RunView, UpdateAction } from './launcher.ts'
 
-// direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs, each through gh with the viewer's own token. This module decides whether an action is allowed and what gh is asked; it never trusts the page, so every rule is checked here again. merge is always a squash into the repository's primary branch; the method is fixed, not a setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused. update writes nothing itself: it starts an agent session through the launcher, which brings the PR's branch up to date with the primary branch and pushes it
-export const actionNames = ['merge', 'markReady', 'convertToDraft', 'requestReview', 'update'] as const
+// direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs, each through gh with the viewer's own token. This module decides whether an action is allowed and what gh is asked; it never trusts the page, so every rule is checked here again. merge is always a squash into the repository's primary branch; the method is fixed, not a setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused. update writes nothing itself: it starts an agent session through the launcher, which brings the PR's branch up to date with the primary branch and pushes it. resolveConflicts is that same session, asked for on a PR the cache holds as conflicting
+export const actionNames = ['merge', 'markReady', 'convertToDraft', 'requestReview', 'update', 'resolveConflicts'] as const
 export type ActionName = typeof actionNames[number]
 
-// every request names the repository the confirmation displayed; a merge also names the full head SHA and the base branch it displayed, and an update all of those and the viewer
+// every request names the repository the confirmation displayed; a merge also names the full head SHA and the base branch it displayed, and an update or a resolveConflicts all of those and the viewer
+type SessionRequest<A extends UpdateAction> = { action: A, repo: string, viewer: string, headSha: string, base: string }
 export type ActionRequest =
   | { action: 'merge', repo: string, headSha: string, base: string }
-  | { action: 'update', repo: string, viewer: string, headSha: string, base: string }
+  | SessionRequest<'update'>
+  | SessionRequest<'resolveConflicts'>
   | { action: 'markReady', repo: string }
   | { action: 'convertToDraft', repo: string }
   | { action: 'requestReview', repo: string, reviewer: string }
 
-// an update answers once its session has started, with the run
+// an update or a resolveConflicts answers once its session has started, with the run
 export type ActionResult =
-  | { number: number, action: Exclude<ActionName, 'update'>, done: true, reviewer?: string }
-  | { number: number, action: 'update', started: true, run: RunView }
+  | { number: number, action: Exclude<ActionName, UpdateAction>, done: true, reviewer?: string }
+  | { number: number, action: UpdateAction, started: true, run: RunView }
+
+// the actions that start the Update session rather than write through gh
+const updateActions: readonly string[] = ['update', 'resolveConflicts'] satisfies UpdateAction[]
+const isUpdateAction = (action: string): action is UpdateAction => updateActions.includes(action)
 
 export type ActionErrorCode =
   | 'badRequest' | 'notOpen' | 'notYours' | 'notAllowed' | 'stale' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'ghFailed'
@@ -39,7 +45,7 @@ export class ActionError extends Error {
   }
 }
 
-const usage = 'send { "action": "merge", "repo": "<owner/name shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "update", "repo": "<owner/name shown>", "viewer": "<login shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "markReady" | "convertToDraft", "repo": "<owner/name shown>" }, or { "action": "requestReview", "repo": "<owner/name shown>", "reviewer": "<login from people>" }'
+const usage = 'send { "action": "merge", "repo": "<owner/name shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "update" | "resolveConflicts", "repo": "<owner/name shown>", "viewer": "<login shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "markReady" | "convertToDraft", "repo": "<owner/name shown>" }, or { "action": "requestReview", "repo": "<owner/name shown>", "reviewer": "<login from people>" }'
 
 // "a", "a or b", "a, b, or c": the words for a choice among the items
 export const orList = (items: readonly string[]): string =>
@@ -57,11 +63,11 @@ export const parseAction = (body: unknown): ActionRequest => {
   const extra = Object.keys(rest)[0]
   if (extra !== undefined) throw new ActionError('badRequest', `unknown field ${extra}; ${usage}`)
   if (typeof repo !== 'string' || repo === '') throw new ActionError('badRequest', `${action} needs repo, the repository the confirmation showed; ${usage}`)
-  if (action !== 'update' && viewer !== undefined) throw new ActionError('badRequest', `${action} takes no viewer; ${usage}`)
-  if (action === 'update') {
-    if (reviewer !== undefined) throw new ActionError('badRequest', `update takes no reviewer; ${usage}`)
-    if (typeof viewer !== 'string' || viewer === '') throw new ActionError('badRequest', `update needs viewer, the login the confirmation showed; ${usage}`)
-    if (typeof headSha !== 'string' || typeof base !== 'string' || base === '') throw new ActionError('badRequest', `update needs headSha and base, the head and base branch the confirmation showed; ${usage}`)
+  if (!isUpdateAction(action) && viewer !== undefined) throw new ActionError('badRequest', `${action} takes no viewer; ${usage}`)
+  if (isUpdateAction(action)) {
+    if (reviewer !== undefined) throw new ActionError('badRequest', `${action} takes no reviewer; ${usage}`)
+    if (typeof viewer !== 'string' || viewer === '') throw new ActionError('badRequest', `${action} needs viewer, the login the confirmation showed; ${usage}`)
+    if (typeof headSha !== 'string' || typeof base !== 'string' || base === '') throw new ActionError('badRequest', `${action} needs headSha and base, the head and base branch the confirmation showed; ${usage}`)
     if (!/^[0-9a-f]{40}$/i.test(headSha)) throw new ActionError('badRequest', `headSha must be the full 40-character head SHA the confirmation showed; ${usage}`)
     return { action, repo, viewer, headSha: headSha.toLowerCase(), base }
   }
@@ -82,7 +88,7 @@ export const parseAction = (body: unknown): ActionRequest => {
 }
 
 // exactly what gh is asked for each action that writes through gh. Merge uses GitHub's REST merge endpoint rather than `gh pr merge`: that endpoint refuses when branch rules require a queue, so one click cannot silently enable auto-merge or enqueue anything. The method is fixed to squash. The merge carries the head SHA the viewer's confirmation showed as GitHub's `sha` precondition, so a push after that is refused by GitHub (409) instead of merged.
-export const ghArgs = (repo: string, number: number, request: Exclude<ActionRequest, { action: 'update' }>, headSha = ''): string[] => {
+export const ghArgs = (repo: string, number: number, request: Exclude<ActionRequest, { action: UpdateAction }>, headSha = ''): string[] => {
   switch (request.action) {
     case 'merge': return ['api', '--method', 'PUT', `repos/${repo}/pulls/${number}/merge`, '-f', 'merge_method=squash', '-f', `sha=${headSha}`]
     case 'markReady': return ['pr', 'ready', String(number), '--repo', repo]
@@ -111,8 +117,8 @@ export type ActionsOptions = {
   config: () => Config
   // starts the targeted refresh of one PR, in the repository the write used, that is certain to start after the write (the poller's refreshPrAfterWrite); not awaited
   refreshPr: (repo: string, number: number) => Promise<unknown>
-  // starts the Update session through the launcher, which makes the identity, clone, and one-run-per-PR checks and throws LaunchError when one refuses
-  startUpdate: (repo: string, number: number, headSha: string) => Promise<RunView>
+  // starts the Update session through the launcher, labeled for the action that asked for it, which makes the identity, clone, and one-run-per-PR checks and throws LaunchError when one refuses
+  startUpdate: (repo: string, number: number, headSha: string, action: UpdateAction) => Promise<RunView>
   log: (line: string) => void
 }
 
@@ -130,8 +136,8 @@ export const createActions = (options: ActionsOptions): Actions => {
     options.refreshPr(repo, number).catch((error: unknown) => log(`PR #${number}: refresh after an action failed: ${messageOf(error)}`))
   }
 
-  // the Update session: offered on the viewer's own PRs that target the primary branch, bound to the head and base the confirmation displayed, and started through the launcher, never twice at once
-  const update = async (number: number, request: Extract<ActionRequest, { action: 'update' }>, pr: RawOpenPr, defaultBranch: string | null, config: Config): Promise<ActionResult> => {
+  // the Update session: offered on the viewer's own PRs that target the primary branch, bound to the head and base the confirmation displayed, and started through the launcher, never twice at once. resolveConflicts starts the same session, and only on a PR the cache holds as conflicting
+  const update = async (number: number, request: Extract<ActionRequest, { action: UpdateAction }>, pr: RawOpenPr, defaultBranch: string | null, config: Config): Promise<ActionResult> => {
     const { repo } = config
     // the session pushes to the PR's branch, and a bot's PR is never the viewer's to rewrite
     if (!offersFix(pr, config)) throw new ActionError('notYours', `#${number} is not your PR; direct actions apply to your own PRs only`)
@@ -144,13 +150,17 @@ export const createActions = (options: ActionsOptions): Actions => {
     if (!isPrimaryBase(base, defaultBranch)) {
       throw new ActionError('notAllowed', `#${number} targets ${base}, not the primary branch (${defaultBranch ?? 'master or main'}); Pit View updates only PRs that target the primary branch`)
     }
+    // the Conflicts chip's own test, on the cached PR rather than the page's word
+    if (request.action === 'resolveConflicts' && pr.mergeable !== 'CONFLICTING') {
+      throw new ActionError('notAllowed', `#${number} has no conflicts that GitHub reports; nothing was started. Update branch brings it up to date instead`)
+    }
     const key = `${repo}#${number}`
     if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
     inFlight.add(key)
     try {
-      const run = await options.startUpdate(repo, number, request.headSha)
-      log(`PR #${number}: update session ${run.id} started`)
-      return { number, action: 'update', started: true, run }
+      const run = await options.startUpdate(repo, number, request.headSha, request.action)
+      log(`PR #${number}: update session ${run.id} started (${request.action})`)
+      return { number, action: request.action, started: true, run }
     } finally {
       inFlight.delete(key)
     }
@@ -163,7 +173,7 @@ export const createActions = (options: ActionsOptions): Actions => {
     // the repository the confirmation displayed must still be the one in effect: the page learns of a change in Settings only when its feed patch arrives, and #<n> in another repository is another PR. Nothing is read, written, or held in flight
     if (request.repo !== repo) throw new ActionError('stale', `the repository is now ${repo}, not ${request.repo}; the confirmation was for ${request.repo}, so nothing was done`)
     // an update's session pushes as the viewer, so the viewer the confirmation displayed must still be the one in effect too
-    if (request.action === 'update' && !sameLogin(request.viewer, viewer)) {
+    if ((request.action === 'update' || request.action === 'resolveConflicts') && !sameLogin(request.viewer, viewer)) {
       throw new ActionError('stale', `the viewer is now ${viewer || 'nobody'}, not ${request.viewer}; the confirmation was for ${request.viewer}, so nothing was started`)
     }
     const cached = cache.readView(repo)
@@ -171,7 +181,7 @@ export const createActions = (options: ActionsOptions): Actions => {
     if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched`)
     const author = row.pr.author?.login ?? ''
     if (viewer === '' || !sameLogin(author, viewer)) throw new ActionError('notYours', `#${number} is not your PR; direct actions apply to your own PRs only`)
-    if (request.action === 'update') return update(number, request, row.pr, cached.defaultBranch, config)
+    if (request.action === 'update' || request.action === 'resolveConflicts') return update(number, request, row.pr, cached.defaultBranch, config)
     let reviewer: string | undefined
     let merging: { base: string, headSha: string } | undefined
     if (request.action === 'merge') {
@@ -203,7 +213,7 @@ export const createActions = (options: ActionsOptions): Actions => {
     inFlight.add(key)
     try {
       // gh writes as whichever account it is signed in as, and this machine holds more than one: the write confirms the account with the token it then writes with, and runs once
-      const checked: Exclude<ActionRequest, { action: 'update' }> = reviewer === undefined ? request : { action: 'requestReview', repo, reviewer }
+      const checked: Exclude<ActionRequest, { action: UpdateAction }> = reviewer === undefined ? request : { action: 'requestReview', repo, reviewer }
       try {
         const check = merging === undefined ? undefined : async (read: (args: string[]) => Promise<string>): Promise<void> => {
           // the confirmation named the cached base and head; the PR is read once more, live, and anything that differs refuses before a write is made

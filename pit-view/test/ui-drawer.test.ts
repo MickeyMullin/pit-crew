@@ -11,7 +11,7 @@ import type { ReportListing } from '../src/reports.ts'
 import { rereadRequest } from '../public/agent.ts'
 import type { AgentCell, RunView, StartOption, StepSlot } from '../public/agent.ts'
 import {
-  cardKind, commitModel, cellFromRun, confirmHolds, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
+  cardKind, commitModel, readyPointer, cellFromRun, confirmHolds, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
   queuedStopModel, reportName, reportRows, resumeReadyText, returnSelector, runRows, runText, startConfirmModel, startsModel, stepModels, stepsName, stopModel, summaryOf,
 } from '../public/drawerview.ts'
 import type { DrawerInput, Loadable } from '../public/drawerview.ts'
@@ -60,7 +60,7 @@ const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
   lastReviewAt: null,
   runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
   steps: slots(), tandem: false, commit: null,
-  finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, resume: null, costUsd: null,
+  finishedAt: null, text: null, result: null, question: null, note: null, firstNote: null, resolvedByHand: false, resume: null, costUsd: null,
   ...patch,
 })
 
@@ -933,9 +933,13 @@ test('a run finished by hand reads as its new outcome with the original failure 
   assert.equal(drawerModel(input(finished())).result?.byHand, null)
   const again = drawerModel(input(deniedCell({ resolvedByHand: true, note: 'gh pr review failed' })))
   assert.deepEqual([again.result?.byHand, again.result?.note], [null, 'gh pr review failed'])
+  // a run that failed again before it was finished tells the original denial, not the failure it ended on
+  const history = drawerModel(input({ ...approved, note: 'could not reach GitHub', firstNote: 'permissionDenied: Bash' })).result
+  assert.equal(history?.byHand, 'Finished by hand after a denied tool call (Bash): Pit View read the result again at your request.')
   // the PR left the open tables: the card is rebuilt from the runs list, which carries the flag
   const run = { id: 7, label: 'Re-review', runner: 'claude', status: 'done', note: 'permissionDenied: Bash', resolvedByHand: true, result: null, steps: slots(), tandem: false } as unknown as RunView
   assert.equal(cellFromRun(deniedCell(), run).resolvedByHand, true)
+  assert.equal(cellFromRun(deniedCell(), { ...run, firstNote: 'permissionDenied: Bash' } as unknown as RunView).firstNote, 'permissionDenied: Bash')
   assert.equal(runText(run).text, 'Done · finished by hand')
   assert.equal(runText({ ...run, status: 'failed', note: null }).text, 'Failed')
 })
@@ -985,4 +989,26 @@ test('a card rebuilt from the runs list takes the commit from the run record', (
   assert.equal(cellFromRun(idle(), runView({ status: 'done', result: review } as unknown as Partial<RunView>)).commit, sha)
   assert.equal(cellFromRun(idle(), runView({ status: 'done', result: fix } as unknown as Partial<RunView>)).commit, sha)
   assert.equal(cellFromRun(idle(), runView({ status: 'stopped', result: null })).commit, null)
+})
+
+const cleanDraft = (patch: Partial<AgentCell> = {}): AgentCell => finished({ text: 'Clean · mark ready?', ...patch })
+const ownRow = (agent: AgentCell, state: string, section = 'mine'): OpenRow => ({ ...row(agent), section, merge: { state }, issues: [], primaryBase: true } as unknown as OpenRow)
+
+test('the ready ask on the latest-run card says where Mark ready for review is, on the viewer\'s own draft only', () => {
+  const pointer = 'Mark it ready from the Actions section above: Mark ready for review.'
+  assert.equal(drawerModel(input(null, { row: ownRow(cleanDraft(), 'draft') })).result?.ready, pointer)
+  assert.equal(drawerModel(input(null, { row: ownRow(cleanDraft({ text: 'Clean · mark ready? · finished by hand' }), 'draft') })).result?.ready, pointer)
+  assert.equal(drawerModel(input(null, { row: ownRow(cleanDraft(), 'ready') })).result?.ready, null)
+  assert.equal(drawerModel(input(null, { row: ownRow(cleanDraft(), 'draft', 'others') })).result?.ready, null)
+  assert.equal(drawerModel(input(null, { row: ownRow(cleanDraft(), 'draft'), open: false })).result?.ready, null)
+  assert.equal(drawerModel(input(null, { row: ownRow(finished({ text: 'Clean' }), 'draft') })).result?.ready, null)
+  assert.equal(drawerModel(input(null, { row: ownRow(finished(), 'draft') })).result?.ready, null)
+})
+
+test('readyPointer needs both the done text and the offered action', () => {
+  assert.equal(readyPointer('Clean · mark ready?', [{ action: 'markReady', text: 'Mark ready for review' }]) !== null, true)
+  assert.equal(readyPointer('Clean · mark ready?', [{ action: 'convertToDraft', text: 'Convert to draft' }]), null)
+  assert.equal(readyPointer('Clean · mark ready?', []), null)
+  assert.equal(readyPointer(null, [{ action: 'markReady', text: 'Mark ready for review' }]), null)
+  assert.equal(readyPointer('Approved', [{ action: 'markReady', text: 'Mark ready for review' }]), null)
 })

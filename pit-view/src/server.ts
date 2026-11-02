@@ -582,7 +582,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     gh,
     config: effective,
     refreshPr: (repo, number) => poller.refreshPrAfterWrite(repo, number),
-    startUpdate: async (repo, number, headSha) => runView(await launcher.start(updateRequest(repo, number, headSha))),
+    startUpdate: async (repo, number, headSha, action) => runView(await launcher.start(updateRequest(repo, number, headSha, action))),
     log,
   })
 

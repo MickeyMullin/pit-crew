@@ -976,6 +976,25 @@ test('each served page carries this start\'s token in a meta tag, added at serve
   }
 })
 
+test('the favicon is served by the static path as an SVG with no outside request, and every page head links it', async () => {
+  const publicDir = join(import.meta.dirname, '..', 'public')
+  const icon = await readFile(join(publicDir, 'favicon.svg'), 'utf8')
+  const files = { 'public/favicon.svg': icon, 'public/index.html': await readFile(join(publicDir, 'index.html'), 'utf8'), 'public/settings.html': await readFile(join(publicDir, 'settings.html'), 'utf8') }
+  const h = await setup({ files })
+  try {
+    const response = await fetch(`${h.base}/favicon.svg`)
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('content-type'), 'image/svg+xml')
+    assert.equal(await response.text(), icon)
+    for (const path of ['/', '/settings.html']) {
+      const body = await (await fetch(`${h.base}${path}`)).text()
+      assert.ok(body.split('</head>')[0]!.includes('<link rel="icon" type="image/svg+xml" href="/favicon.svg">'), `${path} links the favicon`)
+    }
+  } finally {
+    await h.cleanup()
+  }
+})
+
 const token = (h: Harness): Record<string, string> => ({ 'X-Pit-View-Token': h.server.token })
 
 test('starting and stopping a run need the token as well as the Host and Origin checks; one run per PR', async () => {

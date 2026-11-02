@@ -84,12 +84,15 @@ export type RawTimelineCommit = {
 }
 export type RawTimelineReview = {
   __typename: 'PullRequestReview'
+  // the number in the review's #pullrequestreview- anchor; absent from a row cached before it was fetched
+  databaseId?: number | null
   author: RawLogin | null
   state: RawReviewState
   submittedAt: string | null
   createdAt: string
 }
-export type RawTimelineComment = { __typename: 'IssueComment', author: RawLogin | null, createdAt: string }
+// databaseId is the number in the comment's #issuecomment- anchor; absent from a row cached before it was fetched
+export type RawTimelineComment = { __typename: 'IssueComment', databaseId?: number | null, author: RawLogin | null, createdAt: string }
 export type RawTimelineReviewRequested = {
   __typename: 'ReviewRequestedEvent'
   actor: RawLogin | null
@@ -322,8 +325,8 @@ timelineItems(last: 5, itemTypes: [PULL_REQUEST_COMMIT, PULL_REQUEST_REVIEW, ISS
   nodes {
     __typename
     ... on PullRequestCommit { commit { oid committedDate author { name user { login } } } }
-    ... on PullRequestReview { author { login } state submittedAt createdAt }
-    ... on IssueComment { author { login } createdAt }
+    ... on PullRequestReview { databaseId author { login } state submittedAt createdAt }
+    ... on IssueComment { databaseId author { login } createdAt }
     ... on ReviewRequestedEvent { actor { login } createdAt requestedReviewer { ${reviewerFields} } }
     ... on ReadyForReviewEvent { actor { login } createdAt }
     ... on ConvertToDraftEvent { actor { login } createdAt }
