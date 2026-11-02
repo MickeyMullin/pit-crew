@@ -5,7 +5,7 @@ import type { OpenRow } from '../src/derive.ts'
 import type { View } from '../src/poller.ts'
 import { ticketChip } from './cells.ts'
 import { h } from './dom.ts'
-import { formatAge, formatCached, shortSha } from './format.ts'
+import { formatAge, formatCached, getTimeFormat, shortSha } from './format.ts'
 import { findOpenRow, rowFreshness } from './state.ts'
 
 type Anchor = { table: string, number: number, kind: string }
@@ -66,7 +66,7 @@ export const createHoverCard = (card: HTMLElement, current: () => { view: View, 
     const row = state === null ? undefined : findOpenRow(state.view, anchor.number)
     if (state === null || row === undefined) return false
     const freshness = rowFreshness(row, state.view.sync)
-    const sig = JSON.stringify([row, freshness, formatAge(row.createdAt, state.nowMs)])
+    const sig = JSON.stringify([row, freshness, formatAge(row.createdAt, state.nowMs), getTimeFormat()])
     if (sig !== shownSig) {
       card.replaceChildren(...content(row, state.view, state.nowMs))
       shownSig = sig

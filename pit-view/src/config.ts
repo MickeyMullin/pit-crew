@@ -57,6 +57,8 @@ export type Config = {
   // stored with ~; expand with expandHome before use
   reportsDir: string
   density: 'comfortable' | 'compact'
+  // how every clock time in the pages is written: 2:45 PM or 14:45
+  timeFormat: '12h' | '24h'
   showAgentColumn: boolean
   // review runs in flight at once; more wait in a queue (section 8 of DESIGN.md, Review cap)
   maxConcurrentReviews: number
@@ -106,6 +108,7 @@ export const defaultConfig = (): Config => ({
   bots: ['dependabot', 'renovate'],
   reportsDir: '~/agents/output',
   density: 'comfortable',
+  timeFormat: '12h',
   showAgentColumn: false,
   maxConcurrentReviews: 2,
   selfReviewOverCap: false,
@@ -180,7 +183,7 @@ const personKeys = ['login', 'alias', 'initials', 'color', 'avatar'] as const
 const ticketKeys = ['enabled', 'kind', 'name', 'source', 'pattern', 'baseUrl', 'linkTemplate'] as const
 const configKeys = [
   'repo', 'viewer', 'people', 'tickets', 'refreshSeconds', 'idleMinutes', 'todayStartsAt',
-  'bots', 'reportsDir', 'density', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'allowedHosts', 'cloneDir', 'agent', 'notifications',
+  'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'allowedHosts', 'cloneDir', 'agent', 'notifications',
 ] as const
 
 // a bare DNS name: dot-separated labels of letters, digits and inner hyphens, with no scheme,
@@ -307,6 +310,7 @@ export const validateConfig = (input: unknown): Config => {
     bots: list(input, 'bots', 'config').map((bot) => typeof bot === 'string' ? bot : fail('config.bots must hold strings')),
     reportsDir: str(input, 'reportsDir', 'config'),
     density: oneOf(input, 'density', ['comfortable', 'compact'], 'config'),
+    timeFormat: oneOf(input, 'timeFormat', ['12h', '24h'], 'config'),
     showAgentColumn: bool(input, 'showAgentColumn', 'config'),
     maxConcurrentReviews: maxConcurrentReviews(input, 'config'),
     selfReviewOverCap: bool(input, 'selfReviewOverCap', 'config'),

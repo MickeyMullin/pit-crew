@@ -10,6 +10,7 @@ import { createDrawer } from './drawer.ts'
 import { drawerOpenerSelector, escapeApplies } from './drawerview.ts'
 import { clearFilters, cycleSort, initialControls, pressTile, setClosedRange, setFilter, setGrouped, setPageSearch, toggleSection } from './filters.ts'
 import type { ClosedRangeKey, Controls, Filters } from './filters.ts'
+import { parseTimeFormat, setTimeFormat } from './format.ts'
 import { createHoverCard } from './hovercard.ts'
 import { createIdleTracker } from './idle.ts'
 import { loadInstance, showInstance } from './instance.ts'
@@ -240,6 +241,7 @@ const loadSettings = async (): Promise<void> => {
       showAgentColumn: config.showAgentColumn === true,
       idleMinutes: typeof config.idleMinutes === 'number' ? config.idleMinutes : 90,
     }
+    setTimeFormat(parseTimeFormat(config.timeFormat))
     idleTracker.setMinutes(settings.idleMinutes)
     draw()
   } catch {

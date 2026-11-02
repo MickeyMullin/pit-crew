@@ -40,6 +40,7 @@ export type Form = {
   bots: string
   reportsDir: string
   density: Config['density']
+  timeFormat: Config['timeFormat']
   showAgentColumn: boolean
   // the cap as typed: a whole number of 1 or more
   maxConcurrentReviews: string
@@ -74,6 +75,7 @@ export const toForm = (config: Config, makeId: MakeId): Form => ({
   bots: config.bots.join(', '),
   reportsDir: config.reportsDir,
   density: config.density,
+  timeFormat: config.timeFormat,
   showAgentColumn: config.showAgentColumn,
   maxConcurrentReviews: String(config.maxConcurrentReviews),
   selfReviewOverCap: config.selfReviewOverCap,
@@ -143,6 +145,7 @@ export const toConfig = (form: Form, base: Config): Config => {
     bots: parseBots(form.bots),
     reportsDir: form.reportsDir.trim(),
     density: form.density,
+    timeFormat: form.timeFormat,
     showAgentColumn: form.showAgentColumn,
     maxConcurrentReviews: parseMaxReviews(form.maxConcurrentReviews),
     selfReviewOverCap: form.selfReviewOverCap,
@@ -248,7 +251,7 @@ export const validateForm = (form: Form): FieldError[] => {
   return errors
 }
 
-const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'notifyEnabled'])
+const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'notifyEnabled'])
 
 const capitalize = (text: string): string => text === '' ? text : `${text[0]!.toUpperCase()}${text.slice(1)}`
 
@@ -472,6 +475,11 @@ export const todayChoices = (timeZone: string): Choice<Config['todayStartsAt']>[
 export const densityChoices: Choice<Config['density']>[] = [
   { value: 'comfortable', label: 'Comfortable (default)' },
   { value: 'compact', label: 'Compact' },
+]
+
+export const timeFormatChoices: Choice<Config['timeFormat']>[] = [
+  { value: '12h', label: '12 hour, 2:45 PM (default)' },
+  { value: '24h', label: '24 hour, 14:45' },
 ]
 
 export const avatarChoices: Choice<AvatarMode>[] = [

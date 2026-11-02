@@ -250,6 +250,23 @@ test('validateConfig accepts people, a local avatar and notifications', () => {
   assert.deepEqual(config.notifications, { enabled: false, kinds: ['changesRequested'] })
 })
 
+test('timeFormat defaults to 12h, also for a config file that lacks it, and takes only 12h or 24h', async () => {
+  assert.equal(defaultConfig().timeFormat, '12h')
+  const { dir, cleanup } = await tempDir()
+  try {
+    const file = join(dir, 'config.json')
+    await writeFile(file, JSON.stringify({ repo: 'example-org/app', viewer: 'someone' }))
+    assert.equal((await loadConfig({ file, viewerLogin: noViewer })).timeFormat, '12h')
+    await writeFile(file, JSON.stringify({ viewer: 'someone', timeFormat: '24h' }))
+    assert.equal((await loadConfig({ file, viewerLogin: noViewer })).timeFormat, '24h')
+    await writeFile(file, JSON.stringify({ viewer: 'someone', timeFormat: '13h' }))
+    await assert.rejects(loadConfig({ file, viewerLogin: noViewer }), /config\.timeFormat must be one of 12h, 24h/)
+  } finally {
+    await cleanup()
+  }
+  assert.throws(() => validateConfig({ ...defaultConfig(), timeFormat: 24 }), /config\.timeFormat must be one of 12h, 24h/)
+})
+
 test('saveConfig creates the folder, writes formatted JSON and round-trips', async () => {
   const { dir, cleanup } = await tempDir()
   try {

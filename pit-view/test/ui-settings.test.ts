@@ -13,7 +13,7 @@ import { cycleKeys } from '../src/poller.ts'
 import type { View } from '../src/poller.ts'
 import {
   aliasOf, changeKind, colorFor, contrastWithWhite, errorId, fieldId, initialsOf, isDirty, kindDefaults, needsRefresh, newPerson, newTicket,
-  idleLimits, notifyChoices, openSuggestions, parseBots, parseIdleMinutes, parseMaxReviews, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, serverError, ticketSample, toConfig, toForm,
+  idleLimits, notifyChoices, openSuggestions, parseBots, parseIdleMinutes, parseMaxReviews, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, timeFormatChoices, serverError, ticketSample, toConfig, toForm,
   validateForm,
 } from '../public/settings-form.ts'
 import type { Form, TicketForm } from '../public/settings-form.ts'
@@ -45,6 +45,7 @@ const sample = (): Config => ({
   todayStartsAt: 'utc',
   bots: ['dependabot', 'renovate', 'review-helper'],
   density: 'compact',
+  timeFormat: '24h',
   showAgentColumn: true,
   maxConcurrentReviews: 3,
   selfReviewOverCap: true,
@@ -116,7 +117,7 @@ test('unsaved changes are differences in what would be saved, not in spacing', (
 test('only the settings the poller refreshes for start a refresh', () => {
   assert.deepEqual([...refreshKeys], [...cycleKeys])
   const before = sample()
-  assert.equal(needsRefresh(before, { ...before, density: 'comfortable', refreshSeconds: 300, showAgentColumn: false }), false)
+  assert.equal(needsRefresh(before, { ...before, density: 'comfortable', timeFormat: '12h', refreshSeconds: 300, showAgentColumn: false }), false)
   assert.equal(needsRefresh(before, { ...before, bots: ['dependabot'] }), true)
   assert.equal(needsRefresh(before, { ...before, people: [] }), true)
 })
@@ -418,7 +419,24 @@ test('the Agent card holds the Agent column switch, then Concurrent reviews, the
   assert.match(agent, /<label for="f-maxConcurrentReviews">Concurrent reviews<\/label>/)
   assert.match(agent, /<span class="field-label">Self-review over limit<\/span>/)
   const behavior = fieldsIn(cardOf(html, 'behavior'))
-  assert.deepEqual(behavior, ['refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density'])
+  assert.deepEqual(behavior, ['refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'timeFormat'])
+})
+
+test('the time format is a Behavior choice, 12 hour first and the default, and it round-trips through the form', () => {
+  assert.deepEqual(timeFormatChoices.map((choice) => choice.value), ['12h', '24h'])
+  assert.match(timeFormatChoices[0]?.label ?? '', /12 hour.*default/)
+  const form = formOf()
+  assert.equal(form.timeFormat, '24h')
+  form.timeFormat = '12h'
+  assert.equal(toConfig(form, sample()).timeFormat, '12h')
+  assert.equal(formOf({ ...sample(), timeFormat: '12h' }).timeFormat, '12h')
+})
+
+test('the Behavior card has a labeled time format select with a hint and an error slot', async () => {
+  const behavior = cardOf(await settingsHtml(), 'behavior')
+  assert.match(behavior, /<label for="f-timeFormat">Time format<\/label>/)
+  assert.match(behavior, /<select id="f-timeFormat" class="input" aria-describedby="f-timeFormat-hint"><\/select>/)
+  assert.match(behavior, /id="f-timeFormat-error" class="field-error" hidden/)
 })
 
 test('the Agent card sits right after Behavior and before Notifications, and no old label survives anywhere on the page', async () => {

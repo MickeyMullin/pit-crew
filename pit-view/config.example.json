@@ -31,6 +31,7 @@
   ],
   "reportsDir": "~/agents/output",
   "density": "comfortable",
+  "timeFormat": "12h",
   "showAgentColumn": false,
   "maxConcurrentReviews": 2,
   "selfReviewOverCap": false,

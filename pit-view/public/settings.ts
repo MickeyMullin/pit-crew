@@ -6,11 +6,11 @@ import type { View } from '../src/poller.ts'
 import { avatar } from './cells.ts'
 import { byId, h, setText, svg } from './dom.ts'
 import type { Shape } from './dom.ts'
-import { formatClock } from './format.ts'
+import { formatClock, parseTimeFormat, setTimeFormat } from './format.ts'
 import { loadInstance, showInstance } from './instance.ts'
 import {
   avatarChoices, changeKind, configChannel, configPathText, densityChoices, errorId, fieldId, isDirty, kindChoices, needsRefresh,
-  newPerson, newTicket, notifyChoices, openSuggestions, previewPerson, refreshChoices, sampleTextsFrom, serverError, sourceChoices, ticketSample,
+  newPerson, newTicket, notifyChoices, openSuggestions, previewPerson, refreshChoices, sampleTextsFrom, serverError, sourceChoices, ticketSample, timeFormatChoices,
   toConfig, todayChoices, toForm, validateForm,
 } from './settings-form.ts'
 import type { AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
@@ -310,6 +310,7 @@ const fillStatic = (): void => {
   options(byId<HTMLSelectElement>(fieldId('refreshSeconds')), refreshChoices, form.refreshSeconds)
   options(byId<HTMLSelectElement>(fieldId('todayStartsAt')), todayChoices(Intl.DateTimeFormat().resolvedOptions().timeZone), form.todayStartsAt)
   options(byId<HTMLSelectElement>(fieldId('density')), densityChoices, form.density)
+  options(byId<HTMLSelectElement>(fieldId('timeFormat')), timeFormatChoices, form.timeFormat)
   byId<HTMLInputElement>(fieldId('showAgentColumn')).checked = form.showAgentColumn
   byId<HTMLInputElement>(fieldId('selfReviewOverCap')).checked = form.selfReviewOverCap
   byId<HTMLInputElement>(fieldId('notifyEnabled')).checked = form.notifyEnabled
@@ -354,6 +355,12 @@ const bindStatic = (): void => {
   density.addEventListener('change', () => {
     if (page === null) return
     page.form.density = density.value === 'compact' ? 'compact' : 'comfortable'
+    changed()
+  })
+  const timeFormat = byId<HTMLSelectElement>(fieldId('timeFormat'))
+  timeFormat.addEventListener('change', () => {
+    if (page === null) return
+    page.form.timeFormat = parseTimeFormat(timeFormat.value)
     changed()
   })
   const notify = byId<HTMLInputElement>(fieldId('notifyEnabled'))
@@ -508,6 +515,7 @@ const save = async (): Promise<void> => {
     if (!response.ok) throw new Error(`PUT /api/config answered ${response.status}`)
     const before = current.saved
     current.saved = body as Config
+    setTimeFormat(parseTimeFormat(current.saved.timeFormat))
     current.form = toForm(current.saved, makeId)
     current.errors = []
     current.checking = false

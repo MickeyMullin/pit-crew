@@ -26,22 +26,44 @@ export const formatSince = (fromIso: string, nowMs: number): string => {
 export const formatInterval = (seconds: number): string =>
   seconds % 60 === 0 ? `${seconds / 60}m` : `${seconds}s`
 
+// the Settings preference for how clock times read; this module is the only place a time is turned into text, so one switch covers every screen
+export type TimeFormat = '12h' | '24h'
+
+let timeFormat: TimeFormat = '12h'
+
+export const getTimeFormat = (): TimeFormat => timeFormat
+
+export const setTimeFormat = (format: TimeFormat): void => {
+  timeFormat = format
+}
+
+// anything but 24h is the 12 hour default, as for a config that predates the setting
+export const parseTimeFormat = (value: unknown): TimeFormat => value === '24h' ? '24h' : '12h'
+
 type DateStyle = 'clock' | 'weekdayClock' | 'day'
 
-const styles: Record<DateStyle, Intl.DateTimeFormatOptions> = {
-  clock: { hour: 'numeric', minute: '2-digit' },
-  weekdayClock: { weekday: 'short', hour: 'numeric', minute: '2-digit' },
-  day: { weekday: 'short', month: 'short', day: 'numeric' },
+const clockOptions = (): Intl.DateTimeFormatOptions =>
+  timeFormat === '24h' ? { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' } : { hour: 'numeric', minute: '2-digit', hourCycle: 'h12' }
+
+const styleOptions = (style: DateStyle): Intl.DateTimeFormatOptions => {
+  switch (style) {
+    case 'clock':
+      return clockOptions()
+    case 'weekdayClock':
+      return { weekday: 'short', ...clockOptions() }
+    default:
+      return { weekday: 'short', month: 'short', day: 'numeric' }
+  }
 }
 
 const formats = new Map<string, Intl.DateTimeFormat>()
 
 // the browser's zone unless one is named; tests name one so they read the same anywhere
 const formatOf = (style: DateStyle, timeZone: string | undefined): Intl.DateTimeFormat => {
-  const key = `${style}:${timeZone ?? ''}`
+  const key = `${style}:${timeFormat}:${timeZone ?? ''}`
   let format = formats.get(key)
   if (format === undefined) {
-    format = new Intl.DateTimeFormat('en-US', { ...styles[style], ...(timeZone === undefined ? {} : { timeZone }) })
+    format = new Intl.DateTimeFormat('en-US', { ...styleOptions(style), ...(timeZone === undefined ? {} : { timeZone }) })
     formats.set(key, format)
   }
   return format
