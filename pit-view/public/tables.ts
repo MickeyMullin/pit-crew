@@ -95,7 +95,7 @@ const refreshColumn = <R extends OpenRow>(): Column<R> => ({
 
 const prCell = <R extends { number: number, url: string }>(hover: boolean): Column<R>['cell'] => (row, { terms, queryTerms }) => ({
   sig: [row.number, row.url, hover, terms, queryTerms],
-  build: () => [h('a', { ...newTab, class: 'pr-link mono', href: safeHref(row.url), 'data-focus': 'pr', 'data-hover': hover ? 'pr' : null }, highlighted(`#${row.number}`, [...terms, ...queryTerms]))],
+  build: () => [h('a', { ...newTab, class: 'pr-link mono', href: safeHref(row.url), 'data-focus': 'pr', 'data-hover': hover ? 'pr' : null }, highlighted(`#${row.number}`, terms, queryTerms.filter((phrase) => String(row.number).includes(phrase))))],
 })
 
 const titleCell = (aliasShown: boolean) => (row: OpenRow, { terms, queryTerms }: CellContext): { sig: unknown, build: () => Node[] } => {
@@ -103,7 +103,7 @@ const titleCell = (aliasShown: boolean) => (row: OpenRow, { terms, queryTerms }:
   return {
     sig: [row.title, row.stack, terms, queryTerms, hits],
     build: () => [h('span', { class: 'title-cell' },
-      h('span', { class: 'title-text', 'data-hover': 'title' }, highlighted(row.title, [...terms, ...queryTerms])),
+      h('span', { class: 'title-text', 'data-hover': 'title' }, highlighted(row.title, terms, queryTerms)),
       row.stack === null ? null : chip(`stack ${row.stack.position}/${row.stack.size}`, 'gray', { class: 'chip chip-small tone-gray', title: 'Stacked PR: its position in the stack' }),
       hitsLine(hits, terms))],
   }
@@ -259,7 +259,7 @@ export const closedColumns = (range: ClosedRange): Column<ClosedRow>[] => [
       const hits = hiddenHits(terms, row, { tickets: false, alias: true })
       return {
         sig: [row.title, terms, queryTerms, hits],
-        build: () => [h('span', { class: 'title-cell' }, h('span', { class: 'title-text', title: row.title }, highlighted(row.title, [...terms, ...queryTerms])), hitsLine(hits, terms))],
+        build: () => [h('span', { class: 'title-cell' }, h('span', { class: 'title-text', title: row.title }, highlighted(row.title, terms, queryTerms)), hitsLine(hits, terms))],
       }
     },
   },

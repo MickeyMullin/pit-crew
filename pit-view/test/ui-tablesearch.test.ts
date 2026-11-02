@@ -7,7 +7,7 @@ import type { Config } from '../src/config.ts'
 import { deriveClosed, deriveOpenRows } from '../src/derive.ts'
 import type { ClosedRow, MineRow, OtherRow } from '../src/derive.ts'
 import { matchesClosed, matchesMine, matchesOthers, matchesQuery, noFilters, queryTerms } from '../public/filters.ts'
-import { highlighted, searchTerms } from '../public/pagesearch.ts'
+import { searchTerms, splitMatches } from '../public/pagesearch.ts'
 import { closedColumns, mineColumns, othersColumns } from '../public/tables.ts'
 import type { CellContext } from '../public/tables.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -68,18 +68,58 @@ test('a table search is one phrase: trimmed, lowercased, a leading # dropped, in
   assert.deepEqual(queryTerms('cache#'), ['cache#'])
 })
 
-test('the table search keeps the rows it kept, and agrees with highlighting on context-sensitive lowercase', () => {
+// the table search's row selection exactly as it was before highlighting existed: whole-string lowercase, a leading # dropped
+const masterMatchesQuery = (query: string, row: { number: number, title: string }): boolean => {
+  const wanted = query.trim().toLowerCase().replace(/^#/, '')
+  return wanted === '' || row.title.toLowerCase().includes(wanted) || String(row.number).includes(wanted)
+}
+
+test('the table search keeps the rows it kept', () => {
   const row = { number: 118, title: 'Fix the Orbit cache' }
   assert.equal(matchesQuery('  ORBIT cache ', row), true)
   assert.equal(matchesQuery('11', row), true)
   assert.equal(matchesQuery('#119', row), false)
   assert.equal(matchesQuery('cache#', row), false)
-  // a final sigma lowercases the same way in matching and in highlighting
-  const sigma = { number: 2, title: 'ΟΣ cache' }
-  for (const query of ['ΟΣ', 'ΟΣ cache', 'σ']) {
-    assert.equal(matchesQuery(query, sigma), true, query)
-    assert.equal(highlighted(sigma.title, queryTerms(query)).some((part) => typeof part !== 'string'), true, query)
+})
+
+test('a title ending in capital sigma is kept by the final-form query and not by the plain one, as before', () => {
+  const title = { number: 2, title: 'ΟΣ cache' }
+  const ending = { number: 3, title: 'Fix ΟΣ' }
+  // expected values come from the whole-string lowercase: ΟΣ becomes ος, with a final sigma
+  assert.equal(matchesQuery('ς', title), true)
+  assert.equal(matchesQuery('ς', ending), true)
+  assert.equal(matchesQuery('σ', title), false)
+  assert.equal(matchesQuery('σ', ending), false)
+  assert.equal(matchesQuery('Σ', ending), false)
+  assert.equal(matchesQuery('ΟΣ', ending), true)
+  assert.equal(matchesQuery('ΟΣ cache', title), true)
+  assert.equal(matchesQuery('ος', ending), true)
+  assert.equal(matchesQuery('οσ', ending), false)
+  assert.equal(matchesQuery('οσ', { number: 4, title: 'οσ' }), true)
+  // and for every pairing below, the kept set equals the original logic's
+  const titles = ['ΟΣ cache', 'Fix ΟΣ', 'οσ', 'ος', 'ΑΣΑ', 'İstanbul', 'plain']
+  const queries = ['ς', 'σ', 'Σ', 'ΟΣ', 'οσ', 'ος', 'ΑΣ', 'ασα', 'i̇', 'i', 'İ', 'stanbul', '#2', '2', '', ' plain ']
+  for (const t of titles) {
+    for (const query of queries) assert.equal(matchesQuery(query, { number: 2, title: t }), masterMatchesQuery(query, { number: 2, title: t }), `${query} in ${t}`)
   }
+})
+
+test('highlighting follows the rows the search keeps and marks the original characters, also where lowercase changes length', () => {
+  const marks = (text: string, query: string): string[] => splitMatches(text, [], queryTerms(query)).filter((piece) => piece.hit).map((piece) => piece.text)
+  // a kept row is marked on the capital sigma its final-form query matched
+  assert.deepEqual(marks('ΟΣ cache', 'ς'), ['Σ'])
+  assert.deepEqual(marks('ΟΣ cache', 'ΟΣ cache'), ['ΟΣ cache'])
+  // a row the search does not keep has no mark
+  assert.equal(matchesQuery('σ', { number: 1, title: 'ΟΣ cache' }), false)
+  assert.deepEqual(marks('ΟΣ cache', 'σ'), [])
+  // a dotted capital I lowercases to two units; the mark still covers the one original character, and text after it stays aligned
+  assert.equal(matchesQuery('i̇stanbul', { number: 1, title: 'İstanbul cache' }), true)
+  assert.deepEqual(marks('İstanbul cache', 'i̇stanbul'), ['İstanbul'])
+  assert.deepEqual(marks('İstanbul cache', 'stanbul'), ['stanbul'])
+  assert.deepEqual(marks('İstanbul cache', 'cache'), ['cache'])
+  assert.deepEqual(marks('xİİx', 'i̇i̇'), ['İİ'])
+  // the page search's own words are located exactly as before
+  assert.deepEqual(splitMatches('ΟΣ cache', searchTerms('σ')).filter((piece) => piece.hit).map((piece) => piece.text), ['Σ'])
 })
 
 test('the PR number and title cells mark a table search in Mine, Others\', and Closed', async () => {
@@ -102,6 +142,17 @@ test('the PR number and title cells mark a table search in Mine, Others\', and C
     assert.doesNotMatch(await cellText(titleColumn, row, [], []), /\[\[/, name)
     assert.doesNotMatch(await cellText(prColumn, row, [], []), /\[\[/, name)
   }
+})
+
+test('the PR number cell marks a table search only where the number itself contains it', async () => {
+  const { mine } = await fixtures()
+  const row: MineRow = { ...mine[0]!, title: 'Fix #1 cache', number: 118 }
+  const pr = byKey<MineRow>(mineColumns(false), 'pr')
+  // the row is kept by its title, so the number has nothing of the search to show
+  assert.equal(matchesQuery('##1', row), true)
+  assert.doesNotMatch(await cellText(pr, row, [], queryTerms('##1')), /\[\[/)
+  assert.equal(await cellText(pr, row, [], queryTerms('#18')), '#1[[18]]')
+  assert.equal(await cellText(pr, row, [], queryTerms('#11')), '#[[11]]8')
 })
 
 test('with both searches set, a cell marks both, and each is removed alone', async () => {

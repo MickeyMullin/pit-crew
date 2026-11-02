@@ -4,7 +4,7 @@ import type { ClosedRange, Ticket } from '../src/derive.ts'
 import type { View } from '../src/poller.ts'
 import { h } from './dom.ts'
 import type { Child } from './dom.ts'
-import { foldCase, matchesClosed, matchesMine, matchesOthers } from './filters.ts'
+import { matchesClosed, matchesMine, matchesOthers } from './filters.ts'
 import type { Filters } from './filters.ts'
 import type { TableKey } from './tables.ts'
 
@@ -17,7 +17,8 @@ export type Searchable = {
   tickets: readonly Ticket[]
 }
 
-export { foldCase }
+// lowercase one character at a time, the way highlighting does, so matching and highlighting agree on context-sensitive letters
+export const foldCase = (text: string): string => Array.from(text, (char) => char.toLowerCase()).join('')
 
 // lowercase words; each loses a leading hash mark, so a PR number typed with one still finds it
 export const searchTerms = (query: string): string[] =>
@@ -56,8 +57,8 @@ export const hiddenHits = (terms: readonly string[], row: Searchable, shown: { t
 
 export type Piece = { text: string, hit: boolean }
 
-// the text cut at every occurrence of a word, overlapping or touching occurrences merged
-export const splitMatches = (text: string, terms: readonly string[]): Piece[] => {
+// the text cut at every occurrence of a word, overlapping or touching occurrences merged; phrases are a table search's, which keeps its rows by lowercasing the whole title, so they are found in that lowercase and mapped back to the original characters
+export const splitMatches = (text: string, terms: readonly string[], phrases: readonly string[] = []): Piece[] => {
   if (text === '') return []
   // lowercase one character at a time, so each unit of the lowered text knows which span of the original it came from
   let lower = ''
@@ -76,6 +77,13 @@ export const splitMatches = (text: string, terms: readonly string[]): Piece[] =>
   const spans: [number, number][] = []
   for (const term of terms) {
     for (let at = lower.indexOf(term); at !== -1; at = lower.indexOf(term, at + 1)) spans.push([starts[at]!, ends[at + term.length - 1]!])
+  }
+  // the whole-string lowercase differs from the per-character one only in letters that keep their length, so its units line up with the same map; if they ever do not, a phrase marks nothing rather than the wrong characters
+  const whole = text.toLowerCase()
+  if (whole.length === lower.length) {
+    for (const phrase of phrases) {
+      for (let at = whole.indexOf(phrase); at !== -1; at = whole.indexOf(phrase, at + 1)) spans.push([starts[at]!, ends[at + phrase.length - 1]!])
+    }
   }
   spans.sort((a, b) => a[0] - b[0])
   const merged: [number, number][] = []
@@ -96,8 +104,8 @@ export const splitMatches = (text: string, terms: readonly string[]): Piece[] =>
 }
 
 // text with its matches in <mark>; without words it is the text itself
-export const highlighted = (text: string, terms: readonly string[]): Child[] =>
-  terms.length === 0 ? [text] : splitMatches(text, terms).map((piece) => piece.hit ? h('mark', { class: 'search-hit' }, piece.text) : piece.text)
+export const highlighted = (text: string, terms: readonly string[], phrases: readonly string[] = []): Child[] =>
+  terms.length === 0 && phrases.length === 0 ? [text] : splitMatches(text, terms, phrases).map((piece) => piece.hit ? h('mark', { class: 'search-hit' }, piece.text) : piece.text)
 
 // the line under a title that names a match in a field the row does not show
 export const hitsLine = (hits: readonly Hit[], terms: readonly string[]): HTMLElement | null =>

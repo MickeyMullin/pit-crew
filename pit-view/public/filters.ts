@@ -138,19 +138,16 @@ export const authorOptions = (rows: readonly { author: { alias: string } }[], se
 
 // predicates
 
-// lowercase one character at a time, the way highlighting does, so matching and highlighting agree on context-sensitive letters
-export const foldCase = (text: string): string => Array.from(text, (char) => char.toLowerCase()).join('')
-
-// a table's own search as the words highlighting looks for: the whole query is one phrase, trimmed and lowercased, a leading # ignored; empty when nothing is typed
+// a table's own search as the phrase highlighting looks for: the whole query trimmed and lowercased as a whole string, a leading # ignored; empty when nothing is typed
 export const queryTerms = (query: string): string[] => {
-  const wanted = foldCase(query.trim()).replace(/^#/, '')
+  const wanted = query.trim().toLowerCase().replace(/^#/, '')
   return wanted === '' ? [] : [wanted]
 }
 
 // title or number, a leading # ignored
 export const matchesQuery = (query: string, row: { number: number, title: string }): boolean => {
-  const [wanted] = queryTerms(query)
-  return wanted === undefined || foldCase(row.title).includes(wanted) || String(row.number).includes(wanted)
+  const wanted = query.trim().toLowerCase().replace(/^#/, '')
+  return wanted === '' || row.title.toLowerCase().includes(wanted) || String(row.number).includes(wanted)
 }
 
 const matchesIssues = (issues: string, row: OpenRow): boolean => {
