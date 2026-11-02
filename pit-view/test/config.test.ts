@@ -112,8 +112,9 @@ test('maxConcurrentReviews is a whole number of 1 or more, 2 by default, and sel
   const base = defaultConfig()
   assert.equal(base.maxConcurrentReviews, 2)
   assert.equal(base.selfReviewOverCap, false)
-  for (const good of [1, 2, 3, 10, 50]) assert.equal(validateConfig({ ...base, maxConcurrentReviews: good }).maxConcurrentReviews, good)
-  for (const bad of [0, -1, -2, 1.5, 2.25, '2', null, true, Number.NaN, Number.POSITIVE_INFINITY]) {
+  for (const good of [1, 2, 3, 10, 50, 10_000, 100_000, Number.MAX_SAFE_INTEGER]) assert.equal(validateConfig({ ...base, maxConcurrentReviews: good }).maxConcurrentReviews, good)
+  // a whole number too large for a JSON number to hold exactly is refused too, so the Settings page, which shows it in digits, can save every value the server keeps
+  for (const bad of [0, -1, -2, 1.5, 2.25, '2', null, true, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, 1e21]) {
     assert.throws(() => validateConfig({ ...base, maxConcurrentReviews: bad }), /config\.maxConcurrentReviews must be a whole number of 1 or more/, String(bad))
   }
   assert.equal(validateConfig({ ...base, selfReviewOverCap: true }).selfReviewOverCap, true)

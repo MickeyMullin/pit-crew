@@ -165,7 +165,8 @@ const idleMinutes = (obj: Record<string, unknown>, where: string): number =>
     ? obj.idleMinutes
     : fail(`${where}.idleMinutes must be 0 (never idle) or a whole number of minutes from ${idleRange.min} to ${idleRange.max}`)
 
-export const isReviewCap = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 1
+// a whole number of 1 or more that a JSON number holds exactly, so the Settings page, which shows it in digits, can save back every cap kept here
+export const isReviewCap = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 1
 
 const maxConcurrentReviews = (obj: Record<string, unknown>, where: string): number =>
   isReviewCap(obj.maxConcurrentReviews) ? obj.maxConcurrentReviews : fail(`${where}.maxConcurrentReviews must be a whole number of 1 or more`)

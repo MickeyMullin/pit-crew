@@ -115,7 +115,7 @@ export const parseIdleMinutes = (text: string): number => {
 // a whole number of reviews; anything else is NaN, which the checks refuse before a save
 export const parseMaxReviews = (text: string): number => {
   const value = text.trim()
-  return /^\d{1,4}$/.test(value) ? Number(value) : Number.NaN
+  return /^\d+$/.test(value) ? Number(value) : Number.NaN
 }
 
 // the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit (allowedHosts, cloneDir, agent) are carried over from the config it loaded
@@ -242,9 +242,9 @@ export const validateForm = (form: Form): FieldError[] => {
     errors.push({ field: 'idleMinutes', message: `Use 0 for never, or a whole number of minutes from ${idleLimits.min} to ${idleLimits.max}.` })
   }
   if (form.reportsDir.trim() === '') errors.push({ field: 'reportsDir', message: 'Enter the folder review reports are written to, for example ~/agents/output.' })
-  // the same rule as isReviewCap in src/config.ts
+  // the same rule as isReviewCap in src/config.ts, which a test keeps in step
   const cap = parseMaxReviews(form.maxConcurrentReviews)
-  if (!(Number.isInteger(cap) && cap >= 1)) errors.push({ field: 'maxConcurrentReviews', message: 'Use a whole number of 1 or more.' })
+  if (!(Number.isSafeInteger(cap) && cap >= 1)) errors.push({ field: 'maxConcurrentReviews', message: 'Use a whole number of 1 or more.' })
   return errors
 }
 

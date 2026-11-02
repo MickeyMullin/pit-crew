@@ -173,6 +173,30 @@ test('the review cap edits as text: a whole number of 1 or more, refused as zero
   assert.deepEqual(serverError(refusal({ ...sample(), selfReviewOverCap: 'yes' }), form), { field: 'selfReviewOverCap', message: 'Must be true or false.' })
 })
 
+test('the page takes every review cap the server takes and refuses every one it refuses, five digits and more included', () => {
+  // a stored cap of five digits saves unchanged
+  const stored = { ...sample(), maxConcurrentReviews: 10_000 }
+  const form = toForm(stored, () => 'id')
+  assert.equal(form.maxConcurrentReviews, '10000')
+  assert.deepEqual(fields(form), [])
+  assert.equal(isDirty(form, stored), false)
+  assert.equal(validateConfig(toConfig(form, stored)).maxConcurrentReviews, 10_000)
+  form.maxConcurrentReviews = '100000'
+  assert.deepEqual(fields(form), [])
+  assert.equal(toConfig(form, stored).maxConcurrentReviews, 100_000)
+  // the page sees the number as the field shows it, in digits, and agrees with the server on each
+  for (const value of [1, 2, 9999, 10_000, 100_000, 123_456_789, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, 1e21, 0, -1, 1.5]) {
+    form.maxConcurrentReviews = String(value)
+    let server = true
+    try {
+      validateConfig({ ...stored, maxConcurrentReviews: value })
+    } catch {
+      server = false
+    }
+    assert.equal(fields(form).length === 0, server, String(value))
+  }
+})
+
 test('a valid form passes the checks, and the server accepts what it sends', () => {
   const form = formOf()
   assert.deepEqual(validateForm(form), [])
