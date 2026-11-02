@@ -22,3 +22,6 @@ export const activityHref = (anchor: ActivityAnchor | null | undefined, repo: st
   if (anchor.kind === 'review') return `${base}#pullrequestreview-${anchor.id}`
   return null
 }
+
+// the Re-review flag's link: the first commit after the viewer's review when the flag names one, otherwise the PR URL
+export const reReviewHref = (sinceSha: string | null | undefined, repo: string | undefined, number: number, url: string): string => pushHref(sinceSha, repo, number) ?? url

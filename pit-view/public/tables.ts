@@ -11,7 +11,7 @@ import { closedSortValues, mineSortValues, othersSortValues } from './filters.ts
 import type { Sort, SortValue } from './filters.ts'
 import { formatAge, formatClock, plural, shortSha } from './format.ts'
 import { hiddenHits, highlighted, hitsLine } from './pagesearch.ts'
-import { activityHref, pushHref } from './anchors.ts'
+import { activityHref, reReviewHref } from './anchors.ts'
 import { safeHref } from './safeurl.ts'
 import { rowFreshness } from './state.ts'
 import { sweepLinkFor } from './sweepview.ts'
@@ -214,8 +214,8 @@ export const othersColumns = (agent: boolean): Column<OtherRow>[] => [
     cell: (row, { view }) => ({
       sig: [row.flags, row.reviewers, row.url, view.repo],
       build: () => [h('span', { class: 'review' },
-        row.flags.map((flag) => flag.kind === 'reReview' && flag.sinceSha !== undefined
-          ? h('a', { ...newTab, class: 'chip tone-blue chip-link', href: safeHref(pushHref(flag.sinceSha, view.repo, row.number) ?? row.url) }, flag.label)
+        row.flags.map((flag) => flag.kind === 'reReview'
+          ? h('a', { ...newTab, class: 'chip tone-blue chip-link', href: safeHref(reReviewHref(flag.sinceSha, view.repo, row.number, row.url)) }, flag.label)
           : chip(flag.label, 'blue')),
         row.reviewers.map(pip),
         row.flags.length === 0 && row.reviewers.length === 0 ? h('span', { class: 'muted small' }, 'no reviews yet') : null)],
