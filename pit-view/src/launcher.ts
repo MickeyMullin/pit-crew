@@ -1094,21 +1094,50 @@ export type SpawnedProcess = {
 
 export type Spawn = (request: SpawnRequest) => SpawnedProcess
 
-// detached in its own process group, its output in files: restarting the server does not end it
-export const systemSpawn: Spawn = (request) => {
-  const out = openSync(request.stdoutPath, 'a')
-  const err = openSync(request.stderrPath, 'a')
-  let child: ReturnType<typeof spawnChild>
+// the part of a child process the system spawn uses
+export type ChildHandle = {
+  pid?: number | undefined
+  stdin: { write: (text: string) => unknown, end: () => unknown, on: (event: 'error', listener: (error: Error) => void) => unknown } | null
+  once: ((event: 'error', listener: (error: Error) => void) => unknown) & ((event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void) => unknown)
+  unref: () => unknown
+}
+
+// what the system spawn calls on the operating system: opening and closing a run's output files, and starting the process
+export type SpawnPrimitives = {
+  open: (path: string) => number
+  close: (fd: number) => void
+  spawn: (command: string, args: string[], options: { cwd: string, env: Record<string, string>, detached: true, stdio: ['pipe' | 'ignore', number, number] }) => ChildHandle
+}
+
+// detached in its own process group, its output in files: restarting the server does not end it. Once the process has started, nothing here throws, so it is always handed back to be watched: a descriptor that refuses to close is only a leaked descriptor
+export const spawnWith = (primitives: SpawnPrimitives): Spawn => (request) => {
+  const closeAll = (fds: number[]): void => {
+    for (const fd of fds) {
+      try {
+        primitives.close(fd)
+      } catch {
+        // the process, if one started, matters more than the descriptor
+      }
+    }
+  }
+  const out = primitives.open(request.stdoutPath)
+  let err: number
   try {
-    child = spawnChild(request.command, request.args, {
+    err = primitives.open(request.stderrPath)
+  } catch (error) {
+    closeAll([out])
+    throw error
+  }
+  let child: ChildHandle
+  try {
+    child = primitives.spawn(request.command, request.args, {
       cwd: request.cwd,
       env: request.env,
       detached: true,
       stdio: [request.stdin, out, err],
     })
   } finally {
-    closeSync(out)
-    closeSync(err)
+    closeAll([out, err])
   }
   const exited = new Promise<Exit>((resolveExit) => {
     child.once('error', (error) => resolveExit({ code: null, signal: null, error: error.message }))
@@ -1124,6 +1153,12 @@ export const systemSpawn: Spawn = (request) => {
     exited,
   }
 }
+
+export const systemSpawn: Spawn = spawnWith({
+  open: (path) => openSync(path, 'a'),
+  close: closeSync,
+  spawn: (command, args, options) => spawnChild(command, args, options),
+})
 
 export type LauncherFs = {
   mkdir: (path: string) => Promise<void>
@@ -1338,6 +1373,8 @@ export type SessionStore<T extends Session> = {
 // one run being watched
 type Live = {
   id: number
+  // its row as it was watched, which a settle whose read of the row is refused judges it by
+  row: Session
   // the slot it holds under the cap, if any
   slot: ReviewSlot | null
   dir: string
@@ -1419,7 +1456,14 @@ export const createSweepLauncher = (options: LauncherOptions<Sweep>): Launcher<S
 const createEngine = <T extends Session>(options: LauncherOptions<T>, store: SessionStore<T>): Launcher<T> => {
   const { gh, git, spawn, fs, kill, procs, clock, timers, home, onChange, onWatch } = options
   const noun = store.noun
-  const log = options.log ?? (() => {})
+  // a log line that cannot be written is dropped: logging sits on the paths that keep a process watched and a slot released, so it must never throw there
+  const log = (line: string): void => {
+    try {
+      options.log?.(line)
+    } catch {
+      // nowhere left to tell it
+    }
+  }
   const pollMs = options.pollMs ?? 1000
   const watchedPollMs = options.watchedPollMs ?? 10_000
   const stopGraceMs = options.stopGraceMs ?? 10_000
@@ -1443,8 +1487,24 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   let closed = false
 
   const now = (): string => iso(clock.now())
+  // the page is told of a change; a listener that throws is logged and never keeps a run from being watched, ended, or woken, or its slot from being released
   const changed = (run: T): void => {
-    if (!closed) onChange(run)
+    if (closed) return
+    try {
+      onChange(run)
+    } catch (error) {
+      log(`${noun} ${run.id}: cannot announce its change: ${messageOf(error)}`)
+    }
+  }
+
+  // the page is told a run is watched here; as for a change, a listener that throws is only logged
+  const watching = (run: T): void => {
+    if (closed) return
+    try {
+      onWatch(run)
+    } catch (error) {
+      log(`${noun} ${run.id}: cannot announce that it is watched: ${messageOf(error)}`)
+    }
   }
 
   const alive = (pid: number): boolean => {
@@ -1779,10 +1839,17 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       parsed = { ok: false, error: `result.json: expected ${store.schema}, found ${parsed.value.schema}` }
     }
     // a run takes only the result of its own command and of its own PR: an update's result in a review's folder, or one about another PR, is no result
-    const started = store.get(entry.id) as Partial<Run> | null
+    let started: Partial<Run> | null
+    try {
+      started = store.get(entry.id) as Partial<Run> | null
+    } catch (error) {
+      // a read the database refuses never keeps the run from ending: it is judged on its row as it was watched
+      log(`${noun} ${entry.id}: cannot read its row to settle it, so it settles on the row it was watched with: ${messageOf(error)}`)
+      started = entry.row as Partial<Run>
+    }
     if (parsed?.ok === true && store.schema === null && started?.command !== undefined) {
       const found = parsed.value
-      const wrong = found.schema === 'pit-crew/sweep-result@1' ? 'result.json is a sweep result, not the result of a run' : found.command !== started.command ? `result.json is for command ${found.command}, not ${started.command}` : found.target === null ? null : targetMismatch(store.get(entry.id) as T, null, found)
+      const wrong = found.schema === 'pit-crew/sweep-result@1' ? 'result.json is a sweep result, not the result of a run' : found.command !== started.command ? `result.json is for command ${found.command}, not ${started.command}` : found.target === null ? null : targetMismatch(started as T, null, found)
       if (wrong !== null) parsed = { ok: false, error: wrong }
     }
     let reportExists: boolean | null = null
@@ -1831,6 +1898,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const watchRun = (run: T, dir: string, child: SpawnedProcess | null, stdinOpen: boolean, spec: LaunchSpec | null, slot: ReviewSlot | null): Live => {
     const entry: Live = {
       id: run.id,
+      row: run,
       slot,
       dir,
       spec,
@@ -1847,7 +1915,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       stopping: false,
       settling: false,
     }
+    // counted, within Stop's reach, and settled by its exit before anything else is set up
     live.set(run.id, entry)
+    if (child !== null) {
+      void child.exited.then((exit) => settle(entry, exit, false)).catch((error: unknown) => log(`${noun} ${run.id}: cannot settle: ${messageOf(error)}`))
+    }
     try {
       entry.watcher = fs.watch(dir, () => {
         if (!entry.settling) void pumpOf(entry)
@@ -1856,9 +1928,6 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       log(`${noun} ${run.id}: cannot watch ${tildePath(dir, home)}, polling instead: ${messageOf(error)}`)
     }
     poll(entry, entry.watcher === null ? pollMs : watchedPollMs)
-    if (child !== null) {
-      void child.exited.then((exit) => settle(entry, exit, false)).catch((error: unknown) => log(`${noun} ${run.id}: cannot settle: ${messageOf(error)}`))
-    }
     void pumpOf(entry)
     return entry
   }
@@ -1910,6 +1979,19 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }, (id) => tildePath(join(runsDir, String(id)), home))
   }
 
+  // request.json written whole once its process exists: a write refused, at once or later, is logged and answered with false rather than thrown, since nothing may throw while a process is not yet watched
+  const writeRequest = (id: number, dir: string, contents: Record<string, unknown>): Promise<boolean> => {
+    const refused = (error: unknown): boolean => {
+      log(`${noun} ${id}: cannot update request.json: ${messageOf(error)}`)
+      return false
+    }
+    try {
+      return fs.writeFile(join(dir, 'request.json'), `${JSON.stringify(contents, null, 2)}\n`).then(() => true, refused)
+    } catch (error) {
+      return Promise.resolve(refused(error))
+    }
+  }
+
   // how a review was admitted: the slot it was given, the attempt holding that slot until its process is watched, and the viewer its start was confirmed for
   type Admitted = { slot: ReviewSlot, attempt: number, viewer: string }
 
@@ -1918,13 +2000,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     let run = queued ?? newRow(request, config, cwd, 'running')
     const runner = run.runner
     const sessionId = run.sessionId
-    if (!closed && queued === null) onWatch(run)
+    if (queued === null) watching(run)
     launching.set(run.id, false)
     const dir = join(runsDir, String(run.id))
     let child: SpawnedProcess
     let spec: LaunchSpec
     let record: Record<string, unknown>
     let stdin: string | null
+    let resume: string | null
     try {
       await fs.mkdir(dir)
       await probeRunDir(dir, fs).catch((reason: unknown) => {
@@ -1933,6 +2016,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       spec = await specFor(run, dir)
       const invocation = runners[runner].invocation(spec)
       stdin = invocation.stdin
+      // made before the spawn, so nothing that builds it can throw once a process exists; Codex's is written once its session id is read from the stream, so it is left out here
+      resume = sessionId === null ? null : resumeFor(run, sessionId, spec)
       record = {
         runner,
         command: run.command,
@@ -1968,6 +2053,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
     // from here the process exists: nothing is awaited and nothing may throw until it is watched, so it is never left running unwatched, uncounted, or out of Stop's reach
     const pid = child.pid
+    // the pid goes to request.json first and then to the row, each write on its own, so one refused write never leaves a restart without it; the file's write is begun here and awaited only after the watch
+    const pidInFile = writeRequest(run.id, dir, { ...record, pid, pidStartedAt: null })
     if (stdin !== null) {
       try {
         child.stdin?.write(stdin)
@@ -1975,30 +2062,33 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         log(`${noun} ${run.id}: cannot write its request to stdin: ${messageOf(error)}`)
       }
     }
-    const resume = sessionId === null ? null : resumeFor(run, sessionId, spec)
+    let pidInRow = true
     try {
-      // Codex's resume command is written once its session id is read from the stream, so it is left out here
       run = store.update(run.id, { pid, ...(resume === null ? {} : { resume }) })
     } catch (error) {
-      // the row keeps no pid, but the watch below has it, so Stop still signals the process and its end still settles it
+      // the row keeps no pid, but the watch below has it, so Stop still signals the process and its end still settles it; the write is made again with the start time
+      pidInRow = false
       log(`${noun} ${run.id}: cannot record its pid ${pid ?? 'unknown'}: ${messageOf(error)}`)
       run = { ...run, pid, resume } as T
     }
-    watchRun(run, dir, child, stdin !== null && child.stdin !== null, spec, admitted?.slot ?? null)
+    const entry = watchRun(run, dir, child, stdin !== null && child.stdin !== null, spec, admitted?.slot ?? null)
     // the watched run holds its slot from here, so the attempt's is released at once and the slot never counts twice
     if (admitted !== null) admitting.delete(admitted.attempt)
     const stopAsked = launching.get(run.id) === true
     launching.delete(run.id)
-    if (stopAsked) stop(run.id)
+    // carried out on the watched process itself, with no read of the row that could throw before the start time is recorded
+    if (stopAsked) stopLive(entry)
     // the start time, which a restart needs to tell this process from one that reused its pid, comes after the watch, since reading it is awaited
     const pidStartedAt = pid === null ? null : await procs.startTime(pid).catch(() => null)
     try {
-      run = store.update(run.id, { pidStartedAt })
+      // the second try at a pid and resume command the row refused at once after the spawn
+      run = store.update(run.id, { ...(pidInRow ? {} : { pid, ...(resume === null ? {} : { resume }) }), pidStartedAt })
     } catch (error) {
-      log(`${noun} ${run.id}: cannot record its start time: ${messageOf(error)}`)
+      log(`${noun} ${run.id}: cannot record its ${pidInRow ? '' : 'pid and its '}start time: ${messageOf(error)}`)
     }
-    await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid, pidStartedAt }, null, 2)}\n`)
-      .catch((error: unknown) => log(`${noun} ${run.id}: cannot update request.json: ${messageOf(error)}`))
+    // the second write of request.json, with the start time, made once the first has ended so the two never interleave; it is also the second try at a pid the first write did not keep
+    await pidInFile
+    await writeRequest(run.id, dir, { ...record, pid, pidStartedAt })
     log(`${noun} ${run.id} started: ${run.runner} ${run.command} ${run.args.join(' ')} in ${run.cwd}`)
     // a run that settled while its start time was read was announced by its settle, which this older row must not follow
     if (live.has(run.id)) changed(run)
@@ -2052,7 +2142,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const enqueue = (request: StartRequest, config: Config, cwd: string): T => {
     const run = newRow(request, config, cwd, 'queued')
     queue.push({ id: run.id, run, request, viewer: config.viewer, attempt: null, checked: null })
-    if (!closed) onWatch(run)
+    watching(run)
     log(`${noun} ${run.id} queued: ${run.command} ${run.args.join(' ')}, ${reviewsInFlight().length} reviews in flight with a cap of ${config.maxConcurrentReviews}`)
     changed(run)
     return run
@@ -2103,25 +2193,36 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       changed(stopped)
       return stopped
     }
-    // a spawn that failed has no process to signal; its exit settles it as stopped
+    stopLive(entry)
+    return run
+  }
+
+  // a watched run is signaled from the pid it holds in memory, so stopping it reads nothing that could throw; a spawn that failed has no process to signal, and its exit settles it as stopped
+  const stopLive = (entry: Live): void => {
     if (entry.pid === null) {
       entry.stopping = true
-      return run
+      return
     }
-    if (!entry.stopping) {
-      entry.stopping = true
-      signalGroup(entry.pid, 'SIGTERM')
-      entry.killTimer = timers.set(() => {
-        void escalate(entry)
-      }, stopGraceMs)
-    }
-    return run
+    if (entry.stopping) return
+    entry.stopping = true
+    signalGroup(entry.pid, 'SIGTERM')
+    entry.killTimer = timers.set(() => {
+      void escalate(entry)
+    }, stopGraceMs)
   }
 
   type RequestFile = { pid?: unknown, pidStartedAt?: unknown }
 
   // a run watched again after a restart holds the slot the cache gives it now, since the one it was admitted with went with the server
-  const recoveredSlot = (run: T): ReviewSlot | null => store.slot(run as unknown as { repo: string, number?: number, command: string }, options.config())
+  const recoveredSlot = (run: T): ReviewSlot | null => {
+    try {
+      return store.slot(run as unknown as { repo: string, number?: number, command: string }, options.config())
+    } catch (error) {
+      // a cache that cannot be read never keeps a live run from being watched again: a review is then counted as one of the cap's own, which can only hold another back, never let one start over the cap
+      log(`${noun} ${run.id}: cannot read whether it is a self-review, so it counts as a review: ${messageOf(error)}`)
+      return reviewCommands.includes(run.command) ? 'review' : null
+    }
+  }
 
   const recover = async (): Promise<void> => {
     // a start of the server makes no GitHub call and starts no process, so a review still queued when it stopped is not started now
@@ -2139,13 +2240,16 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       } catch {
         request = {}
       }
-      const pid = typeof request.pid === 'number' ? request.pid : run.pid
-      const startedAt = typeof request.pidStartedAt === 'string' ? request.pidStartedAt : run.pidStartedAt
-      // a pid alone could have been reused; its start time must match too
+      // the pid and its start time are each written to both request.json and the row from the same values, and either write may have been refused, so each is taken from whichever record kept it; two records that kept different values cannot both describe the run's process, and neither is trusted
+      const pids = new Set([request.pid, run.pid].filter((value) => typeof value === 'number'))
+      const startTimes = new Set([request.pidStartedAt, run.pidStartedAt].filter((value) => typeof value === 'string'))
+      const pid = pids.size === 1 ? [...pids][0]! : null
+      const startedAt = startTimes.size === 1 ? [...startTimes][0]! : null
+      // a pid alone could have been reused; its start time must match too, so a pid with no start time recorded anywhere is never watched again
       const same = pid !== null && startedAt !== null && alive(pid) && await procs.startTime(pid).catch(() => null) === startedAt
       if (same) {
         log(`${noun} ${run.id}: still running after the restart (pid ${pid}); watching it again`)
-        if (!closed) onWatch(run)
+        watching(run)
         watchRun({ ...run, pid }, dir, null, false, null, recoveredSlot(run))
       } else {
         const entry = watchRun({ ...run, pid: null }, dir, null, false, null, recoveredSlot(run))

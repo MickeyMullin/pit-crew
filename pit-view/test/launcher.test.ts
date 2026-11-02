@@ -1763,6 +1763,290 @@ test('a queued review whose pid cannot be written after its spawn keeps its slot
   }
 })
 
+// a launch whose request.json writes that carry a pid throw, as a full disk's would, while the one made before the spawn, with no pid, succeeds; only the first `left.count` of them throw
+const refusedPidFile = (left = { count: Number.POSITIVE_INFINITY }): FakeLaunch => {
+  const launch = fakeLaunch()
+  const writeRunFile = launch.deps.fs.writeFile
+  launch.deps.fs = {
+    ...launch.deps.fs,
+    writeFile: async (path, text) => {
+      if (path.endsWith('request.json') && typeof (JSON.parse(text) as { pid: unknown }).pid === 'number' && left.count > 0) {
+        left.count -= 1
+        throw new Error('ENOSPC: no space left on device, write')
+      }
+      return writeRunFile(path, text)
+    },
+  }
+  return launch
+}
+
+// the server goes away and a new one starts over the same cache and folders, as a restart would
+const restart = async (h: Awaited<ReturnType<typeof harness>>, old: ReturnType<typeof h.make>): Promise<ReturnType<typeof h.make>> => {
+  old.close()
+  const again = h.make()
+  h.watched.length = 0
+  await again.recover()
+  return again
+}
+
+test('a start whose pid neither its row nor request.json will take is watched and counted while this server runs, and a restart, with no pid to find, settles it as serverRestarted', async () => {
+  const h = await harness({ launch: refusedPidFile(), config: { maxConcurrentReviews: 1 } })
+  const launcher = failingWrites(h, (_id, changes) => pidWrite(changes))
+  let restarted: ReturnType<typeof h.make> | null = null
+  try {
+    const run = await within(launcher.start(request(106)))
+    const pid = h.launch.children[0]!.pid
+    assert.equal(h.cache.getRun(run.id)?.pid, null)
+    assert.equal((await requestFile(h, run.id)).pid, null)
+    // it holds the one slot while this server runs: the next review queues
+    const next = await launcher.start(request(113, { label: 'Review' }))
+    assert.equal(next.status, 'queued')
+    assert.equal(h.launch.children.length, 1)
+    // with no record of its pid, a restart cannot tell the process is the run's, so it settles the row though the process lives on
+    restarted = await restart(h, launcher)
+    assert.deepEqual(h.watched, [])
+    assert.deepEqual([h.cache.getRun(run.id)?.status, h.cache.getRun(run.id)?.note], ['failed', 'serverRestarted'])
+    assert.ok(h.launch.alive.has(pid))
+  } finally {
+    launcher.close()
+    restarted?.close()
+    await h.cleanup()
+  }
+})
+
+test('a start whose row refuses its pid is found by a restart from request.json, holds its slot there, and its end settles it', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  const launcher = failingWrites(h, (_id, changes) => pidWrite(changes))
+  let restarted: ReturnType<typeof h.make> | null = null
+  try {
+    const run = await within(launcher.start(request(106)))
+    const child = h.launch.children[0]!
+    assert.equal(h.cache.getRun(run.id)?.pid, null)
+    assert.equal(h.cache.getRun(run.id)?.pidStartedAt, null)
+    const file = await requestFile(h, run.id)
+    assert.deepEqual([file.pid, file.pidStartedAt], [child.pid, `start-${child.pid}`])
+    restarted = await restart(h, launcher)
+    assert.deepEqual(h.watched, [run.id])
+    assert.equal(h.cache.getRun(run.id)?.status, 'running')
+    // its slot is counted after the restart: a new review queues rather than start over the cap
+    const next = await restarted.start(request(113, { label: 'Review' }))
+    assert.equal(next.status, 'queued')
+    assert.equal(h.launch.children.length, 1)
+    // its process ends with no handle on it; the liveness check settles it, and the slot goes to the next in line
+    const settled = restarted.settled(run.id)
+    child.exit(1)
+    h.time.advance(10 * second)
+    assert.equal((await within(settled)).status, 'failed')
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(next.id)?.status, 'running')
+  } finally {
+    launcher.close()
+    restarted?.close()
+    await h.cleanup()
+  }
+})
+
+test('a start whose request.json refuses its pid is found by a restart from its row', async () => {
+  const h = await harness({ launch: refusedPidFile(), config: { maxConcurrentReviews: 1 } })
+  let restarted: ReturnType<typeof h.make> | null = null
+  try {
+    const run = await within(h.launcher.start(request(106)))
+    const pid = h.launch.children[0]!.pid
+    assert.equal((await requestFile(h, run.id)).pid, null)
+    assert.deepEqual([h.cache.getRun(run.id)?.pid, h.cache.getRun(run.id)?.pidStartedAt], [pid, `start-${pid}`])
+    restarted = await restart(h, h.launcher)
+    assert.deepEqual(h.watched, [run.id])
+    const next = await restarted.start(request(113, { label: 'Review' }))
+    assert.equal(next.status, 'queued')
+  } finally {
+    restarted?.close()
+    await h.cleanup()
+  }
+})
+
+test('a restart whose cache read of a live review throws still watches it again and counts it against the cap', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  let restarted: ReturnType<typeof h.make> | null = null
+  try {
+    const run = await within(h.launcher.start(request(106)))
+    h.launcher.close()
+    const readView = h.cache.readView
+    let failures = 1
+    h.cache.readView = (repo) => {
+      if (failures > 0) {
+        failures -= 1
+        throw new Error('database is locked')
+      }
+      return readView(repo)
+    }
+    restarted = h.make()
+    await within(restarted.recover())
+    assert.equal(failures, 0)
+    const next = await restarted.start(request(113, { label: 'Review' }))
+    assert.equal(next.status, 'queued')
+    assert.equal(h.launch.children.length, 1)
+    // its end settles it after the restart, and the slot goes to the next in line
+    const settled = restarted.settled(run.id)
+    h.launch.children[0]!.exit(1)
+    h.time.advance(10 * second)
+    assert.equal((await within(settled)).status, 'failed')
+    await waitFor(() => h.launch.children.length === 2)
+  } finally {
+    restarted?.close()
+    await h.cleanup()
+  }
+})
+
+test('a pid the row refuses once is written again with its start time, so a restart finds it though request.json refused it too', async () => {
+  const h = await harness({ launch: refusedPidFile(), config: { maxConcurrentReviews: 1 } })
+  let refusals = 1
+  const launcher = failingWrites(h, (_id, changes) => {
+    if (!('pid' in changes) || refusals === 0) return false
+    refusals -= 1
+    return true
+  })
+  let restarted: ReturnType<typeof h.make> | null = null
+  try {
+    const run = await within(launcher.start(request(106)))
+    const pid = h.launch.children[0]!.pid
+    // request.json refused it, and the row refused it at once after the spawn
+    assert.equal((await requestFile(h, run.id)).pid, null)
+    assert.equal(refusals, 0)
+    assert.deepEqual([h.cache.getRun(run.id)?.pid, h.cache.getRun(run.id)?.pidStartedAt], [pid, `start-${pid}`])
+    assert.match(h.cache.getRun(run.id)?.resume ?? '', /claude --resume /)
+    restarted = await restart(h, launcher)
+    assert.deepEqual(h.watched, [run.id])
+  } finally {
+    launcher.close()
+    restarted?.close()
+    await h.cleanup()
+  }
+})
+
+test('request.json takes the pid as soon as the process exists, and a write of it refused once is made again with the start time, so a restart finds it though the row refused it', async () => {
+  const left = { count: 1 }
+  const launch = refusedPidFile(left)
+  const written: unknown[] = []
+  const writeRunFile = launch.deps.fs.writeFile
+  launch.deps.fs = {
+    ...launch.deps.fs,
+    writeFile: async (path, text) => {
+      if (path.endsWith('request.json')) written.push((JSON.parse(text) as { pid: unknown }).pid)
+      return writeRunFile(path, text)
+    },
+  }
+  const h = await harness({ launch, config: { maxConcurrentReviews: 1 } })
+  const launcher = failingWrites(h, (_id, changes) => pidWrite(changes))
+  let restarted: ReturnType<typeof h.make> | null = null
+  try {
+    const run = await within(launcher.start(request(106)))
+    const pid = h.launch.children[0]!.pid
+    // before the spawn with no pid, at once after it with the pid, and again with its start time
+    assert.deepEqual(written, [null, pid, pid])
+    assert.equal(left.count, 0)
+    assert.deepEqual([(await requestFile(h, run.id)).pid, (await requestFile(h, run.id)).pidStartedAt], [pid, `start-${pid}`])
+    restarted = await restart(h, launcher)
+    assert.deepEqual(h.watched, [run.id])
+  } finally {
+    launcher.close()
+    restarted?.close()
+    await h.cleanup()
+  }
+})
+
+test('a stop asked during a launch is carried out on the watched process even when its row cannot be read then, and the start still records its start time', async () => {
+  const launch = fakeLaunch()
+  let release: () => void = () => {}
+  const held = new Promise<void>((resolveHeld) => {
+    release = resolveHeld
+  })
+  const mkdirRun = launch.deps.fs.mkdir
+  launch.deps.fs = { ...launch.deps.fs, mkdir: async (path) => held.then(() => mkdirRun(path)) }
+  const h = await harness({ launch, config: { maxConcurrentReviews: 1 } })
+  const getRun = h.cache.getRun
+  let unreadable = false
+  h.cache.getRun = (id) => {
+    if (unreadable) {
+      unreadable = false
+      throw new Error('database is locked')
+    }
+    return getRun(id)
+  }
+  const launcher = h.make()
+  h.cache.getRun = getRun
+  try {
+    const starting = launcher.start(request(106))
+    await waitFor(() => h.watched.length === 1)
+    const id = h.watched[0]!
+    assert.equal(launcher.stop(id).status, 'running')
+    // the next read of the row throws, once
+    unreadable = true
+    // the runner outlives its SIGTERM, so its start time can still be read
+    h.launch.ignoreTerm.add(4001)
+    release()
+    const run = await within(starting)
+    const pid = h.launch.children[0]!.pid
+    assert.equal(pid, 4001)
+    assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }])
+    assert.equal(run.id, id)
+    assert.equal(h.cache.getRun(id)?.pidStartedAt, `start-${pid}`)
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a review whose row cannot be read as it settles still settles for whoever awaits it and frees its slot', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  const getRun = h.cache.getRun
+  let unreadable = 0
+  h.cache.getRun = (id) => {
+    if (id === unreadable) throw new Error('database disk image is malformed')
+    return getRun(id)
+  }
+  const launcher = h.make()
+  h.cache.getRun = getRun
+  try {
+    const running = await launcher.start(request(106))
+    const next = await launcher.start(request(113, { label: 'Review' }))
+    const settled = launcher.settled(running.id)
+    unreadable = running.id
+    h.launch.children[0]!.exit(1)
+    const ended = await within(settled)
+    assert.equal(ended.status, 'failed')
+    assert.equal(noteKind(ended.note), 'noResult')
+    assert.equal(ended.command, 'review-pr')
+    unreadable = 0
+    assert.equal(h.cache.getRun(running.id)?.status, 'failed')
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(next.id)?.status, 'running')
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a review whose ending the page cannot be told of still settles for whoever awaits it and frees its slot', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  let failing = 0
+  const launcher = h.make((run) => {
+    if (run.id === failing && run.status !== 'running') throw new Error('the page went away')
+  })
+  try {
+    const running = await launcher.start(request(106))
+    const next = await launcher.start(request(113, { label: 'Review' }))
+    failing = running.id
+    const settled = launcher.settled(running.id)
+    h.launch.children[0]!.exit(1)
+    assert.equal((await within(settled)).status, 'failed')
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(next.id)?.status, 'running')
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
 test('a start that fails before its spawn and cannot record the failure is still given to whoever awaits it as failed, never as the running row', async () => {
   const h = await harness({ config: { maxConcurrentReviews: 1 } })
   let unwritable = true
