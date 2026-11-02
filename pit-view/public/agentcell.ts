@@ -14,6 +14,7 @@ export const agentCellSig = (cell: AgentCell | null, number: number, nowMs: numb
   if (cell === null) return null
   const model = cellModel(cell, number, nowMs)
   if (model.state === 'idle') return { ...model, under: model.under !== null }
+  if (model.state === 'queued') return { state: model.state, label: model.label, name: model.name, runId: cell.runId }
   if (model.state === 'running') return { state: model.state, label: model.label, name: model.name, runId: cell.runId, startedAt: cell.startedAt }
   return { ...model, line: model.line !== '' }
 }
@@ -31,7 +32,7 @@ export const updateAgentCells = (root: ParentNode, rows: readonly { number: numb
       setText(line, model.under ?? '')
       continue
     }
-    if (model.state === 'done') {
+    if (model.state === 'done' || model.state === 'queued') {
       setText(line, model.line)
       continue
     }
@@ -94,6 +95,21 @@ export const agentCellNodes = (cell: AgentCell | null, number: number, nowMs: nu
     return [h('span', { class: 'agent agent-idle' },
       openButton(number, model.name, 'agent-start', [model.button]),
       model.under === null ? null : h('span', { class: 'agent-line', 'data-agent-line': '' }, model.under))]
+  }
+  if (model.state === 'queued') {
+    return [h('button', {
+      type: 'button',
+      class: 'agent agent-open agent-queued',
+      'data-agent': 'open',
+      'data-pr': number,
+      'aria-label': model.name,
+      'data-focus': 'agent-open',
+      'data-focus-key': `agent-open:${number}`,
+    },
+    h('span', { class: 'agent-head' },
+      h('span', { class: 'agent-dot agent-dot-queued', 'aria-hidden': 'true' }),
+      h('span', { class: 'agent-label' }, model.label)),
+    h('span', { class: 'agent-line', 'data-agent-line': '' }, model.line))]
   }
   if (model.state === 'running') {
     return [h('button', {

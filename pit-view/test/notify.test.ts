@@ -321,6 +321,22 @@ test('review session kinds fire when a watched run settles, and only then', asyn
   poller.stop()
 })
 
+test('a watched run that waits in the queue fires nothing until it starts and settles, then fires once', async () => {
+  const { cycle, poller, cache, events, time } = await harness()
+  await cycle()
+  const run = makeRun(cache, scenario.repo, 106, nowIso(time))
+  cache.updateRun(run.id, { status: 'queued' })
+  watch(poller, run)
+  poller.runChanged(scenario.repo, 106)
+  assert.deepEqual(events, [])
+  cache.updateRun(run.id, { status: 'running' })
+  poller.runChanged(scenario.repo, 106)
+  cache.updateRun(run.id, { status: 'done', finishedAt: nowIso(time) })
+  poller.runChanged(scenario.repo, 106)
+  assert.deepEqual(only(events), [['runFinished', 106]])
+  poller.stop()
+})
+
 test('done and failed fire runFinished, and stopped fires nothing', async () => {
   const { cycle, poller, cache, events, time } = await harness()
   await cycle()

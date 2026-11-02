@@ -77,6 +77,10 @@ export const runningLine = (cell: Pick<AgentCell, 'startedAt' | 'lastStepAt'>, n
   return cell.lastStepAt === null ? `${running} · starting` : `${running} · last step ${formatSince(cell.lastStepAt, nowMs)}`
 }
 
+// "queued 4m": how long a review has waited for a slot under the cap, since it was queued
+export const queuedLine = (cell: Pick<AgentCell, 'startedAt'>, nowMs: number): string =>
+  cell.startedAt === null ? 'queued' : `queued ${formatDuration(cell.startedAt, nowMs)}`
+
 // the newest step in words, for the running cell's tooltip and screen readers
 export const stepText = (step: AgentCell['step'], command: string | null = null): string => {
   if (step === null) return 'Starting: no step recorded yet'
@@ -99,6 +103,7 @@ export const doneTone = (cell: Pick<AgentCell, 'status' | 'text'>): DoneTone => 
 // with the PR number; starting, stopping and copying happen in the drawer
 export type CellModel =
   | { state: 'idle', button: string, name: string, under: string | null }
+  | { state: 'queued', label: string, line: string, name: string }
   | { state: 'running', label: string, line: string, step: string, name: string }
   | {
       state: 'done'
@@ -116,6 +121,9 @@ const failureTip = (note: string | null): string | null => {
 }
 
 export const cellModel = (cell: AgentCell, number: number, nowMs: number): CellModel => {
+  if (cell.state === 'queued') {
+    return { state: 'queued', label: cell.label, line: queuedLine(cell, nowMs), name: `Open agent for #${number}, ${cell.label} queued` }
+  }
   if (cell.state === 'running') {
     return {
       state: 'running',
@@ -210,6 +218,7 @@ export const announceKey = (cell: AgentCell | null): string =>
   cell === null ? 'none' : `${cell.runId ?? 'none'}:${cell.state}:${cell.status ?? 'none'}`
 
 export const announcement = (number: number, cell: AgentCell): string | null => {
+  if (cell.state === 'queued') return `#${number}: ${cell.label} queued`
   if (cell.state === 'running') return `#${number}: ${cell.label} started`
   if (cell.state === 'done') return `#${number}: ${cell.label} finished: ${cell.text ?? 'Done'}`
   return null

@@ -41,6 +41,9 @@ export type Form = {
   reportsDir: string
   density: Config['density']
   showAgentColumn: boolean
+  // the cap as typed: a whole number of 1 or more
+  maxConcurrentReviews: string
+  selfReviewOverCap: boolean
   notifyEnabled: boolean
   notifyKinds: NotificationKind[]
 }
@@ -72,6 +75,8 @@ export const toForm = (config: Config, makeId: MakeId): Form => ({
   reportsDir: config.reportsDir,
   density: config.density,
   showAgentColumn: config.showAgentColumn,
+  maxConcurrentReviews: String(config.maxConcurrentReviews),
+  selfReviewOverCap: config.selfReviewOverCap,
   notifyEnabled: config.notifications?.enabled ?? false,
   notifyKinds: config.notifications?.kinds ?? allKinds,
 })
@@ -107,6 +112,12 @@ export const parseIdleMinutes = (text: string): number => {
   return /^\d{1,5}$/.test(value) ? Number(value) : Number.NaN
 }
 
+// a whole number of reviews; anything else is NaN, which the checks refuse before a save
+export const parseMaxReviews = (text: string): number => {
+  const value = text.trim()
+  return /^\d{1,4}$/.test(value) ? Number(value) : Number.NaN
+}
+
 // the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit (allowedHosts, cloneDir, agent) are carried over from the config it loaded
 export const toConfig = (form: Form, base: Config): Config => {
   const config: Config = {
@@ -133,6 +144,8 @@ export const toConfig = (form: Form, base: Config): Config => {
     reportsDir: form.reportsDir.trim(),
     density: form.density,
     showAgentColumn: form.showAgentColumn,
+    maxConcurrentReviews: parseMaxReviews(form.maxConcurrentReviews),
+    selfReviewOverCap: form.selfReviewOverCap,
     allowedHosts: base.allowedHosts,
     ...(base.cloneDir === undefined ? {} : { cloneDir: base.cloneDir }),
     agent: base.agent,
@@ -229,10 +242,13 @@ export const validateForm = (form: Form): FieldError[] => {
     errors.push({ field: 'idleMinutes', message: `Use 0 for never, or a whole number of minutes from ${idleLimits.min} to ${idleLimits.max}.` })
   }
   if (form.reportsDir.trim() === '') errors.push({ field: 'reportsDir', message: 'Enter the folder review reports are written to, for example ~/agents/output.' })
+  // the same rule as isReviewCap in src/config.ts
+  const cap = parseMaxReviews(form.maxConcurrentReviews)
+  if (!(Number.isInteger(cap) && cap >= 1)) errors.push({ field: 'maxConcurrentReviews', message: 'Use a whole number of 1 or more.' })
   return errors
 }
 
-const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'showAgentColumn', 'notifyEnabled'])
+const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'notifyEnabled'])
 
 const capitalize = (text: string): string => text === '' ? text : `${text[0]!.toUpperCase()}${text.slice(1)}`
 

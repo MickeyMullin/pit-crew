@@ -12,7 +12,7 @@ import { cycleKeys } from '../src/poller.ts'
 import type { View } from '../src/poller.ts'
 import {
   aliasOf, changeKind, colorFor, contrastWithWhite, errorId, fieldId, initialsOf, isDirty, kindDefaults, needsRefresh, newPerson, newTicket,
-  idleLimits, notifyChoices, openSuggestions, parseBots, parseIdleMinutes, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, serverError, ticketSample, toConfig, toForm,
+  idleLimits, notifyChoices, openSuggestions, parseBots, parseIdleMinutes, parseMaxReviews, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, serverError, ticketSample, toConfig, toForm,
   validateForm,
 } from '../public/settings-form.ts'
 import type { Form, TicketForm } from '../public/settings-form.ts'
@@ -45,6 +45,8 @@ const sample = (): Config => ({
   bots: ['dependabot', 'renovate', 'review-helper'],
   density: 'compact',
   showAgentColumn: true,
+  maxConcurrentReviews: 3,
+  selfReviewOverCap: true,
   // not on the page yet (P2.5 or later), so a save must carry them over
   cloneDir: '~/dev/orbit',
   agent: { runner: 'codex', claudeModel: 'sonnet', codexModel: 'gpt-6.1-terra' },
@@ -144,6 +146,31 @@ test('idle minutes edit as text: whole minutes, 0 for never, in the range the se
   assert.ok(Number.isNaN(parseIdleMinutes('ninety')))
   // the server's refusal lands on the same field
   assert.deepEqual(serverError(refusal({ ...sample(), idleMinutes: 3 }), form), { field: 'idleMinutes', message: 'Must be 0 (never idle) or a whole number of minutes from 5 to 1440.' })
+})
+
+test('the review cap edits as text: a whole number of 1 or more, refused as zero, negative, or fractional, and the self-review switch rides along', () => {
+  const form = formOf()
+  assert.deepEqual([form.maxConcurrentReviews, form.selfReviewOverCap], ['3', true])
+  assert.deepEqual([formOf(defaultConfig()).maxConcurrentReviews, formOf(defaultConfig()).selfReviewOverCap], ['2', false])
+  form.maxConcurrentReviews = ' 5 '
+  form.selfReviewOverCap = false
+  const sent = toConfig(form, sample())
+  assert.deepEqual([sent.maxConcurrentReviews, sent.selfReviewOverCap], [5, false])
+  assert.equal(isDirty(form, sample()), true)
+  for (const good of ['1', '2', '12']) {
+    form.maxConcurrentReviews = good
+    assert.deepEqual(fields(form), [], good)
+    assert.equal(validateConfig(toConfig(form, sample())).maxConcurrentReviews, Number(good))
+  }
+  for (const bad of ['', '0', '00', '-1', '1.5', '2.0', 'two', '3 reviews']) {
+    form.maxConcurrentReviews = bad
+    assert.deepEqual(fields(form), ['maxConcurrentReviews'], bad)
+  }
+  assert.match(validateForm(form)[0]!.message, /^Use a whole number of 1 or more\.$/)
+  assert.ok(Number.isNaN(parseMaxReviews('two')))
+  // the server's refusals land on the same fields
+  assert.deepEqual(serverError(refusal({ ...sample(), maxConcurrentReviews: 0 }), form), { field: 'maxConcurrentReviews', message: 'Must be a whole number of 1 or more.' })
+  assert.deepEqual(serverError(refusal({ ...sample(), selfReviewOverCap: 'yes' }), form), { field: 'selfReviewOverCap', message: 'Must be true or false.' })
 })
 
 test('a valid form passes the checks, and the server accepts what it sends', () => {

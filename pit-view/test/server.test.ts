@@ -1153,6 +1153,37 @@ test('POST /api/runs/<id>/reread needs the token and carries what the confirmati
   }
 })
 
+test('at the review cap a start answers with the run queued, its row reads queued, a queued run stops at once, and a saved higher cap starts the queue', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', maxConcurrentReviews: 1 } })
+  try {
+    await filled(h)
+    const first = await send(`${h.base}/api/prs/106/runs`, 'POST', { repo: scenario.repo }, token(h))
+    const second = await send(`${h.base}/api/prs/113/runs`, 'POST', { repo: scenario.repo }, token(h))
+    const third = await send(`${h.base}/api/prs/118/runs`, 'POST', { repo: scenario.repo }, token(h))
+    assert.deepEqual([first.status, second.status, third.status], [200, 200, 200])
+    assert.deepEqual([first.body.status, second.body.status, third.body.status], ['running', 'queued', 'queued'])
+    assert.equal(h.launch.children.length, 1)
+    const view = (await getJson<View>(`${h.base}/api/view`)).body
+    assert.equal(rowIn(view, 113)?.agent?.state, 'queued')
+    // a second start of a queued PR is refused like one of a running PR
+    assert.equal((await send(`${h.base}/api/prs/113/runs`, 'POST', { repo: scenario.repo }, token(h))).status, 409)
+    // the queued run is taken out of the queue at once
+    const stopped = await send(`${h.base}/api/runs/${String(second.body.id)}/stop`, 'POST', undefined, token(h))
+    assert.deepEqual([stopped.status, stopped.body.status], [200, 'stopped'])
+    // raising the cap in Settings starts what still waits
+    const stored = (await getJson<Config>(`${h.base}/api/config`)).body
+    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, maxConcurrentReviews: 2 })).status, 200)
+    await until(() => h.launch.children.length === 2)
+    assert.equal(h.server.cache.getRun(Number(third.body.id))?.status, 'running')
+    // a cap of zero is refused like any invalid setting
+    const refused = await send(`${h.base}/api/config`, 'PUT', { ...stored, maxConcurrentReviews: 0 })
+    assert.equal(refused.status, 400)
+    assert.match(String(refused.body.error), /config\.maxConcurrentReviews must be a whole number of 1 or more/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a re-read refused by a guard is 422 with the reason, and a PR that left the open tables is 409', async () => {
   const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
   try {

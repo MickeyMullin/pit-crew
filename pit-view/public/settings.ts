@@ -298,7 +298,7 @@ const removeTicket = (id: string): void => {
 
 // the fixed fields
 
-const staticText = ['repo', 'viewer', 'idleMinutes', 'bots', 'reportsDir'] as const
+const staticText = ['repo', 'viewer', 'idleMinutes', 'bots', 'reportsDir', 'maxConcurrentReviews'] as const
 
 const fillStatic = (): void => {
   if (page === null) return
@@ -311,6 +311,7 @@ const fillStatic = (): void => {
   options(byId<HTMLSelectElement>(fieldId('todayStartsAt')), todayChoices(Intl.DateTimeFormat().resolvedOptions().timeZone), form.todayStartsAt)
   options(byId<HTMLSelectElement>(fieldId('density')), densityChoices, form.density)
   byId<HTMLInputElement>(fieldId('showAgentColumn')).checked = form.showAgentColumn
+  byId<HTMLInputElement>(fieldId('selfReviewOverCap')).checked = form.selfReviewOverCap
   byId<HTMLInputElement>(fieldId('notifyEnabled')).checked = form.notifyEnabled
   byId('notify-kinds').replaceChildren(...notifyChoices.map((choice) => {
     const id = fieldId(`notifyKind.${choice.kind}`)
@@ -365,6 +366,12 @@ const bindStatic = (): void => {
   agent.addEventListener('change', () => {
     if (page === null) return
     page.form.showAgentColumn = agent.checked
+    changed()
+  })
+  const over = byId<HTMLInputElement>(fieldId('selfReviewOverCap'))
+  over.addEventListener('change', () => {
+    if (page === null) return
+    page.form.selfReviewOverCap = over.checked
     changed()
   })
 }

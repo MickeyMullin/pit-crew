@@ -32,6 +32,8 @@
   "reportsDir": "~/agents/output",
   "density": "comfortable",
   "showAgentColumn": false,
+  "maxConcurrentReviews": 2,
+  "selfReviewOverCap": false,
   "allowedHosts": [],
   "agent": {
     "runner": "claude",

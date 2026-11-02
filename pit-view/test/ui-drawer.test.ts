@@ -12,7 +12,7 @@ import { rereadRequest } from '../public/agent.ts'
 import type { AgentCell, RunView, StartOption, StepSlot } from '../public/agent.ts'
 import {
   cardKind, commitModel, cellFromRun, confirmHolds, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
-  reportName, reportRows, resumeReadyText, returnSelector, runRows, runText, startConfirmModel, startsModel, stepModels, stepsName, stopModel, summaryOf,
+  queuedStopModel, reportName, reportRows, resumeReadyText, returnSelector, runRows, runText, startConfirmModel, startsModel, stepModels, stepsName, stopModel, summaryOf,
 } from '../public/drawerview.ts'
 import type { DrawerInput, Loadable } from '../public/drawerview.ts'
 
@@ -473,6 +473,39 @@ test('a confirmation is dropped as soon as it cannot be built: its run ended, it
   assert.equal(confirmHolds(start, running(), true), false, 'a run started meanwhile makes every start unavailable')
   assert.equal(confirmHolds(start, idle({ starts: options().slice(0, 1) }), true), false, 'the start is no longer offered')
   assert.equal(confirmHolds({ ...start, kind: 'stack' }, idle(), true), true)
+})
+
+test('a queued run gets a card of its own: no steps or timer, a note on why it waits, and a removal that asks first; the lists say Queued', () => {
+  const queued = running({ state: 'queued', status: 'queued', startedAt: ago(4 * m), lastStepAt: null, step: null, steps: slots(), resume: null, tandem: true, args: ['101', '--tandem'], label: 'Tandem re-review' })
+  assert.equal(cardKind(queued), 'queued')
+  const model = drawerModel(input(queued))
+  assert.equal(model.card, 'queued')
+  assert.equal(model.running, null)
+  assert.deepEqual(model.queued, {
+    label: 'Tandem re-review',
+    tandem: true,
+    runnerLabel: 'Claude Code',
+    note: 'Waiting for a review slot: it starts by itself when an earlier review ends, in the order it was queued.',
+  })
+  assert.deepEqual(model.stop, {
+    heading: 'Remove #101 from the queue?',
+    detail: 'Tandem re-review in Claude Code',
+    effect: 'It has not started, so nothing ran and nothing was posted. It stays in the list of runs as stopped.',
+    after: null,
+    confirm: 'Remove from queue',
+    busy: 'Removing…',
+  })
+  assert.deepEqual(queuedStopModel(101, { label: 'Re-review', runner: 'codex' }).detail, 'Re-review in Codex')
+  // the removal's confirmation holds while the run is queued, and once it has started, since the stop is for the same run
+  const stop = { type: 'stop', andOpen: false, runId: 7 } as const
+  assert.equal(confirmHolds(stop, queued, true), true)
+  assert.equal(confirmHolds(stop, running(), true), true, 'it started meanwhile: the stop is for the same run')
+  assert.equal(confirmHolds(stop, finished(), true), false)
+  // every start is unavailable meanwhile, for the server's reason
+  assert.equal(model.starts.shared, 'A run for #101 is already in flight.')
+  assert.deepEqual(runText({ status: 'queued', result: null, note: null }), { text: 'Queued', tone: 'blue' })
+  const rebuilt = cellFromRun(running(), runView({ status: 'queued', lastStepAt: null, step: null, stepState: null, resume: null }))
+  assert.deepEqual([rebuilt.state, rebuilt.text], ['queued', null])
 })
 
 test('focus is moved only from inside the drawer or from nothing, never out of a field in use elsewhere', () => {

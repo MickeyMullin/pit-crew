@@ -196,11 +196,13 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
 
   const stopConfirmBlock = (stop: StopModel, row: OpenRow): HTMLElement => {
     const cell = row.agent
+    // a queued run has no timer yet: it says how long it has waited instead
+    const when = cell === null ? null : cell.state === 'queued' ? cell.startedAt === null ? 'queued' : ageSpan(cell.startedAt, 'queued ', options.nowMs()) : timerLine(cell, options.nowMs())
     return h('div', { class: 'confirm', role: 'group', 'aria-labelledby': 'drawer-confirm-heading' },
       h('h4', { id: 'drawer-confirm-heading', class: 'confirm-heading' }, stop.heading),
       facts([
-        ['Run', h('span', {}, `${stop.detail}, `, cell === null ? null : timerLine(cell, options.nowMs()))],
-        ['Stopping', stop.effect],
+        ['Run', h('span', {}, `${stop.detail}, `, when)],
+        [cell?.state === 'queued' ? 'Removing' : 'Stopping', stop.effect],
         ...(stop.after === null ? [] : [['Then', stop.after] as [string, string]]),
       ]),
       errorLine(),
@@ -598,6 +600,42 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     },
   })
 
+  // a queued review's card: what waits and since when, and one button that takes it out of the queue after asking
+  const queuedCard = (model: DrawerModel, row: OpenRow): Keyed => ({
+    key: 'queued',
+    create: () => h('section', { class: 'drawer-section drawer-card drawer-queued', 'aria-labelledby': 'drawer-queued-title' }),
+    update: (card) => {
+      const queued = model.queued
+      const cell = row.agent
+      if (queued === null || cell === null || model.stop === null) return
+      const asking = confirm?.type === 'stop'
+      sync(card, [
+        {
+          key: 'head',
+          sig: JSON.stringify([queued.label, queued.tandem, queued.runnerLabel, cell.startedAt]),
+          build: () => h('div', { class: 'drawer-run-head' },
+            h('h3', { id: 'drawer-queued-title', class: 'drawer-section-title drawer-run-title' },
+              h('span', { class: 'agent-dot agent-dot-queued', 'aria-hidden': 'true' }),
+              queued.label,
+              queued.tandem ? tag('Tandem', 'blue') : null,
+              tag('Queued', 'blue')),
+            h('p', { class: 'drawer-run-line' }, cell.startedAt === null ? 'queued' : ageSpan(cell.startedAt, 'queued ', options.nowMs()), ` · ${queued.runnerLabel}`)),
+        },
+        { key: 'note', sig: JSON.stringify(queued.note), build: () => h('p', { class: 'drawer-run-note' }, queued.note) },
+        {
+          key: 'actions',
+          sig: JSON.stringify([asking ? ['confirm', model.stop] : 'button', cell.runId, model.stopsEnabled]),
+          build: () => {
+            if (asking) return stopConfirmBlock(model.stop as StopModel, row)
+            const remove = h('button', { type: 'button', class: 'button button-danger-outline', disabled: !model.stopsEnabled, 'data-focus-key': 'stop' }, 'Remove from queue')
+            remove.addEventListener('click', () => askStop(false))
+            return h('div', { class: 'drawer-run-actions' }, remove)
+          },
+        },
+      ])
+    },
+  })
+
   // the latest-run card's Re-read result: a button, or its confirmation once asked
   const rereadBlock = (model: DrawerModel): HTMLElement | null => {
     if (model.rereadAsk !== null) {
@@ -778,7 +816,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     items.push(startPart(model))
     const actions = actionsPart(model)
     if (actions !== null) items.push(actions)
-    if (model.card === 'running') items.push(runningCard(model, row))
+    if (model.card === 'queued') items.push(queuedCard(model, row))
+    else if (model.card === 'running') items.push(runningCard(model, row))
     else if (model.card === 'waiting') items.push(waitingCard(model, number))
     else if (model.card === 'result') items.push(resultCard(model, number))
     const sweepLink = options.sweepLink(number)

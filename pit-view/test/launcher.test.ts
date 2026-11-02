@@ -13,7 +13,7 @@ import type { RawOpenPr } from '../src/github.ts'
 import {
   agentCell, childEnv, claudeInvocation, codexInvocation, codexNote, createLauncher, defaultRun, descendantGroups, doneText, emptyStream, gitConfigEnv,
   emptySteps, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, remoteNamesRepo,
-  requestText, runners, runView, shellPath, startOptions, stepsOf,
+  noteKind, requestText, reviewFits, runners, runView, shellPath, startOptions, stepsOf, updateRequest,
 } from '../src/launcher.ts'
 import type { LaunchSpec, RunResultJson, StartRequest, StepEvent } from '../src/launcher.ts'
 import { createPoller } from '../src/poller.ts'
@@ -684,7 +684,7 @@ test('one run per PR: a second start is refused while one is in flight, even bef
     assert.equal(first.status, 'fulfilled')
     assert.ok(second.status === 'rejected' && second.reason instanceof LaunchError && second.reason.code === 'busy')
     await assert.rejects(h.launcher.start(request()), (error: unknown) => error instanceof LaunchError && error.code === 'busy')
-    // another PR may start meanwhile: there is no overall cap
+    // another PR may start meanwhile, within the cap of two reviews at once
     await h.launcher.start(request(113, { label: 'Review' }))
     assert.equal(h.launch.children.length, 2)
     // once settled, the PR may start again
@@ -917,7 +917,8 @@ test('a runner that exits on SIGTERM settles as stopped with no SIGKILL', async 
 })
 
 test('after a restart, a live run is watched again and the rest settle from result.json or as serverRestarted', async () => {
-  const h = await harness()
+  // room for all four reviews at once, so none waits in the queue
+  const h = await harness({ config: { maxConcurrentReviews: 4 } })
   try {
     const live = await h.launcher.start(request(106))
     const finished = await h.launcher.start(request(113, { label: 'Review' }))
@@ -1001,6 +1002,308 @@ test('a run that cannot spawn fails as spawnFailed and frees its PR', async () =
   } finally {
     await h.cleanup()
   }
+})
+
+// the cap on concurrent reviews (section 8, Launching runs, Review cap)
+
+// the queue starts its next review in the background; wait for what it does, a short while at most
+const waitFor = async (done: () => boolean, ms = 2000): Promise<void> => {
+  const until = Date.now() + ms
+  while (!done()) {
+    if (Date.now() > until) assert.fail('timed out waiting for the queue')
+    await new Promise((resolveWait) => setTimeout(resolveWait, 5))
+  }
+}
+
+test('a review fits while the reviews in flight, less one self-review when the setting allows it, stay within the cap', () => {
+  const others = (count: number): ('review' | 'selfReview')[] => Array.from({ length: count }, () => 'review')
+  assert.equal(reviewFits([], 'review', 1, false), true)
+  assert.equal(reviewFits(others(1), 'review', 2, false), true)
+  assert.equal(reviewFits(others(2), 'review', 2, false), false)
+  assert.equal(reviewFits(others(2), 'selfReview', 2, false), false)
+  // the setting lets one self-review go over the cap, and never a second
+  assert.equal(reviewFits(others(2), 'selfReview', 2, true), true)
+  assert.equal(reviewFits([...others(2), 'selfReview'], 'selfReview', 2, true), false)
+  assert.equal(reviewFits([...others(2), 'selfReview'], 'review', 2, true), false)
+  // the one over the cap is a self-review: with one in flight, the cap's own slots still take any review
+  assert.equal(reviewFits(['review', 'selfReview'], 'review', 2, true), true)
+  assert.equal(reviewFits(['review', 'selfReview'], 'review', 2, false), false)
+})
+
+test('at the cap a review is queued, not started, and the queue starts in arrival order as earlier reviews finish', async () => {
+  const h = await harness()
+  try {
+    const first = await h.launcher.start(request(106))
+    const second = await h.launcher.start(request(113, { label: 'Review' }))
+    const third = await h.launcher.start(request(118, { label: 'Review' }))
+    const fourth = await h.launcher.start(request(109, { label: 'Review' }))
+    assert.deepEqual([first.status, second.status, third.status, fourth.status], ['running', 'running', 'queued', 'queued'])
+    assert.equal(h.launch.children.length, 2)
+    // a queued run has its row and is the PR's run in flight, with nothing behind it yet
+    assert.deepEqual([third.pid, third.finishedAt, third.resume], [null, null, null])
+    assert.deepEqual(h.watched, [first.id, second.id, third.id, fourth.id])
+    await assert.rejects(h.launcher.start(request(118, { label: 'Review' })), (error: unknown) => error instanceof LaunchError && error.code === 'busy')
+    // the identity and clone checks ran for every start, the queued ones too
+    assert.equal(h.gh.calls.filter((call) => call.args[0] === 'api').length, 4)
+
+    // the first finishes a minute on: the earliest queued review starts, in the clone, with a fresh identity check, and its start time is not the time it was queued
+    h.time.advance(60_000)
+    await h.report(106)
+    await h.launch.children[0]!.result(reviewResult())
+    h.launch.children[0]!.exit(0)
+    await h.launcher.settled(first.id)
+    await waitFor(() => h.changes.some((run) => run.id === third.id && run.status === 'running' && run.pid !== null))
+    assert.equal(h.launch.children.length, 3)
+    assert.equal(h.cache.getRun(third.id)?.status, 'running')
+    assert.equal(h.cache.getRun(fourth.id)?.status, 'queued')
+    assert.equal(h.launch.children[2]!.request.cwd, join(h.home, 'dev', 'orbit'))
+    assert.match(h.launch.children[2]!.writes[0] ?? '', /\/review-pr 118 --emit-json=/)
+    // its start time is when it started, not when it was queued
+    assert.equal(h.cache.getRun(third.id)?.startedAt, '2026-10-26T14:06:38Z')
+    assert.equal(h.gh.calls.filter((call) => call.args[0] === 'api').length, 5)
+    assert.deepEqual(h.changes.filter((run) => run.id === third.id).map((run) => run.status).slice(0, 2), ['queued', 'running'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a slot is released however a review ends: failed, stopped, waiting for an answer, or a spawn that fails', async () => {
+  const launch = fakeLaunch()
+  // the spawn error below hits one start only
+  const spawn = launch.deps.spawn
+  launch.deps.spawn = (request) => {
+    const error = launch.spawnError
+    launch.spawnError = null
+    if (error !== null) throw error
+    return spawn(request)
+  }
+  const h = await harness({ launch, config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    const queued = [113, 118, 109, 107, 108].map((number) => h.launcher.start(request(number, { label: 'Review' })))
+    const rows = await Promise.all(queued)
+    assert.deepEqual(rows.map((run) => run.status), ['queued', 'queued', 'queued', 'queued', 'queued'])
+    assert.equal(h.launch.children.length, 1)
+
+    // a run that fails (no result.json) frees its slot for the next in line
+    h.launch.children[0]!.exit(1)
+    assert.equal((await h.launcher.settled(running.id)).status, 'failed')
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(rows[0]!.id)?.status, 'running')
+
+    // a stopped run frees it too
+    h.launcher.stop(rows[0]!.id)
+    assert.equal((await h.launcher.settled(rows[0]!.id)).status, 'stopped')
+    await waitFor(() => h.launch.children.length === 3)
+    assert.equal(h.cache.getRun(rows[1]!.id)?.status, 'running')
+
+    // a run that stops to ask is no longer in flight, so it frees its slot as well
+    await h.launch.children[2]!.result(reviewResult({ status: 'needsInput', reviewed: null, question: 'Post it?', target: { repo: scenario.repo, pr: 118 } }))
+    h.launch.children[2]!.exit(0)
+    assert.equal((await h.launcher.settled(rows[1]!.id)).status, 'needsInput')
+    await waitFor(() => h.launch.children.length === 4)
+    assert.equal(h.cache.getRun(rows[2]!.id)?.status, 'running')
+
+    // a queued review whose runner cannot spawn fails at once and hands the slot on, so the queue never wedges
+    launch.spawnError = new Error('spawn claude ENOENT')
+    h.launch.children[3]!.exit(1)
+    await h.launcher.settled(rows[2]!.id)
+    await waitFor(() => h.cache.getRun(rows[3]!.id)?.status === 'failed')
+    assert.equal(h.cache.getRun(rows[3]!.id)?.note, 'spawnFailed: spawn claude ENOENT')
+    await waitFor(() => h.launch.children.length === 5)
+    assert.equal(h.cache.getRun(rows[4]!.id)?.status, 'running')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a stop asked while a run is still being launched signals it once it is watched, so no process is left holding a slot', async () => {
+  const launch = fakeLaunch()
+  // the launch waits on the process's start time until the test lets it go
+  let release: () => void = () => {}
+  const held = new Promise<void>((resolveHeld) => {
+    release = resolveHeld
+  })
+  const startTime = launch.deps.procs.startTime
+  launch.deps.procs = { ...launch.deps.procs, startTime: async (pid) => held.then(() => startTime(pid)) }
+  const h = await harness({ launch, config: { maxConcurrentReviews: 1 } })
+  try {
+    const starting = h.launcher.start(request(106))
+    await waitFor(() => h.launch.children.length === 1)
+    const id = h.watched[0]!
+    const queued = await h.launcher.start(request(113, { label: 'Review' }))
+    assert.equal(queued.status, 'queued')
+    // the run has its row and its process, but nothing watches it yet
+    assert.equal(h.launcher.stop(id).status, 'running')
+    const settled = h.launcher.settled(id)
+    release()
+    await starting
+    assert.equal((await settled).status, 'stopped')
+    assert.deepEqual(h.launch.kills.map((kill) => kill.signal), ['SIGTERM'])
+    // its slot went to the next in line
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(queued.id)?.status, 'running')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a tandem review counts as one review, and fix and update sessions neither count nor queue', async () => {
+  const h = await harness()
+  try {
+    h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+    h.cache.writePr(scenario.repo, await prOf(102), scenario.defaultBranch)
+    const tandem = await h.launcher.start(request(106, { args: ['106', '--tandem'], label: 'Tandem re-review' }))
+    const review = await h.launcher.start(request(113, { label: 'Review' }))
+    assert.deepEqual([tandem.status, review.status], ['running', 'running'])
+    // the cap of two is full with one tandem and one single review
+    assert.equal((await h.launcher.start(request(118, { label: 'Review' }))).status, 'queued')
+    // a fix session and an update session start beside them, whatever the cap
+    const fix = await h.launcher.start(request(101, { command: 'fix-pr', args: ['101'], label: 'Fix session' }))
+    const update = await h.launcher.start(updateRequest(scenario.repo, 102, 'a'.repeat(40)))
+    assert.deepEqual([fix.status, update.status], ['running', 'running'])
+    assert.equal(h.launch.children.length, 4)
+    // and their ends free no review slot
+    h.launch.children[2]!.exit(1)
+    h.launch.children[3]!.exit(1)
+    await h.launcher.settled(fix.id)
+    await h.launcher.settled(update.id)
+    await h.launcher.check()
+    assert.equal(h.launch.children.length, 4)
+    assert.equal(h.cache.runsFor(scenario.repo, 118)[0]?.status, 'queued')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('with the setting on, one self-review may run over the cap and never a second; with it off, a self-review queues like any review', async () => {
+  const off = await harness()
+  try {
+    off.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+    await off.launcher.start(request(106))
+    await off.launcher.start(request(113, { label: 'Review' }))
+    assert.equal((await off.launcher.start(request(101, { args: ['101', '--no-post'], label: 'Self-review' }))).status, 'queued')
+    assert.equal(off.launch.children.length, 2)
+  } finally {
+    await off.cleanup()
+  }
+  const on = await harness({ config: { selfReviewOverCap: true } })
+  try {
+    for (const number of [101, 102]) on.cache.writePr(scenario.repo, await prOf(number), scenario.defaultBranch)
+    const first = await on.launcher.start(request(106))
+    await on.launcher.start(request(113, { label: 'Review' }))
+    const over = await on.launcher.start(request(101, { args: ['101', '--no-post'], label: 'Self-review' }))
+    assert.equal(over.status, 'running')
+    // never more than one over: a second self-review and any other review wait
+    const secondSelf = await on.launcher.start(request(102, { args: ['102', '--no-post'], label: 'Self-review' }))
+    const other = await on.launcher.start(request(118, { label: 'Review' }))
+    assert.deepEqual([secondSelf.status, other.status], ['queued', 'queued'])
+    assert.equal(on.launch.children.length, 3)
+    // an earlier review finishes: the next in line takes its slot, and the self-review stays the one over
+    on.launch.children[0]!.exit(1)
+    await on.launcher.settled(first.id)
+    await waitFor(() => on.launch.children.length === 4)
+    assert.equal(on.cache.getRun(secondSelf.id)?.status, 'running')
+    assert.equal(on.cache.getRun(other.id)?.status, 'queued')
+  } finally {
+    await on.cleanup()
+  }
+})
+
+test('a queued review can be stopped: it leaves the queue as stopped, never spawns, and frees its PR', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    const queued = await h.launcher.start(request(113, { label: 'Review' }))
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    const stopped = h.launcher.stop(queued.id)
+    assert.equal(stopped.status, 'stopped')
+    assert.notEqual(stopped.finishedAt, null)
+    assert.equal(h.launch.kills.length, 0)
+    assert.equal((await h.launcher.settled(queued.id)).status, 'stopped')
+    assert.throws(() => h.launcher.stop(queued.id), (error: unknown) => error instanceof LaunchError && error.code === 'notRunning')
+    // the next in line moves up; the stopped one never starts
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.match(h.launch.children[1]!.writes[0] ?? '', /\/review-pr 118 /)
+    assert.equal(h.cache.getRun(later.id)?.status, 'running')
+    assert.equal(h.cache.getRun(queued.id)?.status, 'stopped')
+    // the stopped PR may be started again: it queues behind the one now running
+    assert.equal((await h.launcher.start(request(113, { label: 'Review' }))).status, 'queued')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a queued review starts only for the repository and viewer it was confirmed for, and only after its identity check passes again', async () => {
+  const gh = fakeRunner((args) => args[0] === 'api' ? ok(`${login.current}\n`) : ok('gho_fixture_token\n'))
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh, config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    const otherViewer = await h.launcher.start(request(113, { label: 'Review' }))
+    // the viewer changes in Settings while it waits: it fails and never starts
+    h.settings.current = { ...h.settings.current, viewer: 'someone-else' }
+    login.current = 'someone-else'
+    h.launcher.drain()
+    await waitFor(() => h.cache.getRun(otherViewer.id)?.status === 'failed')
+    assert.match(h.cache.getRun(otherViewer.id)?.note ?? '', /^spawnFailed: not started: the viewer is now someone-else, not vera-quill/)
+    h.settings.current = { ...h.settings.current, viewer: scenario.viewer }
+    login.current = scenario.viewer
+    const otherRepo = await h.launcher.start(request(118, { label: 'Review' }))
+    h.settings.current = { ...h.settings.current, repo: 'octo-example/other' }
+    h.launcher.drain()
+    await waitFor(() => h.cache.getRun(otherRepo.id)?.status === 'failed')
+    assert.match(h.cache.getRun(otherRepo.id)?.note ?? '', /^spawnFailed: not started: the repository is now octo-example\/other, not octo-example\/orbit/)
+    h.settings.current = { ...h.settings.current, repo: scenario.repo }
+    // gh switched accounts while it waited: the start is refused as any start is, and nothing spawns
+    const mismatch = await h.launcher.start(request(109, { label: 'Review' }))
+    login.current = 'someone-else'
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.cache.getRun(mismatch.id)?.status === 'failed')
+    assert.match(h.cache.getRun(mismatch.id)?.note ?? '', /^spawnFailed: gh is signed in as someone-else, but the viewer is vera-quill/)
+    assert.equal(h.launch.children.length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('raising the cap starts queued reviews at once, and a restart fails queued reviews as serverRestarted without starting anything', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  try {
+    await h.launcher.start(request(106))
+    const a = await h.launcher.start(request(113, { label: 'Review' }))
+    const b = await h.launcher.start(request(118, { label: 'Review' }))
+    const c = await h.launcher.start(request(109, { label: 'Review' }))
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 2 }
+    h.launcher.drain()
+    await waitFor(() => h.launch.children.length === 2)
+    assert.deepEqual([a, b, c].map((run) => h.cache.getRun(run.id)?.status), ['running', 'queued', 'queued'])
+    // the server goes away with two reviews still queued
+    h.launcher.close()
+    const callsBefore = h.gh.calls.length
+    const again = h.make()
+    await again.recover()
+    assert.deepEqual([b, c].map((run) => [h.cache.getRun(run.id)?.status, noteKind(h.cache.getRun(run.id)?.note ?? null)]), [['failed', 'serverRestarted'], ['failed', 'serverRestarted']])
+    // nothing started and nothing asked GitHub
+    assert.equal(h.launch.children.length, 2)
+    assert.equal(h.gh.calls.length, callsBefore)
+    again.close()
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a queued run\'s cell is queued, carries the run, and offers no other start while it waits', async () => {
+  const pr = await prOf(106)
+  const cell = agentCell(pr, baseConfig(), runRow({ status: 'queued', pid: null, pidStartedAt: null, resume: null }), undefined)
+  assert.equal(cell.state, 'queued')
+  assert.equal(cell.label, 'Re-review')
+  assert.equal(cell.status, 'queued')
+  assert.equal(cell.text, null)
+  assert.ok(cell.starts.every((option) => option.unavailable === 'a run for #106 is already in flight'))
 })
 
 test('a run directory Pit View cannot write is refused before the runner starts, as permissionDenied', async () => {

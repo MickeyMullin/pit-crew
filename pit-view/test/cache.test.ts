@@ -487,6 +487,18 @@ test('pruning keeps the newest runs and never one still running', () => {
   cache.close()
 })
 
+test('a queued run is never pruned, is not counted as running, and is listed as queued', () => {
+  const { cache } = memoryCache({ keepRuns: 1 })
+  const waiting = cache.createRun(newRun(101, { status: 'queued' }), (id) => `~/runs/${id}`)
+  const done = cache.createRun(newRun(102, { status: 'done' }), (id) => `~/runs/${id}`)
+  cache.createRun(newRun(103, { status: 'done' }), (id) => `~/runs/${id}`)
+  assert.deepEqual(cache.pruneRuns().map((run) => run.id), [done.id])
+  assert.equal(cache.getRun(waiting.id)?.status, 'queued')
+  assert.deepEqual(cache.runningRuns(), [])
+  assert.deepEqual(cache.queuedRuns().map((run) => run.id), [waiting.id])
+  cache.close()
+})
+
 test('a version 3 cache is rebuilt with runs, and a rebuild keeps the runs it finds', async () => {
   const { dir, cleanup } = await tempDir()
   try {

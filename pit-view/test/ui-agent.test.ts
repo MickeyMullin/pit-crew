@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  announcements, cellModel, commandLine, doneTone, fixStart, formatDuration, refusalText, runningLine, sentence,
+  announcements, cellModel, commandLine, doneTone, fixStart, formatDuration, queuedLine, refusalText, runningLine, sentence,
   startRequest, stepText, stepTitle, stopRequest, tokenHeader,
 } from '../public/agent.ts'
 import type { AgentCell, StartOption } from '../public/agent.ts'
@@ -120,6 +120,21 @@ test('the banner offers a Fix session while the row offers one, available or not
   assert.equal(fixStart(idle({ starts: [review, busy] })), busy, 'an unavailable fix still shows; the drawer says why')
   assert.equal(fixStart(idle({ starts: [review] })), null, 'a PR that is not yours, or a bot\'s, has no fix start')
   assert.equal(fixStart(null), null)
+})
+
+test('a queued cell names its label and how long it has waited, on a button that opens the drawer, and is announced once', () => {
+  const queued = idle({ state: 'queued', label: 'Re-review', runId: 7, runner: 'claude', command: 'review-pr', args: ['101'], status: 'queued', startedAt: ago(4 * m + 10 * s) })
+  assert.deepEqual(cellModel(queued, 101, now), {
+    state: 'queued', label: 'Re-review', line: 'queued 4m', name: 'Open agent for #101, Re-review queued',
+  })
+  assert.equal(queuedLine(queued, now), 'queued 4m')
+  assert.equal(queuedLine({ startedAt: null }, now), 'queued')
+  const first = announcements(null, [{ number: 101, agent: idle() }])
+  const waiting = announcements(first.next, [{ number: 101, agent: idle() }])
+  const changed = announcements(waiting.next, [{ number: 101, agent: queued }])
+  assert.deepEqual(changed.messages, ['#101: Re-review queued'])
+  // the queued run starting is its own change
+  assert.deepEqual(announcements(changed.next, [{ number: 101, agent: running({ runId: 7, label: 'Re-review' }) }]).messages, ['#101: Re-review started'])
 })
 
 test('a run waiting for an answer keeps its question as the cell\'s tooltip; the drawer offers the resume command', () => {

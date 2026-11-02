@@ -714,6 +714,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     stored = saved
     if (stored.viewer === '' && ghLogin === '') ghLogin = await localLogin(runner)
     await poller.configChanged(before)
+    // a raised cap on concurrent reviews starts what waits, and a review queued for another repository or viewer fails now rather than later
+    launcher.drain()
     json(res, 200, saved)
   }
 

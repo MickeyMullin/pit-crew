@@ -1371,6 +1371,13 @@ button.agent:hover {
   background: var(--blue-fg);
 }
 
+/* a queued review waits for a slot under the cap: a ring, not the running dot */
+.agent-dot-queued {
+  box-sizing: border-box;
+  border: 2px solid var(--blue-fg);
+  background: none;
+}
+
 .agent-label,
 .agent-text {
   font-weight: 600;

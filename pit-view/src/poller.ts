@@ -602,7 +602,8 @@ export const createPoller = (options: PollerOptions): Poller => {
     for (const [id, found] of watched) {
       if (found.repo !== repo || found.number !== number) continue
       const run = cache.getRun(id)
-      if (run?.status === 'running') continue
+      // a review waiting in the queue has not settled either
+      if (run?.status === 'running' || run?.status === 'queued') continue
       watched.delete(id)
       // the repository in effect is the run's own, decided here and not by any scan in flight
       if (run === null || config().repo !== repo) continue

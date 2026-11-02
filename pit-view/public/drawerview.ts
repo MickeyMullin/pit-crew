@@ -183,6 +183,16 @@ export const runningModel = (row: Pick<OpenRow, 'headOid'>, cell: AgentCell): Ru
   }
 }
 
+// a review waiting for a slot under the cap on concurrent reviews: what waits and why, with no steps or timer, since nothing runs yet
+export type QueuedModel = { label: string, tandem: boolean, runnerLabel: string, note: string }
+
+export const queuedModel = (cell: AgentCell): QueuedModel => ({
+  label: cell.label,
+  tandem: cell.tandem,
+  runnerLabel: cell.runner === null ? 'its runner' : runnerLabels[cell.runner],
+  note: 'Waiting for a review slot: it starts by itself when an earlier review ends, in the order it was queued.',
+})
+
 // the stop confirmation: what stops and what stays behind
 export type StopModel = {
   heading: string
@@ -200,6 +210,16 @@ export const stopModel = (number: number, cell: Pick<AgentCell, 'label' | 'runne
   after: andOpen ? 'Then the command to resume the session appears here.' : null,
   confirm: andOpen ? 'Stop and open' : 'Stop run',
   busy: 'Stopping…',
+})
+
+// the same confirmation for a queued review, which leaves the queue: nothing has run, so nothing stays behind
+export const queuedStopModel = (number: number, cell: Pick<AgentCell, 'label' | 'runner'>): StopModel => ({
+  heading: `Remove #${number} from the queue?`,
+  detail: `${cell.label} in ${cell.runner === null ? 'its runner' : runnerLabels[cell.runner]}`,
+  effect: 'It has not started, so nothing ran and nothing was posted. It stays in the list of runs as stopped.',
+  after: null,
+  confirm: 'Remove from queue',
+  busy: 'Removing…',
 })
 
 // the Re-read result action on the latest-run card: for a failed run or one waiting for an answer that has a session to resume, since only a session someone resumed can have changed its result.json
@@ -439,9 +459,10 @@ export const resultModel = (cell: AgentCell, number: number, headOid: string): R
 })
 
 // which card the latest run gets
-export type CardKind = 'none' | 'running' | 'waiting' | 'result'
+export type CardKind = 'none' | 'queued' | 'running' | 'waiting' | 'result'
 
 export const cardKind = (cell: AgentCell): CardKind => {
+  if (cell.state === 'queued') return 'queued'
   if (cell.state === 'running') return 'running'
   if (cell.state === 'done' && cell.status === 'needsInput') return 'waiting'
   // an idle cell after a run still carries it, so the drawer can show what it found
@@ -495,6 +516,7 @@ export const runText = (run: Pick<RunView, 'status' | 'result' | 'note'> & { res
 }
 
 const outcomeText = (run: Pick<RunView, 'status' | 'result' | 'note'>): { text: string, tone: Tone } => {
+  if (run.status === 'queued') return { text: 'Queued', tone: 'blue' }
   if (run.status === 'running') return { text: 'Running', tone: 'blue' }
   if (run.status === 'needsInput') return { text: 'Needs your answer', tone: 'amber' }
   if (run.status === 'stopped') return { text: 'Stopped', tone: 'gray' }
@@ -583,6 +605,7 @@ export type DrawerModel = {
   actions: ActionOffer[]
   actionAsk: ActionConfirmModel | null
   card: CardKind
+  queued: QueuedModel | null
   running: RunningModel | null
   stop: StopModel | null
   // the latest-run card's Re-read result, and its confirmation while asked
@@ -612,8 +635,9 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
     actions: actionOffers(row, input.open),
     actionAsk: confirm?.type === 'action' ? actionConfirmModel(row, confirm, input.people ?? []) : null,
     card,
+    queued: cell !== null && card === 'queued' ? queuedModel(cell) : null,
     running: cell !== null && card === 'running' ? runningModel(row, cell) : null,
-    stop: cell !== null && card === 'running' ? stopModel(row.number, cell, confirm?.type === 'stop' && confirm.andOpen) : null,
+    stop: cell === null ? null : card === 'running' ? stopModel(row.number, cell, confirm?.type === 'stop' && confirm.andOpen) : card === 'queued' ? queuedStopModel(row.number, cell) : null,
     reread: cell !== null && (card === 'result' || card === 'waiting') ? rereadOffer(cell, input.open, row.number) : null,
     rereadAsk: cell !== null && confirm?.type === 'reread' && (card === 'result' || card === 'waiting') && rereadOffer(cell, input.open, row.number)?.disabled === false ? rereadAskModel(row, cell, confirm) : null,
     stopsEnabled: input.open || input.runs.state === 'ready',
@@ -690,7 +714,7 @@ const recordedCommit = (result: RunView['result']): string | null => {
 export const cellFromRun = (cell: AgentCell, run: RunView): AgentCell => {
   return {
     ...cell,
-    state: run.status === 'running' ? 'running' : 'done',
+    state: run.status === 'running' || run.status === 'queued' ? run.status : 'done',
     label: run.label,
     runId: run.id,
     runner: run.runner,
@@ -704,7 +728,7 @@ export const cellFromRun = (cell: AgentCell, run: RunView): AgentCell => {
     tandem: run.tandem,
     commit: recordedCommit(run.result),
     finishedAt: run.finishedAt,
-    text: run.status === 'running' ? null : runText(run).text,
+    text: run.status === 'running' || run.status === 'queued' ? null : runText(run).text,
     result: summaryOf(run.result),
     question: run.status === 'needsInput' ? run.result?.question ?? null : null,
     note: run.note,
@@ -728,7 +752,8 @@ export const confirmHolds = (confirm: Confirm, cell: AgentCell | null, open: boo
   // an action's confirmation is about the row, not the run: actionHolds judges it
   if (confirm.type === 'action') return true
   if (cell === null) return false
-  if (confirm.type === 'stop') return cell.state === 'running' && cell.runId === confirm.runId
+  // a queued run's removal still holds once it has started: the stop is for the same run
+  if (confirm.type === 'stop') return (cell.state === 'running' || cell.state === 'queued') && cell.runId === confirm.runId
   // a re-read is about one finished run that still has the status it was asked for, on a PR still open; the head and base it is bound to are judged by rereadBound
   if (confirm.type === 'reread') return open && rereadOffer(cell, open, 0)?.runId === confirm.runId
   if (!open) return false

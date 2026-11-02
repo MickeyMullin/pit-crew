@@ -151,6 +151,21 @@
           <p id="f-showAgentColumn-hint" class="hint">Starts, follows and stops a review session for each open PR. A start asks first, and runs in the clone set as <code>cloneDir</code> in the config file.</p>
           <p id="f-showAgentColumn-error" class="field-error" hidden></p>
         </div>
+        <div class="field">
+          <label for="f-maxConcurrentReviews">Reviews at once</label>
+          <input id="f-maxConcurrentReviews" class="input mono" type="number" inputmode="numeric" min="1" step="1" autocomplete="off" aria-describedby="f-maxConcurrentReviews-hint">
+          <p id="f-maxConcurrentReviews-hint" class="hint">Review sessions that run at the same time; a tandem review counts as one. More wait in a queue and start, in order, as earlier ones end. Fix and update sessions are not counted.</p>
+          <p id="f-maxConcurrentReviews-error" class="field-error" hidden></p>
+        </div>
+        <div class="field">
+          <span class="field-label">Self-review over the limit</span>
+          <label class="check">
+            <input id="f-selfReviewOverCap" type="checkbox" aria-describedby="f-selfReviewOverCap-hint">
+            Let one self-review run beyond it
+          </label>
+          <p id="f-selfReviewOverCap-hint" class="hint">A review of your own PR may start while the limit is reached, so it never waits behind others' reviews. Never more than one at a time.</p>
+          <p id="f-selfReviewOverCap-error" class="field-error" hidden></p>
+        </div>
       </div>
     </section>
 

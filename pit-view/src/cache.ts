@@ -87,9 +87,9 @@ export type FinishResult = {
   stale: CachedPr[]
 }
 
-// a review session's state; phase 4 adds queued and skipped
-export type RunStatus = 'running' | 'done' | 'failed' | 'needsInput' | 'stopped'
-export const runStatuses: readonly RunStatus[] = ['running', 'done', 'failed', 'needsInput', 'stopped']
+// a review session's state; queued waits for a slot under the cap on concurrent reviews, and phase 4 adds skipped
+export type RunStatus = 'queued' | 'running' | 'done' | 'failed' | 'needsInput' | 'stopped'
+export const runStatuses: readonly RunStatus[] = ['queued', 'running', 'done', 'failed', 'needsInput', 'stopped']
 
 // what a review session and a sweep share: Pit View's record of one launched process
 export type Session = {
@@ -170,6 +170,8 @@ export type Cache = {
   latestRuns: (repo: string) => Map<number, Run>
   // every run still recorded as running, in any repo
   runningRuns: () => Run[]
+  // every run still waiting in the queue, in any repo, oldest first
+  queuedRuns: () => Run[]
   // deletes all but the newest keepRuns finished runs and returns them, so their folders can go
   pruneRuns: () => Run[]
   // sweeps: the same, in a table of their own with ids of their own
@@ -699,9 +701,11 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
 
   const runningRuns = (): Run[] => all('SELECT * FROM runs WHERE status = \'running\' ORDER BY id').map(toRun)
 
-  // a run still in flight is never pruned, however old
+  const queuedRuns = (): Run[] => all('SELECT * FROM runs WHERE status = \'queued\' ORDER BY id').map(toRun)
+
+  // a run still in flight or waiting in the queue is never pruned, however old
   const pruneRuns = (): Run[] => transaction(() => {
-    const doomed = all('SELECT * FROM runs WHERE status != \'running\' AND id NOT IN (SELECT id FROM runs ORDER BY id DESC LIMIT $keep) ORDER BY id', { keep: keepRuns }).map(toRun)
+    const doomed = all('SELECT * FROM runs WHERE status NOT IN (\'running\', \'queued\') AND id NOT IN (SELECT id FROM runs ORDER BY id DESC LIMIT $keep) ORDER BY id', { keep: keepRuns }).map(toRun)
     for (const gone of doomed) run('DELETE FROM runs WHERE id = $id', { id: gone.id })
     return doomed
   })
@@ -779,6 +783,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     runsFor,
     latestRuns,
     runningRuns,
+    queuedRuns,
     pruneRuns,
     createSweep,
     updateSweep,

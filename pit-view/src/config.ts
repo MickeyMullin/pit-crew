@@ -58,6 +58,10 @@ export type Config = {
   reportsDir: string
   density: 'comfortable' | 'compact'
   showAgentColumn: boolean
+  // review runs in flight at once; more wait in a queue (section 8 of DESIGN.md, Review cap)
+  maxConcurrentReviews: number
+  // whether one self-review may run over that cap
+  selfReviewOverCap: boolean
   // host names a reverse proxy may reach the server by, besides its loopback names
   allowedHosts: string[]
   // the owner's local clone of repo, stored with ~; manual runs work in it. Whether it is a
@@ -103,6 +107,8 @@ export const defaultConfig = (): Config => ({
   reportsDir: '~/agents/output',
   density: 'comfortable',
   showAgentColumn: false,
+  maxConcurrentReviews: 2,
+  selfReviewOverCap: false,
   allowedHosts: [],
   agent: { runner: 'claude', claudeModel: defaultClaudeModel },
 })
@@ -159,6 +165,11 @@ const idleMinutes = (obj: Record<string, unknown>, where: string): number =>
     ? obj.idleMinutes
     : fail(`${where}.idleMinutes must be 0 (never idle) or a whole number of minutes from ${idleRange.min} to ${idleRange.max}`)
 
+export const isReviewCap = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 1
+
+const maxConcurrentReviews = (obj: Record<string, unknown>, where: string): number =>
+  isReviewCap(obj.maxConcurrentReviews) ? obj.maxConcurrentReviews : fail(`${where}.maxConcurrentReviews must be a whole number of 1 or more`)
+
 const onlyKeys = (obj: Record<string, unknown>, allowed: readonly string[], where: string): void => {
   const extra = Object.keys(obj).find((key) => !allowed.includes(key))
   if (extra !== undefined) fail(`${where}.${extra} is not a known setting`)
@@ -168,7 +179,7 @@ const personKeys = ['login', 'alias', 'initials', 'color', 'avatar'] as const
 const ticketKeys = ['enabled', 'kind', 'name', 'source', 'pattern', 'baseUrl', 'linkTemplate'] as const
 const configKeys = [
   'repo', 'viewer', 'people', 'tickets', 'refreshSeconds', 'idleMinutes', 'todayStartsAt',
-  'bots', 'reportsDir', 'density', 'showAgentColumn', 'allowedHosts', 'cloneDir', 'agent', 'notifications',
+  'bots', 'reportsDir', 'density', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'allowedHosts', 'cloneDir', 'agent', 'notifications',
 ] as const
 
 // a bare DNS name: dot-separated labels of letters, digits and inner hyphens, with no scheme,
@@ -296,6 +307,8 @@ export const validateConfig = (input: unknown): Config => {
     reportsDir: str(input, 'reportsDir', 'config'),
     density: oneOf(input, 'density', ['comfortable', 'compact'], 'config'),
     showAgentColumn: bool(input, 'showAgentColumn', 'config'),
+    maxConcurrentReviews: maxConcurrentReviews(input, 'config'),
+    selfReviewOverCap: bool(input, 'selfReviewOverCap', 'config'),
     allowedHosts: toAllowedHosts(list(input, 'allowedHosts', 'config')),
     // absent and empty both mean unset, and an unset cloneDir is left out of the file
     ...(cloneDir === undefined ? {} : { cloneDir }),

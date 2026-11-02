@@ -108,6 +108,42 @@ test('idleMinutes is 0 for never or a whole number of minutes from 5 to 1440, 90
   assert.throws(() => validateConfig(missing), /config\.idleMinutes/)
 })
 
+test('maxConcurrentReviews is a whole number of 1 or more, 2 by default, and selfReviewOverCap is true or false, off by default', () => {
+  const base = defaultConfig()
+  assert.equal(base.maxConcurrentReviews, 2)
+  assert.equal(base.selfReviewOverCap, false)
+  for (const good of [1, 2, 3, 10, 50]) assert.equal(validateConfig({ ...base, maxConcurrentReviews: good }).maxConcurrentReviews, good)
+  for (const bad of [0, -1, -2, 1.5, 2.25, '2', null, true, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(() => validateConfig({ ...base, maxConcurrentReviews: bad }), /config\.maxConcurrentReviews must be a whole number of 1 or more/, String(bad))
+  }
+  assert.equal(validateConfig({ ...base, selfReviewOverCap: true }).selfReviewOverCap, true)
+  for (const bad of ['true', 1, null]) {
+    assert.throws(() => validateConfig({ ...base, selfReviewOverCap: bad }), /config\.selfReviewOverCap must be true or false/, String(bad))
+  }
+  const { maxConcurrentReviews: _cap, ...noCap } = base
+  assert.throws(() => validateConfig(noCap), /config\.maxConcurrentReviews/)
+  const { selfReviewOverCap: _over, ...noOver } = base
+  assert.throws(() => validateConfig(noOver), /config\.selfReviewOverCap/)
+})
+
+test('a stored file without the review cap settings takes their defaults, and saved ones survive a read', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const file = join(dir, 'config.json')
+    await writeFile(file, JSON.stringify({ repo: 'example-org/app', viewer: 'someone' }))
+    const read = await readConfig(file)
+    assert.deepEqual([read.maxConcurrentReviews, read.selfReviewOverCap], [2, false])
+    await saveConfig(file, { ...defaultConfig(), maxConcurrentReviews: 4, selfReviewOverCap: true })
+    const saved = await readConfig(file)
+    assert.deepEqual([saved.maxConcurrentReviews, saved.selfReviewOverCap], [4, true])
+    // an invalid value on disk is refused, as every other setting is
+    await writeFile(file, JSON.stringify({ repo: 'example-org/app', viewer: 'someone', maxConcurrentReviews: 0 }))
+    await assert.rejects(readConfig(file), /config\.maxConcurrentReviews/)
+  } finally {
+    await cleanup()
+  }
+})
+
 test('a stored file without idleMinutes takes the default', async () => {
   const { dir, cleanup } = await tempDir()
   try {
