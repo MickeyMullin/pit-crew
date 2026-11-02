@@ -298,10 +298,11 @@ const allOpen = (): Record<TableKey, boolean> => ({ mine: true, others: true, cl
 const opening = (targets: readonly TableKey[]): Record<TableKey, boolean> => ({ mine: targets.includes('mine'), others: targets.includes('others'), closed: targets.includes('closed') })
 
 // targets are the sections the tile opens and controls; the rest collapse
-type Preset = { targets: readonly TableKey[], apply: (filters: Filters) => Filters, range?: ClosedRangeKey }
+// unsort names the tables whose manual column sort the tile clears, so the table shows attention order
+type Preset = { targets: readonly TableKey[], apply: (filters: Filters) => Filters, range?: ClosedRangeKey, unsort?: readonly TableKey[] }
 
 export const tilePresets: Record<TileKey, Preset> = {
-  yourMove: { targets: ['others'], apply: (f) => ({ ...f, others: { ...f.others, status: 'yourMove' } }) },
+  yourMove: { targets: ['others'], apply: (f) => ({ ...f, others: { ...f.others, status: 'yourMove' } }), unsort: ['others'] },
   mineChangesRequested: { targets: ['mine'], apply: (f) => ({ ...f, mine: { ...f.mine, status: 'changesRequested' } }) },
   // the group, not Merge = Ready, since an approved PR GitHub is still checking counts too
   mineReadyToMerge: { targets: ['mine'], apply: (f) => ({ ...f, mine: { ...f.mine, status: 'readyToMerge' } }) },
@@ -315,7 +316,9 @@ export const tilePresets: Record<TileKey, Preset> = {
 export const pressTile = (controls: Controls, tile: TileKey): Controls => {
   if (controls.tile === tile) return { ...controls, tile: null, filters: noFilters(), pageSearch: '', searchOpened: [], searchTouched: [], expanded: allOpen() }
   const preset = tilePresets[tile]
-  return { ...controls, tile, filters: preset.apply(noFilters()), pageSearch: '', searchOpened: [], searchTouched: [], expanded: opening(preset.targets), closedRange: preset.range ?? controls.closedRange }
+  const sort = { ...controls.sort }
+  for (const table of preset.unsort ?? []) sort[table] = null
+  return { ...controls, tile, sort, filters: preset.apply(noFilters()), pageSearch: '', searchOpened: [], searchTouched: [], expanded: opening(preset.targets), closedRange: preset.range ?? controls.closedRange }
 }
 
 // the page search changed: it releases a tile, as any filter does, and the sections follow it. matches counts the rows each section would show for the new text. A collapsed section with a match opens and is remembered; a section the search opened closes again when nothing in it matches any more, or the search is emptied
@@ -346,11 +349,16 @@ export const toggleSection = (controls: Controls, table: TableKey): Controls => 
 })
 
 // a filter changed by hand releases the tile; the filters stay as they are
-export const setFilter = <T extends TableKey>(controls: Controls, table: T, change: Partial<Filters[T]>): Controls => ({
-  ...controls,
-  tile: null,
-  filters: { ...controls.filters, [table]: { ...controls.filters[table], ...change } },
-})
+export const setFilter = <T extends TableKey>(controls: Controls, table: T, change: Partial<Filters[T]>): Controls => {
+  // choosing Status = Your move from another status clears the Others' manual sort, as the tile does: Your move opens in its own order
+  const enteringYourMove = table === 'others' && (change as Partial<Filters['others']>).status === 'yourMove' && controls.filters.others.status !== 'yourMove'
+  return {
+    ...controls,
+    tile: null,
+    sort: enteringYourMove ? { ...controls.sort, others: null } : controls.sort,
+    filters: { ...controls.filters, [table]: { ...controls.filters[table], ...change } },
+  }
+}
 
 export const clearFilters = (controls: Controls, table: TableKey): Controls => ({
   ...controls,

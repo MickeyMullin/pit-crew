@@ -412,3 +412,49 @@ test('each tile\'s preset shows exactly the rows its count counts, and a patch m
   assert.ok(after.groups[0]!.rows.some((row) => row.number === moving.number))
   assert.equal(controls.tile, 'yourMove')
 })
+
+test('selecting Your move, by tile or by the Status filter, clears the Others\' manual sort, including on returning to it; other selections keep it', () => {
+  const sortedOthers = cycleSort(cycleSort(initialControls(), 'others', 'activity'), 'others', 'activity')
+  const sortedBoth = cycleSort(sortedOthers, 'mine', 'pr')
+  assert.deepEqual(sortedBoth.sort.others, { key: 'activity', dir: 'desc' })
+
+  // the tile clears the sort, and only the Others' one
+  const tile = pressTile(sortedBoth, 'yourMove')
+  assert.equal(tile.sort.others, null)
+  assert.deepEqual(tile.sort.mine, { key: 'pr', dir: 'asc' })
+
+  // the Status filter does the same when it changes to Your move
+  const picked = setFilter(sortedBoth, 'others', { status: 'yourMove' })
+  assert.equal(picked.sort.others, null)
+  assert.deepEqual(picked.sort.mine, { key: 'pr', dir: 'asc' })
+
+  // away and back: a sort made while elsewhere is cleared on the return
+  const away = cycleSort(setFilter(picked, 'others', { status: 'waitingOnAuthor' }), 'others', 'pr')
+  assert.deepEqual(away.sort.others, { key: 'pr', dir: 'asc' })
+  assert.equal(setFilter(away, 'others', { status: 'yourMove' }).sort.others, null)
+  assert.equal(pressTile(pressTile(away, 'waitingOnAuthor'), 'yourMove').sort.others, null)
+
+  // a sort made while already on Your move survives other changes to its filters, and other statuses and tiles leave it alone
+  const onMove = cycleSort(picked, 'others', 'pr')
+  assert.deepEqual(setFilter(onMove, 'others', { author: 'Alex' }).sort.others, { key: 'pr', dir: 'asc' })
+  assert.deepEqual(setFilter(onMove, 'others', { status: 'yourMove' }).sort.others, { key: 'pr', dir: 'asc' })
+  assert.deepEqual(setFilter(sortedBoth, 'others', { status: 'readyToMerge' }).sort.others, { key: 'activity', dir: 'desc' })
+  assert.deepEqual(pressTile(sortedBoth, 'waitingOnAuthor').sort.others, { key: 'activity', dir: 'desc' })
+
+  // the third header click returns to attention order
+  assert.equal(cycleSort(sortedOthers, 'others', 'activity').sort.others, null)
+})
+
+test('Your move shown through the page\'s own arrangement is in the new attention order, oldest first, with Re-review ahead', async () => {
+  const { others, rows } = await fixtureView()
+  const base = otherRowsOf(rows)[0]!
+  const row = (number: number, at: string, kind: 'reReview' | 'requestedOfYou' | null): OtherRow => ({
+    ...base, number, group: 'yourMove', flags: kind === null ? [] : [{ kind, label: kind }], lastActivity: { ...base.lastActivity, at },
+  })
+  const input = [row(1, '2026-10-17T10:00:00Z', null), row(2, '2026-10-22T10:00:00Z', 'reReview'), row(3, '2026-10-18T10:00:00Z', 'requestedOfYou')]
+  const withRows = arrange<OtherRow>({
+    table: 'others', groups: [{ ...others.groups[0]!, rows: input }], match: () => true, sortValue: null, dir: 'asc', grouped: false, filtered: false, openGroups: new Set(),
+    attention: openAttention as (a: OtherRow, b: OtherRow) => number,
+  })
+  assert.deepEqual(numbers(withRows.groups[0]!.rows), [2, 1, 3])
+})

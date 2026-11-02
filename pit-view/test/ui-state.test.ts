@@ -285,3 +285,20 @@ test('countRunning counts running rows across both sections and follows a run st
   assert.equal(countRunning(rows(['running', 'running', 'done', null])), 2)
   assert.equal(countRunning(rows(['running', 'done', 'done', null])), 1)
 })
+
+test('the client regroups Your move in the server\'s order, whatever order the rows arrive in', async () => {
+  const prs = [...(await openPage1()).data.repository!.pullRequests.nodes, ...(await openPage2()).data.repository!.pullRequests.nodes]
+  const rows = deriveOpenRows(prs, scenario.defaultBranch, { config: config(), clock: fakeTime().clock, timeZone: scenario.timeZone })
+  const base = rows.find((row): row is OtherRow => row.section === 'others')!
+  const move = (number: number, at: string, kind: 'reReview' | 'requestedOfYou' | null, group: OtherRow['group'] = 'yourMove'): OtherRow => ({
+    ...base, number, group, flags: kind === null ? [] : [{ kind, label: kind }], lastActivity: { ...base.lastActivity, at },
+  })
+  const input = [
+    move(1, '2026-10-20T10:00:00Z', null), move(2, '2026-10-22T10:00:00Z', 'reReview'), move(3, '2026-10-18T10:00:00Z', 'requestedOfYou'),
+    move(4, '2026-10-21T10:00:00Z', 'reReview'), move(5, '2026-10-25T10:00:00Z', 'reReview', 'waitingOnAuthor'), move(6, '2026-10-24T10:00:00Z', null, 'waitingOnAuthor'),
+  ]
+  const regrouped = regroup(groupRows(rows), input)
+  assert.deepEqual(regrouped.others.groups.map((group) => group.rows.map((row) => row.number)), [[4, 2, 3, 1], [], [5, 6], []])
+  assert.deepEqual(regroup(groupRows(rows), [...input].reverse()), regrouped)
+  assert.deepEqual(regrouped, groupRows(input))
+})
