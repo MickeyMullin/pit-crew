@@ -12,6 +12,11 @@ export const openRows = (view: Pick<View, 'mine' | 'others'>): OpenRow[] => [
   ...view.others.groups.flatMap((group) => group.rows),
 ]
 
+// whether the row's latest run is running: the Agent runs tile's filter predicate, and what its count counts
+export const hasRunningRun = (row: { agent: { state: string } | null }): boolean => row.agent?.state === 'running'
+
+export const countRunning = (rows: readonly { agent: { state: string } | null }[]): number => rows.filter(hasRunningRun).length
+
 // attention order, as the server sorts: Re-review, then Requested of you, then most recent activity first
 const flagRank = (row: OpenRow): number => {
   if (row.section !== 'others') return 2

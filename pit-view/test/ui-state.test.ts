@@ -12,7 +12,7 @@ import { createPoller } from '../src/poller.ts'
 import type { Patch, Sync, View } from '../src/poller.ts'
 import { formatAge, formatClock, formatDay, formatInterval, formatSince } from '../public/format.ts'
 import {
-  applyPatch, botGroupLabel, emptyFeed, openRows, receivePatch, receiveView, regroup, restartFeed, rowFreshness,
+  applyPatch, botGroupLabel, countRunning, emptyFeed, hasRunningRun, openRows, receivePatch, receiveView, regroup, restartFeed, rowFreshness,
 } from '../public/state.ts'
 import type { Feed } from '../public/state.ts'
 import { syncStatus } from '../public/status.ts'
@@ -266,4 +266,22 @@ test('a page applying a one-PR refresh\'s patches matches a fresh view, through 
   assert.deepEqual(comparable(caught), comparable(await poller.view()))
   assert.equal(openRows(caught).find((entry) => entry.number === 106)?.refresh, null)
   assert.deepEqual(caught.sync, loaded.sync)
+})
+
+// the Agent runs tile: the count and the predicate are the same function, so the number and the filtered rows cannot disagree
+test('hasRunningRun is true only for a row whose agent cell is running', () => {
+  assert.equal(hasRunningRun({ agent: { state: 'running' } }), true)
+  assert.equal(hasRunningRun({ agent: { state: 'done' } }), false)
+  assert.equal(hasRunningRun({ agent: { state: 'idle' } }), false)
+  assert.equal(hasRunningRun({ agent: null }), false)
+})
+
+test('countRunning counts running rows across both sections and follows a run starting and finishing', () => {
+  const rows = (states: (string | null)[]) => states.map((state) => ({ agent: state === null ? null : { state } }))
+  assert.equal(countRunning(rows([])), 0)
+  assert.equal(countRunning(rows([null, 'idle', 'done'])), 0)
+  assert.equal(countRunning(rows(['running', 'idle', 'running', 'done', null])), 2)
+  // a run starts on an idle row, another finishes
+  assert.equal(countRunning(rows(['running', 'running', 'done', null])), 2)
+  assert.equal(countRunning(rows(['running', 'done', 'done', null])), 1)
 })
