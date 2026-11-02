@@ -129,7 +129,7 @@ export type Session = {
   resume: string | null
 }
 
-// one review session Pit View started (section 8 of DESIGN.md, Launching runs); resolvedByHand is set when the owner's re-read replaced the outcome recorded at exit, and firstNote keeps the note recorded at exit once a failed re-read replaced it
+// one review session Pit View started (section 8 of DESIGN.md, Launching runs); resolvedByHand is set when the owner's re-read replaced the outcome recorded at exit, and firstNote keeps the note recorded at exit once a failed re-read replaced it (an empty string when that note was null)
 export type Run = Session & { number: number, resolvedByHand: boolean, firstNote: string | null }
 
 // one Dependabot sweep Pit View started (section 8, Sweeps): a record of its own with no PR number

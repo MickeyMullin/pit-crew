@@ -2224,8 +2224,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         return refuse('result.json has not changed since the run settled')
       }
       const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true }
-      // the first time a failed re-read replaces the note, the note recorded at exit moves to its own field, so a later finish by hand can still tell why the run first stopped
-      if (note !== run.note && (run as Partial<Run>).firstNote === null) changes.firstNote = run.note
+      // the first time a failed re-read replaces the note, the note recorded at exit moves to its own field, so a later finish by hand can still tell why the run first stopped; an original with no note is kept as an empty string, so firstNote stays set and a later failure cannot be copied in as the original
+      if (note !== run.note && (run as Partial<Run>).firstNote === null) changes.firstNote = run.note ?? ''
       // the later steps too: every line of events.jsonl, folded from the start
       const eventsText = await fs.readFile(join(dir, 'events.jsonl')).catch(() => null)
       const events = (eventsText ?? '').split('\n').map(parseStepEvent).filter((event) => event !== null)
