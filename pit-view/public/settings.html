@@ -143,6 +143,12 @@
           <p id="f-density-hint" class="hint">Compact rows fit more PRs on screen.</p>
           <p id="f-density-error" class="field-error" hidden></p>
         </div>
+      </div>
+    </section>
+
+    <section id="agent" class="card settings-card" aria-labelledby="agent-heading">
+      <h2 id="agent-heading" class="card-title">Agent</h2>
+      <div class="field-grid">
         <div class="field">
           <span class="field-label">Agent column</span>
           <label class="check">
@@ -153,16 +159,16 @@
           <p id="f-showAgentColumn-error" class="field-error" hidden></p>
         </div>
         <div class="field">
-          <label for="f-maxConcurrentReviews">Reviews at once</label>
+          <label for="f-maxConcurrentReviews">Concurrent reviews</label>
           <input id="f-maxConcurrentReviews" class="input mono" type="number" inputmode="numeric" min="1" step="1" autocomplete="off" aria-describedby="f-maxConcurrentReviews-hint">
           <p id="f-maxConcurrentReviews-hint" class="hint">Review sessions that run at the same time; a tandem review counts as one. More wait in a queue and start, in order, as earlier ones end. Fix and update sessions are not counted.</p>
           <p id="f-maxConcurrentReviews-error" class="field-error" hidden></p>
         </div>
         <div class="field">
-          <span class="field-label">Self-review over the limit</span>
+          <span class="field-label">Self-review over limit</span>
           <label class="check">
             <input id="f-selfReviewOverCap" type="checkbox" aria-describedby="f-selfReviewOverCap-hint">
-            Let one self-review run beyond it
+            Let one self-review run over the limit
           </label>
           <p id="f-selfReviewOverCap-hint" class="hint">A review of your own PR may start while the limit is reached, so it never waits behind others' reviews. Never more than one at a time.</p>
           <p id="f-selfReviewOverCap-error" class="field-error" hidden></p>
