@@ -35,15 +35,15 @@ export const matchesPage = (terms: readonly string[]) => (row: Searchable): bool
 export type Hit = { label: 'author' | 'branch' | 'login' | 'ticket', text: string }
 
 const hasTerm = (text: string, terms: readonly string[]): boolean => {
-  const lower = text.toLowerCase()
+  const lower = foldCase(text)
   return terms.some((term) => lower.includes(term))
 }
 
 // matches in fields no cell shows: the branch, the tickets of an open row, a login the alias does not account for, and the alias itself where the row shows no author; the row says so beside its title, so a match never looks arbitrary
 export const hiddenHits = (terms: readonly string[], row: Searchable, shown: { tickets: boolean, alias: boolean }): Hit[] => {
   const hits: Hit[] = []
-  const alias = row.author.alias.toLowerCase()
-  const login = row.author.login.toLowerCase()
+  const alias = foldCase(row.author.alias)
+  const login = foldCase(row.author.login)
   if (!shown.alias && hasTerm(row.author.alias, terms)) hits.push({ label: 'author', text: row.author.alias })
   if (hasTerm(row.headRef, terms)) hits.push({ label: 'branch', text: row.headRef })
   if (terms.some((term) => login.includes(term) && (!shown.alias || !alias.includes(term)))) hits.push({ label: 'login', text: row.author.login })

@@ -107,6 +107,13 @@ test('matching and highlighting agree on context-sensitive lowercase', () => {
   assert.equal(splitMatches(title, terms).some((piece) => piece.hit), true)
 })
 
+test('a hidden-field hit is found with the same per-character lowercase as matching', () => {
+  const row = { number: 1, title: 'x', author: { alias: 'Sam', login: 'sam' }, headRef: 'ΟΣ-branch', tickets: [] }
+  const terms = searchTerms('ΟΣ-branch')
+  assert.equal(matchesPage(terms)(row), true)
+  assert.deepEqual(hiddenHits(terms, row, { tickets: true, alias: true }), [{ label: 'branch', text: 'ΟΣ-branch' }])
+})
+
 test('splitMatches marks every term occurrence and merges overlaps', () => {
   assert.deepEqual(splitMatches('Fix the Orbit cache', []), [{ text: 'Fix the Orbit cache', hit: false }])
   assert.deepEqual(splitMatches('Fix the Orbit cache', ['orbit']), [
