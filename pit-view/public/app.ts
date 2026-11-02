@@ -452,14 +452,19 @@ document.addEventListener('keydown', (event) => {
 // report panel is the drawer's own, and one on a control that opens a drawer is left to that control:
 // another row's Agent cell switches this drawer to its row rather than closing and reopening it. A
 // request on its way keeps the drawer open, as it does for Escape
+const takesFocus = 'a[href], button, input, select, textarea, [tabindex], [contenteditable=""]'
 document.addEventListener('pointerdown', (event) => {
   if (!drawer.isOpen()) return
   const target = event.target instanceof Element ? event.target : null
-  drawer.outside({
+  const closed = drawer.outside({
     inPanel: target !== null && target.closest('#drawer, #report-panel') !== null,
     opener: target !== null && target.closest(drawerOpenerSelector) !== null,
   })
-}, { capture: true, passive: true })
+  // focus went back to the control that opened the drawer, as Escape's close does; a press on a
+  // control that takes focus outside is left to move it there, and a press on plain page area would
+  // only drop it on the body, so that press does not undo the return
+  if (closed && (target === null || target.closest(takesFocus) === null)) event.preventDefault()
+}, { capture: true })
 
 byId('pause').addEventListener('click', () => {
   ui.paused = !ui.paused
