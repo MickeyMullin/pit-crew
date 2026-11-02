@@ -4,7 +4,7 @@ import type { ClosedRange, Ticket } from '../src/derive.ts'
 import type { View } from '../src/poller.ts'
 import { h } from './dom.ts'
 import type { Child } from './dom.ts'
-import { matchesClosed, matchesMine, matchesOthers } from './filters.ts'
+import { foldCase, matchesClosed, matchesMine, matchesOthers } from './filters.ts'
 import type { Filters } from './filters.ts'
 import type { TableKey } from './tables.ts'
 
@@ -17,8 +17,7 @@ export type Searchable = {
   tickets: readonly Ticket[]
 }
 
-// lowercase one character at a time, the way highlighting does, so matching and highlighting agree on context-sensitive letters
-export const foldCase = (text: string): string => Array.from(text, (char) => char.toLowerCase()).join('')
+export { foldCase }
 
 // lowercase words; each loses a leading hash mark, so a PR number typed with one still finds it
 export const searchTerms = (query: string): string[] =>
