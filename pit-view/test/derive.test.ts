@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import {
-  deriveClosed, deriveCounts, deriveIssues, deriveLastActivity, deriveMerge, deriveOpenRow, deriveOpenRows, deriveStacks,
+  attentionOrder, deriveClosed, deriveCounts, deriveIssues, deriveLastActivity, deriveMerge, deriveOpenRow, deriveOpenRows, deriveStacks,
   deriveTickets, deriveTiles, deriveView, groupRows, latestReviewsOf, localAvatarUrl, personView, reviewerPips,
 } from '../src/derive.ts'
 import type { DeriveContext, MineRow, OpenRow, OtherRow } from '../src/derive.ts'
@@ -621,7 +621,7 @@ test('groups keep display order, hold rows in attention order, and name a lone b
     ['changesRequested', [101]], ['readyToMerge', [102]], ['awaitingReview', [120, 104]], ['drafts', [103]],
   ])
   assert.deepEqual(others.groups.map((group) => [group.key, group.label, group.rows.map((entry) => entry.number)]), [
-    ['yourMove', 'Your move', [106, 107, 113, 111, 112]],
+    ['yourMove', 'Your move', [107, 106, 112, 111, 113]],
     ['readyToMerge', 'Ready to merge', [110]],
     ['waitingOnAuthor', 'Waiting on author', [109, 108, 118, 116]],
     ['bots', 'Bots', [114, 115]],
@@ -860,4 +860,55 @@ test('last activity names a comment-only review and a comment is no change reque
     timelineItems: { nodes: [{ __typename: 'PullRequestReview', author: { login: 'sam-tran' }, state: 'COMMENTED', submittedAt: '2026-10-26T10:00:00Z', createdAt: '2026-10-26T10:00:00Z' } as RawTimelineItem] },
   })
   assert.deepEqual(deriveLastActivity(timeline, config), { at: '2026-10-26T10:00:00Z', actor: 'Sam', text: 'Sam commented', anchor: null })
+})
+
+// invented rows for the Your move order: only group, flags, last activity and number matter to it
+const moveRow = (base: OtherRow, number: number, at: string, flag: 'reReview' | 'requestedOfYou' | null, group: OtherRow['group'] = 'yourMove'): OtherRow => ({
+  ...base,
+  number,
+  group,
+  flags: flag === null ? [] : [{ kind: flag, label: flag }],
+  lastActivity: { ...base.lastActivity, at },
+})
+
+test('Your move lists Re-review first, then the rest of the group, oldest activity first inside each, ties by higher number', async () => {
+  const base = (await rows()).find((entry): entry is OtherRow => entry.section === 'others')!
+  const input = [
+    moveRow(base, 1, '2026-10-20T10:00:00Z', null),
+    moveRow(base, 2, '2026-10-22T10:00:00Z', 'reReview'),
+    moveRow(base, 3, '2026-10-18T10:00:00Z', 'requestedOfYou'),
+    moveRow(base, 4, '2026-10-21T10:00:00Z', 'reReview'),
+    moveRow(base, 5, '2026-10-19T10:00:00Z', 'requestedOfYou'),
+    moveRow(base, 6, '2026-10-20T10:00:00Z', null),
+    moveRow(base, 7, '2026-10-23T10:00:00Z', null),
+  ]
+  const order = (list: readonly OtherRow[]): number[] => groupRows(list).others.groups[0]!.rows.map((entry) => entry.number)
+  // Requested of you sits with the unflagged rows, not above them: 3, 5, 6, 1, 7 by age (6 before 1 on the tie)
+  assert.deepEqual(order(input), [4, 2, 3, 5, 6, 1, 7])
+  assert.deepEqual(order([...input].reverse()), [4, 2, 3, 5, 6, 1, 7])
+})
+
+test('the other Others\' groups keep Re-review, then Requested of you, then newest activity first', async () => {
+  const base = (await rows()).find((entry): entry is OtherRow => entry.section === 'others')!
+  const input = [
+    moveRow(base, 1, '2026-10-20T10:00:00Z', null, 'waitingOnAuthor'),
+    moveRow(base, 2, '2026-10-22T10:00:00Z', null, 'waitingOnAuthor'),
+    moveRow(base, 3, '2026-10-18T10:00:00Z', 'requestedOfYou', 'waitingOnAuthor'),
+    moveRow(base, 4, '2026-10-19T10:00:00Z', 'reReview', 'waitingOnAuthor'),
+  ]
+  assert.deepEqual(groupRows(input).others.groups[2]!.rows.map((entry) => entry.number), [4, 3, 2, 1])
+})
+
+test('the attention comparator is a total order across groups, with Your move rows ahead of other groups\' rows of the same flag', async () => {
+  const base = (await rows()).find((entry): entry is OtherRow => entry.section === 'others')!
+  const input = [
+    moveRow(base, 1, '2026-10-20T10:00:00Z', null),
+    moveRow(base, 2, '2026-10-25T10:00:00Z', null, 'waitingOnAuthor'),
+    moveRow(base, 3, '2026-10-24T10:00:00Z', 'reReview', 'waitingOnAuthor'),
+    moveRow(base, 4, '2026-10-23T10:00:00Z', 'reReview'),
+    moveRow(base, 5, '2026-10-19T10:00:00Z', null),
+  ]
+  const forward = [...input].sort(attentionOrder).map((entry) => entry.number)
+  assert.deepEqual(forward, [4, 3, 5, 1, 2])
+  assert.deepEqual([...input].reverse().sort(attentionOrder).map((entry) => entry.number), forward)
 })

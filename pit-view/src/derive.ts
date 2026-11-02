@@ -676,15 +676,20 @@ export const deriveOpenRows = (prs: readonly RawOpenPr[], defaultBranch: string 
   return prs.map((pr) => deriveOpenRow(pr, ctx, stacks, defaultBranch)).filter((row) => row !== null)
 }
 
-// attention order: Re-review, then Requested of you, then most recent activity first
-const flagRank = (row: OpenRow): number => {
-  if (row.section !== 'others') return 2
-  if (row.flags.some((flag) => flag.kind === 'reReview')) return 0
-  return row.flags.some((flag) => flag.kind === 'requestedOfYou') ? 1 : 2
+// attention order. Others' Your move: Re-review first, then the rest of the group (Requested of you included), each oldest activity first, so the PR that has waited longest is on top. Every other group keeps Re-review, then Requested of you, then most recent activity first. Across groups, which only the flat list shows, tiers keep this a total order: Re-review in Your move, Re-review elsewhere, the rest of Your move, Requested of you elsewhere, everything else. Ties go to the higher number
+const attentionTier = (row: OpenRow): number => {
+  if (row.section !== 'others') return 4
+  const reReview = row.flags.some((flag) => flag.kind === 'reReview')
+  if (row.group === 'yourMove') return reReview ? 0 : 2
+  if (reReview) return 1
+  return row.flags.some((flag) => flag.kind === 'requestedOfYou') ? 3 : 4
 }
 
-export const attentionOrder = (a: OpenRow, b: OpenRow): number =>
-  flagRank(a) - flagRank(b) || Date.parse(b.lastActivity.at) - Date.parse(a.lastActivity.at) || b.number - a.number
+export const attentionOrder = (a: OpenRow, b: OpenRow): number => {
+  const tier = attentionTier(a)
+  const age = Date.parse(b.lastActivity.at) - Date.parse(a.lastActivity.at)
+  return tier - attentionTier(b) || (tier === 0 || tier === 2 ? -age : age) || b.number - a.number
+}
 
 const mineGroups: Omit<Group<MineGroup, MineRow>, 'rows'>[] = [
   { key: 'changesRequested', label: 'Changes requested', sub: 'your move', collapsible: false },
