@@ -1419,6 +1419,35 @@ test('a denied run that fails again and is then finished by hand keeps the origi
   }
 })
 
+test('a run that stopped to ask with no note, then failed twice and was finished by hand, does not tell its first failure as the original', async () => {
+  const h = await harness()
+  try {
+    await h.report(106)
+    const run = await h.launcher.start(request())
+    const child = h.launch.children.at(-1)!
+    await child.result(reviewResult({ status: 'needsInput', question: 'Fix the P1 now? (yes / no)' }))
+    const asking = h.launcher.settled(run.id)
+    child.exit(0)
+    const waiting = await asking
+    assert.deepEqual([waiting.status, waiting.note, waiting.firstNote], ['needsInput', null, null])
+    const file = join(h.home, '.local', 'state', 'pit-view', 'runs', String(run.id), 'result.json')
+    await writeFile(file, JSON.stringify(failedByHand('could not reach GitHub')))
+    const first = await h.launcher.reread(run.id)
+    // the replaced note was null, which firstNote records as an empty string so the next failure cannot take its place
+    assert.deepEqual([first.status, first.note, first.firstNote], ['failed', 'could not reach GitHub', ''])
+    await writeFile(file, JSON.stringify(failedByHand('gh pr review failed')))
+    const second = await h.launcher.reread(run.id)
+    assert.deepEqual([second.note, second.firstNote], ['gh pr review failed', ''])
+    await writeFile(file, JSON.stringify(approvedByHand()))
+    const done = await h.launcher.reread(run.id)
+    assert.deepEqual([done.status, done.resolvedByHand, done.note, done.firstNote], ['done', true, 'gh pr review failed', ''])
+    assert.equal(h.cache.getRun(run.id)?.firstNote, '')
+    assert.equal(agentCell(await prOf(106), baseConfig(), done, undefined).firstNote, '')
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a re-read that finishes the run at once leaves firstNote empty, since its note is still the original', async () => {
   const h = await harness()
   try {

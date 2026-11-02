@@ -903,6 +903,8 @@ test('a run finished by hand reads as its new outcome with the original failure 
   // a run that failed again before it was finished tells the original denial, not the failure it ended on
   const history = drawerModel(input({ ...approved, note: 'could not reach GitHub', firstNote: 'permissionDenied: Bash' })).result
   assert.equal(history?.byHand, 'Finished by hand after a denied tool call (Bash): Pit View read the result again at your request.')
+  // a run that began with no note and failed before it was finished tells no failure as history, since the failure it ended on was not the original
+  assert.equal(drawerModel(input({ ...approved, note: 'could not reach GitHub', firstNote: '' })).result?.byHand, 'Finished by hand: Pit View read the result again at your request.')
   // the PR left the open tables: the card is rebuilt from the runs list, which carries the flag
   const run = { id: 7, label: 'Re-review', runner: 'claude', status: 'done', note: 'permissionDenied: Bash', resolvedByHand: true, result: null, steps: slots(), tandem: false } as unknown as RunView
   assert.equal(cellFromRun(deniedCell(), run).resolvedByHand, true)
