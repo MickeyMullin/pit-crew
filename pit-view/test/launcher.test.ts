@@ -1270,6 +1270,204 @@ test('a queued review starts only for the repository and viewer it was confirmed
   }
 })
 
+// a gate a fake dependency waits at once the test arms it, each wait held until the test opens it
+const gate = () => {
+  const held: (() => void)[] = []
+  let armed = 0
+  return {
+    arm: (count = 1): void => {
+      armed += count
+    },
+    wait: async (): Promise<void> => {
+      if (armed === 0) return
+      armed -= 1
+      await new Promise<void>((resolveHeld) => held.push(resolveHeld))
+    },
+    held: (): number => held.length,
+    open: (index: number): void => held[index]!(),
+  }
+}
+
+// a gh whose account lookups wait at the gate, answering with whoever login names
+const gatedGh = (accounts: ReturnType<typeof gate>, login: { current: string }): FakeRunner => fakeRunner(async (args) => {
+  if (args[0] !== 'api') return ok('gho_fixture_token\n')
+  await accounts.wait()
+  return ok(`${login.current}\n`)
+})
+
+// long enough for a start the queue let go to reach its spawn, had it been let go
+const quiet = (): Promise<void> => new Promise((resolveWait) => setTimeout(resolveWait, 50))
+
+test('a queued review whose viewer changes during its dequeue checks fails and never starts, since it stays in the queue a save reads', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    const queued = await h.launcher.start(request(113, { label: 'Review' }))
+    // the running review ends, and the queued one's account check is held
+    accounts.arm()
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => accounts.held() === 1)
+    assert.equal(h.cache.getRun(queued.id)?.status, 'queued')
+    // the viewer is saved as someone else while that check runs
+    h.settings.current = { ...h.settings.current, viewer: 'someone-else' }
+    h.launcher.drain()
+    await waitFor(() => h.cache.getRun(queued.id)?.status === 'failed')
+    assert.match(h.cache.getRun(queued.id)?.note ?? '', /^spawnFailed: not started: the viewer is now someone-else, not vera-quill/)
+    accounts.open(0)
+    await quiet()
+    assert.equal(h.launch.children.length, 1)
+    assert.equal(h.cache.getRun(queued.id)?.status, 'failed')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a queued review whose repository changes after its checks, while it is being launched, is refused just before its spawn', async () => {
+  const launch = fakeLaunch()
+  const folders = gate()
+  const mkdir = launch.deps.fs.mkdir
+  launch.deps.fs = {
+    ...launch.deps.fs,
+    mkdir: async (path) => {
+      await folders.wait()
+      await mkdir(path)
+    },
+  }
+  const h = await harness({ launch, config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    const queued = await h.launcher.start(request(113, { label: 'Review' }))
+    // its checks pass, and its run folder is held
+    folders.arm()
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => folders.held() === 1)
+    assert.equal(h.cache.getRun(queued.id)?.status, 'running')
+    h.settings.current = { ...h.settings.current, repo: 'octo-example/other' }
+    h.launcher.drain()
+    folders.open(0)
+    await waitFor(() => h.cache.getRun(queued.id)?.status === 'failed')
+    assert.match(h.cache.getRun(queued.id)?.note ?? '', /^spawnFailed: not started: the repository is now octo-example\/other, not octo-example\/orbit/)
+    assert.equal(h.launch.children.length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('admission reads the cap as it is once the checks finish: a cap lowered during them queues a new start and puts back a queued one', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login) })
+  try {
+    const running = await h.launcher.start(request(106))
+    // a new start's checks are held while the cap goes from two to one
+    accounts.arm()
+    const pending = h.launcher.start(request(113, { label: 'Review' }))
+    await waitFor(() => accounts.held() === 1)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    h.launcher.drain()
+    accounts.open(0)
+    const queued = await pending
+    assert.equal(queued.status, 'queued')
+    assert.equal(h.launch.children.length, 1)
+
+    // the cap goes back up and the queued review is let go, but goes down again while its checks run
+    accounts.arm()
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 2 }
+    h.launcher.drain()
+    await waitFor(() => accounts.held() === 2)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    h.launcher.drain()
+    accounts.open(1)
+    await quiet()
+    assert.equal(h.cache.getRun(queued.id)?.status, 'queued')
+    assert.equal(h.launch.children.length, 1)
+    // it is still first in line, and starts when the running review ends
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(queued.id)?.status, 'running')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a queued review is classed as a self-review when it starts, from the cache then, not when it was queued', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1, selfReviewOverCap: true } })
+  try {
+    for (const number of [101, 102]) h.cache.writePr(scenario.repo, await prOf(number), scenario.defaultBranch)
+    await h.launcher.start(request(106))
+    const over = await h.launcher.start(request(101, { args: ['101', '--no-post'], label: 'Self-review' }))
+    const queued = await h.launcher.start(request(102, { args: ['102', '--no-post'], label: 'Self-review' }))
+    assert.deepEqual([over.status, queued.status], ['running', 'queued'])
+    // while it waits, the cache learns #102 is someone else's
+    const theirs = await prOf(102)
+    h.cache.writePr(scenario.repo, { ...theirs, author: { ...theirs.author!, login: 'someone-else' } }, scenario.defaultBranch)
+    // the self-review over the cap ends: the place over it is a self-review's, and #102 is no longer one
+    h.launch.children[1]!.exit(1)
+    await h.launcher.settled(over.id)
+    await quiet()
+    assert.equal(h.cache.getRun(queued.id)?.status, 'queued')
+    assert.equal(h.launch.children.length, 2)
+    // it takes the cap's own slot once that is free
+    h.launch.children[0]!.exit(1)
+    await waitFor(() => h.launch.children.length === 3)
+    assert.equal(h.cache.getRun(queued.id)?.status, 'running')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a stop during a queued review\'s dequeue checks ends that attempt and frees its slot, and its late end never frees a newer run\'s', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const launch = fakeLaunch()
+  const starts = gate()
+  const startTime = launch.deps.procs.startTime
+  launch.deps.procs = {
+    ...launch.deps.procs,
+    startTime: async (pid) => {
+      await starts.wait()
+      return startTime(pid)
+    },
+  }
+  const h = await harness({ gh: gatedGh(accounts, login), launch })
+  try {
+    const first = await h.launcher.start(request(106))
+    const alongside = await h.launcher.start(request(107, { label: 'Review' }))
+    const queued = await h.launcher.start(request(113, { label: 'Review' }))
+    // the first ends and the queued review's account check is held; then the second ends too
+    accounts.arm()
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(first.id)
+    await waitFor(() => accounts.held() === 1)
+    h.launch.children[1]!.exit(1)
+    await h.launcher.settled(alongside.id)
+    const stopped = h.launcher.stop(queued.id)
+    assert.equal(stopped.status, 'stopped')
+    assert.equal((await h.launcher.settled(queued.id)).status, 'stopped')
+    // a new run of the same PR starts and is held before it is watched
+    starts.arm()
+    const again = h.launcher.start(request(113, { label: 'Review' }))
+    await waitFor(() => starts.held() === 1)
+    // the stopped attempt's checks end late: they release nothing of the new run's
+    accounts.open(0)
+    await quiet()
+    assert.equal(h.launch.children.length, 3)
+    const other = await h.launcher.start(request(118, { label: 'Review' }))
+    const beyond = await h.launcher.start(request(109, { label: 'Review' }))
+    assert.deepEqual([other.status, beyond.status], ['running', 'queued'])
+    assert.equal(h.launch.children.length, 4)
+    starts.open(0)
+    assert.equal((await again).status, 'running')
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('raising the cap starts queued reviews at once, and a restart fails queued reviews as serverRestarted without starting anything', async () => {
   const h = await harness({ config: { maxConcurrentReviews: 1 } })
   try {

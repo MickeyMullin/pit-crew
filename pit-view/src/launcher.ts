@@ -1338,8 +1338,7 @@ export type SessionStore<T extends Session> = {
 // one run being watched
 type Live = {
   id: number
-  // its key in flight, and the slot it holds under the cap, if any
-  key: string
+  // the slot it holds under the cap, if any
   slot: ReviewSlot | null
   dir: string
   // what the run was started with; a recovered run's comes from the config in effect
@@ -1431,11 +1430,12 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const launching = new Map<number, boolean>()
   // starts between their checks and their row
   const starting = new Set<string>()
-  // reviews waiting for a slot under the cap, in the order they were queued, each with the viewer its start was confirmed for
-  type Queued = { id: number, key: string, slot: ReviewSlot, request: StartRequest, viewer: string }
+  // reviews waiting for a slot under the cap, in the order they were queued, each with the viewer its start was confirmed for and, while its checks run, the attempt that holds a slot for it; it stays here until those checks pass, so a save and a Stop still find it
+  type Queued = { id: number, request: StartRequest, viewer: string, attempt: number | null }
   const queue: Queued[] = []
-  // reviews given a slot that have no running row yet, by key, so two quick starts never both take the last slot
-  const admitting = new Map<string, ReviewSlot>()
+  // slots given to reviews whose process is not watched here yet, each held by an attempt of its own, so two quick starts never both take the last slot and an attempt that ends releases only its own
+  const admitting = new Map<number, ReviewSlot>()
+  let attempts = 0
   let closed = false
 
   const now = (): string => iso(clock.now())
@@ -1576,16 +1576,23 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     entry.killTimer = null
   }
 
-  // the slots the reviews in flight hold: those watched here and those given a slot that are still starting
-  const reviewsInFlight = (): ReviewSlot[] => {
-    const held = new Map(admitting)
-    for (const entry of live.values()) {
-      if (entry.slot !== null) held.set(entry.key, entry.slot)
-    }
-    return [...held.values()]
-  }
+  // the slots the reviews in flight hold: those watched here and those given a slot that no watched process holds yet, each counted once, since a launch releases its attempt's slot as it is watched
+  const reviewsInFlight = (): ReviewSlot[] => [...admitting.values(), ...[...live.values()].flatMap((entry) => entry.slot === null ? [] : [entry.slot])]
 
   const fits = (slot: ReviewSlot, config: Config): boolean => reviewFits(reviewsInFlight(), slot, config.maxConcurrentReviews, config.selfReviewOverCap)
+
+  // holds a slot for one attempt to start a review; a caller tests the fit with nothing awaited between that and this
+  const reserve = (slot: ReviewSlot): number => {
+    attempts += 1
+    admitting.set(attempts, slot)
+    return attempts
+  }
+
+  // why a review confirmed for one repository and viewer may not start under this config, or null when both still hold: it would act where, or as whom, the confirmation did not say
+  const unbound = (repo: string, viewer: string, config: Config): string | null => {
+    if (repo !== config.repo) return `the repository is now ${config.repo}, not ${repo}`
+    return viewer.toLowerCase() !== config.viewer.toLowerCase() ? `the viewer is now ${config.viewer}, not ${viewer}` : null
+  }
 
   const wake = (id: number, run: T): void => {
     for (const resolveWaiter of waiters.get(id) ?? []) resolveWaiter(run)
@@ -1600,44 +1607,75 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     wake(id, run)
   }
 
-  // gives a slot to every queued review that fits now, earliest first; each then starts in the background
+  // takes a review out of the queue, and releases the slot an attempt to start it held
+  const dequeue = (item: Queued): void => {
+    const at = queue.indexOf(item)
+    if (at >= 0) queue.splice(at, 1)
+    if (item.attempt !== null) admitting.delete(item.attempt)
+    item.attempt = null
+  }
+
+  // gives a slot to every queued review that fits now, earliest first; each then makes its checks in the background, still in the queue
   const admit = (): void => {
     if (closed) return
     const config = options.config()
-    // a review confirmed for another repository or another viewer never starts: it would act where, or as whom, the confirmation did not say
     for (const item of [...queue]) {
-      const why = item.request.repo !== config.repo
-        ? `the repository is now ${config.repo}, not ${item.request.repo}`
-        : item.viewer.toLowerCase() !== config.viewer.toLowerCase() ? `the viewer is now ${config.viewer}, not ${item.viewer}` : null
+      const why = unbound(item.request.repo, item.viewer, config)
       if (why === null) continue
-      queue.splice(queue.indexOf(item), 1)
+      dequeue(item)
       failQueued(item.id, `spawnFailed: not started: ${why}`)
     }
     for (const item of [...queue]) {
-      if (!fits(item.slot, config)) continue
-      queue.splice(queue.indexOf(item), 1)
-      admitting.set(item.key, item.slot)
-      void begin(item, config).catch((error: unknown) => log(`${noun} ${item.id}: cannot start from the queue: ${messageOf(error)}`))
+      // one whose checks are running already holds its slot
+      if (item.attempt !== null) continue
+      // whether it is a self-review is read from the cache now, as it is about to start
+      const slot = store.slot(item.request, config)
+      if (slot === null || !fits(slot, config)) continue
+      const attempt = reserve(slot)
+      item.attempt = attempt
+      void begin(item, attempt).catch((error: unknown) => log(`${noun} ${item.id}: cannot start from the queue: ${messageOf(error)}`))
     }
   }
 
-  // a queued review's start: the checks every start makes, then the same launch, on the row it already has
-  const begin = async (item: Queued, config: Config): Promise<void> => {
+  // a queued review's start: the checks every start makes while it stays in the queue, then the fit test again under the config as it is then, and the same launch, on the row it already has
+  const begin = async (item: Queued, attempt: number): Promise<void> => {
+    // false once a Stop, a failure, or a lowered cap ended this attempt
+    const ours = (): boolean => !closed && item.attempt === attempt && queue.includes(item)
     try {
       let cloneDir: string
       try {
-        await checkIdentity(config)
-        cloneDir = await checkClone(config)
+        const checked = options.config()
+        await checkIdentity(checked)
+        cloneDir = await checkClone(checked)
       } catch (error) {
-        if (store.get(item.id)?.status === 'queued') failQueued(item.id, `spawnFailed: ${messageOf(error)}`)
+        if (ours()) {
+          dequeue(item)
+          failQueued(item.id, `spawnFailed: ${messageOf(error)}`)
+        }
         return
       }
-      // stopped while its checks ran
       const run = store.get(item.id)
-      if (run === null || run.status !== 'queued' || closed) return
-      await launch(item.request, config, item.request.cwd ?? cloneDir, run)
+      if (!ours() || run === null) return
+      // a config saved during the checks is the one admission reads, with nothing awaited between the reading and the slot held or given back
+      const config = options.config()
+      const why = unbound(item.request.repo, item.viewer, config)
+      if (why !== null) {
+        dequeue(item)
+        failQueued(item.id, `spawnFailed: not started: ${why}`)
+        return
+      }
+      admitting.delete(attempt)
+      const slot = store.slot(item.request, config)
+      if (slot === null || !fits(slot, config)) {
+        // it no longer fits: it waits again, in its place in line
+        item.attempt = null
+        return
+      }
+      admitting.set(attempt, slot)
+      queue.splice(queue.indexOf(item), 1)
+      await launch(item.request, config, item.request.cwd ?? cloneDir, run, { slot, attempt, viewer: item.viewer })
     } finally {
-      admitting.delete(item.key)
+      admitting.delete(attempt)
       // the queue is read again however the start went: one that ended at once hands its slot on, and a run that settled before its start returned was still counted here when it settled
       admit()
     }
@@ -1706,12 +1744,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }, ms)
   }
 
-  const watchRun = (run: T, dir: string, child: SpawnedProcess | null, stdinOpen: boolean, spec: LaunchSpec | null): Live => {
-    const target = run as unknown as { repo: string, number?: number, command: string }
+  // a launched review holds the slot it was admitted with; a recovered one's is read from the cache
+  const watchRun = (run: T, dir: string, child: SpawnedProcess | null, stdinOpen: boolean, spec: LaunchSpec | null, slot: ReviewSlot | null): Live => {
     const entry: Live = {
       id: run.id,
-      key: store.key(target),
-      slot: store.slot(target, options.config()),
+      slot,
       dir,
       spec,
       child,
@@ -1783,8 +1820,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }, (id) => tildePath(join(runsDir, String(id)), home))
   }
 
+  // how a review was admitted: the slot it was given, the attempt holding that slot until its process is watched, and the viewer its start was confirmed for
+  type Admitted = { slot: ReviewSlot, attempt: number, viewer: string }
+
   // a queued review's row already exists and was announced when it was queued; it starts now, in the folder the checks just confirmed
-  const launch = async (request: StartRequest, config: Config, cwd: string, queued: T | null = null): Promise<T> => {
+  const launch = async (request: StartRequest, config: Config, cwd: string, queued: T | null = null, admitted: Admitted | null = null): Promise<T> => {
     let run = queued === null ? newRow(request, config, cwd, 'running') : store.update(queued.id, { status: 'running', startedAt: now(), cwd: tildePath(cwd, home) })
     const runner = run.runner
     const sessionId = run.sessionId
@@ -1813,6 +1853,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         startedAt: run.startedAt,
       }
       await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid: null, pidStartedAt: null }, null, 2)}\n`)
+      // the last thing before the spawn: a review starts only for the repository and the viewer its start was confirmed for, under the config in effect now
+      const why = admitted === null ? null : unbound(request.repo, admitted.viewer, options.config())
+      if (why !== null) throw new Error(`not started: ${why}`)
       child = spawn({
         command: invocation.command,
         args: invocation.args,
@@ -1845,7 +1888,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     })
     await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid: child.pid, pidStartedAt }, null, 2)}\n`)
       .catch((error: unknown) => log(`${noun} ${run.id}: cannot update request.json: ${messageOf(error)}`))
-    watchRun(run, dir, child, stdin !== null && child.stdin !== null, spec)
+    watchRun(run, dir, child, stdin !== null && child.stdin !== null, spec, admitted?.slot ?? null)
+    // the watched run holds its slot from here, so the attempt's is released at once and the slot never counts twice
+    if (admitted !== null) admitting.delete(admitted.attempt)
     const stopAsked = launching.get(run.id) === true
     launching.delete(run.id)
     log(`${noun} ${run.id} started: ${run.runner} ${run.command} ${run.args.join(' ')} in ${run.cwd}`)
@@ -1872,16 +1917,23 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     try {
       await checkIdentity(config)
       const cloneDir = await checkClone(config)
-      const slot = store.slot(request, config)
+      // a config saved during the checks is the one admission reads, and whether it is a self-review is read from the cache now, with nothing awaited before the slot is held
+      const current = options.config()
+      const slot = store.slot(request, current)
       if (slot === null) return await launch(request, config, request.cwd ?? cloneDir)
       // whatever already waits and fits goes first, so a new review never overtakes one queued before it
       admit()
-      if (!fits(slot, config)) return enqueue(request, config, request.cwd ?? cloneDir, key, slot)
-      admitting.set(key, slot)
+      if (!fits(slot, current)) {
+        const queued = enqueue(request, config, request.cwd ?? cloneDir)
+        // a save during the checks may have left it confirmed for a repository or a viewer no longer in effect
+        admit()
+        return store.get(queued.id) ?? queued
+      }
+      const attempt = reserve(slot)
       try {
-        return await launch(request, config, request.cwd ?? cloneDir)
+        return await launch(request, config, request.cwd ?? cloneDir, null, { slot, attempt, viewer: config.viewer })
       } finally {
-        admitting.delete(key)
+        admitting.delete(attempt)
         // as for a queued start: the slot is never left counted for a run that is no longer in flight
         admit()
       }
@@ -1891,9 +1943,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   }
 
   // at the cap: the review gets its row, queued, and starts when a slot is free
-  const enqueue = (request: StartRequest, config: Config, cwd: string, key: string, slot: ReviewSlot): T => {
+  const enqueue = (request: StartRequest, config: Config, cwd: string): T => {
     const run = newRow(request, config, cwd, 'queued')
-    queue.push({ id: run.id, key, slot, request, viewer: config.viewer })
+    queue.push({ id: run.id, request, viewer: config.viewer, attempt: null })
     if (!closed) onWatch(run)
     log(`${noun} ${run.id} queued: ${run.command} ${run.args.join(' ')}, ${reviewsInFlight().length} reviews in flight with a cap of ${config.maxConcurrentReviews}`)
     changed(run)
@@ -1919,12 +1971,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (run === null) throw new LaunchError('unknownRun', `${noun} ${id} does not exist`)
     // a queued review leaves the queue at once: nothing has started, so there is nothing to signal
     if (run.status === 'queued') {
-      const at = queue.findIndex((item) => item.id === id)
-      if (at >= 0) queue.splice(at, 1)
+      const item = queue.find((entry) => entry.id === id)
+      // an attempt to start it whose checks still run ends here, and the slot it held goes to the next in line
+      if (item !== undefined) dequeue(item)
       const stopped = store.update(id, { status: 'stopped', finishedAt: now() })
       log(`${noun} ${id}: taken out of the queue`)
       changed(stopped)
       wake(id, stopped)
+      admit()
       return stopped
     }
     if (run.status !== 'running') throw new LaunchError('notRunning', `${noun} ${id} is not running (${run.status})`)
@@ -1957,6 +2011,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   type RequestFile = { pid?: unknown, pidStartedAt?: unknown }
 
+  // a run watched again after a restart holds the slot the cache gives it now, since the one it was admitted with went with the server
+  const recoveredSlot = (run: T): ReviewSlot | null => store.slot(run as unknown as { repo: string, number?: number, command: string }, options.config())
+
   const recover = async (): Promise<void> => {
     // a start of the server makes no GitHub call and starts no process, so a review still queued when it stopped is not started now
     for (const run of store.queued()) {
@@ -1979,9 +2036,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (same) {
         log(`${noun} ${run.id}: still running after the restart (pid ${pid}); watching it again`)
         if (!closed) onWatch(run)
-        watchRun({ ...run, pid }, dir, null, false, null)
+        watchRun({ ...run, pid }, dir, null, false, null, recoveredSlot(run))
       } else {
-        const entry = watchRun({ ...run, pid: null }, dir, null, false, null)
+        const entry = watchRun({ ...run, pid: null }, dir, null, false, null, recoveredSlot(run))
         await settle(entry, null, true)
       }
     }
