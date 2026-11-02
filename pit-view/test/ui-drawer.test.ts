@@ -11,7 +11,7 @@ import type { ReportListing } from '../src/reports.ts'
 import { rereadRequest } from '../public/agent.ts'
 import type { AgentCell, RunView, StartOption, StepSlot } from '../public/agent.ts'
 import {
-  cardKind, cellFromRun, confirmHolds, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
+  cardKind, commitModel, cellFromRun, confirmHolds, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
   reportName, reportRows, resumeReadyText, returnSelector, runRows, runText, startConfirmModel, startsModel, stepModels, stepsName, stopModel, summaryOf,
 } from '../public/drawerview.ts'
 import type { DrawerInput, Loadable } from '../public/drawerview.ts'
@@ -59,7 +59,7 @@ const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
   starts: options(),
   lastReviewAt: null,
   runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
-  steps: slots(), tandem: false,
+  steps: slots(), tandem: false, commit: null,
   finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, resume: null, costUsd: null,
   ...patch,
 })
@@ -905,4 +905,51 @@ test('a run finished by hand reads as its new outcome with the original failure 
   assert.equal(cellFromRun(deniedCell(), run).resolvedByHand, true)
   assert.equal(runText(run).text, 'Done · finished by hand')
   assert.equal(runText({ ...run, status: 'failed', note: null }).text, 'Failed')
+})
+
+test('the commit a run reviewed links to GitHub as a short SHA, and says when the head has moved past it', () => {
+  const reviewed = '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7'
+  const head = reviewed
+  assert.deepEqual(commitModel(reviewed, 'octo-example/orbit', head, 'review-pr'), {
+    short: '755b78b', href: `https://github.com/octo-example/orbit/commit/${reviewed}`, moved: false,
+  })
+  assert.equal(commitModel(reviewed, 'octo-example/orbit', 'aaaaaaa2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7', 'review-pr')?.moved, true)
+  // a SHA the run recorded short, in capitals, still matches the head it names
+  assert.deepEqual(commitModel('755B78B', 'octo-example/orbit', head, 'fix-pr'), { short: '755b78b', href: 'https://github.com/octo-example/orbit/commit/755b78b', moved: false })
+  // a stack review reads the top layer, whose commit is not this PR's head
+  assert.equal(commitModel(reviewed, 'octo-example/orbit', 'aaaaaaa2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7', 'review-stack')?.moved, false)
+})
+
+test('a run record without a usable commit shows no SHA and no link', () => {
+  const head = '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7'
+  assert.equal(commitModel(null, 'octo-example/orbit', head, 'review-pr'), null)
+  for (const bad of ['', 'abc123', 'zzzzzzzz', '755b78b"><script>', '755b78b 1', 'g'.repeat(40), 'a'.repeat(41)]) {
+    assert.equal(commitModel(bad, 'octo-example/orbit', head, 'review-pr'), null, bad)
+  }
+})
+
+test('the commit link is built only for a plausible owner/name repository', () => {
+  const head = '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7'
+  for (const bad of ['', 'orbit', 'a/b/c', 'a b/c', '../x', 'o/n?x=1', 'o/n#frag', 'o//n', 'javascript:alert(1)//x']) {
+    const model = commitModel('755b78b', bad, head, 'review-pr')
+    assert.deepEqual(model, { short: '755b78b', href: null, moved: false }, bad)
+  }
+})
+
+test('the latest-run card carries the cell\'s commit; none when the record has none', () => {
+  const sha = '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7'
+  const withCommit = drawerModel(input(finished({ commit: sha })))
+  assert.deepEqual(withCommit.result?.commit, { short: '755b78b', href: `https://github.com/octo-example/orbit/commit/${sha}`, moved: false })
+  assert.equal(drawerModel(input(finished({ commit: null }))).result?.commit, null)
+  const moved = drawerModel(input(finished({ state: 'idle', commit: 'aaaaaaa2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7' })))
+  assert.equal(moved.result?.commit?.moved, true)
+})
+
+test('a card rebuilt from the runs list takes the commit from the run record', () => {
+  const sha = '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7'
+  const review = { schema: 'pit-crew/review-result@1', reviewed: { kind: 'commit', sha }, findings: [], verdict: 'clean', recommendation: null, ci: null, posted: null, notPostedReason: null, report: null }
+  const fix = { schema: 'pit-crew/fix-result@1', head: { sha }, requests: [], pushed: null, notPushedReason: null, checks: [], worktree: null, report: null }
+  assert.equal(cellFromRun(idle(), runView({ status: 'done', result: review } as unknown as Partial<RunView>)).commit, sha)
+  assert.equal(cellFromRun(idle(), runView({ status: 'done', result: fix } as unknown as Partial<RunView>)).commit, sha)
+  assert.equal(cellFromRun(idle(), runView({ status: 'stopped', result: null })).commit, null)
 })

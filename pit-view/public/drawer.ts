@@ -653,6 +653,10 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
         h('p', { class: 'drawer-result-text' },
           h('span', { class: `agent-text tone-text-${result.tone}` }, result.text),
           result.finishedAt === null ? null : h('span', { class: 'drawer-meta' }, ' · ', ageSpan(result.finishedAt, 'finished ', options.nowMs())),
+          result.commit === null ? null : h('span', { class: 'drawer-meta' }, ' · ', safeHref(result.commit.href) === null
+            ? h('code', { class: 'mono' }, result.commit.short)
+            : h('a', { ...newTab, class: 'mono', href: safeHref(result.commit.href), 'aria-label': `Commit ${result.commit.short} on GitHub` }, result.commit.short),
+          result.commit.moved && result.stale === null ? ' (head has moved)' : null),
           h('span', { class: 'drawer-meta' }, ` · ${result.runnerLabel}`),
           result.cost === null ? null : h('span', { class: 'drawer-meta' }, ` · ${result.cost}`)),
         result.note === null ? null : h('p', { class: 'drawer-note' }, result.note),
