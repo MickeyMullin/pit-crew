@@ -11,6 +11,7 @@ import { closedSortValues, mineSortValues, othersSortValues } from './filters.ts
 import type { Sort, SortValue } from './filters.ts'
 import { formatAge, formatClock, plural, shortSha } from './format.ts'
 import { hiddenHits, highlighted, hitsLine } from './pagesearch.ts'
+import { activityHref, reReviewHref } from './anchors.ts'
 import { safeHref } from './safeurl.ts'
 import { rowFreshness } from './state.ts'
 import { sweepLinkFor } from './sweepview.ts'
@@ -124,11 +125,12 @@ const ageLine = (age: string, marker: Marker): HTMLElement => {
 const activityCell = (row: OpenRow, { view, nowMs, paused }: CellContext): { sig: unknown, build: () => Node[] } => {
   const age = formatAge(row.lastActivity.at, nowMs)
   const marker = rowMarker(row, view.sync, { paused, nowMs })
+  const href = safeHref(activityHref(row.lastActivity.anchor, view.repo, row.number) ?? row.url)
   return {
-    sig: [age, row.lastActivity.text, marker],
+    sig: [age, row.lastActivity.text, href, marker],
     build: () => [h('span', { class: 'activity' },
       ageLine(age, marker),
-      h('span', { class: 'activity-text', title: row.lastActivity.text }, row.lastActivity.text))],
+      h('a', { ...newTab, class: 'activity-text', title: row.lastActivity.text, href }, row.lastActivity.text))],
   }
 }
 
@@ -209,10 +211,12 @@ export const othersColumns = (agent: boolean): Column<OtherRow>[] => [
     label: 'Review',
     width: '200px',
     sort: othersSortValues.review,
-    cell: (row) => ({
-      sig: [row.flags, row.reviewers],
+    cell: (row, { view }) => ({
+      sig: [row.flags, row.reviewers, row.url, view.repo],
       build: () => [h('span', { class: 'review' },
-        row.flags.map((flag) => chip(flag.label, 'blue')),
+        row.flags.map((flag) => flag.kind === 'reReview'
+          ? h('a', { ...newTab, class: 'chip tone-blue chip-link', href: safeHref(reReviewHref(flag.sinceSha, view.repo, row.number, row.url)) }, flag.label)
+          : chip(flag.label, 'blue')),
         row.reviewers.map(pip),
         row.flags.length === 0 && row.reviewers.length === 0 ? h('span', { class: 'muted small' }, 'no reviews yet') : null)],
     }),

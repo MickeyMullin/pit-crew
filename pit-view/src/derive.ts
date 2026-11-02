@@ -32,7 +32,9 @@ export type Issue = { kind: IssueKind, label: string, count?: number, url?: stri
 export type MergeStateKind = 'ready' | 'needsReview' | 'needsApproval' | 'checking' | 'blocked' | 'draft'
 export type MergeState = { state: MergeStateKind, label: string }
 
-export type LastActivity = { at: string, actor: string | null, text: string }
+// the GitHub event Last activity links to: a comment or review by its database id, a commit by its SHA; null when the fetched data has no id for it
+export type ActivityAnchor = { kind: 'comment' | 'review' | 'commit', id: string }
+export type LastActivity = { at: string, actor: string | null, text: string, anchor: ActivityAnchor | null }
 
 export type FreshnessState = 'current' | 'pending' | 'stale'
 export type Freshness = { state: FreshnessState, fetchedAt: string }
@@ -71,7 +73,8 @@ export type PrBase = {
 }
 
 export type Flag =
-  | { kind: 'reReview', label: string, count?: number }
+  // sinceSha is the first commit after the viewer's review, when the last-30 window holds both
+  | { kind: 'reReview', label: string, count?: number, sinceSha?: string }
   | { kind: 'requestedOfYou', label: string }
 
 export type OtherGroup = 'yourMove' | 'readyToMerge' | 'waitingOnAuthor' | 'bots'
@@ -291,21 +294,21 @@ const isRequestedOf = (pr: RawOpenPr, login: string | undefined): boolean =>
 export const isRequestedOfViewer = (pr: RawOpenPr, config: Config): boolean => isRequestedOf(pr, config.viewer)
 
 // commits after oid in the last-30 window; null when oid is outside it (force push or rebase)
-const commitsSince = (pr: RawOpenPr, oid: string | null | undefined): number | null => {
+const commitsSince = (pr: RawOpenPr, oid: string | null | undefined): { count: number, first: string | undefined } | null => {
   if (oid == null) return null
   const nodes = pr.recentCommits.nodes
   const index = nodes.findIndex((node) => node.commit.oid === oid)
-  return index === -1 ? null : nodes.length - 1 - index
+  return index === -1 ? null : { count: nodes.length - 1 - index, first: nodes[index + 1]?.commit.oid }
 }
 
 export const deriveFlags = (pr: RawOpenPr, config: Config): Flag[] => {
   const flags: Flag[] = []
   const review = viewerReview(pr, config)
   if (review !== undefined && review.commit?.oid !== pr.headRefOid) {
-    const count = commitsSince(pr, review.commit?.oid)
-    flags.push(count === null || count === 0
+    const since = commitsSince(pr, review.commit?.oid)
+    flags.push(since === null || since.count === 0
       ? { kind: 'reReview', label: 'Re-review · new commits' }
-      : { kind: 'reReview', label: `Re-review · ${plural(count, 'push', 'pushes')} since yours`, count })
+      : { kind: 'reReview', label: `Re-review · ${plural(since.count, 'push', 'pushes')} since yours`, count: since.count, ...since.first === undefined ? {} : { sinceSha: since.first } })
   }
   if (isRequestedOfViewer(pr, config)) flags.push({ kind: 'requestedOfYou', label: 'Requested of you' })
   return flags
@@ -447,7 +450,7 @@ export const selfReviewOf = (report: ReportInfo | undefined, headRefOid: string)
 
 // last activity
 
-type Activity = { at: string, actor: string | null, kind: RawTimelineItem['__typename'], verb: string }
+type Activity = { at: string, actor: string | null, kind: RawTimelineItem['__typename'], verb: string, anchor: ActivityAnchor | null }
 
 // bot commits carry a login or name like dependabot[bot], where the bot's other events say dependabot
 const commitActor = (item: Extract<RawTimelineItem, { __typename: 'PullRequestCommit' }>): string | null => {
@@ -462,32 +465,35 @@ const reviewVerbs: Partial<Record<RawReview['state'], string>> = {
   DISMISSED: 'reviewed',
 }
 
+const databaseAnchor = (kind: 'comment' | 'review', id: number | null | undefined): ActivityAnchor | null =>
+  id == null ? null : { kind, id: String(id) }
+
 const activityOf = (item: RawTimelineItem, config: Config): Activity | null => {
   switch (item.__typename) {
     case 'PullRequestCommit':
-      return { at: item.commit.committedDate, actor: commitActor(item), kind: item.__typename, verb: 'pushed' }
+      return { at: item.commit.committedDate, actor: commitActor(item), kind: item.__typename, verb: 'pushed', anchor: { kind: 'commit', id: item.commit.oid } }
     case 'PullRequestReview': {
       const verb = reviewVerbs[item.state]
       if (verb === undefined) return null
-      return { at: item.submittedAt ?? item.createdAt, actor: item.author?.login ?? null, kind: item.__typename, verb }
+      return { at: item.submittedAt ?? item.createdAt, actor: item.author?.login ?? null, kind: item.__typename, verb, anchor: databaseAnchor('review', item.databaseId) }
     }
     case 'IssueComment':
-      return { at: item.createdAt, actor: item.author?.login ?? null, kind: item.__typename, verb: 'commented' }
+      return { at: item.createdAt, actor: item.author?.login ?? null, kind: item.__typename, verb: 'commented', anchor: databaseAnchor('comment', item.databaseId) }
     case 'ReviewRequestedEvent': {
       const reviewer = item.requestedReviewer
       let verb = 'requested a review'
       if (reviewer !== null && reviewer.__typename !== 'Team' && same(reviewer.login, config.viewer)) verb = 'requested your review'
       else if (reviewer !== null) verb = `requested review from ${reviewer.__typename === 'Team' ? reviewer.name : aliasOf(reviewer.login, config)}`
-      return { at: item.createdAt, actor: item.actor?.login ?? null, kind: item.__typename, verb }
+      return { at: item.createdAt, actor: item.actor?.login ?? null, kind: item.__typename, verb, anchor: null }
     }
     case 'ReadyForReviewEvent':
-      return { at: item.createdAt, actor: item.actor?.login ?? null, kind: item.__typename, verb: 'marked it ready for review' }
+      return { at: item.createdAt, actor: item.actor?.login ?? null, kind: item.__typename, verb: 'marked it ready for review', anchor: null }
     case 'ConvertToDraftEvent':
-      return { at: item.createdAt, actor: item.actor?.login ?? null, kind: item.__typename, verb: 'converted it to a draft' }
+      return { at: item.createdAt, actor: item.actor?.login ?? null, kind: item.__typename, verb: 'converted it to a draft', anchor: null }
     case 'RenamedTitleEvent':
-      return { at: item.createdAt, actor: item.actor?.login ?? null, kind: item.__typename, verb: 'edited the title' }
+      return { at: item.createdAt, actor: item.actor?.login ?? null, kind: item.__typename, verb: 'edited the title', anchor: null }
     case 'HeadRefForcePushedEvent':
-      return { at: item.createdAt, actor: item.actor?.login ?? null, kind: item.__typename, verb: 'force-pushed' }
+      return { at: item.createdAt, actor: item.actor?.login ?? null, kind: item.__typename, verb: 'force-pushed', anchor: item.afterCommit?.oid == null ? null : { kind: 'commit', id: item.afterCommit.oid } }
     default:
       return null
   }
@@ -502,16 +508,16 @@ export const deriveLastActivity = (pr: RawOpenPr, config: Config): LastActivity 
     if (activity !== null && (best == null || Date.parse(activity.at) >= Date.parse(best.at))) latest = index
   })
   const activity = activities[latest]
-  if (activity == null) return { at: pr.updatedAt, actor: null, text: 'Updated' }
+  if (activity == null) return { at: pr.updatedAt, actor: null, text: 'Updated', anchor: null }
   const actor = aliasOf(activity.actor, config)
-  if (activity.kind !== 'PullRequestCommit') return { at: activity.at, actor, text: `${actor} ${activity.verb}` }
+  if (activity.kind !== 'PullRequestCommit') return { at: activity.at, actor, text: `${actor} ${activity.verb}`, anchor: activity.anchor }
   let count = 1
   for (let index = latest - 1; index >= 0; index -= 1) {
     const earlier = activities[index]
     if (earlier == null || earlier.kind !== 'PullRequestCommit' || earlier.actor !== activity.actor) break
     count += 1
   }
-  return { at: activity.at, actor, text: `${actor} pushed ${plural(count, 'commit')}` }
+  return { at: activity.at, actor, text: `${actor} pushed ${plural(count, 'commit')}`, anchor: activity.anchor }
 }
 
 // tickets

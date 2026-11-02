@@ -138,7 +138,9 @@ test('waiting on author still shows Requested of you', async () => {
 })
 
 test('re-review counts pushes since the viewer\'s review, or says new commits when the window lost it', async () => {
-  assert.deepEqual((await other(106)).flags, [{ kind: 'reReview', label: 'Re-review · 2 pushes since yours', count: 2 }])
+  const window = find(await page1(), 106).recentCommits.nodes
+  // sinceSha is the first commit after the viewer's review, so the page can link to that push
+  assert.deepEqual((await other(106)).flags, [{ kind: 'reReview', label: 'Re-review · 2 pushes since yours', count: 2, sinceSha: window[window.length - 2]?.commit.oid }])
   assert.deepEqual((await other(107)).flags, [
     { kind: 'reReview', label: 'Re-review · new commits' },
     { kind: 'requestedOfYou', label: 'Requested of you' },
@@ -152,7 +154,7 @@ test('re-review counts pushes since the viewer\'s review, or says new commits wh
   assert.ok(review)
   review.commit = { oid: middle }
   assert.deepEqual((deriveOpenRow(onePush, ctx(), new Map()) as OtherRow).flags, [
-    { kind: 'reReview', label: 'Re-review · 1 push since yours', count: 1 },
+    { kind: 'reReview', label: 'Re-review · 1 push since yours', count: 1, sinceSha: recent[2]?.commit.oid },
   ])
 })
 
@@ -432,7 +434,7 @@ test('last activity names the actor and merges consecutive commits', async () =>
   assert.equal(await text(103), 'You pushed 1 commit')
   // bot commits carry only a name
   assert.equal(await text(114), 'dependabot pushed 1 commit')
-  assert.deepEqual((await row(108)).lastActivity, { at: '2026-10-25T16:20:00Z', actor: 'Lee', text: 'Lee edited the title' })
+  assert.deepEqual((await row(108)).lastActivity, { at: '2026-10-25T16:20:00Z', actor: 'Lee', text: 'Lee edited the title', anchor: null })
 })
 
 test('last activity covers force pushes, draft changes and an empty timeline', async () => {
@@ -454,7 +456,31 @@ test('last activity covers force pushes, draft changes and an empty timeline', a
     commit('sam-tran', '2026-10-26T08:00:00Z'), event('RenamedTitleEvent', '2026-10-26T08:30:00Z'),
     commit('sam-tran', '2026-10-26T09:00:00Z'), commit('sam-tran', '2026-10-26T10:00:00Z'),
   )), 'Sam pushed 2 commits')
-  assert.deepEqual(deriveLastActivity(timeline(), config), { at: base.updatedAt, actor: null, text: 'Updated' })
+  assert.deepEqual(deriveLastActivity(timeline(), config), { at: base.updatedAt, actor: null, text: 'Updated', anchor: null })
+})
+
+test('last activity carries the id of the event it describes, where the fetched data has one', async () => {
+  const base = find(await page1(), 113)
+  const anchorOf = (...nodes: RawTimelineItem[]) => deriveLastActivity(variant(base, { timelineItems: { nodes } }), config).anchor
+  const commit = (oid: string, at: string): RawTimelineItem =>
+    ({ __typename: 'PullRequestCommit', commit: { oid, committedDate: at, author: { name: 'Sam', user: { login: 'sam-tran' } } } })
+  const comment = (databaseId: number | undefined, at: string): RawTimelineItem =>
+    ({ __typename: 'IssueComment', databaseId, author: { login: 'sam-tran' }, createdAt: at }) as RawTimelineItem
+  const review = (databaseId: number | undefined, at: string): RawTimelineItem =>
+    ({ __typename: 'PullRequestReview', databaseId, author: { login: 'sam-tran' }, state: 'APPROVED', submittedAt: at, createdAt: at }) as RawTimelineItem
+  assert.deepEqual(anchorOf(comment(4400123, '2026-10-26T10:00:00Z')), { kind: 'comment', id: '4400123' })
+  assert.deepEqual(anchorOf(review(5500456, '2026-10-26T10:00:00Z')), { kind: 'review', id: '5500456' })
+  // consecutive commits by one actor are one push: the link is the newest commit
+  assert.deepEqual(anchorOf(commit('aaaaaaa1', '2026-10-26T09:00:00Z'), commit('bbbbbbb2', '2026-10-26T10:00:00Z')), { kind: 'commit', id: 'bbbbbbb2' })
+  assert.deepEqual(anchorOf({ __typename: 'HeadRefForcePushedEvent', actor: { login: 'sam-tran' }, createdAt: '2026-10-26T10:00:00Z', beforeCommit: { oid: 'ccccccc3' }, afterCommit: { oid: 'ddddddd4' } }), { kind: 'commit', id: 'ddddddd4' })
+  // an old cached row has no databaseId, and a force push can lack its after commit: no anchor, so the PR URL is used
+  assert.equal(anchorOf(comment(undefined, '2026-10-26T10:00:00Z')), null)
+  assert.equal(anchorOf(review(undefined, '2026-10-26T10:00:00Z')), null)
+  assert.equal(anchorOf({ __typename: 'HeadRefForcePushedEvent', actor: null, createdAt: '2026-10-26T10:00:00Z', beforeCommit: null, afterCommit: null }), null)
+  // events GitHub gives no id for in this data
+  for (const typename of ['ReviewRequestedEvent', 'ReadyForReviewEvent', 'ConvertToDraftEvent', 'RenamedTitleEvent']) {
+    assert.equal(anchorOf({ __typename: typename, actor: { login: 'sam-tran' }, createdAt: '2026-10-26T10:00:00Z', requestedReviewer: null } as RawTimelineItem), null, typename)
+  }
 })
 
 test('stacks are found across page boundaries', async () => {
@@ -675,7 +701,7 @@ test('a review GitHub dropped from latestReviews on a re-request still counts: a
   assert.equal(found.group, 'yourMove')
   // the pushes since the viewer's review are still counted, and the request is still flagged
   assert.deepEqual(found.flags, [
-    { kind: 'reReview', label: 'Re-review · 1 push since yours', count: 1 },
+    { kind: 'reReview', label: 'Re-review · 1 push since yours', count: 1, sinceSha: dropped.recentCommits.nodes[dropped.recentCommits.nodes.length - 1]?.commit.oid },
     { kind: 'requestedOfYou', label: 'Requested of you' },
   ])
   // and the row is the same one the review would have made had GitHub kept it in latestReviews
@@ -833,5 +859,5 @@ test('last activity names a comment-only review and a comment is no change reque
   const timeline = variant(base, {
     timelineItems: { nodes: [{ __typename: 'PullRequestReview', author: { login: 'sam-tran' }, state: 'COMMENTED', submittedAt: '2026-10-26T10:00:00Z', createdAt: '2026-10-26T10:00:00Z' } as RawTimelineItem] },
   })
-  assert.deepEqual(deriveLastActivity(timeline, config), { at: '2026-10-26T10:00:00Z', actor: 'Sam', text: 'Sam commented' })
+  assert.deepEqual(deriveLastActivity(timeline, config), { at: '2026-10-26T10:00:00Z', actor: 'Sam', text: 'Sam commented', anchor: null })
 })
