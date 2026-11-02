@@ -1430,12 +1430,16 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const launching = new Map<number, boolean>()
   // starts between their checks and their row
   const starting = new Set<string>()
-  // reviews waiting for a slot under the cap, in the order they were queued, each with the viewer its start was confirmed for and, while its checks run, the attempt that holds a slot for it; it stays here until those checks pass, so a save and a Stop still find it
-  type Queued = { id: number, request: StartRequest, viewer: string, attempt: number | null }
+  // reviews waiting for a slot under the cap, in the order they were queued, each with its row as it was queued, the viewer its start was confirmed for, the attempt that holds a slot for it while its checks run, and the clone folder those checks confirmed once they pass; it stays here until it is launched, so a save and a Stop still find it
+  type Queued = { id: number, run: T, request: StartRequest, viewer: string, attempt: number | null, checked: string | null }
   const queue: Queued[] = []
   // slots given to reviews whose process is not watched here yet, each held by an attempt of its own, so two quick starts never both take the last slot and an attempt that ends releases only its own
   const admitting = new Map<number, ReviewSlot>()
   let attempts = 0
+  // queued reviews taken out of the queue whose launch has not returned yet; none behind them starts until it has, so they spawn in the order they were queued
+  let opening = 0
+  // reviews failed here whose row could not be written and still reads queued, each as it was failed, for whoever awaits it; the next server start fails the row
+  const unrecorded = new Map<number, T>()
   let closed = false
 
   const now = (): string => iso(clock.now())
@@ -1610,6 +1614,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   // a queued review that will never start is recorded as failed to start, with the reason
   const failQueued = (id: number, note: string): void => {
     const run = store.update(id, { status: 'failed', finishedAt: now(), note })
+    unrecorded.delete(id)
     log(`${noun} ${id}: queued, not started: ${note}`)
     changed(run)
     wake(id, run)
@@ -1621,95 +1626,134 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (at >= 0) queue.splice(at, 1)
     if (item.attempt !== null) admitting.delete(item.attempt)
     item.attempt = null
+    item.checked = null
   }
 
-  // an unexpected failure, such as a cache read that throws, fails the queued review with the error rather than leaving it in line to fail again, and a failure to record that still takes it out of the queue
-  const abandon = (item: Queued, error: unknown): void => {
-    dequeue(item)
-    try {
-      failQueued(item.id, `spawnFailed: ${messageOf(error)}`)
-    } catch (failure) {
-      log(`${noun} ${item.id}: taken out of the queue, but cannot record why: ${messageOf(failure)}`)
+  // a queued review that will never start, never to be tried again: its row is recorded as failed before it leaves the queue and its slot is released, so the row, the queue, the slot, and its waiters change together. A record that fails twice, the database unwritable, leaves the row queued for the next server start to fail as serverRestarted, while the review still leaves the queue here and whoever awaits it is given it as failed
+  const failInQueue = (item: Queued, note: string): void => {
+    const record = (): boolean => {
+      try {
+        failQueued(item.id, note)
+        return true
+      } catch (failure) {
+        log(`${noun} ${item.id}: cannot record that it failed in the queue: ${messageOf(failure)}`)
+        return false
+      }
     }
+    const recorded = record() || record()
+    dequeue(item)
+    if (recorded) return
+    const run = { ...item.run, status: 'failed', finishedAt: now(), note } as T
+    unrecorded.set(item.id, run)
+    log(`${noun} ${item.id}: taken out of the queue as ${note}, but its row stays queued until the server restarts`)
+    wake(item.id, run)
   }
 
-  // gives a slot to every queued review that fits now, earliest first; each then makes its checks in the background, still in the queue
+  // gives a slot to every queued review that fits now, earliest first, each then making its checks in the background, still in the queue; and launches each whose checks have passed once no review ahead of it is still making its checks or being launched, so they start in the order they were queued
   const admit = (): void => {
     if (closed) return
     const config = options.config()
     for (const item of [...queue]) {
       const why = unbound(item.request.repo, item.viewer, config)
-      if (why === null) continue
-      dequeue(item)
-      failQueued(item.id, `spawnFailed: not started: ${why}`)
+      if (why !== null) failInQueue(item, `spawnFailed: not started: ${why}`)
     }
+    let heldBack = opening > 0
     for (const item of [...queue]) {
-      // one whose checks are running already holds its slot
-      if (item.attempt !== null) continue
+      // one taken out of the queue since this pass began is skipped
+      if (!queue.includes(item)) continue
+      if (item.attempt !== null) {
+        // one whose checks are running holds its slot, and holds back every one behind it
+        if (item.checked === null || heldBack) {
+          heldBack = true
+          continue
+        }
+        proceed(item, item.attempt, item.checked)
+        heldBack ||= opening > 0
+        continue
+      }
       let slot: ReviewSlot | null
       try {
         // whether it is a self-review is read from the cache now, as it is about to start
         slot = store.slot(item.request, config)
       } catch (error) {
-        abandon(item, error)
+        // an unexpected failure, such as a cache read that throws, fails the queued review with the error rather than leaving it in line to fail again
+        failInQueue(item, `spawnFailed: ${messageOf(error)}`)
         continue
       }
       if (slot === null || !fitsInLine(item, slot, config)) continue
       const attempt = reserve(slot)
       item.attempt = attempt
+      heldBack = true
       void begin(item, attempt).catch((error: unknown) => log(`${noun} ${item.id}: cannot start from the queue: ${messageOf(error)}`))
     }
   }
 
-  // a queued review's start: the checks every start makes while it stays in the queue, then the fit test again under the config as it is then, and the same launch, on the row it already has
+  // a queued review's checks, the ones every start makes, while it stays in the queue; once they pass it keeps its slot and waits for the reviews ahead of it, which the queue's next reading launches it after
   const begin = async (item: Queued, attempt: number): Promise<void> => {
-    // false once a Stop, a failure, or a lowered cap ended this attempt
+    // false once a Stop or a failure ended this attempt
     const ours = (): boolean => !closed && item.attempt === attempt && queue.includes(item)
-    // true once the launch has taken it out of the queue; until then a failure leaves it in line for this attempt to fail
-    let launched = false
     try {
-      let cloneDir: string
-      try {
-        const checked = options.config()
-        await checkIdentity(checked)
-        cloneDir = await checkClone(checked)
-      } catch (error) {
-        if (ours()) {
-          dequeue(item)
-          failQueued(item.id, `spawnFailed: ${messageOf(error)}`)
-        }
-        return
-      }
-      if (!ours()) return
-      const run = store.get(item.id)
-      if (run === null) throw new Error('its row is gone')
-      // a config saved during the checks is the one admission reads, with nothing awaited between the reading and the slot held or given back
-      const config = options.config()
+      const checked = options.config()
+      await checkIdentity(checked)
+      const cloneDir = await checkClone(checked)
+      if (ours()) item.checked = cloneDir
+    } catch (error) {
+      if (ours()) failInQueue(item, `spawnFailed: ${messageOf(error)}`)
+    }
+    // the queue is read again however the checks went: this one may be next to start, and one that failed hands its slot on
+    admit()
+  }
+
+  // a queued review whose checks passed and that nothing ahead of it holds back: the fit test again under the config and the cache as they are now, with nothing awaited between the reading and the slot held or given back, then the same launch, on the row it already has
+  const proceed = (item: Queued, attempt: number, cloneDir: string): void => {
+    let config: Config
+    let slot: ReviewSlot | null
+    try {
+      if (store.get(item.id) === null) throw new Error('its row is gone')
+      config = options.config()
       const why = unbound(item.request.repo, item.viewer, config)
       if (why !== null) {
-        dequeue(item)
-        failQueued(item.id, `spawnFailed: not started: ${why}`)
+        failInQueue(item, `spawnFailed: not started: ${why}`)
         return
       }
-      const slot = store.slot(item.request, config)
-      if (slot === null || !fitsInLine(item, slot, config)) {
-        // it no longer fits: it gives its slot back and waits again, in its place in line
-        admitting.delete(attempt)
-        item.attempt = null
-        return
-      }
-      admitting.set(attempt, slot)
-      queue.splice(queue.indexOf(item), 1)
-      launched = true
-      await launch(item.request, config, item.request.cwd ?? cloneDir, run, { slot, attempt, viewer: item.viewer })
+      slot = store.slot(item.request, config)
     } catch (error) {
-      // an unexpected failure after the checks fails the review, so it is never left in line holding an attempt nothing will finish, nor retried to fail again
-      if (!launched && ours()) abandon(item, error)
-      else log(`${noun} ${item.id}: cannot start from the queue: ${messageOf(error)}`)
-    } finally {
-      if (item.attempt === attempt) item.attempt = null
+      // an unexpected failure, such as a cache read that throws, fails the review, so it is never left in line holding an attempt nothing will finish, nor retried to fail again
+      failInQueue(item, `spawnFailed: ${messageOf(error)}`)
+      return
+    }
+    if (slot === null || !fitsInLine(item, slot, config)) {
+      // it no longer fits: it gives its slot back and waits again, in its place in line
       admitting.delete(attempt)
-      // the queue is read again however the start went: one that ended at once hands its slot on, and a run that settled before its start returned was still counted here when it settled
+      item.attempt = null
+      item.checked = null
+      return
+    }
+    admitting.set(attempt, slot)
+    const cwd = item.request.cwd ?? cloneDir
+    let run: T
+    try {
+      // its row says running before it leaves the queue, so a write that fails leaves the two as they were, for it to fail in the queue
+      run = store.update(item.id, { status: 'running', startedAt: now(), cwd: tildePath(cwd, home) })
+    } catch (error) {
+      failInQueue(item, `spawnFailed: ${messageOf(error)}`)
+      return
+    }
+    queue.splice(queue.indexOf(item), 1)
+    opening += 1
+    void launchQueued(item, run, config, cwd, { slot, attempt, viewer: item.viewer })
+  }
+
+  // a queued review's launch, after which the queue is read again
+  const launchQueued = async (item: Queued, run: T, config: Config, cwd: string, admitted: Admitted): Promise<void> => {
+    try {
+      await launch(item.request, config, cwd, run, admitted)
+    } catch (error) {
+      log(`${noun} ${item.id}: cannot start from the queue: ${messageOf(error)}`)
+    } finally {
+      opening -= 1
+      admitting.delete(admitted.attempt)
+      // the queue is read again however the start went: the next in line may start now, one that ended at once hands its slot on, and a run that settled before its start returned was still counted here when it settled
       admit()
     }
   }
@@ -1856,9 +1900,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   // how a review was admitted: the slot it was given, the attempt holding that slot until its process is watched, and the viewer its start was confirmed for
   type Admitted = { slot: ReviewSlot, attempt: number, viewer: string }
 
-  // a queued review's row already exists and was announced when it was queued; it starts now, in the folder the checks just confirmed
+  // a queued review's row already exists, was announced when it was queued, and was marked running as it left the queue; it starts now, in the folder the checks just confirmed
   const launch = async (request: StartRequest, config: Config, cwd: string, queued: T | null = null, admitted: Admitted | null = null): Promise<T> => {
-    let run = queued === null ? newRow(request, config, cwd, 'running') : store.update(queued.id, { status: 'running', startedAt: now(), cwd: tildePath(cwd, home) })
+    let run = queued ?? newRow(request, config, cwd, 'running')
     const runner = run.runner
     const sessionId = run.sessionId
     if (!closed && queued === null) onWatch(run)
@@ -1978,7 +2022,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   // at the cap: the review gets its row, queued, and starts when a slot is free
   const enqueue = (request: StartRequest, config: Config, cwd: string): T => {
     const run = newRow(request, config, cwd, 'queued')
-    queue.push({ id: run.id, request, viewer: config.viewer, attempt: null })
+    queue.push({ id: run.id, run, request, viewer: config.viewer, attempt: null, checked: null })
     if (!closed) onWatch(run)
     log(`${noun} ${run.id} queued: ${run.command} ${run.args.join(' ')}, ${reviewsInFlight().length} reviews in flight with a cap of ${config.maxConcurrentReviews}`)
     changed(run)
@@ -2008,6 +2052,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       // an attempt to start it whose checks still run ends here, and the slot it held goes to the next in line
       if (item !== undefined) dequeue(item)
       const stopped = store.update(id, { status: 'stopped', finishedAt: now() })
+      unrecorded.delete(id)
       log(`${noun} ${id}: taken out of the queue`)
       changed(stopped)
       wake(id, stopped)
@@ -2170,6 +2215,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   }
 
   const settled = (id: number): Promise<T> => {
+    const failed = unrecorded.get(id)
+    if (failed !== undefined) return Promise.resolve(failed)
     const run = store.get(id)
     if (run === null) return Promise.reject(new LaunchError('unknownRun', `${noun} ${id} does not exist`))
     if (!live.has(id) && !launching.has(id) && run.status !== 'queued') return Promise.resolve(run)

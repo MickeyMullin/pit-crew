@@ -4,7 +4,7 @@ import { mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { openCache } from '../src/cache.ts'
-import type { Run } from '../src/cache.ts'
+import type { Run, RunChanges } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import type { OpenRow } from '../src/derive.ts'
@@ -1469,6 +1469,70 @@ test('a queued review sent back by a lowered cap keeps its place: a slot freed w
   }
 })
 
+// the PR each spawned runner was asked to review, in the order they were spawned
+const startOrder = (h: Awaited<ReturnType<typeof harness>>): number[] => h.launch.children.map((child) => Number(/\/review-pr (\d+) /.exec(child.writes[0] ?? '')?.[1]))
+
+test('a later queued review whose checks end first waits for the earlier one, so queued reviews start in the order they were queued', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+  try {
+    await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    accounts.arm(2)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 3 }
+    h.launcher.drain()
+    await waitFor(() => accounts.held() === 2)
+    // the later one's checks end first: both fit, but it waits while the earlier one still makes its checks
+    accounts.open(1)
+    await quiet()
+    assert.equal(h.cache.getRun(later.id)?.status, 'queued')
+    assert.equal(h.launch.children.length, 1)
+    // the earlier one's checks end: it starts, then the later one
+    accounts.open(0)
+    await waitFor(() => h.launch.children.length === 3)
+    assert.deepEqual(startOrder(h), [106, 113, 118])
+    assert.deepEqual([earlier, later].map((run) => h.cache.getRun(run.id)?.status), ['running', 'running'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a later queued review whose checks end first never starts ahead of an earlier one that a lowered cap then leaves room for alone', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    accounts.arm(2)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 3 }
+    h.launcher.drain()
+    await waitFor(() => accounts.held() === 2)
+    // the later one's checks end first, while both still fit
+    accounts.open(1)
+    await quiet()
+    assert.equal(h.launch.children.length, 1)
+    // the cap comes down to room for one beside the running review, and the earlier one's checks end
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 2 }
+    h.launcher.drain()
+    accounts.open(0)
+    await waitFor(() => h.launch.children.length === 2)
+    await quiet()
+    assert.deepEqual(startOrder(h), [106, 113])
+    assert.deepEqual([earlier, later].map((run) => h.cache.getRun(run.id)?.status), ['running', 'queued'])
+    // the later one starts when a slot is free
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length === 3)
+    assert.deepEqual(startOrder(h), [106, 113, 118])
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('an unexpected failure after a queued review\'s checks fails that review with the error, so it never stays queued, and the queue moves on', async () => {
   const accounts = gate()
   const login = { current: scenario.viewer as string }
@@ -1533,6 +1597,97 @@ test('an unexpected failure while the queue is read fails only the review it was
     await waitFor(() => h.launch.children.length === 2)
     assert.equal(h.cache.getRun(next.id)?.status, 'running')
   } finally {
+    await h.cleanup()
+  }
+})
+
+// a launcher over a cache whose writes to the runs the test names throw, as an unwritable database's would; the store reads updateRun when the launcher is made
+const failingWrites = (h: Awaited<ReturnType<typeof harness>>, fails: (id: number, changes: RunChanges) => boolean) => {
+  const updateRun = h.cache.updateRun
+  h.cache.updateRun = (id, changes) => {
+    if (fails(id, changes)) throw new Error('attempt to write a readonly database')
+    return updateRun(id, changes)
+  }
+  const launcher = h.make()
+  h.cache.updateRun = updateRun
+  return launcher
+}
+
+test('a queued review whose failure cannot be recorded still leaves the queue failed for whoever awaits it, its row left queued for a restart to fail', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  let unwritable = 0
+  const launcher = failingWrites(h, (id, changes) => id === unwritable && changes.status === 'failed')
+  try {
+    const running = await launcher.start(request(106))
+    const broken = await launcher.start(request(113, { label: 'Review' }))
+    const next = await launcher.start(request(118, { label: 'Review' }))
+    unwritable = broken.id
+    const settled = launcher.settled(broken.id)
+    // the cache read that decides its fit throws as the queue is read, and every write of its failure throws too
+    const readView = h.cache.readView
+    let failures = 1
+    h.cache.readView = (repo) => {
+      if (failures > 0) {
+        failures -= 1
+        throw new Error('database is locked')
+      }
+      return readView(repo)
+    }
+    h.launch.children[0]!.exit(1)
+    await launcher.settled(running.id)
+    const failed = await within(settled)
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.note, 'spawnFailed: database is locked')
+    assert.equal((await within(launcher.settled(broken.id))).status, 'failed')
+    // its row says queued, the next in line takes the slot, and it is never tried again
+    assert.equal(h.cache.getRun(broken.id)?.status, 'queued')
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(next.id)?.status, 'running')
+    launcher.drain()
+    await quiet()
+    assert.deepEqual(startOrder(h), [106, 118])
+    // the next start of the server fails the row as it fails any review still queued
+    launcher.close()
+    const restarted = h.make()
+    await restarted.recover()
+    restarted.close()
+    assert.equal(h.cache.getRun(broken.id)?.note, 'serverRestarted: it was still queued, so it never started')
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a queued review whose row cannot be marked running fails with the error and never spawns, and the queue moves on', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  let unwritable = 0
+  // marking it running throws once, and so does the first record of the failure
+  const throwsLeft = { running: 1, failed: 1 }
+  const launcher = failingWrites(h, (id, changes) => {
+    if (id !== unwritable || (changes.status !== 'running' && changes.status !== 'failed')) return false
+    if (throwsLeft[changes.status] === 0) return false
+    throwsLeft[changes.status] -= 1
+    return true
+  })
+  try {
+    const running = await launcher.start(request(106))
+    const broken = await launcher.start(request(113, { label: 'Review' }))
+    const next = await launcher.start(request(118, { label: 'Review' }))
+    unwritable = broken.id
+    const settled = launcher.settled(broken.id)
+    h.launch.children[0]!.exit(1)
+    await launcher.settled(running.id)
+    const failed = await within(settled)
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.note, 'spawnFailed: attempt to write a readonly database')
+    assert.equal(h.cache.getRun(broken.id)?.status, 'failed')
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(next.id)?.status, 'running')
+    launcher.drain()
+    await quiet()
+    assert.deepEqual(startOrder(h), [106, 118])
+  } finally {
+    launcher.close()
     await h.cleanup()
   }
 })
