@@ -226,6 +226,11 @@ test('Clean · mark ready? only on the viewer\'s own draft, and a moved head ret
   assert.equal(moved.state, 'idle')
   assert.equal(moved.label, 'Re-review')
   assert.equal(moved.runId, 7)
+  // the cell carries the commit the run record names, never the PR's current head
+  assert.equal(moved.commit, '0123456789abcdef0123456789abcdef01234567')
+  assert.equal(agentCell(await prOf(106), config, runRow({ status: 'needsInput', result: reviewResult({ status: 'needsInput', reviewed: null }) as unknown as RunResultJson }), undefined).commit, null)
+  assert.equal(agentCell(await prOf(106), config, runRow({ status: 'stopped', result: null }), undefined).commit, null)
+  assert.equal(agentCell(await prOf(106), config, undefined, undefined).commit, null)
   // a waiting run shows its question
   const waiting = agentCell(await prOf(106), config, runRow({ status: 'needsInput', result: reviewResult({ status: 'needsInput', reviewed: null, question: 'Fix now, or stop here?' }) as unknown as RunResultJson }), undefined)
   assert.equal(waiting.state, 'done')

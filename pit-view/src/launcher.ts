@@ -722,6 +722,8 @@ export type AgentCell = {
   steps: StepSlot[]
   // whether the latest run was a tandem review
   tandem: boolean
+  // the commit the latest run's record says it read, as the run wrote it: a review's reviewed commit, a fix's or an update's head; null with no run or no commit recorded
+  commit: string | null
   finishedAt: string | null
   // the done text: Changes requested, Approved, Clean · mark ready?, Failed · no result, and so on
   text: string | null
@@ -867,6 +869,14 @@ const standingShas = (run: Run): string[] => {
   return []
 }
 
+// the commit the run record names as the one it read, never the PR's current head
+const recordedCommit = (run: Run): string | null => {
+  const result = run.result
+  if (result?.schema === 'pit-crew/review-result@1') return result.reviewed?.sha ?? null
+  if (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1') return result.head?.sha ?? null
+  return null
+}
+
 export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null): AgentCell => {
   const mine = isMine(pr, config)
   const plan = defaultRun(pr, config)
@@ -875,7 +885,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
   const idle: AgentCell = {
     state: 'idle', label: plan.label, action, starts: startOptions(pr, config, stack, run?.status === 'running'), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
-    steps: emptySteps(), tandem: false,
+    steps: emptySteps(), tandem: false, commit: null,
     finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, resume: null, costUsd: null,
   }
   if (run === undefined) return idle
@@ -899,6 +909,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     step: run.step === null ? null : { name: run.step, state: run.stepState ?? 'started' },
     steps: stepsOf(run),
     tandem: isTandemRun(run.args),
+    commit: recordedCommit(run),
     finishedAt: run.finishedAt,
     text: run.status === 'running' ? null : doneText(run, mine && pr.isDraft),
     result: agentResult(run.result),

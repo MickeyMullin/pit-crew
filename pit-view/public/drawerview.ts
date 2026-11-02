@@ -377,12 +377,27 @@ export const fixModel = (result: FixSummary): FixModel => {
   }
 }
 
+// the reviewed commit on the latest-run card: its short SHA, a link to it on GitHub (null when the repository is not a plausible owner/name), and whether the PR's head has moved past it
+export type CommitModel = { short: string, href: string | null, moved: boolean }
+
+// only 7 to 40 hex characters become a SHA and only owner/name a repository, so nothing else reaches the URL; a stack review reads its top layer, whose commit is not this PR's head, so it never counts as moved
+export const commitModel = (commit: string | null, repo: string | undefined, headOid: string, command: string | null): CommitModel | null => {
+  if (commit === null || !/^[0-9a-f]{7,40}$/i.test(commit)) return null
+  const sha = commit.toLowerCase()
+  const head = headOid.toLowerCase()
+  const moved = command !== 'review-stack' && head !== '' && !head.startsWith(sha) && !sha.startsWith(head)
+  const href = repo !== undefined && /^[\w.-]+\/[\w.-]+$/.test(repo) && !repo.split('/').some((part) => /^\.+$/.test(part)) ? `https://github.com/${repo}/commit/${sha}` : null
+  return { short: shortSha(sha), href, moved }
+}
+
 export type ResultModel = {
   text: string
   tone: DoneTone
   runnerLabel: string
   // the finish time; drawer.ts writes "finished 17h ago" and keeps it current
   finishedAt: string | null
+  // the commit the run read, from its record; null when the record has none
+  commit: CommitModel | null
   note: string | null
   cost: string | null
   resume: string | null
@@ -404,11 +419,12 @@ const byHandText = (note: string | null): string => {
   return note.startsWith('permissionDenied') ? `Finished by hand after a denied tool call (${note.slice(note.indexOf(':') + 1).trim() || 'unnamed'}): ${reread}` : `Finished by hand after an earlier failure (${was.replace(/\.$/, '')}): ${reread}`
 }
 
-export const resultModel = (cell: AgentCell, number: number): ResultModel => ({
+export const resultModel = (cell: AgentCell, number: number, headOid: string): ResultModel => ({
   text: cell.text ?? 'Done',
   tone: doneTone({ status: cell.status, text: cell.text }),
   runnerLabel: cell.runner === null ? 'its runner' : runnerLabels[cell.runner],
   finishedAt: cell.finishedAt,
+  commit: commitModel(cell.commit, cell.starts[0]?.repo, headOid, cell.command),
   // a run finished by hand keeps the note of its first failure, which byHand tells instead
   note: cell.resolvedByHand && cell.status !== 'failed' ? null : noteText(cell.note),
   cost: formatCost(cell.costUsd),
@@ -602,7 +618,7 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
     rereadAsk: cell !== null && confirm?.type === 'reread' && (card === 'result' || card === 'waiting') && rereadOffer(cell, input.open, row.number)?.disabled === false ? rereadAskModel(row, cell, confirm) : null,
     stopsEnabled: input.open || input.runs.state === 'ready',
     waiting: cell !== null && card === 'waiting' ? waitingModel(cell, row.number) : null,
-    result: cell !== null && card === 'result' ? resultModel(cell, row.number) : null,
+    result: cell !== null && card === 'result' ? resultModel(cell, row.number, row.headOid) : null,
     runs: {
       state: runs.state,
       message: runs.state === 'error' ? runs.message : null,
@@ -664,6 +680,13 @@ export const summaryOf = (result: RunView['result']): AgentResult | null => {
   }
 }
 
+// the commit a run's record names as the one it read, a client copy of the server's
+const recordedCommit = (result: RunView['result']): string | null => {
+  if (result?.schema === 'pit-crew/review-result@1') return result.reviewed?.sha ?? null
+  if (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1') return result.head?.sha ?? null
+  return null
+}
+
 export const cellFromRun = (cell: AgentCell, run: RunView): AgentCell => {
   return {
     ...cell,
@@ -679,6 +702,7 @@ export const cellFromRun = (cell: AgentCell, run: RunView): AgentCell => {
     step: run.step === null ? null : { name: run.step, state: run.stepState ?? 'started' },
     steps: run.steps,
     tandem: run.tandem,
+    commit: recordedCommit(run.result),
     finishedAt: run.finishedAt,
     text: run.status === 'running' ? null : runText(run).text,
     result: summaryOf(run.result),
