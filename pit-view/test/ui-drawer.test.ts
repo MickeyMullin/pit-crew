@@ -11,7 +11,7 @@ import type { ReportListing } from '../src/reports.ts'
 import { rereadRequest } from '../public/agent.ts'
 import type { AgentCell, RunView, StartOption, StepSlot } from '../public/agent.ts'
 import {
-  cardKind, cellFromRun, confirmHolds, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
+  cardKind, cellFromRun, confirmHolds, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
   reportName, reportRows, resumeReadyText, returnSelector, runRows, runText, startConfirmModel, startsModel, stepModels, stepsName, stopModel, summaryOf,
 } from '../public/drawerview.ts'
 import type { DrawerInput, Loadable } from '../public/drawerview.ts'
@@ -387,6 +387,32 @@ test('Escape closes the report panel first, then a confirmation, then the drawer
   assert.equal(escapeTarget({ report: false, confirm: false, busy: false, drawer: true }), 'drawer')
   assert.equal(escapeTarget({ report: false, confirm: true, busy: true, drawer: true }), null)
   assert.equal(escapeTarget({ report: false, confirm: false, busy: false, drawer: false }), null)
+})
+
+test('a press outside the drawer closes it, unless it is in a panel, on a drawer opener, or mid-request', () => {
+  assert.equal(outsidePressCloses({ inPanel: false, opener: false, busy: false }), true)
+  // the page behind, its header and its tables: outside
+  assert.equal(outsidePressCloses({ inPanel: false, opener: false, busy: true }), false)
+  // inside the drawer, a confirmation included, or inside its report panel
+  assert.equal(outsidePressCloses({ inPanel: true, opener: false, busy: false }), false)
+  assert.equal(outsidePressCloses({ inPanel: true, opener: false, busy: true }), false)
+  // another row's Agent cell: the click switches the drawer to that row
+  assert.equal(outsidePressCloses({ inPanel: false, opener: true, busy: false }), false)
+  assert.equal(outsidePressCloses({ inPanel: false, opener: true, busy: true }), false)
+})
+
+test('the page closes the drawer on a press outside it and leaves the controls that open a drawer to their own click', async () => {
+  const read = (name: string): Promise<string> => readFile(join(import.meta.dirname, '..', 'public', name), 'utf8')
+  const [app, drawer, tables] = [await read('app.ts'), await read('drawer.ts'), await read('tables.ts')]
+  // the press is caught on the page, and the drawer owns the guard for a request on its way
+  assert.match(app, /addEventListener\('pointerdown', \(event\) => \{/)
+  assert.match(app, /drawer\.outside\(\{/)
+  assert.match(drawer, /if \(number === null \|\| !outsidePressCloses\(\{ \.\.\.where, busy \}\)\) return false\s+close\(\)/)
+  // every control that opens a drawer is named, so none of them closes it first
+  for (const attribute of ['data-agent="open"', 'data-open-agent', 'data-fix-session', 'data-sweep']) {
+    assert.ok(drawerOpenerSelector.includes(attribute), attribute)
+    assert.ok(app.includes(attribute) || tables.includes(attribute), attribute)
+  }
 })
 
 test('Stop and open says when the resume command is ready, or that there is no session', () => {

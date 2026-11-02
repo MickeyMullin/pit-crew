@@ -772,3 +772,15 @@ export const escapeTarget = (state: EscapeState): 'report' | 'confirm' | 'drawer
   if (state.confirm) return 'confirm'
   return state.drawer ? 'drawer' : null
 }
+
+// a press outside the drawer closes it, as Escape's last step does. A press inside the drawer or its
+// report panel is the drawer's own, and a press on a control that opens a drawer switches this one to
+// that row instead of closing and reopening it. Nothing closes while a request is on its way, as for
+// Escape, so a Start in progress keeps its confirmation on screen
+export type OutsidePressState = { inPanel: boolean, opener: boolean, busy: boolean }
+
+export const outsidePressCloses = (press: OutsidePressState): boolean => !press.inPanel && !press.opener && !press.busy
+
+// the page's controls whose click opens a drawer: another row's Agent cell, the changes-requested
+// banner's Open agent and Fix session buttons, and a sweep's broom or status
+export const drawerOpenerSelector = 'button[data-agent="open"][data-pr], button[data-open-agent], button[data-fix-session], button[data-sweep]'

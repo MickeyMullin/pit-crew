@@ -14,8 +14,8 @@ import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import {
-  confirmHolds, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, refetchKeys, rereadBound,
-  resumeReadyText, returnSelector,
+  confirmHolds, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
+  rereadBound, resumeReadyText, returnSelector,
 } from './drawerview.ts'
 import type { Confirm, DrawerModel, Loadable, Opener, StartConfirmModel, StopModel } from './drawerview.ts'
 import { formatSince } from './format.ts'
@@ -55,6 +55,9 @@ export type Drawer = {
   number: () => number | null
   // Escape: closes what is topmost; false when there is nothing to close
   escape: () => boolean
+  // a press on the page: closes the drawer when the press starts outside it and its report panel,
+  // off the controls that open a drawer, and with no request on its way; false otherwise
+  outside: (where: { inPanel: boolean, opener: boolean }) => boolean
   // focus the control with this data-focus-key, or the heading when it is gone; without force
   // only while focus is inside the drawer or on nothing, so a page's field in use keeps it
   focusKey: (key: string | null, force?: boolean) => void
@@ -969,6 +972,11 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       else if (target === 'confirm') cancelConfirm()
       else if (target === 'drawer') close()
       else return false
+      return true
+    },
+    outside: (where) => {
+      if (number === null || !outsidePressCloses({ ...where, busy })) return false
+      close()
       return true
     },
     focusKey,

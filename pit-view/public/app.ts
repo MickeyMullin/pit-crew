@@ -7,7 +7,7 @@ import { announcements } from './agent.ts'
 import { tickTimers, updateAgentCells } from './agentcell.ts'
 import { byId, setText } from './dom.ts'
 import { createDrawer } from './drawer.ts'
-import { escapeApplies } from './drawerview.ts'
+import { drawerOpenerSelector, escapeApplies } from './drawerview.ts'
 import { clearFilters, cycleSort, initialControls, pressTile, setClosedRange, setFilter, setGrouped, setPageSearch, toggleSection } from './filters.ts'
 import type { ClosedRangeKey, Controls, Filters } from './filters.ts'
 import { createHoverCard } from './hovercard.ts'
@@ -447,6 +447,19 @@ document.addEventListener('keydown', (event) => {
   })
   if (applies && (drawer.escape() || sweepDrawer.escape())) event.preventDefault()
 })
+
+// a press outside the drawer closes it, with Escape's focus return. A press inside the drawer or its
+// report panel is the drawer's own, and one on a control that opens a drawer is left to that control:
+// another row's Agent cell switches this drawer to its row rather than closing and reopening it. A
+// request on its way keeps the drawer open, as it does for Escape
+document.addEventListener('pointerdown', (event) => {
+  if (!drawer.isOpen()) return
+  const target = event.target instanceof Element ? event.target : null
+  drawer.outside({
+    inPanel: target !== null && target.closest('#drawer, #report-panel') !== null,
+    opener: target !== null && target.closest(drawerOpenerSelector) !== null,
+  })
+}, { capture: true, passive: true })
 
 byId('pause').addEventListener('click', () => {
   ui.paused = !ui.paused
