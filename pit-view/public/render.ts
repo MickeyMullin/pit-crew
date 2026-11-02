@@ -18,6 +18,7 @@ import type { Arrangement, ClosedRangeKey, Controls, TileKey } from './filters.t
 import { formatAge, shortSha } from './format.ts'
 import { emptyMessage, hiddenHits, highlighted, hitsLine, matchesPage, searchTerms } from './pagesearch.ts'
 import { safeHref } from './safeurl.ts'
+import { countRunning, openRows } from './state.ts'
 import { sweepHeaderModel } from './sweepview.ts'
 import { offlineBadge, offlineBanner, sectionMarker, syncStatus, tableState } from './status.ts'
 import { closedColumns, countText, mineColumns, openFreshness, othersColumns, renderTable } from './tables.ts'
@@ -96,15 +97,15 @@ const renderOffline = (frame: Frame): void => {
 }
 
 type TileTone = 'blue' | 'red' | 'green' | 'gray' | 'purple'
-type Tile = { key: TileKey, count: number, label: string, sub: string, tone: TileTone, alarm: boolean, target: TableKey }
+type Tile = { key: TileKey, count: number, label: string, sub: string, tone: TileTone, alarm: boolean, targets: readonly TableKey[] }
 
 // each tile is a filter preset (filters.ts, tilePresets); the section it targets is its id
-const tiles = (view: View, nowMs: number): Tile[] => {
+export const tiles = (view: View, nowMs: number): Tile[] => {
   const t = view.tiles
   const detail = t.mineChangesRequestedDetail
   const previous = t.closedPrevious
   return [
-    { key: 'yourMove', count: t.yourMove, label: 'Your move', sub: 'others\' PRs waiting on your review', tone: 'blue', alarm: false, target: 'others' },
+    { key: 'yourMove', count: t.yourMove, label: 'Your move', sub: 'others\' PRs waiting on your review', tone: 'blue', alarm: false, targets: ['others'] },
     {
       key: 'mineChangesRequested',
       count: t.mineChangesRequested,
@@ -113,10 +114,10 @@ const tiles = (view: View, nowMs: number): Tile[] => {
       // red only while there is something to address
       tone: t.mineChangesRequested > 0 ? 'red' : 'gray',
       alarm: t.mineChangesRequested > 0,
-      target: 'mine',
+      targets: ['mine'],
     },
-    { key: 'mineReadyToMerge', count: t.mineReadyToMerge, label: 'Yours ready to merge', sub: 'approved, green, no conflicts', tone: 'green', alarm: false, target: 'mine' },
-    { key: 'waitingOnAuthor', count: t.waitingOnAuthor, label: 'Waiting on author', sub: 'conflicts, red CI, or your changes', tone: 'gray', alarm: false, target: 'others' },
+    { key: 'mineReadyToMerge', count: t.mineReadyToMerge, label: 'Yours ready to merge', sub: 'approved, green, no conflicts', tone: 'green', alarm: false, targets: ['mine'] },
+    { key: 'waitingOnAuthor', count: t.waitingOnAuthor, label: 'Waiting on author', sub: 'conflicts, red CI, or your changes', tone: 'gray', alarm: false, targets: ['others'] },
     {
       key: 'closedToday',
       count: t.closedToday,
@@ -124,8 +125,10 @@ const tiles = (view: View, nowMs: number): Tile[] => {
       sub: `${previous.count} ${previous.label} · ${previous.merged} merged, ${previous.closed} closed`,
       tone: 'purple',
       alarm: false,
-      target: 'closed',
+      targets: ['closed'],
     },
+    // counted on the client from the rows the tables hold, so it follows every row patch (the server's tiles do not carry it)
+    { key: 'agentRuns', count: countRunning(openRows(view)), label: 'Agent runs', sub: 'runs in flight right now', tone: 'blue', alarm: false, targets: ['mine', 'others'] },
   ]
 }
 
@@ -141,8 +144,8 @@ const renderTiles = (frame: Frame, actions: Actions): void => {
           type: 'button',
           class: `tile tile-${tile.tone}${tile.alarm ? ' tile-alarm' : ''}`,
           'aria-pressed': String(pressed),
-          'aria-controls': tile.target,
-          'data-target': tile.target,
+          'aria-controls': tile.targets.join(' '),
+          'data-target': tile.targets.join(' '),
           'data-focus-key': `tile:${tile.key}`,
         },
         h('span', { class: 'tile-count' }, String(tile.count)),

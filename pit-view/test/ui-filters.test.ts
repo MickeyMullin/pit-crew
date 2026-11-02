@@ -11,10 +11,12 @@ import type { RawClosedPr } from '../src/github.ts'
 import {
   arrange, authorOptions, clearFilters, closedSortValues, comparator, cycleSort, initialControls, isFiltered, matchesClosed, matchesMine,
   matchesOthers, matchesQuery, mineSortValues, nextSort, noFilters, openAttention, othersSortValues, pressTile, setClosedRange, setFilter,
-  setGrouped, shownText, statusOptions,
+  setGrouped, setPageSearch, shownText, statusOptions,
 } from '../public/filters.ts'
-import type { ArrangeInput, Controls, Filters, SortValue } from '../public/filters.ts'
+import type { ArrangeInput, Controls, Filters, SortValue, SourceGroup } from '../public/filters.ts'
+import { tiles } from '../public/render.ts'
 import { regroup } from '../public/state.ts'
+import type { View } from '../public/state.ts'
 import { closedColumns, mineColumns, othersColumns } from '../public/tables.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { closedSearch, fakeTime, openPage1, openPage2 } from './helpers.ts'
@@ -293,6 +295,55 @@ test('a tile clears every filter, opens its section alone and applies its preset
   assert.equal(released.tile, null)
   assert.deepEqual(released.filters, noFilters())
   assert.deepEqual(released.expanded, { mine: true, others: true, closed: true })
+})
+
+test('the Agent runs tile opens Mine and Others\' together, collapses Closed, and filters both tables to rows with a running run', async () => {
+  const { rows, mine, others } = await fixtureView()
+  const running = (row: OpenRow): OpenRow => ({ ...row, agent: { state: 'running' } as OpenRow['agent'] })
+  const idle = (row: OpenRow): OpenRow => ({ ...row, agent: null })
+  const mineRow = mineRowsOf(rows)[0]!
+  const othersRow = otherRowsOf(rows)[0]!
+  const runs = rows.map((row) => row.number === mineRow.number || row.number === othersRow.number ? running(row) : idle(row))
+
+  const pressed = pressTile(setFilter(initialControls(), 'closed', { query: 'cache' }), 'agentRuns')
+  assert.equal(pressed.tile, 'agentRuns')
+  assert.deepEqual(pressed.expanded, { mine: true, others: true, closed: false })
+  assert.deepEqual(pressed.filters, { ...noFilters(), mine: { ...noFilters().mine, running: true }, others: { ...noFilters().others, running: true } })
+  assert.equal(isFiltered('mine', pressed.filters), true)
+
+  const regrouped = regroup({ mine, others }, runs)
+  const shown = (table: 'mine' | 'others'): number[] => numbers(arrange<OpenRow>({
+    table, groups: regrouped[table].groups as SourceGroup<OpenRow>[], match: table === 'mine' ? matchesMine(pressed.filters.mine) as (row: OpenRow) => boolean : matchesOthers(pressed.filters.others) as (row: OpenRow) => boolean,
+    sortValue: null, dir: 'asc', grouped: true, filtered: true, openGroups: new Set(),
+  }).groups.flatMap((group) => group.rows))
+  assert.deepEqual(shown('mine'), [mineRow.number])
+  assert.deepEqual(shown('others'), [othersRow.number])
+
+  // a hand change releases the tile, as for any other; pressed again it clears and reopens all three
+  assert.equal(setFilter(pressed, 'mine', { running: false }).tile, null)
+  assert.equal(clearFilters(pressed, 'others').tile, null)
+  const released = pressTile(pressed, 'agentRuns')
+  assert.deepEqual([released.tile, released.filters, released.expanded], [null, noFilters(), { mine: true, others: true, closed: true }])
+  // the other tiles still open one section alone
+  assert.deepEqual(pressTile(pressed, 'yourMove').expanded, { mine: false, others: true, closed: false })
+})
+
+test('the Agent runs tile is last, blue, controls both open sections, and counts running rows from the rows the tables hold', async () => {
+  const { rows, mine, others, closed, tiles: counts } = await fixtureView()
+  const view = (rowsNow: OpenRow[]) => ({ ...regroup({ mine, others }, rowsNow), tiles: counts, closed }) as unknown as View
+  const withRuns = (numbersRunning: number[]): OpenRow[] => rows.map((row) => ({ ...row, agent: numbersRunning.includes(row.number) ? { state: 'running' } as OpenRow['agent'] : null }))
+  const last = (rowsNow: OpenRow[]) => tiles(view(rowsNow), Date.parse('2026-10-27T12:00:00Z')).at(-1)!
+  assert.deepEqual([last(withRuns([])).key, last(withRuns([])).count, last(withRuns([])).tone, last(withRuns([])).sub, last(withRuns([])).targets], ['agentRuns', 0, 'blue', 'runs in flight right now', ['mine', 'others']])
+  // a run starting or finishing is a row patch: the count follows with no new tiles object
+  assert.equal(last(withRuns([mineRowsOf(rows)[0]!.number, otherRowsOf(rows)[0]!.number])).count, 2)
+  assert.equal(last(withRuns([otherRowsOf(rows)[0]!.number])).count, 1)
+})
+
+test('pressing the Agent runs tile clears the page search and what the search opened', () => {
+  const searching = setPageSearch(initialControls(), 'orbit', { mine: 1, others: 1, closed: 0 })
+  assert.equal(searching.pageSearch, 'orbit')
+  const pressed = pressTile(searching, 'agentRuns')
+  assert.deepEqual([pressed.pageSearch, pressed.searchOpened, pressed.searchTouched], ['', [], []])
 })
 
 test('changing a filter by hand releases the tile and keeps the filters; sorting, grouping and an unchanged range do not', () => {

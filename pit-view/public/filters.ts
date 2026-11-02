@@ -3,7 +3,7 @@
 // keys, Group by status, and the summary tiles as filter presets; no DOM here
 import type { ClosedRow, MineGroup, MineRow, OpenRow, OtherGroup, OtherRow } from '../src/derive.ts'
 import { plural } from './format.ts'
-import { attentionOrder } from './state.ts'
+import { attentionOrder, hasRunningRun } from './state.ts'
 import type { ShownGroup, TableKey } from './tables.ts'
 
 export type MineFilters = {
@@ -12,6 +12,8 @@ export type MineFilters = {
   issues: 'any' | 'none' | 'changesRequested' | 'conflicts' | 'ciFailing'
   selfReview: 'any' | 'current' | 'stale' | 'none'
   merge: 'any' | 'ready' | 'notReady'
+  // only rows with a running run, set by the Agent runs tile
+  running: boolean
 }
 
 export type OthersFilters = {
@@ -21,6 +23,8 @@ export type OthersFilters = {
   author: string
   issues: 'any' | 'none' | 'changesRequested' | 'conflicts' | 'ciFailing' | 'ciRunning'
   merge: 'any' | 'ready' | 'needsReview' | 'blocked'
+  // only rows with a running run, set by the Agent runs tile
+  running: boolean
 }
 
 export type ClosedFilters = {
@@ -34,7 +38,7 @@ export type Filters = { mine: MineFilters, others: OthersFilters, closed: Closed
 // a column's sort, or null for attention order
 export type Sort = { key: string, dir: 'asc' | 'desc' } | null
 
-export type TileKey = 'yourMove' | 'mineChangesRequested' | 'mineReadyToMerge' | 'waitingOnAuthor' | 'closedToday'
+export type TileKey = 'yourMove' | 'mineChangesRequested' | 'mineReadyToMerge' | 'waitingOnAuthor' | 'closedToday' | 'agentRuns'
 
 export type ClosedRangeKey = 'today' | 'yesterday'
 
@@ -56,8 +60,8 @@ export type Controls = {
 }
 
 export const noFilters = (): Filters => ({
-  mine: { query: '', status: 'any', issues: 'any', selfReview: 'any', merge: 'any' },
-  others: { query: '', status: 'any', author: '', issues: 'any', merge: 'any' },
+  mine: { query: '', status: 'any', issues: 'any', selfReview: 'any', merge: 'any', running: false },
+  others: { query: '', status: 'any', author: '', issues: 'any', merge: 'any', running: false },
   closed: { query: '', author: '', outcome: 'all' },
 })
 
@@ -152,6 +156,7 @@ export const matchesMine = (filters: MineFilters) => (row: MineRow): boolean =>
   && matchesIssues(filters.issues, row)
   && (filters.selfReview === 'any' || row.selfReview.state === filters.selfReview)
   && (filters.merge === 'any' || (filters.merge === 'ready') === (row.merge.state === 'ready'))
+  && (!filters.running || hasRunningRun(row))
 
 const othersMerge: Record<Exclude<OthersFilters['merge'], 'any'>, readonly string[]> = {
   ready: ['ready'],
@@ -165,6 +170,7 @@ export const matchesOthers = (filters: OthersFilters) => (row: OtherRow): boolea
   && (filters.author === '' || row.author.alias === filters.author)
   && matchesIssues(filters.issues, row)
   && (filters.merge === 'any' || othersMerge[filters.merge].includes(row.merge.state))
+  && (!filters.running || hasRunningRun(row))
 
 export const matchesClosed = (filters: ClosedFilters) => (row: ClosedRow): boolean =>
   matchesQuery(filters.query, row)
@@ -283,24 +289,27 @@ export const shownText = ({ total, matched }: { total: number, matched: number }
 
 const allOpen = (): Record<TableKey, boolean> => ({ mine: true, others: true, closed: true })
 
-const only = (table: TableKey): Record<TableKey, boolean> => ({ mine: table === 'mine', others: table === 'others', closed: table === 'closed' })
+const opening = (targets: readonly TableKey[]): Record<TableKey, boolean> => ({ mine: targets.includes('mine'), others: targets.includes('others'), closed: targets.includes('closed') })
 
-type Preset = { target: TableKey, apply: (filters: Filters) => Filters, range?: ClosedRangeKey }
+// targets are the sections the tile opens and controls; the rest collapse
+type Preset = { targets: readonly TableKey[], apply: (filters: Filters) => Filters, range?: ClosedRangeKey }
 
 export const tilePresets: Record<TileKey, Preset> = {
-  yourMove: { target: 'others', apply: (f) => ({ ...f, others: { ...f.others, status: 'yourMove' } }) },
-  mineChangesRequested: { target: 'mine', apply: (f) => ({ ...f, mine: { ...f.mine, status: 'changesRequested' } }) },
+  yourMove: { targets: ['others'], apply: (f) => ({ ...f, others: { ...f.others, status: 'yourMove' } }) },
+  mineChangesRequested: { targets: ['mine'], apply: (f) => ({ ...f, mine: { ...f.mine, status: 'changesRequested' } }) },
   // the group, not Merge = Ready, since an approved PR GitHub is still checking counts too
-  mineReadyToMerge: { target: 'mine', apply: (f) => ({ ...f, mine: { ...f.mine, status: 'readyToMerge' } }) },
-  waitingOnAuthor: { target: 'others', apply: (f) => ({ ...f, others: { ...f.others, status: 'waitingOnAuthor' } }) },
-  closedToday: { target: 'closed', apply: (f) => f, range: 'today' },
+  mineReadyToMerge: { targets: ['mine'], apply: (f) => ({ ...f, mine: { ...f.mine, status: 'readyToMerge' } }) },
+  waitingOnAuthor: { targets: ['others'], apply: (f) => ({ ...f, others: { ...f.others, status: 'waitingOnAuthor' } }) },
+  closedToday: { targets: ['closed'], apply: (f) => f, range: 'today' },
+  // the one tile that opens two sections: it is a running-only view of every open PR
+  agentRuns: { targets: ['mine', 'others'], apply: (f) => ({ ...f, mine: { ...f.mine, running: true }, others: { ...f.others, running: true } }) },
 }
 
-// a tile clears every filter, the page search included, opens its section alone, and applies its preset; pressing the active tile again clears every filter and reopens all three sections
+// a tile clears every filter, the page search included, opens its section or sections and collapses the rest, and applies its preset; pressing the active tile again clears every filter and reopens all three sections
 export const pressTile = (controls: Controls, tile: TileKey): Controls => {
   if (controls.tile === tile) return { ...controls, tile: null, filters: noFilters(), pageSearch: '', searchOpened: [], searchTouched: [], expanded: allOpen() }
   const preset = tilePresets[tile]
-  return { ...controls, tile, filters: preset.apply(noFilters()), pageSearch: '', searchOpened: [], searchTouched: [], expanded: only(preset.target), closedRange: preset.range ?? controls.closedRange }
+  return { ...controls, tile, filters: preset.apply(noFilters()), pageSearch: '', searchOpened: [], searchTouched: [], expanded: opening(preset.targets), closedRange: preset.range ?? controls.closedRange }
 }
 
 // the page search changed: it releases a tile, as any filter does, and the sections follow it. matches counts the rows each section would show for the new text. A collapsed section with a match opens and is remembered; a section the search opened closes again when nothing in it matches any more, or the search is emptied
