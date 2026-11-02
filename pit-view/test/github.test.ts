@@ -249,6 +249,13 @@ test('the open list and the one-PR refresh both ask for the reviews a re-request
   }
 })
 
+test('the open list and the one-PR refresh ask for the ids the Last activity links are built from', () => {
+  for (const query of [openPrsQuery, singlePrQuery]) {
+    assert.match(query, /\.\.\. on PullRequestReview \{ databaseId /)
+    assert.match(query, /\.\.\. on IssueComment \{ databaseId /)
+  }
+})
+
 test('commandRunner reports exit code, stdout, stderr and extra env', async () => {
   const run = commandRunner(process.execPath)
   const script = 'process.stdout.write(process.env.GH_TOKEN + " " + process.env.GH_PROMPT_DISABLED); process.stderr.write("oops"); process.exit(3)'
