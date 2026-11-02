@@ -52,7 +52,8 @@ test('every color is a light-dark() token in styles.css, and no other file holds
   assert.deepEqual(outside, [], 'styles.css uses colors only through tokens')
   assert.match(css, /color-scheme: light dark/)
   for (const name of await publicFiles()) {
-    if (name === 'styles.css') continue
+    // the favicon is a standalone document that cannot read the stylesheet's tokens; its own test below holds its colors to solid fills
+    if (name === 'styles.css' || name === 'favicon.svg') continue
     const text = await read(name)
     // svg path data such as M6 9l6 6 is not a color; strip d="..." before looking
     const lines = text.replace(/\sd="[^"]*"/g, '').split('\n').filter((line) => colorLiteral.test(line))
@@ -114,10 +115,11 @@ test('every public file starts with its path comment', async () => {
     '.ts': (name) => `// public/${name}`,
     '.css': (name) => `/* public/${name} */`,
     '.html': (name) => `<!-- public/${name} -->`,
+    '.svg': (name) => `<!-- public/${name} -->`,
   }
   for (const name of await publicFiles()) {
     const expected = comment[name.slice(name.lastIndexOf('.'))]
-    assert.ok(expected !== undefined, `${name} is a TypeScript, CSS or HTML file`)
+    assert.ok(expected !== undefined, `${name} is a TypeScript, CSS, HTML, or SVG file`)
     assert.equal((await read(name)).split('\n')[0], expected(name))
   }
 })
@@ -143,4 +145,20 @@ test('every link built in public/ opens in a new tab unless it stays in the app'
     }
   }
   assert.deepEqual(inPlace, [])
+})
+
+// the favicon: one committed SVG, linked from every page's head, needing no outside request
+test('every page links the committed favicon, and the icon is a self-contained SVG of solid fills', async () => {
+  for (const name of (await publicFiles()).filter((file) => file.endsWith('.html'))) {
+    const head = (await read(name)).split('</head>')[0]!
+    assert.match(head, /<link rel="icon" type="image\/svg\+xml" href="\/favicon\.svg">/, `${name} links the favicon`)
+  }
+  const icon = await read('favicon.svg')
+  assert.match(icon, /^<!-- public\/favicon\.svg -->\n<svg [^>]*viewBox="0 0 32 32"/)
+  // the only URL is the SVG namespace; nothing is fetched, no script runs, and no thin strokes or text
+  assert.deepEqual([...icon.matchAll(/https?:\/\/[^"'\s)]+/g)].map((match) => match[0]), ['http://www.w3.org/2000/svg'])
+  assert.doesNotMatch(icon, /<script|<image|<text|<style|href=|url\(|stroke|@import/)
+  const fills = [...icon.matchAll(/fill="([^"]+)"/g)].map((match) => match[1]!)
+  assert.ok(fills.length >= 2, 'the icon has a background and a mark')
+  for (const fill of fills) assert.match(fill, /^#[0-9A-Fa-f]{6}$/, 'solid fills only')
 })
