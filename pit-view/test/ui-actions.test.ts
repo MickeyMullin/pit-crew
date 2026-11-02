@@ -230,6 +230,8 @@ test('Update is offered on the viewer\'s own PRs that target the primary branch,
   assert.ok(!actionOffers(mine('blocked', { baseRef: 'feat/import-reader', primaryBase: false }), true).some((offer) => offer.action === 'update'))
   // one run per PR: a review or a fix in flight holds it back, a finished one does not
   assert.ok(!actionOffers(mine('blocked', { agent: { state: 'running' } }), true).some((offer) => offer.action === 'update'))
+  // a review waiting in the queue holds its PR as a running one does
+  assert.ok(!actionOffers(mine('blocked', { agent: { state: 'queued' } }), true).some((offer) => offer.action === 'update'))
   assert.ok(actionOffers(mine('blocked', { agent: { state: 'done' } }), true).some((offer) => offer.action === 'update'))
   assert.deepEqual(actionOffers(others(), true), [])
 })
@@ -288,6 +290,7 @@ test('Resolve conflicts is offered only on the viewer\'s own conflicting PRs tha
   assert.ok(!offersResolve(mine('blocked', { issues: conflicts, baseRef: 'feat/import-reader', primaryBase: false })))
   // one run per PR
   assert.ok(!offersResolve(mine('blocked', { issues: conflicts, agent: { state: 'running' } })))
+  assert.ok(!offersResolve(mine('blocked', { issues: conflicts, agent: { state: 'queued' } })))
   assert.ok(offersResolve(mine('blocked', { issues: conflicts, agent: { state: 'done' } })))
   // someone else's PR, or one that left the open tables
   assert.ok(!offersResolve(mine('blocked', { issues: conflicts, section: 'others', author: { login: 'alex-mendez', alias: 'Alex' } })))
