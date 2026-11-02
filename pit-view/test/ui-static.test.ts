@@ -119,7 +119,7 @@ test('every public file starts with its path comment', async () => {
   }
   for (const name of await publicFiles()) {
     const expected = comment[name.slice(name.lastIndexOf('.'))]
-    assert.ok(expected !== undefined, `${name} is a TypeScript, CSS, HTML or SVG file`)
+    assert.ok(expected !== undefined, `${name} is a TypeScript, CSS, HTML, or SVG file`)
     assert.equal((await read(name)).split('\n')[0], expected(name))
   }
 })
