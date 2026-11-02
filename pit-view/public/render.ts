@@ -11,7 +11,7 @@ import type { Part } from './dom.ts'
 import { renderFilterBar } from './filterbar.ts'
 import type { FilterBarActions, SelectModel } from './filterbar.ts'
 import {
-  arrange, authorOptions, isFiltered, matchesClosed, matchesMine, matchesOthers, mineIssueOptions, mineMergeOptions, openAttention,
+  arrange, authorOptions, isFiltered, matchesClosed, matchesMine, matchesOthers, mineIssueOptions, mineMergeOptions, openAttention, queryTerms,
   othersIssueOptions, othersMergeOptions, outcomeOptions, selfReviewOptions, shownText, statusOptions,
 } from './filters.ts'
 import type { Arrangement, ClosedRangeKey, Controls, TileKey } from './filters.ts'
@@ -305,7 +305,7 @@ export const render = (frame: Frame, actions: Actions): void => {
   const terms = searchTerms(ui.pageSearch)
   const searching = terms.length > 0
   const page = matchesPage(terms)
-  const ctx: CellContext = { view, nowMs, paused: ui.paused, terms }
+  const ctx = (query: string): CellContext => ({ view, nowMs, paused: ui.paused, terms, queryTerms: queryTerms(query) })
   const range = closedRangeOf(view, ui)
   const freshness = openFreshness(view)
   const openTable = tableState(view.sync.sections.open, view.sync, ui.paused)
@@ -336,7 +336,7 @@ export const render = (frame: Frame, actions: Actions): void => {
     table: 'mine',
     columns: mineCols,
     groups: mine.groups,
-    ctx,
+    ctx: ctx(mineFilters.query),
     state: openTable,
     emptyText: emptyMessage(mine.total, mine.matched, minePage, 'You have no open PRs.'),
     numberOf: (row) => row.number,
@@ -370,7 +370,7 @@ export const render = (frame: Frame, actions: Actions): void => {
     table: 'others',
     columns: othersCols,
     groups: others.groups,
-    ctx,
+    ctx: ctx(othersFilters.query),
     state: openTable,
     emptyText: emptyMessage(others.total, others.matched, othersPage, 'No open PRs from anyone else.'),
     numberOf: (row) => row.number,
@@ -404,7 +404,7 @@ export const render = (frame: Frame, actions: Actions): void => {
     table: 'closed',
     columns: closedCols,
     groups: closed.groups,
-    ctx,
+    ctx: ctx(closedFilters.query),
     state: tableState(view.sync.sections.closed, view.sync, ui.paused),
     emptyText: emptyMessage(closed.total, closed.matched, closedPage, ui.closedRange === 'today' ? 'Nothing merged or closed yet today.' : 'Nothing merged or closed in this range.'),
     numberOf: (row) => row.number,

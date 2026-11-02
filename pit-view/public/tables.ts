@@ -21,8 +21,8 @@ import type { Marker, TableState } from './status.ts'
 
 export type TableKey = 'mine' | 'others' | 'closed'
 
-// what every cell builder can read besides its row; paused is this page's own, and terms are the page search's words, which cells highlight
-export type CellContext = { view: View, nowMs: number, paused: boolean, terms: readonly string[] }
+// what every cell builder can read besides its row; paused is this page's own, terms are the page search's words, which cells highlight, and queryTerms are the table's own search, which only the PR number and title cells highlight, since it reads nothing else
+export type CellContext = { view: View, nowMs: number, paused: boolean, terms: readonly string[], queryTerms: readonly string[] }
 
 // one column: its header, its width in the colgroup, how a row fills it, and the value it
 // sorts by; a column without one has a plain header
@@ -93,17 +93,17 @@ const refreshColumn = <R extends OpenRow>(): Column<R> => ({
   },
 })
 
-const prCell = <R extends { number: number, url: string }>(hover: boolean): Column<R>['cell'] => (row, { terms }) => ({
-  sig: [row.number, row.url, hover, terms],
-  build: () => [h('a', { ...newTab, class: 'pr-link mono', href: safeHref(row.url), 'data-focus': 'pr', 'data-hover': hover ? 'pr' : null }, highlighted(`#${row.number}`, terms))],
+const prCell = <R extends { number: number, url: string }>(hover: boolean): Column<R>['cell'] => (row, { terms, queryTerms }) => ({
+  sig: [row.number, row.url, hover, terms, queryTerms],
+  build: () => [h('a', { ...newTab, class: 'pr-link mono', href: safeHref(row.url), 'data-focus': 'pr', 'data-hover': hover ? 'pr' : null }, highlighted(`#${row.number}`, terms, queryTerms.filter((phrase) => String(row.number).includes(phrase))))],
 })
 
-const titleCell = (aliasShown: boolean) => (row: OpenRow, { terms }: CellContext): { sig: unknown, build: () => Node[] } => {
+const titleCell = (aliasShown: boolean) => (row: OpenRow, { terms, queryTerms }: CellContext): { sig: unknown, build: () => Node[] } => {
   const hits = hiddenHits(terms, row, { tickets: true, alias: aliasShown })
   return {
-    sig: [row.title, row.stack, terms, hits],
+    sig: [row.title, row.stack, terms, queryTerms, hits],
     build: () => [h('span', { class: 'title-cell' },
-      h('span', { class: 'title-text', 'data-hover': 'title' }, highlighted(row.title, terms)),
+      h('span', { class: 'title-text', 'data-hover': 'title' }, highlighted(row.title, terms, queryTerms)),
       row.stack === null ? null : chip(`stack ${row.stack.position}/${row.stack.size}`, 'gray', { class: 'chip chip-small tone-gray', title: 'Stacked PR: its position in the stack' }),
       hitsLine(hits, terms))],
   }
@@ -255,11 +255,11 @@ export const closedColumns = (range: ClosedRange): Column<ClosedRow>[] => [
     label: 'Title',
     width: 'auto',
     sort: closedSortValues.title,
-    cell: (row, { terms }) => {
+    cell: (row, { terms, queryTerms }) => {
       const hits = hiddenHits(terms, row, { tickets: false, alias: true })
       return {
-        sig: [row.title, terms, hits],
-        build: () => [h('span', { class: 'title-cell' }, h('span', { class: 'title-text', title: row.title }, highlighted(row.title, terms)), hitsLine(hits, terms))],
+        sig: [row.title, terms, queryTerms, hits],
+        build: () => [h('span', { class: 'title-cell' }, h('span', { class: 'title-text', title: row.title }, highlighted(row.title, terms, queryTerms)), hitsLine(hits, terms))],
       }
     },
   },

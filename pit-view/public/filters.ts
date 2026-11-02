@@ -138,6 +138,12 @@ export const authorOptions = (rows: readonly { author: { alias: string } }[], se
 
 // predicates
 
+// a table's own search as the phrase highlighting looks for: the whole query trimmed and lowercased as a whole string, a leading # ignored; empty when nothing is typed
+export const queryTerms = (query: string): string[] => {
+  const wanted = query.trim().toLowerCase().replace(/^#/, '')
+  return wanted === '' ? [] : [wanted]
+}
+
 // title or number, a leading # ignored
 export const matchesQuery = (query: string, row: { number: number, title: string }): boolean => {
   const wanted = query.trim().toLowerCase().replace(/^#/, '')
