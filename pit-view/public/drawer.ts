@@ -662,6 +662,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
         result.note === null ? null : h('p', { class: 'drawer-note' }, result.note),
         result.byHand === null ? null : h('p', { class: 'drawer-note', 'data-by-hand': '' }, result.byHand),
         result.stale === null ? null : h('p', { class: 'drawer-note' }, result.stale),
+        result.ready === null ? null : h('p', { class: 'drawer-note', 'data-ready-pointer': '' }, result.ready),
         fix?.pushed == null ? null : h('div', { class: 'drawer-pushed' },
           h('p', { class: 'drawer-label' }, 'Pushed to ', h('code', { class: 'mono' }, fix.pushed.branch)),
           h('ul', { class: 'drawer-commits' }, fix.pushed.commits.map((commit) => h('li', {},
