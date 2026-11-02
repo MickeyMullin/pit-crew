@@ -1395,6 +1395,74 @@ test('admission reads the cap as it is once the checks finish: a cap lowered dur
   }
 })
 
+test('a cap lowered while two queued reviews make their checks keeps queue order: the earlier starts first, and the later gives its slot back', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    // the cap goes up and both are let go, each holding a slot while its account check is held
+    accounts.arm(2)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 3 }
+    h.launcher.drain()
+    await waitFor(() => accounts.held() === 2)
+    // the cap comes down to room for one beside the running review, and the earlier one's checks end first
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 2 }
+    h.launcher.drain()
+    accounts.open(0)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(earlier.id)?.status, 'running')
+    assert.match(h.launch.children[1]!.writes[0] ?? '', /\/review-pr 113 /)
+    // the later one's checks end: it no longer fits, and waits in its place
+    accounts.open(1)
+    await quiet()
+    assert.equal(h.cache.getRun(later.id)?.status, 'queued')
+    assert.equal(h.launch.children.length, 2)
+    // it starts when a slot is free
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length === 3)
+    assert.equal(h.cache.getRun(later.id)?.status, 'running')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a queued review sent back by a lowered cap keeps its place: a slot freed while a later one still makes its checks goes to it first', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    accounts.arm(2)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 3 }
+    h.launcher.drain()
+    await waitFor(() => accounts.held() === 2)
+    // the cap goes back to one: the earlier one's checks end and it waits again, while the later one's are still held
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    h.launcher.drain()
+    accounts.open(0)
+    await quiet()
+    assert.deepEqual([earlier, later].map((run) => h.cache.getRun(run.id)?.status), ['queued', 'queued'])
+    // the running review ends: the slot is the earlier one's, though the later one still holds an attempt
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(earlier.id)?.status, 'running')
+    // the later one's checks end behind it, and it waits
+    accounts.open(1)
+    await quiet()
+    assert.equal(h.cache.getRun(later.id)?.status, 'queued')
+    assert.equal(h.launch.children.length, 2)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a queued review is classed as a self-review when it starts, from the cache then, not when it was queued', async () => {
   const h = await harness({ config: { maxConcurrentReviews: 1, selfReviewOverCap: true } })
   try {

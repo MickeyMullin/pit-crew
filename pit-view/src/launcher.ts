@@ -1581,6 +1581,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   const fits = (slot: ReviewSlot, config: Config): boolean => reviewFits(reviewsInFlight(), slot, config.maxConcurrentReviews, config.selfReviewOverCap)
 
+  // a queued review's fit counts every review in flight and the slots held for reviews ahead of it in line, never its own or one behind it, so when a lowered cap leaves too many slots held it is always a later review that gives its slot back
+  const fitsInLine = (item: Queued, slot: ReviewSlot, config: Config): boolean => {
+    const behind = new Set(queue.slice(queue.indexOf(item)).flatMap((entry) => entry.attempt === null ? [] : [entry.attempt]))
+    const counted = [...admitting].flatMap(([attempt, held]) => behind.has(attempt) ? [] : [held])
+    const watched = [...live.values()].flatMap((entry) => entry.slot === null ? [] : [entry.slot])
+    return reviewFits([...counted, ...watched], slot, config.maxConcurrentReviews, config.selfReviewOverCap)
+  }
+
   // holds a slot for one attempt to start a review; a caller tests the fit with nothing awaited between that and this
   const reserve = (slot: ReviewSlot): number => {
     attempts += 1
@@ -1630,7 +1638,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (item.attempt !== null) continue
       // whether it is a self-review is read from the cache now, as it is about to start
       const slot = store.slot(item.request, config)
-      if (slot === null || !fits(slot, config)) continue
+      if (slot === null || !fitsInLine(item, slot, config)) continue
       const attempt = reserve(slot)
       item.attempt = attempt
       void begin(item, attempt).catch((error: unknown) => log(`${noun} ${item.id}: cannot start from the queue: ${messageOf(error)}`))
@@ -1664,10 +1672,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         failQueued(item.id, `spawnFailed: not started: ${why}`)
         return
       }
-      admitting.delete(attempt)
       const slot = store.slot(item.request, config)
-      if (slot === null || !fits(slot, config)) {
-        // it no longer fits: it waits again, in its place in line
+      if (slot === null || !fitsInLine(item, slot, config)) {
+        // it no longer fits: it gives its slot back and waits again, in its place in line
+        admitting.delete(attempt)
         item.attempt = null
         return
       }
