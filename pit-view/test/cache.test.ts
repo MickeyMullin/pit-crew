@@ -803,3 +803,27 @@ test('a one-PR refresh that wrote nothing leaves the running cycle\'s data in pl
   cache.writeOpenPage(cycle.id, { ...pages[1]!, prs: [{ ...target, title: 'later copy' }] })
   assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'later copy')
 })
+
+test('a version 8 cache gains runs.first_note in place: its runs stay with no first note, and the field is stored', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const created = first.createRun(newRun(106), (id) => `~/runs/${id}`)
+    first.close()
+    const old = new DatabaseSync(path)
+    old.exec('ALTER TABLE runs DROP COLUMN first_note')
+    old.exec('UPDATE meta SET value = \'8\' WHERE key = \'schemaVersion\'')
+    old.close()
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.equal(cache.getRun(created.id)?.firstNote, null)
+    assert.equal(cache.updateRun(created.id, { firstNote: 'permissionDenied: Bash' }).firstNote, 'permissionDenied: Bash')
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
+    cache.close()
+    const again = openCache({ path, clock: handClock().clock })
+    assert.equal(again.getRun(created.id)?.firstNote, 'permissionDenied: Bash')
+    again.close()
+  } finally {
+    await cleanup()
+  }
+})

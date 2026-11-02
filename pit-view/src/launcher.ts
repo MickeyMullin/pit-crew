@@ -731,8 +731,10 @@ export type AgentCell = {
   question: string | null
   // why it failed: a kind such as noResult, optionally followed by ': ' and detail
   note: string | null
-  // the owner's re-read replaced the outcome recorded at exit; the note is then the original one
+  // the owner's re-read replaced the outcome recorded at exit; the note is then the original one unless the run failed again
   resolvedByHand: boolean
+  // the note recorded at exit, kept once a failed re-read replaced it; null while the note is still the original
+  firstNote: string | null
   resume: string | null
   costUsd: number | null
 }
@@ -886,7 +888,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     state: 'idle', label: plan.label, action, starts: startOptions(pr, config, stack, run?.status === 'running'), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
-    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, resume: null, costUsd: null,
+    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null,
   }
   if (run === undefined) return idle
   const shas = standingShas(run)
@@ -916,6 +918,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     question: run.status === 'needsInput' ? run.result?.question ?? null : null,
     note: run.note,
     resolvedByHand: run.resolvedByHand,
+    firstNote: run.firstNote,
     resume: run.resume,
     costUsd: run.costUsd,
   }
@@ -1882,6 +1885,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         return refuse('result.json has not changed since the run settled')
       }
       const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true }
+      // the first time a failed re-read replaces the note, the note recorded at exit moves to its own field, so a later finish by hand can still tell why the run first stopped
+      if (note !== run.note && (run as Partial<Run>).firstNote === null) changes.firstNote = run.note
       // the later steps too: every line of events.jsonl, folded from the start
       const eventsText = await fs.readFile(join(dir, 'events.jsonl')).catch(() => null)
       const events = (eventsText ?? '').split('\n').map(parseStepEvent).filter((event) => event !== null)
