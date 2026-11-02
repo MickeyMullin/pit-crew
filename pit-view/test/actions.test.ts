@@ -37,6 +37,8 @@ type Behavior = {
   single?: (number: number) => Promise<unknown>
   // the base branch each listed PR has, by number, instead of the fixture's
   bases?: Record<number, string>
+  // the mergeable value each listed PR has, by number, instead of the fixture's
+  mergeable?: Record<number, string>
   // called when a write has been accepted
   onWrite?: () => void
   // what the live read of one PR (just before a merge) says, over the fixture's own state
@@ -87,9 +89,12 @@ const ghWorld = (behavior: Behavior = {}): FakeRunner => {
       return ok(JSON.stringify(await behavior.single(Number(field(args, 'number')))))
     }
     const answer = await base.runner(args)
-    if (behavior.bases !== undefined && args[0] === 'api' && args[1] === 'graphql' && (field(args, 'query') ?? '').includes('query OpenPullRequests')) {
+    if ((behavior.bases !== undefined || behavior.mergeable !== undefined) && args[0] === 'api' && args[1] === 'graphql' && (field(args, 'query') ?? '').includes('query OpenPullRequests')) {
       const parsed = JSON.parse(answer.stdout) as RawOpenResponse
-      for (const node of parsed.data.repository?.pullRequests.nodes ?? []) node.baseRefName = behavior.bases[node.number] ?? node.baseRefName
+      for (const node of parsed.data.repository?.pullRequests.nodes ?? []) {
+        node.baseRefName = behavior.bases?.[node.number] ?? node.baseRefName
+        node.mergeable = (behavior.mergeable?.[node.number] ?? node.mergeable) as typeof node.mergeable
+      }
       return ok(JSON.stringify(parsed))
     }
     return answer
@@ -1109,7 +1114,7 @@ test('orList joins one, two, and three or more items as plain English', () => {
 })
 
 test('an unknown action names the allowed actions with a final "or"', () => {
-  assert.throws(() => parseAction({ action: 'comment', repo: 'o/r' }), /action must be one of merge, markReady, convertToDraft, requestReview, or update;/)
+  assert.throws(() => parseAction({ action: 'comment', repo: 'o/r' }), /action must be one of merge, markReady, convertToDraft, requestReview, update, or resolveConflicts;/)
 })
 
 // Update (section 9 of DESIGN.md, Direct actions): an agent session through the launcher, never a gh write of its own. The runner is the fake launch, so no git command runs and no branch is rebased or pushed
@@ -1251,4 +1256,100 @@ test('an update is refused on a PR that does not target the primary branch, with
   } finally {
     await otherAccount.cleanup()
   }
+})
+
+// Resolve conflicts (section 9 of DESIGN.md, Direct actions): the Update session itself, started only on a PR the cache holds as conflicting. The runner is the fake launch, so no git command runs and no branch is rebased or pushed
+
+const resolveBody = async (number: number): Promise<{ action: 'resolveConflicts', viewer: string, headSha: string, base: string }> => ({ ...(await updateBody(number)), action: 'resolveConflicts' })
+
+test('Resolve conflicts starts the Update session, update-pr with Claude bound to the head it showed, labeled Resolve conflicts, and its settled run reads the PR again as a patch', async () => {
+  const h = await setup({ config: { ...withClone, agent: { runner: 'codex', claudeModel: 'sonnet' } }, runner: ghWorld({ mergeable: { 101: 'CONFLICTING' } }) })
+  const stream = await collectPatches(h.base)
+  try {
+    await filled(h)
+    assert.ok((await rowOf(h, 101))?.issues.some((issue) => issue.kind === 'conflicts'))
+    const body = await resolveBody(101)
+    const started = await act(h, 101, body)
+    assert.equal(started.status, 200, JSON.stringify(started.body))
+    const run = started.body.run as { id: number, command: string, args: string[], runner: string, label: string, status: string }
+    assert.deepEqual([started.body.number, started.body.action, started.body.started], [101, 'resolveConflicts', true])
+    // the same command and arguments as Update, so the same lease, push rules, and result
+    assert.deepEqual([run.command, run.args, run.runner, run.label, run.status], ['update-pr', ['101', `--head=${body.headSha}`], 'claude', 'Resolve conflicts', 'running'])
+    const child = h.launch.children[0]!
+    assert.equal(child.request.command, 'claude')
+    assert.match(JSON.parse(child.writes[0]!).message.content as string, new RegExp(`^/update-pr 101 --head=${body.headSha} --emit-json=\\S+$`))
+    assert.equal(userCalls(h.runner), 1)
+    assert.equal(writesOf(h.runner).length, 0)
+    // one run per PR, across Update and Resolve conflicts
+    assert.equal((await act(h, 101, await updateBody(101))).status, 409)
+    assert.equal((await act(h, 101, body)).status, 409)
+    assert.equal(h.launch.children.length, 1)
+    assert.deepEqual([(await rowOf(h, 101))?.agent?.state, (await rowOf(h, 101))?.agent?.label], ['running', 'Resolve conflicts'])
+
+    const reads = singleCallsOf(h.runner).length
+    await child.result(updateResult({ head: { sha: body.headSha }, conflicts: [{ path: 'src/retry.ts', resolution: 'kept both the new backoff and the renamed option' }] }))
+    child.exit(0)
+    await until(() => singleCallsOf(h.runner).length === reads + 1)
+    await until(() => stream.patches.some((patch) => patch.rows.some((row) => row.number === 101 && row.refresh === null && row.agent?.status === 'done')))
+    await h.server.poller.idle()
+    const row = await rowOf(h, 101)
+    assert.deepEqual([row?.agent?.state, row?.agent?.text, row?.agent?.result?.kind], ['done', 'Rebased onto main', 'update'])
+    assert.equal(writesOf(h.runner).length, 0)
+  } finally {
+    stream.close()
+    await h.cleanup()
+  }
+})
+
+test('Resolve conflicts is refused, starting nothing, on a PR the cache does not hold as conflicting, and takes the Update session\'s binding and refusals', async () => {
+  const h = await setup({ config: withClone, runner: ghWorld({ mergeable: { 101: 'MERGEABLE', 120: 'UNKNOWN', 104: 'CONFLICTING' }, bases: { 104: 'release/2026-10' } }) })
+  try {
+    await filled(h)
+    // no conflict that GitHub reports, or mergeability not computed yet: refused before the account is looked up
+    for (const number of [101, 120]) {
+      const refused = await act(h, number, await resolveBody(number))
+      assert.equal(refused.status, 422, `#${number}`)
+      assert.match(String(refused.body.error), new RegExp(`#${number} has no conflicts that GitHub reports; nothing was started`))
+    }
+    assert.equal(h.launch.children.length, 0)
+    assert.equal(userCalls(h.runner), 0)
+
+    // the binding is the Update session's
+    const body = await resolveBody(101)
+    const { viewer: _viewer, ...noViewer } = body
+    const { headSha: _headSha, ...noHead } = body
+    for (const bad of [noViewer, noHead, { ...body, headSha: body.headSha.slice(0, 7) }, { ...body, reviewer: 'sam-tran' }, { ...body, runner: 'codex' }, { ...body, method: 'merge' }, { ...body, force: true }]) {
+      assert.equal((await act(h, 101, bad)).status, 400, JSON.stringify(bad))
+    }
+    assert.equal((await act(h, 101, body, { Origin: '' })).status, 403)
+    assert.equal((await act(h, 101, body, { 'X-Pit-View-Token': 'not-the-token' })).status, 403)
+    assert.equal((await act(h, 101, { ...body, repo: 'octo-example/other' })).status, 409)
+    const otherViewer = await act(h, 101, { ...body, viewer: 'someone-else' })
+    assert.equal(otherViewer.status, 409)
+    assert.match(String(otherViewer.body.error), /nothing was started/)
+    // a moved head is stale before it is judged not conflicting
+    const moved = await act(h, 101, { ...body, headSha: 'a'.repeat(40) })
+    assert.equal(moved.status, 409)
+    assert.match(String(moved.body.error), /#101 changed since you saw it \(it has new commits\); nothing was started/)
+    // a conflicting PR that does not target the primary branch has no Update session
+    const release = await act(h, 104, { ...(await resolveBody(104)), base: 'release/2026-10' })
+    assert.equal(release.status, 422)
+    assert.match(String(release.body.error), /#104 targets release\/2026-10, not the primary branch/)
+    // someone else's conflicting PR
+    const others = await act(h, 108, await resolveBody(108))
+    assert.equal(others.status, 422)
+    assert.match(String(others.body.error), /not your PR/)
+    assert.equal(h.launch.children.length, 0)
+    assert.equal(userCalls(h.runner), 0)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('parseAction reads resolveConflicts with exactly the Update session\'s fields', () => {
+  const headSha = 'B'.repeat(40)
+  assert.deepEqual(parseAction({ action: 'resolveConflicts', repo: 'o/r', viewer: 'vera-quill', headSha, base: 'main' }), { action: 'resolveConflicts', repo: 'o/r', viewer: 'vera-quill', headSha: headSha.toLowerCase(), base: 'main' })
+  assert.throws(() => parseAction({ action: 'resolveConflicts', repo: 'o/r', headSha, base: 'main' }), /resolveConflicts needs viewer/)
+  assert.throws(() => parseAction({ action: 'resolveConflicts', repo: 'o/r', viewer: 'vera-quill', base: 'main' }), /resolveConflicts needs headSha and base/)
+  assert.throws(() => parseAction({ action: 'resolveConflicts', repo: 'o/r', viewer: 'vera-quill', headSha, base: 'main', reviewer: 'sam-tran' }), /resolveConflicts takes no reviewer/)
 })

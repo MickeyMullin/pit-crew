@@ -959,7 +959,7 @@ test('a card rebuilt from the runs list takes the commit from the run record', (
 })
 
 const cleanDraft = (patch: Partial<AgentCell> = {}): AgentCell => finished({ text: 'Clean · mark ready?', ...patch })
-const ownRow = (agent: AgentCell, state: string, section = 'mine'): OpenRow => ({ ...row(agent), section, merge: { state }, primaryBase: true } as unknown as OpenRow)
+const ownRow = (agent: AgentCell, state: string, section = 'mine'): OpenRow => ({ ...row(agent), section, merge: { state }, issues: [], primaryBase: true } as unknown as OpenRow)
 
 test('the ready ask on the latest-run card says where Mark ready for review is, on the viewer\'s own draft only', () => {
   const pointer = 'Mark it ready from the Actions section above: Mark ready for review.'

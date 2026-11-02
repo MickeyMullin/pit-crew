@@ -4,31 +4,36 @@ import type { OpenRow } from '../src/derive.ts'
 import { sentence, tokenHeader } from './agent.ts'
 import type { RunRequest } from './agent.ts'
 
-// the actions this page offers; merge is always a squash into the PR's base branch, and update starts an agent session that brings the PR's branch up to date with it
-export type ActionKind = 'merge' | 'markReady' | 'convertToDraft' | 'requestReview' | 'update'
+// the actions this page offers; merge is always a squash into the PR's base branch, update starts an agent session that brings the PR's branch up to date with it, and resolveConflicts starts that same session on a conflicting PR
+export type ActionKind = 'merge' | 'markReady' | 'convertToDraft' | 'requestReview' | 'update' | 'resolveConflicts'
 
-export const actionKinds: readonly ActionKind[] = ['merge', 'markReady', 'convertToDraft', 'requestReview', 'update']
+export const actionKinds: readonly ActionKind[] = ['merge', 'markReady', 'convertToDraft', 'requestReview', 'update', 'resolveConflicts']
+
+// the actions that start the Update session, and so are bound to the viewer, the head, and the base their confirmation showed
+const startsUpdate = (action: ActionKind): boolean => action === 'update' || action === 'resolveConflicts'
 
 // a person the config lists, as far as a reviewer choice needs
 export type PersonChoice = { login: string, alias: string }
 
-// repo and viewer are the repository and the login the page showed when the action was asked; every request carries the repository back, and an update the viewer too, since its session pushes as the viewer. headSha and baseRef are what the row showed when the action was asked, in full, and a merge or an update request carries them; the other actions have nothing more of the row to be bound to
+// repo and viewer are the repository and the login the page showed when the action was asked; every request carries the repository back, and an update or a resolveConflicts the viewer too, since its session pushes as the viewer. headSha and baseRef are what the row showed when the action was asked, in full, and a merge, an update, or a resolveConflicts request carries them; the other actions have nothing more of the row to be bound to
 export type ActionConfirm = { type: 'action', action: ActionKind, repo: string, viewer: string, reviewer: string, headSha: string, baseRef: string }
 
 export type ActionOffer = { action: ActionKind, text: string }
 
 // the row fields an offer reads; agent is absent on a row that has no Agent cell
-type OfferRow = Pick<OpenRow, 'section' | 'merge' | 'primaryBase'> & { agent?: OpenRow['agent'] }
+type OfferRow = Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'issues'> & { agent?: OpenRow['agent'] }
 
-// the actions this page offers: only the viewer's own PRs (Mine rows) have any, and a PR that has left the open tables has none. Merge is offered only while the merge state is ready and its base is the cached primary branch. Update is offered on any of them whose base is the primary branch, drafts included, except while a run of the PR is in flight, since one run per PR runs at a time. The server decides again whatever this says
+// the actions this page offers: only the viewer's own PRs (Mine rows) have any, and a PR that has left the open tables has none. Merge is offered only while the merge state is ready and its base is the cached primary branch. Update is offered on any of them whose base is the primary branch, drafts included, except while a run of the PR is in flight, since one run per PR runs at a time. Resolve conflicts is offered after it on the same terms, and only while the row carries the Conflicts chip. The server decides again whatever this says
 export const actionOffers = (row: OfferRow, open: boolean): ActionOffer[] => {
   if (!open || row.section !== 'mine') return []
   const draft = row.merge.state === 'draft'
+  const updates = row.primaryBase && row.agent?.state !== 'running'
   return [
     ...row.merge.state === 'ready' && row.primaryBase ? [{ action: 'merge', text: 'Squash and merge' } as const] : [],
     draft ? { action: 'markReady', text: 'Mark ready for review' } : { action: 'convertToDraft', text: 'Convert to draft' },
     { action: 'requestReview', text: 'Request review' },
-    ...row.primaryBase && row.agent?.state !== 'running' ? [{ action: 'update', text: 'Update branch' } as const] : [],
+    ...updates ? [{ action: 'update', text: 'Update branch' } as const] : [],
+    ...updates && row.issues.some((issue) => issue.kind === 'conflicts') ? [{ action: 'resolveConflicts', text: 'Resolve conflicts' } as const] : [],
   ]
 }
 
@@ -59,12 +64,31 @@ const aliasOf = (people: readonly PersonChoice[], login: string): string =>
 
 // null when the row no longer offers that action. The chosen reviewer is kept when still listed, otherwise the first choice
 export const actionConfirmModel = (
-  row: Pick<OpenRow, 'number' | 'title' | 'author' | 'section' | 'merge' | 'headRef' | 'baseRef' | 'primaryBase' | 'headOid' | 'headSha'> & { agent?: OpenRow['agent'] },
+  row: Pick<OpenRow, 'number' | 'title' | 'author' | 'section' | 'merge' | 'issues' | 'headRef' | 'baseRef' | 'primaryBase' | 'headOid' | 'headSha'> & { agent?: OpenRow['agent'] },
   ask: ActionConfirm,
   people: readonly PersonChoice[],
 ): ActionConfirmModel | null => {
   if (!actionHolds(ask, row, true)) return null
   const n = row.number
+  const fallback = (branch: string, base: string): string => `If a rebase is not workable (someone else has commits on the branch, another PR is based on it, or it already holds a merge), it merges ${base} into ${branch} instead and pushes without force.`
+  const rewrite = (branch: string, base: string): string => `A rebase rewrites the PR's own commits and replaces ${branch} on GitHub. Nothing on ${base} is rewritten.`
+  // the Update session asked for on a conflicting PR: the same session, method, and push, in the words of the conflicts
+  if (ask.action === 'resolveConflicts') {
+    const branch = row.headRef
+    const base = ask.baseRef
+    return {
+      action: ask.action,
+      heading: `Resolve the conflicts between #${n} and ${base}?`,
+      title: row.title,
+      effect: `Starts an agent session that resolves the conflicts between ${branch} and ${base} by rebasing ${branch} onto ${base}, and force-pushes ${branch} with --force-with-lease under your account, so the push is refused if ${branch} has moved on from head ${row.headOid}. ${fallback(branch, base)} It changes nothing but what the update and its conflicts need, and stops to ask when a conflict needs your judgment.`,
+      reviewers: null,
+      reviewer: '',
+      canConfirm: true,
+      caution: rewrite(branch, base),
+      confirm: 'Start resolving conflicts',
+      busy: 'Starting session…',
+    }
+  }
   if (ask.action === 'update') {
     const branch = row.headRef
     const base = ask.baseRef
@@ -72,11 +96,11 @@ export const actionConfirmModel = (
       action: ask.action,
       heading: `Update #${n} from ${base}?`,
       title: row.title,
-      effect: `Starts an agent session that rebases ${branch} onto ${base}, resolving any conflicts, and force-pushes ${branch} with --force-with-lease under your account, so the push is refused if ${branch} has moved on from head ${row.headOid}. If a rebase is not workable (someone else has commits on the branch, another PR is based on it, or it already holds a merge), it merges ${base} into ${branch} instead and pushes without force. It stops to ask when a conflict needs your judgment.`,
+      effect: `Starts an agent session that rebases ${branch} onto ${base}, resolving any conflicts, and force-pushes ${branch} with --force-with-lease under your account, so the push is refused if ${branch} has moved on from head ${row.headOid}. ${fallback(branch, base)} It stops to ask when a conflict needs your judgment.`,
       reviewers: null,
       reviewer: '',
       canConfirm: true,
-      caution: `A rebase rewrites the PR's own commits and replaces ${branch} on GitHub. Nothing on ${base} is rewritten.`,
+      caution: rewrite(branch, base),
       confirm: 'Start update',
       busy: 'Starting update…',
     }
@@ -141,18 +165,18 @@ export const actionConfirmModel = (
   }
 }
 
-// a confirmation outlives nothing: it is dropped when the PR has left the open tables, or no longer offers its action (a draft marked ready by a patch no longer offers Mark ready, and a PR whose run has started no longer offers Update). A merge or update confirmation is also dropped when a patch changed the head or base it showed: the request is bound to them, and the confirmation must not go on describing a PR that is no longer the one cached
+// a confirmation outlives nothing: it is dropped when the PR has left the open tables, or no longer offers its action (a draft marked ready by a patch no longer offers Mark ready, a PR whose run has started no longer offers Update, and one whose conflicts are gone no longer offers Resolve conflicts). A merge, update, or resolveConflicts confirmation is also dropped when a patch changed the head or base it showed: the request is bound to them, and the confirmation must not go on describing a PR that is no longer the one cached
 type BoundRow = OfferRow & Pick<OpenRow, 'headSha' | 'baseRef'>
 
 export const actionHolds = (ask: ActionConfirm, row: BoundRow, open: boolean): boolean =>
   actionOffers(row, open).some((offer) => offer.action === ask.action) &&
-  ((ask.action !== 'merge' && ask.action !== 'update') || (row.headSha === ask.headSha && row.baseRef === ask.baseRef))
+  ((ask.action !== 'merge' && !startsUpdate(ask.action)) || (row.headSha === ask.headSha && row.baseRef === ask.baseRef))
 
 // actionHolds, and the page's repository and viewer are still the ones the confirmation was opened for: #<n> in another repository is another PR, and an update pushes as the viewer, so a confirmation never outlives a switch of either
 export const actionBound = (ask: ActionConfirm, row: BoundRow, open: boolean, repo: string, viewer: string = ask.viewer): boolean =>
   ask.repo === repo && ask.viewer.toLowerCase() === viewer.toLowerCase() && actionHolds(ask, row, open)
 
-// the request the confirmation sends: the token header, the repository the confirmation showed, the head SHA and base it showed for a merge, those and the viewer for an update, and the reviewer for a review request
+// the request the confirmation sends: the token header, the repository the confirmation showed, the head SHA and base it showed for a merge, those and the viewer for an update or a resolveConflicts, and the reviewer for a review request
 export const actionRequest = (number: number, ask: ActionConfirm, token: string): RunRequest => ({
   url: `/api/prs/${number}/actions`,
   init: {
@@ -163,7 +187,7 @@ export const actionRequest = (number: number, ask: ActionConfirm, token: string)
         ? { action: ask.action, repo: ask.repo, reviewer: ask.reviewer }
         : ask.action === 'merge'
           ? { action: ask.action, repo: ask.repo, headSha: ask.headSha, base: ask.baseRef }
-          : ask.action === 'update'
+          : startsUpdate(ask.action)
             ? { action: ask.action, repo: ask.repo, viewer: ask.viewer, headSha: ask.headSha, base: ask.baseRef }
             : { action: ask.action, repo: ask.repo }),
   },
@@ -180,6 +204,7 @@ export const actionRefusalText = (status: number, error: string | null): string 
 export const actionDoneText = (number: number, ask: ActionConfirm, people: readonly PersonChoice[]): string => {
   // the session has only started; its outcome arrives on the row, and the PR is read again once it ends
   if (ask.action === 'update') return `#${number}: update session started. The row is refreshed when it ends.`
+  if (ask.action === 'resolveConflicts') return `#${number}: session to resolve conflicts started. The row is refreshed when it ends.`
   const done = ask.action === 'merge'
     ? 'merge requested (squash)'
     : ask.action === 'markReady'

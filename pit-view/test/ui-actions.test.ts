@@ -26,6 +26,7 @@ const mine = (mergeState: string, patch: Record<string, unknown> = {}): OpenRow 
   author: { login: 'vera-quill', alias: 'You' },
   headRef: 'fix/retry', baseRef: 'main', primaryBase: true, headOid: '755b78b', headSha: '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7',
   merge: { state: mergeState, label: mergeState },
+  issues: [],
   agent: null,
   ...patch,
 } as unknown as OpenRow)
@@ -268,4 +269,63 @@ test('an Update request carries everything its confirmation displayed, and the c
 
 test('the Update done line says the session started and the row is refreshed when it ends', () => {
   assert.equal(actionDoneText(101, updateAsk(), people), '#101: update session started. The row is refreshed when it ends.')
+})
+
+// Resolve conflicts (section 9 of DESIGN.md, Direct actions): the Update session itself, offered only while GitHub reports the PR as conflicting, behind a confirmation of its own that names the PR, the method, and the force push
+const conflicts = [{ kind: 'conflicts', label: 'Conflicts' }]
+const resolveAsk = (patch: Partial<ActionConfirm> = {}): ActionConfirm => ({ type: 'action', action: 'resolveConflicts', repo: shown, viewer: 'vera-quill', reviewer: '', headSha: fullSha, baseRef: 'main', ...patch })
+const offersResolve = (row: OpenRow, open = true): boolean => actionOffers(row, open).some((offer) => offer.action === 'resolveConflicts')
+
+test('Resolve conflicts is offered only on the viewer\'s own conflicting PRs that target the primary branch, after Update branch, and not while a run of the PR is in flight', () => {
+  assert.deepEqual(actionOffers(mine('blocked', { issues: conflicts }), true).map((offer) => [offer.action, offer.text]), [
+    ['convertToDraft', 'Convert to draft'], ['requestReview', 'Request review'], ['update', 'Update branch'], ['resolveConflicts', 'Resolve conflicts'],
+  ])
+  assert.ok(offersResolve(mine('draft', { issues: conflicts })))
+  // no Conflicts chip, whatever else the PR has: a blocked PR with failing CI, or GitHub not having computed mergeability yet
+  assert.ok(!offersResolve(mine('blocked')))
+  assert.ok(!offersResolve(mine('blocked', { issues: [{ kind: 'ciFailing', label: 'CI failing · 1', count: 1 }] })))
+  // a stack's upper layer or a release PR has no Update session, so no Resolve conflicts either
+  assert.ok(!offersResolve(mine('blocked', { issues: conflicts, baseRef: 'feat/import-reader', primaryBase: false })))
+  // one run per PR
+  assert.ok(!offersResolve(mine('blocked', { issues: conflicts, agent: { state: 'running' } })))
+  assert.ok(offersResolve(mine('blocked', { issues: conflicts, agent: { state: 'done' } })))
+  // someone else's PR, or one that left the open tables
+  assert.ok(!offersResolve(mine('blocked', { issues: conflicts, section: 'others', author: { login: 'alex-mendez', alias: 'Alex' } })))
+  assert.ok(!offersResolve(mine('blocked', { issues: conflicts }), false))
+})
+
+test('the Resolve conflicts confirmation names the PR, the primary branch, the method with its fallback, and the force push with --force-with-lease', () => {
+  const model = drawerModel(input(mine('blocked', { issues: conflicts }), { confirm: resolveAsk() })).actionAsk
+  assert.ok(model !== null)
+  assert.equal(model.heading, 'Resolve the conflicts between #101 and main?')
+  assert.equal(model.title, 'fix(retry): back off between attempts')
+  assert.match(model.effect, /^Starts an agent session that resolves the conflicts between fix\/retry and main by rebasing fix\/retry onto main, and force-pushes fix\/retry with --force-with-lease under your account, so the push is refused if fix\/retry has moved on from head 755b78b\./)
+  assert.match(model.effect, /If a rebase is not workable \(someone else has commits on the branch, another PR is based on it, or it already holds a merge\), it merges main into fix\/retry instead and pushes without force\./)
+  assert.match(model.effect, /It changes nothing but what the update and its conflicts need, and stops to ask when a conflict needs your judgment\.$/)
+  assert.equal(model.caution, 'A rebase rewrites the PR\'s own commits and replaces fix/retry on GitHub. Nothing on main is rewritten.')
+  assert.deepEqual([model.confirm, model.busy, model.canConfirm, model.reviewers], ['Start resolving conflicts', 'Starting session…', true, null])
+  // no confirmation on a PR that does not offer it
+  assert.equal(actionConfirmModel(mine('blocked'), resolveAsk(), people), null)
+})
+
+test('a Resolve conflicts request carries everything its confirmation displayed, and the confirmation is dropped when any of it changes or the conflicts are gone', () => {
+  const request = actionRequest(101, resolveAsk(), 'tok')
+  assert.equal(request.url, '/api/prs/101/actions')
+  assert.deepEqual(request.init.headers, { 'Content-Type': 'application/json', 'X-Pit-View-Token': 'tok' })
+  assert.deepEqual(JSON.parse(request.init.body ?? ''), { action: 'resolveConflicts', repo: shown, viewer: 'vera-quill', headSha: fullSha, base: 'main' })
+  const row = mine('blocked', { issues: conflicts })
+  assert.equal(actionBound(resolveAsk(), row, true, shown, 'Vera-Quill'), true)
+  assert.equal(actionBound(resolveAsk(), row, true, shown, 'someone-else'), false)
+  assert.equal(actionBound(resolveAsk(), row, true, 'other-org/other-repo', 'vera-quill'), false)
+  // a new head or base in a patch, a run that started, conflicts that are gone, or a PR that left the open tables
+  assert.equal(actionHolds(resolveAsk(), mine('blocked', { issues: conflicts, headSha: 'a'.repeat(40) }), true), false)
+  assert.equal(actionHolds(resolveAsk(), mine('blocked', { issues: conflicts, baseRef: 'master' }), true), false)
+  assert.equal(actionHolds(resolveAsk(), mine('blocked', { issues: conflicts, agent: { state: 'running' } }), true), false)
+  assert.equal(actionHolds(resolveAsk(), mine('blocked'), true), false)
+  assert.equal(actionHolds(resolveAsk(), row, false), false)
+  assert.equal(drawerModel(input(mine('blocked'), { confirm: resolveAsk() })).actionAsk, null)
+})
+
+test('the Resolve conflicts done line says the session started and the row is refreshed when it ends', () => {
+  assert.equal(actionDoneText(101, resolveAsk(), people), '#101: session to resolve conflicts started. The row is refreshed when it ends.')
 })

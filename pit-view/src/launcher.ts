@@ -1218,9 +1218,13 @@ export type StartRequest = {
   cwd?: string
 }
 
+// the actions that start the Update session, and the label each run carries: Resolve conflicts is the same session, asked for on a conflicting PR
+export type UpdateAction = 'update' | 'resolveConflicts'
+const updateLabels: Readonly<Record<UpdateAction, string>> = { update: 'Update branch', resolveConflicts: 'Resolve conflicts' }
+
 // the Update session (section 9 of DESIGN.md, Direct actions): update-pr with Claude, given the full head SHA the confirmation showed, which the command takes as its lease, so a push made since the confirmation is never overwritten
-export const updateRequest = (repo: string, number: number, headSha: string): StartRequest => ({
-  repo, number, command: 'update-pr', args: [String(number), `--head=${headSha}`], label: 'Update branch', runner: 'claude',
+export const updateRequest = (repo: string, number: number, headSha: string, action: UpdateAction = 'update'): StartRequest => ({
+  repo, number, command: 'update-pr', args: [String(number), `--head=${headSha}`], label: updateLabels[action], runner: 'claude',
 })
 
 export type Launcher<T extends Session = Run> = {
