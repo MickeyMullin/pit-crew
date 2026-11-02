@@ -435,7 +435,7 @@ export const resultModel = (cell: AgentCell, number: number, headOid: string): R
   stale: cell.state !== 'idle' ? null : cell.command === 'fix-pr' || cell.command === 'update-pr'
     ? 'The head has moved since this run, so it covers an earlier commit.'
     : 'The head has moved since this run, so it covers an earlier commit. Start a new review for the current one.',
-  byHand: cell.resolvedByHand && cell.status === 'done' ? byHandText(cell.note) : null,
+  byHand: cell.resolvedByHand && cell.status === 'done' ? byHandText(cell.firstNote ?? cell.note) : null,
 })
 
 // which card the latest run gets
@@ -709,6 +709,7 @@ export const cellFromRun = (cell: AgentCell, run: RunView): AgentCell => {
     question: run.status === 'needsInput' ? run.result?.question ?? null : null,
     note: run.note,
     resolvedByHand: run.resolvedByHand,
+    firstNote: run.firstNote,
     resume: run.resume,
     costUsd: run.costUsd,
   }

@@ -42,7 +42,7 @@ const runRow = (patch: Partial<Run> = {}): Run => ({
   id: 7, repo: scenario.repo, number: 106, command: 'review-pr', args: ['106'], label: 'Re-review', runner: 'claude',
   cwd: '~/dev/orbit', dir: '~/.local/state/pit-view/runs/7', sessionId: 'sess-1', pid: 4001, pidStartedAt: 'start-4001',
   startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, steps: null, finishedAt: null, status: 'running',
-  result: null, note: null, costUsd: null, resume: 'cd ~/dev/orbit && claude --resume sess-1', resolvedByHand: false, ...patch,
+  result: null, note: null, costUsd: null, resume: 'cd ~/dev/orbit && claude --resume sess-1', resolvedByHand: false, firstNote: null, ...patch,
 })
 
 const spec = (patch: Partial<LaunchSpec> = {}): LaunchSpec => ({
@@ -1387,6 +1387,45 @@ test('a run denied a tool and finished by hand reads as Approved after a re-read
     assert.equal(cell.note, 'permissionDenied: Bash')
     // a settled run that is done cannot be read again
     await assert.rejects(h.launcher.reread(denied.id), (error: unknown) => error instanceof LaunchError && error.code === 'notRereadable')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+const failedByHand = (error: string): Record<string, unknown> => reviewResult({ status: 'failed', error, verdict: null, findings: [], posted: null })
+
+test('a denied run that fails again and is then finished by hand keeps the original denial in firstNote, while note follows each new failure', async () => {
+  const h = await harness()
+  try {
+    const denied = await deniedRun(h)
+    assert.equal(denied.firstNote, null)
+    const file = join(h.home, '.local', 'state', 'pit-view', 'runs', String(denied.id), 'result.json')
+    await writeFile(file, JSON.stringify(failedByHand('could not reach GitHub')))
+    const again = await h.launcher.reread(denied.id)
+    assert.deepEqual([again.status, again.note, again.firstNote], ['failed', 'could not reach GitHub', 'permissionDenied: Bash'])
+    const cell = agentCell(await prOf(106), baseConfig(), again, undefined)
+    assert.deepEqual([cell.note, cell.firstNote], ['could not reach GitHub', 'permissionDenied: Bash'])
+    // a third failure replaces the note again and leaves the original denial where it is
+    await writeFile(file, JSON.stringify(failedByHand('gh pr review failed')))
+    const third = await h.launcher.reread(denied.id)
+    assert.deepEqual([third.note, third.firstNote], ['gh pr review failed', 'permissionDenied: Bash'])
+    await writeFile(file, JSON.stringify(approvedByHand()))
+    const done = await h.launcher.reread(denied.id)
+    assert.deepEqual([done.status, done.resolvedByHand, done.note, done.firstNote], ['done', true, 'gh pr review failed', 'permissionDenied: Bash'])
+    assert.equal(h.cache.getRun(denied.id)?.firstNote, 'permissionDenied: Bash')
+    assert.equal(agentCell(await prOf(106), baseConfig(), done, undefined).firstNote, 'permissionDenied: Bash')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a re-read that finishes the run at once leaves firstNote empty, since its note is still the original', async () => {
+  const h = await harness()
+  try {
+    const denied = await deniedRun(h)
+    await writeFile(join(h.home, '.local', 'state', 'pit-view', 'runs', String(denied.id), 'result.json'), JSON.stringify(approvedByHand()))
+    const done = await h.launcher.reread(denied.id)
+    assert.deepEqual([done.note, done.firstNote], ['permissionDenied: Bash', null])
   } finally {
     await h.cleanup()
   }
