@@ -1,11 +1,11 @@
 // public/sweepview.ts
 // the Dependabot sweep's words and shapes, as pure functions of the sweeps the view carries: the bot group header's control, the confirmation, the group-level sweep drawer, the broom link on a PR's row, and the link in that PR's own drawer. Sweeps are their own concept (section 8 of DESIGN.md, Sweeps), so nothing here reads a row's Agent cell; sweepdrawer.ts turns the models into elements. Nothing here reads the DOM or the clock: every time is passed in
 import type { SweepRow, SweepStart, SweepView, SweepsView } from '../src/sweeps.ts'
-import { formatDuration, runnerLabels, sentence, tokenHeader } from './agent.ts'
+import { runnerLabels, sentence, tokenHeader } from './agent.ts'
 import type { DoneTone, RunnerName, RunRequest } from './agent.ts'
 import { noteText, formatCost, newestNote, reportName, stepModels, stepsName } from './drawerview.ts'
 import type { StepModel } from './drawerview.ts'
-import { formatClock, formatDay, formatSince } from './format.ts'
+import { formatClock, formatDay, formatDuration, formatSince } from './format.ts'
 
 export type { SweepRow, SweepStart, SweepView, SweepsView }
 

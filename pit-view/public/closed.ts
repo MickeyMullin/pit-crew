@@ -7,14 +7,12 @@ import { formatDay } from './format.ts'
 
 const hour = 3_600_000
 
-const dayAt = (ms: number, timeZone: string | undefined): string => formatDay(new Date(ms).toISOString(), timeZone)
-
 // a range's days, "Mon Oct 26" or "Fri Oct 23 – Sun Oct 25"; each end is read twelve hours
 // inside the range, so a day that DST lengthens or shortens, or a range of UTC days
 // (todayStartsAt utc) read in another browser zone, still names its own dates
 export const rangeDays = (range: Pick<ClosedRange, 'from' | 'to' | 'isMondayRule'>, timeZone?: string): string => {
-  const first = dayAt(Date.parse(range.from) + 12 * hour, timeZone)
-  return range.isMondayRule ? `${first} – ${dayAt(Date.parse(range.to) - 12 * hour, timeZone)}` : first
+  const first = formatDay(Date.parse(range.from) + 12 * hour, timeZone)
+  return range.isMondayRule ? `${first} – ${formatDay(Date.parse(range.to) - 12 * hour, timeZone)}` : first
 }
 
 export const closedTally = (rows: readonly Pick<ClosedRow, 'outcome'>[]): string => {

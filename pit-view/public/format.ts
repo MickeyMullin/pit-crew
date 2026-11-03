@@ -1,5 +1,5 @@
 // public/format.ts
-// pure formatting for the page: ages, times and counts; every clock reading is passed in
+// pure formatting for the page: ages, durations, times, and counts; every clock reading is passed in
 
 const second = 1000
 const minute = 60 * second
@@ -20,6 +20,15 @@ export const formatSince = (fromIso: string, nowMs: number): string => {
   if (elapsed < 10 * second) return 'just now'
   if (elapsed < minute) return `${Math.floor(elapsed / second)}s ago`
   return `${formatAge(fromIso, nowMs)} ago`
+}
+
+// how long a run has gone: seconds under a minute, minutes under an hour, then hours and minutes
+export const formatDuration = (fromIso: string, nowMs: number): string => {
+  const elapsed = Math.max(0, nowMs - Date.parse(fromIso))
+  if (elapsed < minute) return `${Math.floor(elapsed / second)}s`
+  if (elapsed < hour) return `${Math.floor(elapsed / minute)}m`
+  const minutes = Math.floor((elapsed % hour) / minute)
+  return minutes === 0 ? `${Math.floor(elapsed / hour)}h` : `${Math.floor(elapsed / hour)}h ${minutes}m`
 }
 
 // refreshSeconds as the header shows it: "every 5m"
@@ -69,17 +78,25 @@ const formatOf = (style: DateStyle, timeZone: string | undefined): Intl.DateTime
   return format
 }
 
+// an instant as an ISO string from the server or as milliseconds from the page's own arithmetic
+export type Instant = string | number
+
+const dateOf = (at: Instant): Date => new Date(typeof at === 'number' ? at : Date.parse(at))
+
 // "5:53 PM", or "Sun 5:53 PM" when the range spans several days
-export const formatClock = (iso: string, withWeekday = false, timeZone?: string): string =>
-  formatOf(withWeekday ? 'weekdayClock' : 'clock', timeZone).format(new Date(Date.parse(iso)))
+export const formatClock = (at: Instant, withWeekday = false, timeZone?: string): string =>
+  formatOf(withWeekday ? 'weekdayClock' : 'clock', timeZone).format(dateOf(at))
 
 // "Mon Oct 26"
-export const formatDay = (iso: string, timeZone?: string): string =>
-  formatOf('day', timeZone).format(new Date(Date.parse(iso))).replace(',', '')
+export const formatDay = (at: Instant, timeZone?: string): string =>
+  formatOf('day', timeZone).format(dateOf(at)).replace(',', '')
 
 // a cache time: "10:02 AM" today, "Fri 10:02 AM" on an earlier day
 export const formatCached = (iso: string, nowMs: number, timeZone?: string): string =>
-  formatClock(iso, formatDay(iso, timeZone) !== formatDay(new Date(nowMs).toISOString(), timeZone), timeZone)
+  formatClock(iso, formatDay(iso, timeZone) !== formatDay(nowMs, timeZone), timeZone)
+
+// the browser's IANA zone name, which Settings offers for the day boundary; it is a name, not a time
+export const browserTimeZone = (): string => Intl.DateTimeFormat().resolvedOptions().timeZone
 
 export const plural = (count: number, one: string, many: string): string => `${count} ${count === 1 ? one : many}`
 

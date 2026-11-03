@@ -4,10 +4,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  announcements, cellModel, commandLine, doneTone, fixStart, formatDuration, queuedLine, refusalText, runningLine, sentence,
+  announcements, cellModel, commandLine, doneTone, fixStart, queuedLine, refusalText, runningLine, sentence,
   startRequest, stepText, stepTitle, stopRequest, tokenHeader,
 } from '../public/agent.ts'
 import type { AgentCell, StartOption } from '../public/agent.ts'
+import { formatDuration } from '../public/format.ts'
 import { tokenHeader as serverTokenHeader, tokenMeta } from '../src/server.ts'
 
 const now = Date.parse('2026-10-28T15:00:00Z')

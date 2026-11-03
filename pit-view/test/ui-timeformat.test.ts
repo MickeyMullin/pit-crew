@@ -1,13 +1,13 @@
 // test/ui-timeformat.test.ts
-// the time format preference: the one shared formatter in public/format.ts reads it, and no other file formats a time
+// the time format preference: the one shared formatter in public/format.ts reads it, and no other browser code turns a time into text
 import assert from 'node:assert/strict'
-import { readdir, readFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { extname, join } from 'node:path'
 import { test } from 'node:test'
-import { formatCached, formatClock, getTimeFormat, parseTimeFormat, setTimeFormat } from '../public/format.ts'
+import { formatCached, formatClock, formatDay, getTimeFormat, parseTimeFormat, setTimeFormat } from '../public/format.ts'
+import { browserSources, checkTimeText, codeExtensions, inertExtensions, pageExtensions, publicFiles, root } from './timetext.ts'
 
 const zone = 'America/New_York'
-const root = join(import.meta.dirname, '..')
 
 // the preference is module state, so every test that changes it puts it back
 const withFormat = (format: '12h' | '24h', body: () => void): void => {
@@ -42,87 +42,85 @@ test('a cache time follows the preference, today and on an earlier day', () => {
   assert.equal(formatCached('2026-10-26T14:02:00Z', now, zone), '10:02 AM')
 })
 
+test('a time given as milliseconds reads as its ISO string does, in either format', () => {
+  const ms = Date.parse('2026-10-25T21:53:00Z')
+  assert.equal(formatClock(ms, true, zone), 'Sun 5:53 PM')
+  assert.equal(formatDay(ms, zone), 'Sun Oct 25')
+  withFormat('24h', () => assert.equal(formatClock(ms, false, zone), '17:53'))
+})
+
 test('setting the preference back to 12 hour restores AM and PM at once', () => {
   setTimeFormat('24h')
   setTimeFormat('12h')
   assert.equal(formatClock('2026-10-25T21:53:00Z', false, zone), '5:53 PM')
 })
 
-// code that turns an instant into clock text; only the shared formatter may do it. The Intl constructors match with or without new
-const clockText = [
-  /\b(?:toTimeString|toLocaleTimeString|toLocaleDateString|toLocaleString|toDateString|toUTCString|toGMTString)\b/,
-  /\b(?:getHours|getMinutes|getUTCHours|getUTCMinutes)\b/,
-  /\b(?:hour12|hourCycle|timeStyle|dateStyle)\b/,
-  /\bIntl\s*\.\s*(?:DateTimeFormat|RelativeTimeFormat)\b/,
-  /\.toISOString\(\)\s*\.\s*(?:slice|substring|substr)\(/,
-]
-
-// the browser's own zone name is not a time: Settings reads it to offer the day boundary's zone, and shows no clock from it
-const zoneLookup = /\bIntl\.DateTimeFormat\(\)\.resolvedOptions\(\)\.timeZone\b/g
-
-const formatsClock = (line: string): boolean => {
-  const code = line.replace(zoneLookup, '')
-  return clockText.some((pattern) => pattern.test(code))
-}
-
-// the server's calendar arithmetic reads a zone's wall clock to find day boundaries; it shows nothing
-const allowed = new Set(['src/time.ts'])
-
-// every file the server ships to the browser, or that a build step could read, that can hold code; the rest are inert data
-const scanned = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.html', '.htm', '.svg'])
-const inert = new Set(['.css', '.json', '.png', '.ico', '.webp', '.woff2'])
-
-const walk = async (dir: string): Promise<string[]> => {
-  const files: string[] = []
-  for (const entry of await readdir(join(root, dir), { withFileTypes: true })) {
-    const path = `${dir}/${entry.name}`
-    if (entry.isDirectory()) files.push(...await walk(path))
-    else files.push(path)
-  }
-  return files
-}
-
-const sourceFiles = async (): Promise<string[]> =>
-  (await Promise.all(['public', 'src'].map(walk))).flat().filter((file) => scanned.has(extname(file).toLowerCase())).sort()
-
-const isComment = (line: string): boolean => /^(?:\/\/|\/\*|\*|<!--)/.test(line.trimStart())
-
-test('no file formats a time outside public/format.ts', async () => {
-  const offenders: string[] = []
-  for (const file of await sourceFiles()) {
-    if (file === 'public/format.ts' || allowed.has(file)) continue
-    const lines = (await readFile(join(root, file), 'utf8')).split('\n')
-    lines.forEach((line, at) => {
-      if (!isComment(line) && formatsClock(line)) offenders.push(`${file}:${at + 1}: ${line.trim()}`)
-    })
-  }
-  assert.deepEqual(offenders, [], 'format times through public/format.ts, which reads the time format preference')
+test('no code the browser runs turns a time into text outside public/format.ts', async () => {
+  const { offenders } = checkTimeText(await browserSources())
+  assert.deepEqual(offenders, [], 'outside public/format.ts, hold no Date or Intl value and call the Date constructor only for milliseconds; write the time through public/format.ts, which reads the time format preference')
 })
 
-test('the scan reaches nested folders and every extension the static handler can serve as code', async () => {
-  const files = await sourceFiles()
-  for (const expected of ['public/format.ts', 'public/index.html', 'public/settings.html', 'src/time.ts', 'src/server.ts']) assert.ok(files.includes(expected), expected)
+test('the check reads every file the static handler can serve: code and pages are checked, the rest hold no script', async () => {
   const server = await readFile(join(root, 'src/server.ts'), 'utf8')
   const served = [...(server.match(/const staticTypes[^{]*\{([^}]*)\}/s)?.[1] ?? '').matchAll(/'(\.[a-z0-9]+)'\s*:/g)].map((match) => match[1] ?? '')
   assert.ok(served.length > 0, 'the static handler\'s extensions were not found')
-  for (const extension of served) assert.ok(scanned.has(extension) || inert.has(extension), `${extension} is served to the browser: scan it or list it as inert`)
-  const all = (await Promise.all(['public', 'src'].map(walk))).flat()
-  for (const file of all) {
+  const known = (extension: string): boolean => codeExtensions.has(extension) || pageExtensions.has(extension) || inertExtensions.has(extension)
+  for (const extension of served) assert.ok(known(extension), `${extension} is served to the browser: check it as code or a page, or list it as inert`)
+  for (const file of await publicFiles()) {
     const extension = extname(file).toLowerCase()
-    assert.ok(scanned.has(extension) || inert.has(extension), `${file}: ${extension} is neither scanned nor listed as inert`)
+    assert.ok(known(extension), `${file}: ${extension} is neither checked nor listed as inert`)
+    const text = await readFile(file, 'utf8')
+    if (inertExtensions.has(extension)) assert.doesNotMatch(text, /<script\b/i, `${file} holds a script the check cannot read`)
+    if (pageExtensions.has(extension)) assert.doesNotMatch(text.replace(/<script\b[\s\S]*?<\/script>/gi, ''), /<[^>]*\son[a-z]+\s*=/i, `${file} holds an inline event handler the check cannot read`)
   }
+  const { shipped } = checkTimeText(await browserSources())
+  for (const expected of ['public/format.ts', 'public/app.ts', 'public/settings.ts', 'public/index.html.inline-1.js', 'public/settings.html.inline-1.js']) assert.ok(shipped.includes(expected), expected)
 })
 
-test('the check catches what it looks for, with and without new', () => {
-  const sample = [
-    'new Date().toLocaleTimeString()', 'date.toLocaleDateString()', 'date.toLocaleString(\'en-US\')', 'date.toTimeString()', 'date.toDateString()', 'date.toUTCString()', 'date.toGMTString()',
-    'date.getHours()', 'date.getMinutes()', 'date.getUTCHours()', 'date.getUTCMinutes()', 'const options = { hour12: false }', '{ hourCycle: \'h23\' }', '{ timeStyle: \'short\' }', '{ dateStyle: \'medium\' }',
-    'new Intl.DateTimeFormat(\'en-US\', { hour12: false })', 'Intl.DateTimeFormat(\'en-US\', { hour: \'numeric\', minute: \'2-digit\' })', 'Intl.RelativeTimeFormat(\'en\')', 'new Intl.RelativeTimeFormat(\'en\')',
-    'iso.toISOString().slice(11, 16)', 'iso.toISOString().substring(11, 16)', 'iso.toISOString() .slice(11, 16)',
-  ]
-  for (const line of sample) assert.ok(formatsClock(line), line)
-  assert.ok(!formatsClock('const zone = Intl.DateTimeFormat().resolvedOptions().timeZone'))
-  assert.ok(formatsClock('Intl.DateTimeFormat().resolvedOptions().timeZone; Intl.DateTimeFormat(\'en-US\', { hour: \'numeric\' })'))
+// each sample is its own browser module beside the real ones, so it may import the shared formatter
+const samplePath = (name: string): string => join(root, 'public', `timetext-sample-${name}.ts`)
+
+const flagged: Record<string, string> = {
+  dateToString: 'export const at = new Date().toString()',
+  stringOfDate: 'export const at = String(new Date())',
+  templateDate: 'const now = new Date()\nexport const at = `saved ${now}`',
+  plusDate: 'export const at = \'saved \' + new Date()',
+  isoUnsliced: 'export const at = new Date().toISOString()',
+  timeString: 'export const at = new Date(Date.now()).toTimeString()',
+  intlWithoutNew: 'export const at = Intl.DateTimeFormat(\'en-US\', { hour: \'numeric\', minute: \'2-digit\' }).format(0)',
+  intlWithNew: 'export const at = new Intl.DateTimeFormat(\'en-US\').format(0)',
+  dateCalled: 'export const at = Date()',
+  aliasedConstructor: 'const Clock = Date\nexport const at = new Clock().getHours()',
+  domDate: 'export const at = (input: HTMLInputElement): string => `${input.valueAsDate?.getHours()}`',
+  textSink: 'export const show = (cell: HTMLElement, ms: number): void => {\n  cell.textContent = new Date(ms).toLocaleTimeString()\n}',
+  attributeSink: 'export const show = (cell: HTMLElement, ms: number): void => cell.setAttribute(\'title\', new Date(ms).toUTCString())',
+}
+
+const passed: Record<string, string> = {
+  age: 'export const age = (iso: string, now: number): number => Math.floor((now - Date.parse(iso)) / 60_000)',
+  comparison: 'export const newer = (a: string, b: string): boolean => Date.parse(a) > Date.parse(b)',
+  sorting: 'export const oldestFirst = (times: string[]): string[] => [...times].sort((a, b) => Date.parse(a) - Date.parse(b))',
+  now: 'export const skew = (serverNow: string): number => Date.parse(serverNow) - Date.now()',
+  formatter: 'import { formatClock } from \'./format.ts\'\nexport const at = formatClock(\'2026-10-25T21:53:00Z\')',
+  wordsOnly: '// new Date().toString() in a comment is not code\nexport const help = \'String(new Date()) and toTimeString() are words here\'',
+}
+
+test('the rule flags a Date or an Intl value however it would become text, and passes arithmetic, comparisons, and the shared formatter', () => {
+  const sources = Object.entries({ ...flagged, ...passed }).map(([name, text]) => ({ path: samplePath(name), text }))
+  const { offenders } = checkTimeText(sources)
+  const flaggedIn = (name: string): string[] => offenders.filter((line) => line.startsWith(`public/timetext-sample-${name}.ts:`))
+  for (const name of Object.keys(flagged)) assert.ok(flaggedIn(name).length > 0, `${name} should be flagged: ${flagged[name]}`)
+  for (const name of Object.keys(passed)) assert.deepEqual(flaggedIn(name), [], `${name} should pass: ${passed[name]}`)
+})
+
+test('a file reached by a value import is browser code and is checked; a type import is erased and is not', () => {
+  const { offenders, shipped } = checkTimeText([
+    { path: samplePath('valueImport'), text: 'import { iso } from \'../src/time.ts\'\nexport const at = iso(0)' },
+    { path: samplePath('typeImport'), text: 'import type { Config } from \'../src/config.ts\'\nexport const repo = (config: Config): string => config.repo' },
+  ])
+  assert.ok(shipped.includes('src/time.ts'))
+  assert.ok(!shipped.includes('src/config.ts'))
+  assert.ok(offenders.some((line) => line.startsWith('src/time.ts:')), 'src/time.ts holds Date values, so a page that imports it fails')
 })
 
 test('only 24h reads as 24 hour; anything else the config holds reads as the 12 hour default', () => {

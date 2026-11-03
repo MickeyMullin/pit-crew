@@ -6,7 +6,7 @@ import type { View } from '../src/poller.ts'
 import { avatar } from './cells.ts'
 import { byId, h, setText, svg } from './dom.ts'
 import type { Shape } from './dom.ts'
-import { formatClock, parseTimeFormat, setTimeFormat } from './format.ts'
+import { browserTimeZone, formatClock, parseTimeFormat, setTimeFormat } from './format.ts'
 import { loadInstance, showInstance } from './instance.ts'
 import {
   avatarChoices, changeKind, configChannel, configPathText, densityChoices, errorId, fieldId, isDirty, kindChoices, needsRefresh,
@@ -308,7 +308,7 @@ const fillStatic = (): void => {
   viewer.placeholder = ghLogin === '' ? 'the gh login' : `${ghLogin} (the gh login)`
   setText(byId('f-viewer-hint'), `Defaults to the gh login${ghLogin === '' ? '' : `, ${ghLogin}`}. Uses gh's own token; nothing else to sign in to.`)
   options(byId<HTMLSelectElement>(fieldId('refreshSeconds')), refreshChoices, form.refreshSeconds)
-  options(byId<HTMLSelectElement>(fieldId('todayStartsAt')), todayChoices(Intl.DateTimeFormat().resolvedOptions().timeZone), form.todayStartsAt)
+  options(byId<HTMLSelectElement>(fieldId('todayStartsAt')), todayChoices(browserTimeZone()), form.todayStartsAt)
   options(byId<HTMLSelectElement>(fieldId('density')), densityChoices, form.density)
   options(byId<HTMLSelectElement>(fieldId('timeFormat')), timeFormatChoices, form.timeFormat)
   byId<HTMLInputElement>(fieldId('showAgentColumn')).checked = form.showAgentColumn
@@ -520,7 +520,7 @@ const save = async (): Promise<void> => {
     current.errors = []
     current.checking = false
     renderAll()
-    const at = formatClock(new Date().toISOString())
+    const at = formatClock(Date.now())
     setStatus(needsRefresh(before, current.saved) ? `Saved at ${at}. The dashboard is refreshing from GitHub with these settings.` : `Saved at ${at}.`, 'ok')
     try {
       const channel = new BroadcastChannel(configChannel)

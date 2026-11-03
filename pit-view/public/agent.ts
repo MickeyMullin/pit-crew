@@ -4,13 +4,9 @@
 // clock reading passed in. The drawer's own words are in drawerview.ts
 import type { RunnerName } from '../src/config.ts'
 import type { AgentCell, AgentResult, RunView, StartKind, StartOption, StepSlot } from '../src/launcher.ts'
-import { formatSince } from './format.ts'
+import { formatDuration, formatSince } from './format.ts'
 
 export type { AgentCell, AgentResult, RunnerName, RunView, StartKind, StartOption, StepSlot }
-
-const second = 1000
-const minute = 60 * second
-const hour = 60 * minute
 
 export const runnerNames: readonly RunnerName[] = ['claude', 'codex']
 
@@ -61,15 +57,6 @@ const titlesByCommand: Readonly<Record<string, Readonly<Record<string, string>>>
 // a step's label for a run of this command
 export const stepTitle = (command: string | null, step: string): string =>
   (titlesByCommand[command ?? ''] ?? reviewTitles)[step] ?? step
-
-// how long a run has gone: seconds under a minute, minutes under an hour, then hours and minutes
-export const formatDuration = (fromIso: string, nowMs: number): string => {
-  const elapsed = Math.max(0, nowMs - Date.parse(fromIso))
-  if (elapsed < minute) return `${Math.floor(elapsed / second)}s`
-  if (elapsed < hour) return `${Math.floor(elapsed / minute)}m`
-  const minutes = Math.floor((elapsed % hour) / minute)
-  return minutes === 0 ? `${Math.floor(elapsed / hour)}h` : `${Math.floor(elapsed / hour)}h ${minutes}m`
-}
 
 // "running 3m · last step 20s ago", or "running 12s · starting" before the first step
 export const runningLine = (cell: Pick<AgentCell, 'startedAt' | 'lastStepAt'>, nowMs: number): string => {
