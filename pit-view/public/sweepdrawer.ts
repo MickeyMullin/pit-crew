@@ -9,7 +9,7 @@ import type { ReportPanel } from './reportpanel.ts'
 import { sendRun } from './runapi.ts'
 import { safeHref } from './safeurl.ts'
 import {
-  defaultSweepRunner, shownSweep, sweepCards, sweepConfirmModel, sweepConfirmSignature, sweepList, sweepRefusal, sweepResultModel, sweepRunningModel, sweepStartRequest,
+  defaultSweepRunner, shownSweep, sweepCards, sweepConfirmModel, sweepConfirmSignature, sweepList, sweepListSignature, sweepRefusal, sweepResultModel, sweepRunningModel, sweepStartRequest,
   sweepStopModel, sweepStopRefusal, sweepStopRequest, sweepWaitingModel,
 } from './sweepview.ts'
 import type { SweepRowModel, SweepsView, SweepView, Tone } from './sweepview.ts'
@@ -453,7 +453,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
 
   const listPart = (view: SweepsView, current: SweepView | null): Part => ({
     key: 'list',
-    sig: JSON.stringify([view.items.map((sweep) => [sweep.id, sweep.status, sweep.text]), current?.id]),
+    sig: sweepListSignature(view.items, current?.id ?? null),
     build: () => {
       const rows = sweepList(view.items, current?.id ?? null)
       return section('list', 'Earlier sweeps',

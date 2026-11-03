@@ -288,6 +288,10 @@ export const sweepList = (items: readonly SweepView[], shownId: number | null): 
     selected: sweep.id === shownId,
   }))
 
+// what the drawer's list part is keyed on: every row but its start time (the age beside it is set in place as the clock moves), with the label that holds a formatted clock time, so a change of the time format preference redraws the list
+export const sweepListSignature = (items: readonly SweepView[], shownId: number | null): string =>
+  JSON.stringify(sweepList(items, shownId).map(({ startedAt: _startedAt, ...row }) => row))
+
 // the sweep the drawer shows: the one asked for, otherwise the newest; null when there are none
 export const shownSweep = (items: readonly SweepView[], id: number | null): SweepView | null =>
   (id === null ? undefined : items.find((sweep) => sweep.id === id)) ?? items[0] ?? null

@@ -2,11 +2,12 @@
 // the time format preference: the one shared formatter in public/format.ts reads it, and no other file formats a time
 import assert from 'node:assert/strict'
 import { readdir, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { extname, join } from 'node:path'
 import { test } from 'node:test'
 import { formatCached, formatClock, getTimeFormat, parseTimeFormat, setTimeFormat } from '../public/format.ts'
 
 const zone = 'America/New_York'
+const root = join(import.meta.dirname, '..')
 
 // the preference is module state, so every test that changes it puts it back
 const withFormat = (format: '12h' | '24h', body: () => void): void => {
@@ -47,46 +48,81 @@ test('setting the preference back to 12 hour restores AM and PM at once', () => 
   assert.equal(formatClock('2026-10-25T21:53:00Z', false, zone), '5:53 PM')
 })
 
-// code that turns an instant into clock text; only the shared formatter may do it
+// code that turns an instant into clock text; only the shared formatter may do it. The Intl constructors match with or without new
 const clockText = [
-  /\btoLocale(?:Time|Date)?String\b/,
-  /\bgetU?TC?Hours\b|\bgetHours\b|\bgetUTCHours\b|\bgetMinutes\b|\bgetUTCMinutes\b/,
-  /\bhour12\b|\bhourCycle\b|\btimeStyle\b|\bdateStyle\b/,
-  /\bnew Intl\.(?:DateTimeFormat|RelativeTimeFormat)\b/,
-  /\.toISOString\(\)\.(?:slice|substring|substr)\(/,
+  /\b(?:toTimeString|toLocaleTimeString|toLocaleDateString|toLocaleString|toDateString|toUTCString|toGMTString)\b/,
+  /\b(?:getHours|getMinutes|getUTCHours|getUTCMinutes)\b/,
+  /\b(?:hour12|hourCycle|timeStyle|dateStyle)\b/,
+  /\bIntl\s*\.\s*(?:DateTimeFormat|RelativeTimeFormat)\b/,
+  /\.toISOString\(\)\s*\.\s*(?:slice|substring|substr)\(/,
 ]
+
+// the browser's own zone name is not a time: Settings reads it to offer the day boundary's zone, and shows no clock from it
+const zoneLookup = /\bIntl\.DateTimeFormat\(\)\.resolvedOptions\(\)\.timeZone\b/g
+
+const formatsClock = (line: string): boolean => {
+  const code = line.replace(zoneLookup, '')
+  return clockText.some((pattern) => pattern.test(code))
+}
 
 // the server's calendar arithmetic reads a zone's wall clock to find day boundaries; it shows nothing
 const allowed = new Set(['src/time.ts'])
 
-const sourceFiles = async (): Promise<string[]> => {
-  const root = join(import.meta.dirname, '..')
+// every file the server ships to the browser, or that a build step could read, that can hold code; the rest are inert data
+const scanned = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.html', '.htm', '.svg'])
+const inert = new Set(['.css', '.json', '.png', '.ico', '.webp', '.woff2'])
+
+const walk = async (dir: string): Promise<string[]> => {
   const files: string[] = []
-  for (const dir of ['public', 'src']) {
-    for (const name of await readdir(join(root, dir))) {
-      if (name.endsWith('.ts') || name.endsWith('.html')) files.push(`${dir}/${name}`)
-    }
+  for (const entry of await readdir(join(root, dir), { withFileTypes: true })) {
+    const path = `${dir}/${entry.name}`
+    if (entry.isDirectory()) files.push(...await walk(path))
+    else files.push(path)
   }
-  return files.sort()
+  return files
 }
+
+const sourceFiles = async (): Promise<string[]> =>
+  (await Promise.all(['public', 'src'].map(walk))).flat().filter((file) => scanned.has(extname(file).toLowerCase())).sort()
+
+const isComment = (line: string): boolean => /^(?:\/\/|\/\*|\*|<!--)/.test(line.trimStart())
 
 test('no file formats a time outside public/format.ts', async () => {
   const offenders: string[] = []
   for (const file of await sourceFiles()) {
     if (file === 'public/format.ts' || allowed.has(file)) continue
-    const lines = (await readFile(join(import.meta.dirname, '..', file), 'utf8')).split('\n')
+    const lines = (await readFile(join(root, file), 'utf8')).split('\n')
     lines.forEach((line, at) => {
-      if (line.trimStart().startsWith('//')) return
-      if (clockText.some((pattern) => pattern.test(line))) offenders.push(`${file}:${at + 1}: ${line.trim()}`)
+      if (!isComment(line) && formatsClock(line)) offenders.push(`${file}:${at + 1}: ${line.trim()}`)
     })
   }
   assert.deepEqual(offenders, [], 'format times through public/format.ts, which reads the time format preference')
 })
 
-test('the check catches what it looks for', () => {
-  const sample = ['new Date().toLocaleTimeString()', 'date.getHours()', 'new Intl.DateTimeFormat(\'en-US\', { hour12: false })', 'iso.toISOString().slice(11, 16)']
-  for (const line of sample) assert.ok(clockText.some((pattern) => pattern.test(line)), line)
-  assert.ok(!clockText.some((pattern) => pattern.test('Intl.DateTimeFormat().resolvedOptions().timeZone')))
+test('the scan reaches nested folders and every extension the static handler can serve as code', async () => {
+  const files = await sourceFiles()
+  for (const expected of ['public/format.ts', 'public/index.html', 'public/settings.html', 'src/time.ts', 'src/server.ts']) assert.ok(files.includes(expected), expected)
+  const server = await readFile(join(root, 'src/server.ts'), 'utf8')
+  const served = [...(server.match(/const staticTypes[^{]*\{([^}]*)\}/s)?.[1] ?? '').matchAll(/'(\.[a-z0-9]+)'\s*:/g)].map((match) => match[1] ?? '')
+  assert.ok(served.length > 0, 'the static handler\'s extensions were not found')
+  for (const extension of served) assert.ok(scanned.has(extension) || inert.has(extension), `${extension} is served to the browser: scan it or list it as inert`)
+  const all = (await Promise.all(['public', 'src'].map(walk))).flat()
+  for (const file of all) {
+    const extension = extname(file).toLowerCase()
+    assert.ok(scanned.has(extension) || inert.has(extension), `${file}: ${extension} is neither scanned nor listed as inert`)
+  }
+})
+
+test('the check catches what it looks for, with and without new', () => {
+  const sample = [
+    'new Date().toLocaleTimeString()', 'date.toLocaleDateString()', 'date.toLocaleString(\'en-US\')', 'date.toTimeString()', 'date.toDateString()', 'date.toUTCString()', 'date.toGMTString()',
+    'date.getHours()', 'date.getMinutes()', 'date.getUTCHours()', 'date.getUTCMinutes()', 'const options = { hour12: false }', '{ hourCycle: \'h23\' }', '{ timeStyle: \'short\' }', '{ dateStyle: \'medium\' }',
+    'new Intl.DateTimeFormat(\'en-US\', { hour12: false })', 'Intl.DateTimeFormat(\'en-US\', { hour: \'numeric\', minute: \'2-digit\' })', 'Intl.RelativeTimeFormat(\'en\')', 'new Intl.RelativeTimeFormat(\'en\')',
+    'iso.toISOString().slice(11, 16)', 'iso.toISOString().substring(11, 16)', 'iso.toISOString() .slice(11, 16)',
+  ]
+  for (const line of sample) assert.ok(formatsClock(line), line)
+  assert.ok(!formatsClock('const zone = Intl.DateTimeFormat().resolvedOptions().timeZone'))
+  assert.ok(formatsClock('Intl.DateTimeFormat().resolvedOptions().timeZone; Intl.DateTimeFormat(\'en-US\', { hour: \'numeric\' })'))
 })
 
 test('only 24h reads as 24 hour; anything else the config holds reads as the 12 hour default', () => {

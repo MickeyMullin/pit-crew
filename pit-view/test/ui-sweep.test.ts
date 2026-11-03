@@ -12,9 +12,10 @@ import type { SweepResult } from '../src/launcher.ts'
 import { sweepStartOf, sweepView } from '../src/sweeps.ts'
 import type { SweepsView, SweepView } from '../src/sweeps.ts'
 import { stepTitle } from '../public/agent.ts'
+import { setTimeFormat } from '../public/format.ts'
 import { applyPatch } from '../public/state.ts'
 import {
-  defaultSweepRunner, shownSweep, sweepAnnounceKey, sweepAnnouncement, sweepCards, sweepConfirmModel, sweepConfirmSignature, sweepHeaderModel, sweepLinkFor, sweepList,
+  defaultSweepRunner, shownSweep, sweepAnnounceKey, sweepAnnouncement, sweepCards, sweepConfirmModel, sweepConfirmSignature, sweepHeaderModel, sweepLinkFor, sweepList, sweepListSignature,
   sweepResultModel, sweepRowModel, sweepRunningModel, sweepStartRequest, sweepStopModel, sweepStopRequest, sweepTone, sweepWaitingModel,
 } from '../public/sweepview.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -348,4 +349,34 @@ test('a waiting sweep shows its question and the result it has so far, and only 
   const bare = settledLoose(sweepResult({ status: 'needsInput', question: 'Close #202 first? (yes / no)', counts: null, rows: [], mergeOrder: [], summary: null }), { status: 'needsInput' })
   assert.deepEqual(sweepCards(bare), ['waiting'])
   assert.equal(sweepResultModel(bare).counts, null)
+})
+
+// the Earlier sweeps list is a drawer part rebuilt only when its signature changes; each label holds a formatted clock time, so the time format preference must be in the signature
+test('the Earlier sweeps list is redrawn when the time format changes, and its labels follow the new format', () => {
+  const items = [settled(sweepResult()), settled(sweepResult(), { id: 2, startedAt: '2026-10-25T09:05:00Z', finishedAt: '2026-10-25T09:20:00Z' })]
+  const clockOf = (label: string): string => label.replace(/^Sweep of \w+ \w+ \d+ /, '')
+  try {
+    setTimeFormat('12h')
+    const twelve = sweepList(items, 1).map((row) => row.label)
+    const twelveSig = sweepListSignature(items, 1)
+    assert.match(clockOf(twelve[0] ?? ''), /^\d{1,2}:\d{2} [AP]M$/)
+    setTimeFormat('24h')
+    const twentyFour = sweepList(items, 1).map((row) => row.label)
+    assert.match(clockOf(twentyFour[0] ?? ''), /^\d{2}:\d{2}$/)
+    assert.notDeepEqual(twelve, twentyFour)
+    assert.notEqual(sweepListSignature(items, 1), twelveSig, 'a list drawn in 12 hour must not be reused once the preference is 24 hour')
+  } finally {
+    setTimeFormat('12h')
+  }
+})
+
+test('the Earlier sweeps signature is stable for one list and follows which sweep is shown', () => {
+  const items = [settled(sweepResult())]
+  assert.equal(sweepListSignature(items, 1), sweepListSignature(items, 1))
+  assert.notEqual(sweepListSignature(items, 1), sweepListSignature(items, null))
+})
+
+test('the drawer keys the Earlier sweeps list on that signature', async () => {
+  const source = await readFile(join(import.meta.dirname, '..', 'public', 'sweepdrawer.ts'), 'utf8')
+  assert.match(source, /key: 'list',\s+sig: sweepListSignature\(view\.items, current\?\.id \?\? null\)/)
 })
