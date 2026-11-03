@@ -92,6 +92,8 @@ test('the bot group keeps its Run sweep button and sweep state beside the disclo
   assert.ok(cls(all[0]!).includes('disclosure'))
   assert.deepEqual(all.slice(1).map((node) => node.attrs.get('data-sweep')), ['start', 'open'])
   assert.equal(text(all[1]!), 'Run sweep')
+  // the sweep state shows its label and tone, and the open button is the one that opens the sweep
+  assert.equal(text(all[2]!), 'Sweep: Done')
 })
 
 test('the stylesheet gives the group disclosure the section control, at the group header\'s size and the label\'s tone', async () => {
