@@ -256,13 +256,13 @@ test('a change of the newest sweep\'s status is announced once, and the first re
 
 // the DOM modules are not run under Node; their wiring is checked as source
 
-test('the bot group header, the broom, and the PR drawer are wired to the sweep models, with the group\'s collapse button kept', async () => {
+test('the bot group header, the broom, and the PR drawer are wired to the sweep models, with the group\'s disclosure kept', async () => {
   const dir = join(import.meta.dirname, '..', 'public')
   const tables = await readFile(join(dir, 'tables.ts'), 'utf8')
   assert.match(tables, /sweepControls\(sweep\)/)
   assert.match(tables, /model\.table === 'others' && group\.key === 'bots'/)
-  // the collapse toggle is still the last child of the group bar
-  assert.match(tables, /sweep === null \? null : sweepControls\(sweep\),\s+toggle\)/)
+  // the disclosure leads the group bar and the sweep controls are its last child
+  assert.match(tables, /toggle \?\? label,[\s\S]*sweep === null \? null : sweepControls\(sweep\)\)\)\)/)
   assert.match(tables, /sweepLinkFor\(view\.sweeps\.items, row\.number, row\.headOid\)/)
   assert.match(tables, /'aria-label': link\.name,\s+title: link\.tip,/)
   const drawer = await readFile(join(dir, 'drawer.ts'), 'utf8')

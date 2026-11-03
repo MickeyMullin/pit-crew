@@ -385,7 +385,7 @@ const sweepControls = (sweep: SweepHeaderModel): HTMLElement => {
       : status.finishedAt === null ? null : h('span', { 'data-sweep-age': status.finishedAt, class: 'sweep-status-line' }, '')))
 }
 
-const groupHead = <R>(model: TableModel<R>, group: ShownGroup<R>, bodyId: string): Part => {
+export const groupHead = <R>(model: TableModel<R>, group: ShownGroup<R>, bodyId: string): Part => {
   const tone = groupTone[`${model.table}:${group.key}`] ?? 'ink'
   const sweep = model.table === 'others' && group.key === 'bots' ? model.sweep ?? null : null
   // the status's moving text is not in the signature
@@ -394,20 +394,21 @@ const groupHead = <R>(model: TableModel<R>, group: ShownGroup<R>, bodyId: string
     key: 'head',
     sig: JSON.stringify([group.label, group.sub, group.rows.length, group.collapsible, group.open, model.columns.length, tone, sweepSig]),
     build: () => {
+      const label = h('span', { class: `group-label tone-text-${tone}` }, group.label)
+      // a collapsible group leads with the sections' own disclosure (chevron, then the label), so the glyph, placement, states, and keyboard behavior match
       const toggle = group.collapsible
-        ? h('button', { type: 'button', class: 'button button-small', 'aria-expanded': String(group.open), 'aria-controls': bodyId, 'data-focus-key': `group:${model.table}:${group.key}` },
-            group.open ? 'Hide' : `Show ${group.rows.length}`)
+        ? h('button', { type: 'button', class: 'disclosure', 'aria-expanded': String(group.open), 'aria-controls': bodyId, 'data-focus-key': `group:${model.table}:${group.key}` },
+            svg(icons.chevron, { size: 16, stroke: '2.6' }), label)
         : null
       toggle?.addEventListener('click', () => model.onToggleGroup(group.key))
       return h('tr', { class: 'group-head' },
         h('th', { colspan: model.columns.length, scope: 'rowgroup' },
           h('span', { class: 'group-bar' },
-            h('span', { class: `group-label tone-text-${tone}` }, group.label),
+            toggle ?? label,
             h('span', { class: 'group-count mono' }, String(group.rows.length)),
             h('span', { class: 'group-sub' }, group.sub),
             h('span', { class: 'spacer' }),
-            sweep === null ? null : sweepControls(sweep),
-            toggle)))
+            sweep === null ? null : sweepControls(sweep))))
     },
   }
 }
