@@ -61,7 +61,6 @@ test('Claude starts exactly as Launching runs pins it, with the request as one s
   assert.deepEqual(invocation.args, [
     '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
     '--model', 'sonnet', '--session-id', '6f1c1f9e-0000-4000-8000-000000000003', '--permission-mode', 'auto',
-    '--allowedTools', 'Bash(gh pr review 106:*)',
     '--add-dir', '/home/tester/agents',
   ])
   assert.ok(invocation.stdin?.endsWith('\n'))
@@ -4046,104 +4045,78 @@ test('a review whose two settlement writes both fail still frees its slot, and t
   }
 })
 
-// the post permission (section 8, Launching runs, Permissions): chosen by the run's own command and flags, and the post it may not make shows as a review done with its post not made
-
-// the values a repeatable Claude flag takes, up to the next flag
-const flagValues = (args: readonly string[], flag: string): string[] | null => {
-  const at = args.indexOf(flag)
-  if (at < 0) return null
-  const end = args.findIndex((arg, index) => index > at && arg.startsWith('--'))
-  return args.slice(at + 1, end < 0 ? undefined : end)
-}
+// Pit View grants a worker no post permission (section 8, Launching runs, Permissions): every run starts as one command line, and a post the classifier refuses shows as a review done with its post not made
 
 const claudeArgs = (command: string, args: string[]): string[] => claudeInvocation(spec({ command, args })).args
 
-test('a run allowed to post carries one allow rule, for gh pr review on its own PR', () => {
-  const cases: [string, string[], string][] = [
-    ['review-pr', ['106'], 'Bash(gh pr review 106:*)'],
-    ['review-pr', ['106', '--tandem'], 'Bash(gh pr review 106:*)'],
-    ['review-dependabot', ['113'], 'Bash(gh pr review 113:*)'],
-  ]
-  for (const [command, args, rule] of cases) {
-    const built = claudeArgs(command, args)
-    assert.deepEqual(flagValues(built, '--allowedTools'), [rule], `${command} ${args.join(' ')}`)
-    assert.equal(flagValues(built, '--disallowedTools'), null)
-    // auto mode stays, and nothing is bypassed
-    assert.equal(built[built.indexOf('--permission-mode') + 1], 'auto')
-    assert.ok(!built.includes('--dangerously-skip-permissions'))
-  }
-})
+// the command line of every Claude run, whatever its kind and flags; nothing in it depends on either
+const pinnedClaudeArgs = [
+  '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+  '--model', 'sonnet', '--session-id', '6f1c1f9e-0000-4000-8000-000000000003', '--permission-mode', 'auto',
+  '--add-dir', '/home/tester/agents',
+]
 
-test('a sweep may post on the PRs it finds, so its rule names no PR; it is still gh pr review alone', () => {
-  const { command, args } = sweepRequest(scenario.repo, 'claude')
-  assert.deepEqual(flagValues(claudeArgs(command, args), '--allowedTools'), ['Bash(gh pr review:*)'])
-})
+// no permission flag at all, and no argument that names a post, so a rule cannot sit under another flag's name either
+const assertGrantsNoPost = (args: readonly string[], name: string): void => {
+  assert.ok(!args.includes('--allowedTools') && !args.includes('--allowed-tools'), `${name}: an allow flag`)
+  assert.ok(!args.includes('--disallowedTools') && !args.includes('--disallowed-tools'), `${name}: a deny flag`)
+  assert.deepEqual(args.filter((arg) => /gh pr (review|comment)/.test(arg)), [], `${name}: a rule naming a post`)
+}
 
-test('a --no-post invocation never carries the rule, and withdraws the post the owner\'s own allow rules would let through', () => {
+test('no run kind, posting or not, carries a permission rule for a post, and each starts on the one pinned command line', () => {
   const cases: [string, string[]][] = [
+    ['review-pr', ['106']],
+    ['review-pr', ['106', '--tandem']],
     ['review-pr', ['104', '--no-post']],
     ['review-pr', ['104', '--tandem', '--no-post']],
+    ['review-pr', ['feature/x']],
+    ['review-pr', []],
+    ['review-dependabot', ['113']],
     ['review-dependabot', ['113', '--no-post']],
+    ['review-dependabot-sweep', [scenario.repo, '--parallel', '1']],
     ['review-dependabot-sweep', [scenario.repo, '--parallel', '1', '--no-post']],
+    ['review-stack', ['106']],
     ['review-stack', ['104', '--no-post']],
+    ['review-local', []],
+    ['fix-pr', ['104']],
+    ['update-pr', ['104', `--head=${'a'.repeat(40)}`]],
   ]
   for (const [command, args] of cases) {
     const built = claudeArgs(command, args)
-    assert.equal(flagValues(built, '--allowedTools'), null, `${command} ${args.join(' ')}`)
-    assert.deepEqual(flagValues(built, '--disallowedTools'), ['Bash(gh pr review:*)', 'Bash(gh pr comment:*)'], `${command} ${args.join(' ')}`)
+    const name = `${command} ${args.join(' ')}`
+    assertGrantsNoPost(built, name)
+    assert.deepEqual(built, pinnedClaudeArgs, name)
+    // auto mode stays, and nothing is bypassed
+    assert.equal(built[built.indexOf('--permission-mode') + 1], 'auto', name)
+    assert.ok(!built.includes('--dangerously-skip-permissions'), name)
   }
 })
 
-test('the run kinds that never post by themselves gain nothing: a stack review, a fix, and an update', () => {
-  const cases: [string, string[]][] = [['review-stack', ['106']], ['fix-pr', ['104']], ['update-pr', ['104', `--head=${'a'.repeat(40)}`]], ['review-local', []]]
-  for (const [command, args] of cases) {
-    const built = claudeArgs(command, args)
-    assert.equal(flagValues(built, '--allowedTools'), null, command)
-    assert.equal(flagValues(built, '--disallowedTools'), null, command)
-  }
-})
-
-test('a target that is not a PR number names no rule', () => {
-  assert.equal(flagValues(claudeArgs('review-pr', ['feature/x']), '--allowedTools'), null)
-  assert.equal(flagValues(claudeArgs('review-pr', []), '--allowedTools'), null)
-})
-
-test('every start the rows offer gets the permission its own flags select, and a Codex run gets no such flag', async () => {
+test('every start the rows offer, on the Claude and the Codex runner, names no post on its command line', async () => {
   const config = baseConfig()
-  const offered = async (number: number): Promise<Record<string, { allow: string[] | null, deny: string[] | null, codex: string[] }>> =>
-    Object.fromEntries(startOptions(await prOf(number), config, null, false).map((option) => {
-      const built = claudeArgs(option.command, option.args)
-      return [option.kind, { allow: flagValues(built, '--allowedTools'), deny: flagValues(built, '--disallowedTools'), codex: codexInvocation(spec({ command: option.command, args: option.args })).args.filter((arg) => arg.includes('gh pr')) }]
-    }))
-  const others = await offered(106)
-  assert.deepEqual(others.default?.allow, ['Bash(gh pr review 106:*)'])
-  assert.deepEqual(others.tandem?.allow, ['Bash(gh pr review 106:*)'])
-  const own = await offered(104)
-  assert.equal(own.default?.allow, null)
-  assert.equal(own.tandem?.allow, null)
-  assert.equal(own.fix?.allow, null)
-  assert.deepEqual(own.default?.deny, ['Bash(gh pr review:*)', 'Bash(gh pr comment:*)'])
-  assert.deepEqual(own.tandem?.deny, ['Bash(gh pr review:*)', 'Bash(gh pr comment:*)'])
-  assert.equal(own.fix?.deny, null)
-  assert.deepEqual(others.default?.codex, [])
-  const dependabot = await offered(114)
-  assert.deepEqual(dependabot.default?.allow, ['Bash(gh pr review 114:*)'])
-  assert.equal(dependabot.default?.deny, null)
+  for (const number of [106, 104, 114]) {
+    for (const option of startOptions(await prOf(number), config, null, false)) {
+      const name = `#${number} ${option.kind}`
+      assertGrantsNoPost(claudeArgs(option.command, option.args), name)
+      assertGrantsNoPost(codexInvocation(spec({ command: option.command, args: option.args })).args, `${name} on Codex`)
+    }
+  }
+  const sweep = sweepRequest(scenario.repo, 'claude')
+  assertGrantsNoPost(claudeArgs(sweep.command, sweep.args), 'a sweep')
 })
 
-test('the permission reaches the spawned process and the argv request.json records', async () => {
+test('the spawned process and the argv request.json records carry no permission rule for a post, on a posting run or a --no-post run', async () => {
   const h = await harness()
   try {
     await h.launcher.start(request())
     const child = h.launch.children[0]!
-    assert.deepEqual(flagValues(child.request.args, '--allowedTools'), ['Bash(gh pr review 106:*)'])
+    assertGrantsNoPost(child.request.args, 'the posting run')
     const recorded = JSON.parse(await readFile(join(child.runDir, 'request.json'), 'utf8')) as { argv: string[] }
-    assert.deepEqual(flagValues(recorded.argv, '--allowedTools'), ['Bash(gh pr review 106:*)'])
+    assertGrantsNoPost(recorded.argv, 'the posting run\'s request.json')
     child.exit(0)
     await h.launcher.start(request(104, { args: ['104', '--no-post'], label: 'Self-review' }))
     const own = h.launch.children[1]!
-    assert.equal(flagValues(own.request.args, '--allowedTools'), null)
-    assert.deepEqual(flagValues(own.request.args, '--disallowedTools'), ['Bash(gh pr review:*)', 'Bash(gh pr comment:*)'])
+    assertGrantsNoPost(own.request.args, 'the --no-post run')
     own.exit(0)
   } finally {
     await h.cleanup()
@@ -4185,7 +4158,6 @@ const settledWith = async (h: Awaited<ReturnType<typeof harness>>, denials: unkn
 test('a finished review whose post alone was denied is done with its post not made, not failed and not waiting', async () => {
   const shapes: [string, unknown][] = [
     ['the post alone', deniedPost],
-    ['chained after a cd and a check', { tool_name: 'Bash', tool_use_id: 'b1', tool_input: { command: 'cd /home/tester/agents/worktrees/orbit-106 && gh pr checks 106 | grep -vc pass; gh pr review 106 --approve --body-file /home/tester/agents/output/PR-106.md' } }],
     ['the comment form', { tool_name: 'Bash', tool_use_id: 'b1', tool_input: { command: 'gh pr comment 106 --body-file /home/tester/agents/output/PR-106.md' } }],
   ]
   for (const [name, denial] of shapes) {
@@ -4355,7 +4327,7 @@ test('nothing but a blocked review of this PR, at its head, is offered the post'
   assert.equal(agentCell(pr, config, undefined, undefined).postOffer, null)
 })
 
-// what a denied command runs, read as a shell would read it: only the denied call's own command decides, and only a plain gh pr review or gh pr comment on this run's PR is its post
+// what a denied command runs, read as a shell would read it: only the denied call's own command decides, and only one gh pr review or gh pr comment on this run's PR, with nothing around it, is its post
 
 const deniedBash = (command: string): Record<string, unknown> => ({ tool_name: 'Bash', tool_use_id: 'b1', tool_input: { command } })
 
@@ -4387,10 +4359,9 @@ test('a denied command that only mentions the post is not a denied post, whereve
   }
 })
 
-test('a denied post counts only as the command the rule covers, on this run\'s own PR', async () => {
+test('a denied post counts only as the command the prompts write, on this run\'s own PR', async () => {
   const others: [string, string][] = [
     ['another PR', 'gh pr review 999 --approve --body-file report.md'],
-    ['this PR and another', 'gh pr review 106 --approve --body-file report.md; gh pr comment 999 --body-file report.md'],
     ['no number at all', 'gh pr review --approve --body-file report.md'],
     ['a number that is not the first argument', 'gh pr review --approve 106'],
     ['a longer number that starts with this one', 'gh pr review 1060 --approve'],
@@ -4408,19 +4379,66 @@ test('a denied post counts only as the command the rule covers, on this run\'s o
   }
 })
 
-test('a true denial is the post however the shell spells it around the command', async () => {
+test('a denied command with anything around the post is the generic denial the worker reported, not a denied post', async () => {
+  const compounds: [string, string][] = [
+    ['a destructive part before it', 'rm important-file && gh pr review 106 --approve'],
+    ['a destructive part after it', 'gh pr review 106 --approve && rm important-file'],
+    ['a fallback after it', 'gh pr review 106 --approve || rm important-file'],
+    ['a semicolon before it', 'rm important-file; gh pr review 106 --approve'],
+    ['a semicolon after it', 'gh pr review 106 --approve; rm important-file'],
+    ['a semicolon with nothing after it', 'gh pr review 106 --approve;'],
+    ['a pipe into it', 'cat notes.md | gh pr review 106 --approve --body-file -'],
+    ['a pipe out of it', 'gh pr review 106 --approve | tee /tmp/out'],
+    ['a line before it', 'rm important-file\ngh pr review 106 --approve'],
+    ['a line after it', 'gh pr review 106 --approve\nrm important-file'],
+    ['a note on the line before it', '# the approval\ngh pr review 106 --approve'],
+    ['sent to the background', 'gh pr review 106 --approve &'],
+    ['a background job before it', 'rm important-file & gh pr review 106 --approve'],
+    ['a change of directory', 'cd /home/tester/worktrees/orbit-106 && gh pr review 106 --approve --body-file report.md'],
+    ['a read of CI', 'gh pr checks 106 | grep -vc pass; gh pr review 106 --approve --body-file report.md'],
+    ['two posts on this PR', 'gh pr review 106 --approve; gh pr comment 106 --body-file report.md'],
+    ['this PR and another', 'gh pr review 106 --approve; gh pr comment 999 --body-file report.md'],
+    ['a subshell', '(gh pr review 106 --approve)'],
+    ['a group', '{ gh pr review 106 --approve; }'],
+    ['a substitution in its arguments', 'gh pr review 106 --approve --body "$(rm important-file)"'],
+    ['backticks in its arguments', 'gh pr review 106 --approve --body `rm important-file`'],
+    ['a process substitution', 'gh pr review 106 --approve --body-file <(rm important-file)'],
+    ['a command in front of it', 'env gh pr review 106 --approve'],
+    ['a quoted mention before the real post', 'echo "gh pr review 106" && gh pr review 106 --approve --body-file report.md'],
+  ]
+  for (const [name, command] of compounds) {
+    const h = await harness()
+    try {
+      await h.report(106)
+      // even a worker that called the whole call a blocked post, which is its own reading
+      for (const result of [askedAboutIt(), reviewResult({ verdict: 'clean', findings: [], posted: null, notPostedReason: 'postBlocked' })]) {
+        const run = await settledWith(h, [deniedBash(command)], result)
+        assert.equal(run.status, 'failed', name)
+        assert.equal(run.note, 'permissionDenied: Bash', name)
+        assert.equal(doneText(run, false), 'Failed · permission denied', name)
+        assert.equal((run.result as ReviewResult).notPostedReason, (result as { notPostedReason: unknown }).notPostedReason, name)
+        assert.equal(agentCell(await prOf(106), baseConfig(), run, undefined).postOffer, null, name)
+      }
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('a denied post alone counts, however the shell spells that one command', async () => {
   const posts: [string, string][] = [
     ['alone', 'gh pr review 106 --approve --body-file report.md'],
     ['the comment form', 'gh pr comment 106 --body-file report.md'],
-    ['chained', 'cd /home/tester/worktrees/orbit-106 && gh pr checks 106 | grep -vc pass; gh pr review 106 --approve --body-file report.md'],
-    ['on its own line', 'cd /tmp\ngh pr review 106 --approve --body-file report.md'],
     ['with a variable before it', 'GH_PROMPT_DISABLED=1 gh pr review 106 --approve --body-file report.md'],
     ['with a quoted body file', 'gh pr review 106 --approve --body-file "/home/tester/my reports/PR-106.md"'],
     ['with a quoted number', 'gh pr review "106" --approve --body-file report.md'],
+    ['with lines inside a quoted body', 'gh pr comment 106 --body "first line\nsecond line; and more"'],
+    ['with the repository named', `gh pr review 106 -R ${scenario.repo} --approve --body-file report.md`],
     ['continued on the next line', 'gh pr review 106 \\\n  --approve --body-file report.md'],
     ['with its errors redirected', 'gh pr review 106 --approve --body-file report.md 2>&1'],
     ['with a note after it', 'gh pr review 106 --approve --body-file report.md # the approval'],
-    ['beside a quoted mention', 'echo "gh pr review 106" && gh pr review 106 --approve --body-file report.md'],
+    ['with a line ending after it', 'gh pr review 106 --approve --body-file report.md\n'],
+    ['with spaces around it', '  gh pr review 106 --approve --body-file report.md  '],
   ]
   for (const [name, command] of posts) {
     const h = await harness()
@@ -4428,11 +4446,29 @@ test('a true denial is the post however the shell spells it around the command',
       await h.report(106)
       const run = await settledWith(h, [deniedBash(command)], askedAboutIt())
       assert.equal(run.status, 'done', name)
+      assert.equal(run.note, null, name)
       assert.equal((run.result as ReviewResult).notPostedReason, 'postBlocked', name)
     } finally {
       await h.cleanup()
     }
   }
+})
+
+test('two denials count only when each is a lone post on this run\'s own PR', async () => {
+  const lone = deniedBash('gh pr review 106 --approve --body-file report.md')
+  const compound = deniedBash('rm important-file && gh pr review 106 --approve')
+  const judged = async (denials: unknown[]): Promise<Run> => {
+    const h = await harness()
+    try {
+      await h.report(106)
+      return await settledWith(h, denials, askedAboutIt())
+    } finally {
+      await h.cleanup()
+    }
+  }
+  assert.equal((await judged([lone, lone])).status, 'done')
+  assert.equal((await judged([lone, compound])).status, 'failed')
+  assert.equal((await judged([compound, lone])).status, 'failed')
 })
 
 test('a result the worker marked ghFailed never reads as a blocked post, whatever was denied after it', async () => {
@@ -4489,7 +4525,7 @@ test('a run records the hash of the report it finished with, and a re-read recor
   }
 })
 
-test('a blocked post whose report cannot be read at the end records no hash, and so is offered nothing', async () => {
+test('a blocked post whose report cannot be read at the end records no hash and so is offered nothing', async () => {
   const launch = fakeLaunch({ fs: { readFile: async (path) => path.endsWith('PR-106.md') ? null : readFile(path, 'utf8').catch(() => null) } })
   const h = await harness({ launch })
   try {
@@ -4504,7 +4540,7 @@ test('a blocked post whose report cannot be read at the end records no hash, and
 
 // a post begun and never recorded: its fate is unknown, which ghFailed already says
 
-test('a blocked run whose post was begun and never recorded reads as a post that failed, and offers nothing', async () => {
+test('a blocked run whose post was begun and never recorded reads as a post that failed and offers nothing', async () => {
   const config = baseConfig()
   const { pr, row } = await blockedRow({}, { postAttemptedAt: '2026-10-26T14:04:00Z' })
   const cell = agentCell(pr, config, row, undefined)

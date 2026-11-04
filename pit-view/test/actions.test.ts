@@ -1508,7 +1508,7 @@ test('the form follows the findings and CI, and a comment keeps the URL gh print
   }
 })
 
-test('Post it takes the same token and Origin as a direct action, and what its confirmation showed', async () => {
+test('Post it takes the same token and Origin as a direct action and what its confirmation showed', async () => {
   const h = await blockedHarness()
   try {
     const { id, sha } = await blockedRun(h)

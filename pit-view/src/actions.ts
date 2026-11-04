@@ -156,7 +156,7 @@ export type ActionsOptions = {
   reportsFolder: () => string
   // where a post's private copy of its report goes
   tempFolder: string
-  // puts a run's mark on the record just before gh writes, and takes it off when GitHub refused; a failure to put it there stops the post
+  // puts a run's mark on the record just before gh writes and takes it off when GitHub refused; a failure to put it there stops the post
   markPost: (id: number, posting: boolean) => void
   // records a post on its run; a failure here is logged, since the post has landed by then, and the mark keeps it from being made twice
   recordPost: (id: number, posted: Posted) => RunView
@@ -166,7 +166,7 @@ export type ActionsOptions = {
 export type Actions = {
   // validates and performs one action; throws ActionError, and answers once gh has finished
   run: (number: number, body: unknown) => Promise<ActionResult>
-  // Post it: validates and posts one blocked run's saved report; throws ActionError, and answers once gh has finished
+  // Post it: validates and posts one blocked run's saved report; throws ActionError on a refusal and answers once gh has finished
   post: (id: number, body: unknown) => Promise<PostResult>
 }
 

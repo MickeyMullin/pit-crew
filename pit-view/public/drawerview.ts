@@ -323,7 +323,7 @@ const notPostedWords: Readonly<Record<string, string>> = {
   noPost: 'nothing: the run was told not to post',
   ownPr: 'nothing: it is your own PR',
   awaitingAnswer: 'nothing yet: it waits for your answer',
-  ghFailed: 'unknown: the post failed, and may have landed',
+  ghFailed: 'unknown: the post failed and may have landed',
   postBlocked: 'nothing: a permission check refused the post',
 }
 
@@ -468,7 +468,7 @@ export type ResultModel = {
   byHand: string | null
   // set when the run's ask is "Clean · mark ready?" and the drawer offers Mark ready for review: says where the action is, and does nothing itself
   ready: string | null
-  // set when the review finished and its post was refused: says so, and that nothing reached GitHub
+  // set when the review finished and its post was refused: says so and says that nothing reached GitHub
   notPosted: string | null
   // that run's saved report, for the report panel
   report: { name: string, openName: string } | null

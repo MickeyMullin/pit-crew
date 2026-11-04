@@ -441,25 +441,14 @@ export const codexNote = (reportsDir: string): string =>
   `Note: ~/agents/output resolves to ${reportsDir}. Write report files at that resolved path; file patches through the symlink are refused.`
 
 // whether a run may post at all, from its own command and flags and nothing else: never from anything in its result, which an agent wrote after reading other people's PR text. A stack review stops to offer its post, a fix pushes, and an update pushes, so none of them posts by itself
-export const mayPost = (command: string, args: readonly string[]): boolean =>
+const mayPost = (command: string, args: readonly string[]): boolean =>
   ['review-pr', 'review-dependabot', 'review-dependabot-sweep'].includes(command) && !args.includes('--no-post')
-
-// what a Claude run is told about the post (section 8 of DESIGN.md, Launching runs, Permissions). A run that may post gets one allow rule, for gh pr review on its own PR, or on any PR for a sweep, whose reviewers find theirs. A --no-post run gets a deny rule instead, since the owner's own allow rules may let the post through and a deny wins over them
-export const postPermissionArgs = (command: string, args: readonly string[]): string[] => {
-  if (args.includes('--no-post')) return ['--disallowedTools', 'Bash(gh pr review:*)', 'Bash(gh pr comment:*)']
-  if (!mayPost(command, args)) return []
-  if (command === 'review-dependabot-sweep') return ['--allowedTools', 'Bash(gh pr review:*)']
-  const number = args[0]
-  return number !== undefined && /^[1-9]\d*$/.test(number) ? ['--allowedTools', `Bash(gh pr review ${number}:*)`] : []
-}
 
 export const claudeInvocation = (spec: LaunchSpec): Invocation => ({
   command: 'claude',
   args: [
     '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
-    '--model', spec.claudeModel, '--session-id', spec.sessionId ?? '', '--permission-mode', 'auto',
-    ...postPermissionArgs(spec.command, spec.args),
-    '--add-dir', join(spec.home, 'agents'),
+    '--model', spec.claudeModel, '--session-id', spec.sessionId ?? '', '--permission-mode', 'auto', '--add-dir', join(spec.home, 'agents'),
   ],
   // one user message; stdin then stays open until the result arrives with nothing in the background
   stdin: `${JSON.stringify({ type: 'user', message: { role: 'user', content: requestText('/', spec.command, spec.args, spec.runDir) } })}\n`,
@@ -927,7 +916,7 @@ export const postArgs = (repo: string, number: number, form: PostForm, bodyFile:
 export type PostOffer = {
   runId: number
   form: PostForm
-  // the saved report's file name, and its path written with ~
+  // the saved report's file name and its path written with ~
   report: string
   reportPath: string
   // the full head the review read, which is the PR's head
@@ -1024,7 +1013,7 @@ export type StreamState = {
   outstanding: number
   // tools named in the latest result event's permission_denials
   denials: string[]
-  // the PRs those denials would have posted on, when every one of them is a Bash call that posts a review or a comment; otherwise null. Claude Code's own record of what it refused, which the worker does not write
+  // the PRs those denials would have posted on, when every one of them is a Bash call that is one post with nothing around it; otherwise null. Claude Code's own record of what it refused, which the worker does not write
   deniedPosts: number[] | null
   costUsd: number | null
   sessionId: string | null
@@ -1044,19 +1033,14 @@ export const outstandingTasks = (event: Record<string, unknown>): number => {
   return list.filter((task) => !(isObject(task) && finishedTaskStates.has(String(task.status ?? task.state ?? '').toLowerCase()))).length
 }
 
-// the commands a shell would run from this text at its top level, each as its words with the quotes taken off; null when it holds anything this reader cannot follow (a quote left open, a substitution, an expansion in braces, an ANSI-C quote, a here-document, or a subshell), so that a mention inside one of those is never read as a command
-export const shellCommands = (text: string): string[][] | null => {
-  const commands: string[][] = []
-  let words: string[] = []
+// the one command this text runs, as its words with the quotes taken off; null when a separator at its top level (&&, ||, ;, |, &, or a new line) puts anything around that command, however harmless, or when it holds anything this reader cannot follow (a quote left open, a substitution, an expansion in braces, an ANSI-C quote, a here-document, or a subshell), so that a mention inside one of those is never read as a command
+const loneCommand = (command: string): string[] | null => {
+  const text = command.trim()
+  const words: string[] = []
   let word: string | null = null
   const endWord = (): void => {
     if (word !== null) words.push(word)
     word = null
-  }
-  const endCommand = (): void => {
-    endWord()
-    if (words.length > 0) commands.push(words)
-    words = []
   }
   const expands = (at: number): boolean => text[at] === '`' || (text[at] === '$' && ['(', '{', '\'', '"'].includes(text[at + 1] ?? ''))
   for (let at = 0; at < text.length; at += 1) {
@@ -1083,37 +1067,38 @@ export const shellCommands = (text: string): string[][] | null => {
       if (at >= text.length) return null
       word = `${word ?? ''}${held}`
     } else if (char === '#' && word === null) {
+      // a note runs to the end of the line, and a line after it is another command
       const end = text.indexOf('\n', at)
-      if (end === -1) break
-      at = end - 1
+      if (end !== -1) return null
+      break
     } else if (char === '&' && (text[at - 1] === '>' || text[at - 1] === '<' || text[at + 1] === '>')) {
       // a redirect such as 2>&1 or &>file, not a separator
       word = `${word ?? ''}${char}`
     } else if (char === ';' || char === '|' || char === '&' || char === '\n') {
-      endCommand()
+      return null
     } else if (/\s/.test(char)) {
       endWord()
     } else {
       word = `${word ?? ''}${char}`
     }
   }
-  endCommand()
-  return commands
+  endWord()
+  return words
 }
 
-// the PR one command posts on: gh pr review <n> or gh pr comment <n>, the form the permission rule covers and the prompts write, after any variables set for it; null for anything else
+// the PR one command posts on: gh pr review <n> or gh pr comment <n>, the form the prompts write, after any variables set for it; null for anything else
 const postedPr = (words: readonly string[]): number | null => {
   const [gh, pr, verb, number] = words.slice(words.findIndex((word) => !/^[A-Za-z_]\w*=/.test(word)))
   return gh === 'gh' && pr === 'pr' && (verb === 'review' || verb === 'comment') && /^[1-9]\d*$/.test(number ?? '') ? Number(number) : null
 }
 
-// the PRs a denied call would have posted on, from its own command; null for another tool, a call with no command on record, or a command that posts on nothing
-const deniedPostsOf = (denial: unknown): number[] | null => {
+// the PR a denied call would have posted on, from its own command; null for another tool, a call with no command on record, or a command that is anything but one post, since the rest of a compound call was refused too and is not this reader's to wave through
+const deniedPostOf = (denial: unknown): number | null => {
   if (!isObject(denial) || !isObject(denial.tool_input) || (denial.tool_name ?? denial.toolName) !== 'Bash') return null
   const command = denial.tool_input.command
   if (typeof command !== 'string') return null
-  const prs = (shellCommands(command) ?? []).map(postedPr).filter((pr) => pr !== null)
-  return prs.length === 0 ? null : prs
+  const words = loneCommand(command)
+  return words === null ? null : postedPr(words)
 }
 
 const clip = (text: string, length = 300): string => text.length > length ? `${text.slice(0, length)}…` : text
@@ -1138,8 +1123,8 @@ export const foldStream = (state: StreamState, line: string): { state: StreamSta
   if (typeof event.total_cost_usd === 'number') next.costUsd = event.total_cost_usd
   const denials = Array.isArray(event.permission_denials) ? event.permission_denials : []
   next.denials = denials.map((denial) => isObject(denial) ? String(denial.tool_name ?? denial.toolName ?? 'unknown tool') : String(denial))
-  const posts = denials.map(deniedPostsOf)
-  next.deniedPosts = posts.length > 0 && posts.every((prs) => prs !== null) ? posts.flat() as number[] : null
+  const posts = denials.map(deniedPostOf)
+  next.deniedPosts = posts.length > 0 && posts.every((pr) => pr !== null) ? posts as number[] : null
   return { state: next, closeStdin: next.outstanding === 0 }
 }
 
@@ -1494,9 +1479,9 @@ export type Launcher<T extends Session = Run> = {
   stop: (id: number) => T
   // the owner's re-read of a failed or waiting run's folder (section 8, Re-reading a result): the new result.json replaces the recorded outcome when it passes every guard, and a refusal changes nothing
   reread: (id: number) => Promise<T>
-  // records the post Post it made for a blocked run; a sweep has none
   // marks a run as having begun its post, or takes the mark off
   markPost: (id: number, posting: boolean) => void
+  // records the post Post it made for a blocked run; a sweep has none
   recordPost: (id: number, posted: Posted) => T
   // at server start: re-watch live runs, settle the rest, and fail what was still queued, since a start of the server starts nothing
   recover: () => Promise<void>
@@ -2689,7 +2674,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
-  // Post it's mark (section 8, Launching runs, Blocked post): on the record before gh runs, and off it only when GitHub refused the post. Nothing is announced: the row changes when the post is recorded, or when the refresh after a failure arrives
+  // Post it's mark (section 8, Launching runs, Blocked post): on the record before gh runs, and off it only when GitHub refused the post. Nothing is announced: the row changes when the post is recorded or when the refresh after a failure arrives
   const markPost = (id: number, posting: boolean): void => {
     store.update(id, { postAttemptedAt: posting ? now() : null })
   }

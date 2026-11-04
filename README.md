@@ -321,7 +321,9 @@ clearly happened.
 
 ## Pit View
 
-`pit-view/` holds Pit View, a local dashboard for the pull requests in one GitHub repository: which PRs need your attention, which of your own are blocked or ready, and what closed today. It reads GitHub through `gh` and never writes there, and it reads the review reports in `~/agents/output` (by default) to show whether your own PRs have a current self-review.
+`pit-view/` holds Pit View, a local dashboard for the pull requests in one GitHub repository: which PRs need your attention, which of your own are blocked or ready, and what closed today. It reads GitHub through `gh`, writes there only when you confirm a direct action, and reads the review reports in `~/agents/output` (by default) to show whether your own PRs have a current self-review.
+
+Pit View grants a review run no permission to post. A run's post goes through or is refused under your own Claude Code settings and auto mode's classifier. When the classifier refuses it, the run reads "review done, post not made", and you post the saved report with the drawer's confirmed Post it button.
 
 ```bash
 cd pit-view

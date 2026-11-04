@@ -24,6 +24,10 @@ There are two instances, and they share nothing. The default instance is the dep
 
 The deployed app is a clone of `master` at `~/app/pit-crew`, kept running from login by the `com.mickey.pit-view` launch agent (`pnpm service:install`, `service:status`, `service:restart`, `service:uninstall`). [deploy/README.md](deploy/README.md) covers the first deployment and updates.
 
+## Posting a review
+
+Pit View grants a review run no permission to post. A run's post goes through or is refused under your own Claude Code settings and auto mode's classifier. When the classifier refuses it, the run reads "review done, post not made", and you post the saved report with the drawer's confirmed Post it button. DESIGN.md, section 8, has the rules.
+
 ## Configuration
 
 Settings live in `~/.config/pit-view/config.json` (`~/.config/pit-view-dev/config.json` for `pnpm dev`). Without that file Pit View uses the defaults in [config.example.json](config.example.json) and your `gh` login as the viewer; an empty `viewer` also means the `gh` login. Copy the example to start your own, and keep your real Jira site URL and key pattern there rather than in this repository. Every key is described in section 1 of DESIGN.md. The Settings page edits the same file and checks it before saving. Desktop notifications for state changes are off until the Notifications card in Settings (the `notifications` key) turns them on; they work on macOS only, and clicking one does not open Pit View or the PR, and its Show button only opens an empty Open dialog in Script Editor (section 9 of DESIGN.md).

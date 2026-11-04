@@ -304,7 +304,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   const publicDir = resolve(options.publicDir)
   const gh = createGh(runner)
 
-  // the file as stored, and the gh login standing in for an empty viewer
+  // the file as stored and the gh login standing in for an empty viewer
   let stored = await readConfig(options.configPath)
   let ghLogin = stored.viewer === '' ? await localLogin(runner) : ''
   const effective = (): Config => ({ ...stored, viewer: stored.viewer === '' ? ghLogin : stored.viewer })
