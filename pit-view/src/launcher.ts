@@ -1490,6 +1490,9 @@ export const sweepStore = (cache: Cache): SessionStore<Sweep> => ({
 })
 
 // the review runs' launcher and the sweeps' launcher are the one engine over two stores
+// the delays before each retry of a queue announcement the listener failed, so a flush is tried at most one more time than there are delays
+const QUEUE_RETRY_MS = [50, 200, 800]
+
 export const createLauncher = (options: LauncherOptions): Launcher => createEngine(options, runStore(options.cache))
 
 export const createSweepLauncher = (options: LauncherOptions<Sweep>): Launcher<Sweep> => createEngine(options, sweepStore(options.cache))
@@ -1545,13 +1548,28 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   // the queue answer may have changed: the running count, the queue, or the launches in progress moved, or a run changed. It only marks; one flush on a later turn of the event loop tells the listener, however many marks came before it, and the listener reads the answer itself, so nothing here remembers what any page received
   let flushHandle: ReturnType<typeof setImmediate> | null = null
   let flushWaiters: (() => void)[] = []
+  // a flush whose listener threw is marked again after one of these delays, so a transient failure does not leave open pages on the old label; a new mark in the meantime takes the retry's place, and the run of failures ends at the first success or the last delay
+  let retryHandle: unknown = null
+  let failures = 0
   const flush = (): void => {
     flushHandle = null
     if (!closed && options.onQueueing !== undefined) {
       try {
         options.onQueueing()
+        failures = 0
       } catch (error) {
-        log(`${noun}: cannot announce the queue answer: ${messageOf(error)}`)
+        failures += 1
+        log(`${noun}: cannot announce the queue answer (attempt ${failures} of ${QUEUE_RETRY_MS.length + 1}): ${messageOf(error)}`)
+        const delay = QUEUE_RETRY_MS[failures - 1]
+        if (delay === undefined) {
+          log(`${noun}: giving up on announcing the queue answer; labels may stay stale until the next event`)
+          failures = 0
+        } else {
+          retryHandle = timers.set(() => {
+            retryHandle = null
+            mark()
+          }, delay)
+        }
       }
     }
     const waiting = flushWaiters
@@ -1560,6 +1578,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   }
   const mark = (): void => {
     if (closed || options.onQueueing === undefined || flushHandle !== null) return
+    if (retryHandle !== null) {
+      timers.clear(retryHandle)
+      retryHandle = null
+    }
     flushHandle = setImmediate(flush)
   }
   // resolves once the flush that is pending, if any, has run
@@ -2491,6 +2513,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     closed = true
     if (flushHandle !== null) clearImmediate(flushHandle)
     flushHandle = null
+    if (retryHandle !== null) timers.clear(retryHandle)
+    retryHandle = null
     flush()
     for (const entry of live.values()) clear(entry)
   }

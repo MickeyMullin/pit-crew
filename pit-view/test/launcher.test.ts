@@ -3904,6 +3904,118 @@ test('a burst of changes in one turn is announced once, and a blocked queue mark
   }
 })
 
+// starts one review, lets its marks flush, then arms the listener and moves the answer once by ending the review
+const armed = async (onCall: (launcher: ReturnType<Awaited<ReturnType<typeof harness>>['make']>) => void) => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  let armedNow = false
+  const calls = { count: 0 }
+  let launcher: ReturnType<typeof h.make> | null = null
+  launcher = h.make(undefined, () => {
+    if (!armedNow) return
+    calls.count += 1
+    onCall(launcher!)
+  })
+  const first = await launcher.start(request(106))
+  await launcher.flushed()
+  armedNow = true
+  const trigger = async (): Promise<void> => {
+    h.launch.children[0]!.exit(1)
+    await launcher!.settled(first.id)
+    await launcher!.flushed()
+  }
+  return { h, launcher, calls, trigger }
+}
+
+test('a failed announcement is retried after a delay, so open pages get the labels with no other event', async () => {
+  const received: unknown[] = []
+  let failing = 1
+  const { h, launcher, calls, trigger } = await armed((l) => {
+    if (failing > 0) {
+      failing -= 1
+      throw new Error('cache read failed')
+    }
+    received.push(l.queueing())
+  })
+  try {
+    await trigger()
+    assert.equal(calls.count, 1)
+    assert.equal(received.length, 0, 'the first attempt failed and told no page')
+    assert.equal(h.time.pending(), 1, 'one retry is waiting')
+    h.time.advance(50)
+    await launcher.flushed()
+    assert.equal(calls.count, 2)
+    assert.deepEqual(received, [roomFor])
+    assert.equal(h.time.pending(), 0)
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('an announcement that always fails is tried a bounded number of times, and nothing is left running after close', async () => {
+  const { h, launcher, calls, trigger } = await armed(() => {
+    throw new Error('cache read failed')
+  })
+  try {
+    await trigger()
+    assert.equal(calls.count, 1)
+    for (const delay of [50, 200, 800]) {
+      h.time.advance(delay)
+      await launcher.flushed()
+    }
+    assert.equal(calls.count, 4, 'the first attempt and three retries')
+    assert.equal(h.time.pending(), 0, 'no further retry is scheduled')
+    h.time.advance(60_000)
+    await launcher.flushed()
+    assert.equal(calls.count, 4)
+  } finally {
+    launcher.close()
+    assert.equal(h.time.pending(), 0)
+    await h.cleanup()
+  }
+})
+
+test('a new mark during a pending retry yields one flush, not two', async () => {
+  let failing = true
+  const { h, launcher, calls, trigger } = await armed(() => {
+    if (failing) throw new Error('cache read failed')
+  })
+  try {
+    await trigger()
+    assert.equal(calls.count, 1)
+    assert.equal(h.time.pending(), 1)
+    failing = false
+    // a new mark while the retry waits: one start, one flush
+    await launcher.start(request(107, { label: 'Review' }))
+    await launcher.flushed()
+    const during = calls.count
+    assert.ok(during >= 2)
+    // the new run keeps its own poll timer; the retry's 50 ms must not add a second flush beside the new one
+    h.time.advance(50)
+    await launcher.flushed()
+    assert.equal(calls.count, during, 'the retry was replaced, not kept beside the new flush')
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('close cancels a pending retry', async () => {
+  const { h, launcher, calls, trigger } = await armed(() => {
+    throw new Error('cache read failed')
+  })
+  try {
+    await trigger()
+    assert.equal(h.time.pending(), 1)
+    launcher.close()
+    assert.equal(h.time.pending(), 0)
+    h.time.advance(60_000)
+    assert.equal(calls.count, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a review whose two settlement writes both fail still frees its slot, and the open pages get the plain label with no other event', async () => {
   let broken = false
   const r = await pageRig({ maxConcurrentReviews: 1 }, (_, changes) => broken && changes.status !== undefined && changes.status !== 'running')
