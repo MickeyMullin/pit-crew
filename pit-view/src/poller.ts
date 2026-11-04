@@ -536,17 +536,19 @@ export const createPoller = (options: PollerOptions): Poller => {
     let outcome: PrRefreshResult['outcome'] = 'failed'
     let failure: Extract<RowRefresh, { state: 'failed' }> | null = null
     try {
-      // numbered before the read begins, so a cycle that starts meanwhile and writes a newer page is not overwritten by this older read
+      // numbered before the read begins, so a newer read that lands first is not overwritten by this older one
       const ticket = cache.beginRefresh()
       const found = await fetchPr(gh, repo, number)
-      if (!stopped && found.state === 'OPEN') {
-        if (shown()) await scanNew([found.pr], config(), true)
-        cache.writePr(repo, found.pr, found.defaultBranch, ticket)
-        outcome = 'open'
-      } else if (!stopped) {
-        // the next cycle's closed search shows it in Closed
-        cache.closePr(repo, number, ticket)
-        outcome = 'closed'
+      if (!stopped) {
+        if (found.state === 'OPEN') {
+          if (shown()) await scanNew([found.pr], config(), true)
+          cache.writePr(repo, found.pr, found.defaultBranch, ticket)
+        } else {
+          // the next cycle's closed search shows it in Closed
+          cache.closePr(repo, number, ticket)
+        }
+        // what the cache holds now, which is the newer read's answer when one got there first
+        outcome = cache.readView(repo).open.some((row) => row.number === number) ? 'open' : 'closed'
       }
       rowRefreshes.delete(key)
     } catch (error) {

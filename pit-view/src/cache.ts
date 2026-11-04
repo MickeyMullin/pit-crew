@@ -148,13 +148,13 @@ export type Cache = {
   writeClosed: (cycleId: number, result: ClosedResult) => CachedClosed
   // takes the ordering number of a one-PR refresh; call it before the GitHub read begins and hand it to writePr or closePr
   beginRefresh: () => number
-  // stores one PR fetched on its own, outside any cycle, stamped with the repo's latest cycle so it reads as current; returns the row as written, or the row already there when a newer read (a cycle that started after this refresh began, or a later refresh) wrote it first. ticket is beginRefresh's number; without one the write takes its number now
-  writePr: (repo: string, pr: RawOpenPr, defaultBranch: string | null, ticket?: number) => CachedPr
-  // marks a PR found closed or merged on its own as gone from the open list; false when it was not open or a newer read wrote it first
+  // stores one PR fetched on its own, outside any cycle, stamped with the repo's latest cycle so it reads as current; returns the row as written. A stale read (section 3 of DESIGN.md, the prs row) writes nothing: it returns the row already there, or null when there is none. ticket is beginRefresh's number; without one the write takes its number now
+  writePr: (repo: string, pr: RawOpenPr, defaultBranch: string | null, ticket?: number) => CachedPr | null
+  // marks a PR found closed or merged on its own as gone from the open list; false when it was not open or the read is stale
   closePr: (repo: string, number: number, ticket?: number) => boolean
   // stores a failed response, so the section can report the error it hit
   recordError: (cycleId: number, kind: SnapshotKind, page: number | null, error: string) => void
-  // a null error marks the cycle successful and removes PRs absent from its full open list
+  // a null error marks the cycle successful; one that reached the last page of the open list also removes the PRs absent from it and sets the repo's floor
   finishCycle: (cycleId: number, error?: string | null, errorKind?: CycleErrorKind | null) => FinishResult
   readView: (repo: string) => CachedView
   cycle: (id: number) => Cycle | null
@@ -496,14 +496,18 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     return requireRunning(id)
   }
 
-  // Ordering between a cycle's pages and a one-PR refresh, which the clock cannot give (it has one-second resolution). One counter owned by this cache instance: a cycle takes a number when it starts, and a one-PR refresh takes one before its GitHub read begins. A PR remembers the number of the newest read that wrote or closed it, and a write may replace it only if its own number is not older. Held in memory only: no cycle runs across a restart
+  // Reads are ordered by when they began, which the clock cannot give (it has one-second resolution). One counter owned by this cache instance: a cycle takes a number when it starts, and a one-PR refresh takes one before its GitHub read begins. A PR remembers the number of the newest read that wrote or closed it, and a repo remembers as its floor the start number of its newest cycle whose omissions are authoritative, which is a read of the whole repo. A read may write a PR only if its number is older than neither. Held in memory only: no read runs across a restart
   let sequence = 0
   const cycleSequence = new Map<number, number>()
   const writtenBy = new Map<string, number>()
+  // keyed by repo exactly as prs is, so one floor covers exactly the rows of one repo. One running cycle at a time means start numbers finish in order, so the newest floor is also the highest
+  const floors = new Map<string, number>()
   const beginRefresh = (): number => ++sequence
+  const writerKey = (repo: string, number: number): string => `${repo}#${number}`
   // true when a read numbered order may write the PR, and then records it as the newest writer
   const claim = (repo: string, number: number, order: number): boolean => {
-    const key = `${repo}#${number}`
+    if (order < (floors.get(repo) ?? 0)) return false
+    const key = writerKey(repo, number)
     const newest = writtenBy.get(key)
     if (newest !== undefined && newest > order) return false
     writtenBy.set(key, order)
@@ -553,13 +557,13 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     return { cycle: cycleId, fetchedAt: at, result }
   })
 
-  const writePr = (repo: string, pr: RawOpenPr, defaultBranch: string | null, ticket: number = beginRefresh()): CachedPr => transaction(() => {
+  const writePr = (repo: string, pr: RawOpenPr, defaultBranch: string | null, ticket: number = beginRefresh()): CachedPr | null => transaction(() => {
     const at = now()
     const latest = latestCycle(repo)
-    // a read that began before the one that wrote this row holds older state, so the newer row stays (and keeps the cycle id it was written with)
+    // a stale read writes nothing, so any row there stays (and keeps the cycle id it was written with), and with no row there the PR stays absent
     if (!claim(repo, pr.number, ticket)) {
       const kept = get('SELECT * FROM prs WHERE repo = $repo AND number = $number', { repo, number: pr.number })
-      if (kept !== undefined) return toPr(kept, latest)
+      return kept === undefined ? null : toPr(kept, latest)
     }
     // no cycle yet is cycle 0, which no real cycle id ever is
     const cycleId = latest?.id ?? 0
@@ -621,17 +625,14 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     let stale: CachedPr[] = []
     if (error === null) {
       setMeta(metaKey('lastSuccess', repo), { cycle: cycleId, startedAt: finished.startedAt, finishedAt: at } satisfies LastSuccess)
-      // only a cycle that saw the whole open list can say what left it
+      // only a cycle that saw the whole open list can say what left it, so only that cycle is a read of the whole repo: one that failed or never reached the last page says nothing about a PR it did not list, and leaves the floor where it was
       if (getMeta<Stamp>(metaKey('openListed', repo))?.cycle === cycleId) {
-        // the cycle's omission of a PR is a read result numbered by the cycle's start, so it is ordered like any other write: it records that number for every PR it did not list (so a one-PR refresh whose read began earlier cannot reopen one), and it closes only a PR that no newer read has written
         const cycleStarted = cycleSequence.get(cycleId) ?? 0
-        const unlisted = all('SELECT number, state FROM prs WHERE repo = $repo AND cycle != $id ORDER BY number', { repo, id: cycleId })
-        for (const row of unlisted) {
-          const number = int(row, 'number')
-          if (!claim(repo, number, cycleStarted) || row.state !== 'open') continue
-          removed.push(number)
-          run('UPDATE prs SET state = \'closed\' WHERE repo = $repo AND number = $number', { repo, number })
-        }
+        // the cycle wrote each PR it listed with its own number, so a row whose newest read is older is one it did not list, even when that read landed during the cycle and took the cycle's id
+        const open = all('SELECT number FROM prs WHERE repo = $repo AND state = \'open\' ORDER BY number', { repo }).map((row) => int(row, 'number'))
+        removed = open.filter((number) => (writtenBy.get(writerKey(repo, number)) ?? 0) < cycleStarted)
+        for (const number of removed) run('UPDATE prs SET state = \'closed\' WHERE repo = $repo AND number = $number', { repo, number })
+        floors.set(repo, cycleStarted)
       }
     } else {
       setMeta(metaKey('lastError', repo), { cycle: cycleId, at, error })
