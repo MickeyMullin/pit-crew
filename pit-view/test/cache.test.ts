@@ -853,6 +853,39 @@ test('a one-PR close that began before a cycle and finishes after the cycle wrot
   assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === merged.number)?.pr.title, merged.title)
 })
 
+test('a one-PR refresh that began before a cycle which omitted the PR cannot reopen it when it finishes after the cycle', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  fullCycle(cache, () => {}, pages, closed)
+  const gone = pages[0]!.prs[1]!
+  const ticket = cache.beginRefresh()
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  for (const page of pages) cache.writeOpenPage(cycle.id, without(page, [gone.number]))
+  cache.writeClosed(cycle.id, closed)
+  const finished = cache.finishCycle(cycle.id)
+  assert.deepEqual(finished.removed, [gone.number])
+  const returned = cache.writePr(scenario.repo, { ...gone, title: 'older open read' }, null, ticket)
+  assert.equal(returned.state, 'closed')
+  assert.notEqual(returned.cycle, cycle.id)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === gone.number), undefined)
+  assert.equal(cache.closePr(scenario.repo, gone.number, ticket), false)
+})
+
+test('a one-PR refresh that began after a cycle started keeps its row through the cycle\'s finish', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  fullCycle(cache, () => {}, pages, closed)
+  const kept = pages[0]!.prs[1]!
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  const ticket = cache.beginRefresh()
+  cache.writeOpenPage(cycle.id, { ...pages[0]!, prs: pages[0]!.prs.filter((pr) => pr.number !== kept.number) })
+  cache.writePr(scenario.repo, { ...kept, title: 'refreshed mid-cycle' }, null, ticket)
+  cache.writeClosed(cycle.id, closed)
+  const finished = cache.finishCycle(cycle.id)
+  assert.equal(finished.removed.includes(kept.number), false)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === kept.number)?.pr.title, 'refreshed mid-cycle')
+})
+
 test('of two one-PR refreshes of one PR, the one whose read began later wins whichever finishes first', async () => {
   const { pages } = await fetched()
   const cache = frozenCache()

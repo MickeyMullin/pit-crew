@@ -623,9 +623,15 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       setMeta(metaKey('lastSuccess', repo), { cycle: cycleId, startedAt: finished.startedAt, finishedAt: at } satisfies LastSuccess)
       // only a cycle that saw the whole open list can say what left it
       if (getMeta<Stamp>(metaKey('openListed', repo))?.cycle === cycleId) {
-        removed = all('SELECT number FROM prs WHERE repo = $repo AND state = \'open\' AND cycle != $id ORDER BY number', { repo, id: cycleId })
-          .map((row) => int(row, 'number'))
-        run('UPDATE prs SET state = \'closed\' WHERE repo = $repo AND state = \'open\' AND cycle != $id', { repo, id: cycleId })
+        // the cycle's omission of a PR is a read result numbered by the cycle's start, so it is ordered like any other write: it records that number for every PR it did not list (so a one-PR refresh whose read began earlier cannot reopen one), and it closes only a PR that no newer read has written
+        const cycleStarted = cycleSequence.get(cycleId) ?? 0
+        const unlisted = all('SELECT number, state FROM prs WHERE repo = $repo AND cycle != $id ORDER BY number', { repo, id: cycleId })
+        for (const row of unlisted) {
+          const number = int(row, 'number')
+          if (!claim(repo, number, cycleStarted) || row.state !== 'open') continue
+          removed.push(number)
+          run('UPDATE prs SET state = \'closed\' WHERE repo = $repo AND number = $number', { repo, number })
+        }
       }
     } else {
       setMeta(metaKey('lastError', repo), { cycle: cycleId, at, error })
