@@ -1,4 +1,5 @@
 // src/actions.ts
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Cache, Run } from './cache.ts'
 import type { Config } from './config.ts'
@@ -7,7 +8,7 @@ import { GhError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr } from './github.ts'
 import { isHttpUrl, offersFix, postArgs, postOffer } from './launcher.ts'
 import type { Posted, PostForm, RunView, UpdateAction } from './launcher.ts'
-import { parseReviewedCommit, readReport, ReportReadError } from './reports.ts'
+import { parseReviewedCommit, readReport, reportHash, ReportReadError } from './reports.ts'
 
 // direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs, each through gh with the viewer's own token. This module decides whether an action is allowed and what gh is asked; it never trusts the page, so every rule is checked here again. merge is always a squash into the repository's primary branch; the method is fixed, not a setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused. update writes nothing itself: it starts an agent session through the launcher, which brings the PR's branch up to date with the primary branch and pushes it. resolveConflicts is that same session, asked for on a PR the cache holds as conflicting
 export const actionNames = ['merge', 'markReady', 'convertToDraft', 'requestReview', 'update', 'resolveConflicts'] as const
@@ -138,6 +139,10 @@ export const reviewedHead = (lines: string, viewer: string, headSha: string): bo
     return login !== undefined && sameLogin(login, viewer) && commit?.toLowerCase() === headSha && (state === 'APPROVED' || state === 'CHANGES_REQUESTED')
   })
 
+// GitHub answered and refused, so nothing landed; a lost connection, a 5xx, or anything else gh says leaves the post's fate unknown
+const refusedByGitHub = (error: unknown): boolean =>
+  error instanceof GhError && error.kind !== 'network' && (error.kind === 'auth' || error.kind === 'rateLimit' || /HTTP 4\d\d|GraphQL:/.test(error.stderr))
+
 export type ActionsOptions = {
   cache: Cache
   gh: Gh
@@ -149,7 +154,11 @@ export type ActionsOptions = {
   startUpdate: (repo: string, number: number, headSha: string, action: UpdateAction) => Promise<RunView>
   // the folder reportsDir resolves to, read afresh at every post
   reportsFolder: () => string
-  // records a post on its run; a failure here is logged, since the post has landed by then
+  // where a post's private copy of its report goes
+  tempFolder: string
+  // puts a run's mark on the record just before gh writes, and takes it off when GitHub refused; a failure to put it there stops the post
+  markPost: (id: number, posting: boolean) => void
+  // records a post on its run; a failure here is logged, since the post has landed by then, and the mark keeps it from being made twice
   recordPost: (id: number, posted: Posted) => RunView
   log: (line: string) => void
 }
@@ -161,12 +170,23 @@ export type Actions = {
   post: (id: number, body: unknown) => Promise<PostResult>
 }
 
+// a report's text in a new folder only this user can read, for gh to open
+const privateCopy = async (tempFolder: string, text: string): Promise<{ folder: string, path: string }> => {
+  const folder = await mkdtemp(join(tempFolder, 'pit-view-post-'))
+  const path = join(folder, 'report.md')
+  try {
+    await writeFile(path, text, { mode: 0o600 })
+  } catch (error) {
+    await rm(folder, { recursive: true, force: true }).catch(() => {})
+    throw error
+  }
+  return { folder, path }
+}
+
 export const createActions = (options: ActionsOptions): Actions => {
   const { cache, gh, log } = options
   // one action per PR in flight, so a double click writes once
   const inFlight = new Set<string>()
-  // runs this server has posted, so a post whose record the database refused is never made twice
-  const postedRuns = new Set<number>()
 
   const refresh = (repo: string, number: number): void => {
     options.refreshPr(repo, number).catch((error: unknown) => log(`PR #${number}: refresh after an action failed: ${messageOf(error)}`))
@@ -305,25 +325,29 @@ export const createActions = (options: ActionsOptions): Actions => {
       refresh(repo, number)
       throw new ActionError('stale', `#${number} has new commits since you saw it; nothing was posted. Start a new review for the current head`)
     }
-    if (postedRuns.has(id)) throw new ActionError('notAllowed', `run ${id} has already posted its report; nothing was posted`)
+    // before the mark and the offer, which a post in flight has already changed
+    const key = `${repo}#${number}`
+    if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
+    if (run.postAttemptedAt !== null) throw new ActionError('notAllowed', `run ${id} has already begun its post, which may have landed; nothing was posted. Check #${number} on GitHub`)
     const offer = postOffer(row.pr, config, run)
     if (offer === null) throw new ActionError('notAllowed', `run ${id} has no report waiting to be posted on #${number}; nothing was posted`)
     if (offer.form !== form) throw new ActionError('stale', `this report would now post as ${offer.form}, not ${form}; nothing was posted. Reload its confirmation to see the current state`)
-    const key = `${repo}#${number}`
-    if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
     inFlight.add(key)
     try {
-      // the report on disk must be the one this run wrote: a later run of the PR writes the same name
+      // the report on disk must be the one this run finished with: a later run of the PR writes the same name. One read: the text checked here is the text posted
       const folder = options.reportsFolder()
-      let reviewedAt: string | null
+      let report: string
       try {
-        reviewedAt = parseReviewedCommit((await readReport(folder, offer.report)).raw.split('\n').slice(0, 20))
+        report = (await readReport(folder, offer.report)).raw
       } catch (error) {
         if (error instanceof ReportReadError) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} cannot be posted (${error.message}); nothing was posted`)
         throw error
       }
+      if (reportHash(report) !== run.reportHash) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} has changed since run ${id} finished, so it is no longer that run's review; nothing was posted. Start a new review to post the report as it is now`)
+      const reviewedAt = parseReviewedCommit(report.split('\n').slice(0, 20))
       if (reviewedAt === null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} does not say which commit it reviewed; nothing was posted`)
       if (!headSha.startsWith(reviewedAt)) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} is about another commit (${reviewedAt}); nothing was posted`)
+      let marked = false
       const check = async (read: (args: string[]) => Promise<string>): Promise<void> => {
         let live: LivePr
         let reviews: string
@@ -337,10 +361,21 @@ export const createActions = (options: ActionsOptions): Actions => {
         if (live.state !== 'open' || live.merged === true) throw new ActionError('notAllowed', `#${number} is no longer open; nothing was posted`)
         if (live.head?.sha?.toLowerCase() !== headSha) throw new ActionError('notAllowed', `#${number} has new commits since you saw it; nothing was posted`)
         if (reviewedHead(reviews, viewer, headSha)) throw new ActionError('notAllowed', `you have already reviewed this commit of #${number}; nothing was posted`)
+        // the last step before the write, so a restart can never offer a post that may have landed
+        try {
+          options.markPost(id, true)
+        } catch (error) {
+          throw new ActionError('notAllowed', `cannot record that #${number} is being posted (${messageOf(error)}), and without that record it could be posted twice; nothing was posted`)
+        }
+        marked = true
       }
+      // gh reads a private copy of what was checked, so nothing that happens to the report from here on reaches GitHub
+      const copy = await privateCopy(options.tempFolder, report).catch((error: unknown) => {
+        throw new ActionError('notAllowed', `cannot make a private copy of ${offer.reportPath} (${messageOf(error)}); nothing was posted`)
+      })
       let printed: string
       try {
-        printed = await gh.write(postArgs(repo, number, form, join(folder, offer.report)), viewer, check)
+        printed = await gh.write(postArgs(repo, number, form, copy.path), viewer, check)
       } catch (error) {
         if (error instanceof ActionError) {
           refresh(repo, number)
@@ -350,10 +385,23 @@ export const createActions = (options: ActionsOptions): Actions => {
           if (error.login === null) throw new ActionError('identityUnknown', error.message, error.errorKind)
           throw new ActionError('identityMismatch', error.message)
         }
+        const kind = error instanceof GhError ? error.kind : null
+        if (marked && !refusedByGitHub(error)) {
+          refresh(repo, number)
+          throw new ActionError('ghFailed', `${messageOf(error)}; the post may have landed, so Post it will not be offered again. Check #${number} on GitHub`, kind)
+        }
+        if (marked) {
+          try {
+            options.markPost(id, false)
+          } catch (failure) {
+            log(`PR #${number}: GitHub refused the post of run ${id}, but its mark could not be taken off: ${messageOf(failure)}`)
+          }
+        }
         refresh(repo, number)
-        throw new ActionError('ghFailed', messageOf(error), error instanceof GhError ? error.kind : null)
+        throw new ActionError('ghFailed', messageOf(error), kind)
+      } finally {
+        await rm(copy.folder, { recursive: true, force: true }).catch((error: unknown) => log(`PR #${number}: cannot remove the private copy of its report: ${messageOf(error)}`))
       }
-      postedRuns.add(id)
       // gh pr comment prints the comment's URL; gh pr review prints none, so the post links to the PR, as the prompts' own fallback does
       const url = printed.trim().split('\n').at(-1) ?? ''
       const posted: Posted = { form, url: isHttpUrl(url) ? url : `https://github.com/${repo}/pull/${number}` }

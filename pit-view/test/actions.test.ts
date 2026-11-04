@@ -1,6 +1,6 @@
 // test/actions.test.ts
 import assert from 'node:assert/strict'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -19,7 +19,7 @@ import type { Call, FakeLaunch, FakeRunner } from './helpers.ts'
 
 // every GitHub write below goes to a fake gh; nothing here can reach a real PR
 
-type Harness = { server: PitServer, runner: FakeRunner, launch: FakeLaunch, base: string, home: string, cleanup: () => Promise<void> }
+type Harness = { server: PitServer, runner: FakeRunner, launch: FakeLaunch, base: string, home: string, removeHome: () => Promise<void>, cleanup: () => Promise<void> }
 
 const people = [
   { login: 'alex-mendez', alias: 'Alex', initials: 'AM', color: '#0F766E', avatar: 'github' },
@@ -47,6 +47,10 @@ type Behavior = {
   reviews?: string
   // what a post prints on stdout
   postOutput?: string
+  // what each post's --body-file held when gh opened it
+  bodies?: { path: string, text: string, mode: number }[]
+  // runs when the reviews are read live: after the report is checked and before gh writes
+  onReviews?: () => Promise<void>
 }
 
 const isWrite = (args: string[]): boolean =>
@@ -83,9 +87,16 @@ const ghWorld = (behavior: Behavior = {}): FakeRunner => {
       const { sha, base: ref } = await listed(number)
       return ok(JSON.stringify({ state: 'open', draft: false, merged: false, mergeable: true, mergeable_state: 'clean', base: { ref }, head: { sha }, ...behavior.live?.(number) }))
     }
-    if (isReviewsRead(args)) return ok(behavior.reviews ?? '')
+    if (isReviewsRead(args)) {
+      await behavior.onReviews?.()
+      return ok(behavior.reviews ?? '')
+    }
     if (isWrite(args)) {
       await behavior.gate
+      const bodyFile = args.includes('--body-file') ? args[args.indexOf('--body-file') + 1] : undefined
+      if (bodyFile !== undefined && behavior.bodies !== undefined) {
+        behavior.bodies.push({ path: bodyFile, text: await readFile(bodyFile, 'utf8'), mode: (await stat(bodyFile)).mode & 0o777 })
+      }
       if (behavior.writeError !== undefined) return failed(behavior.writeError)
       behavior.onWrite?.()
       return ok(args[1] === 'review' || args[1] === 'comment' ? behavior.postOutput ?? '' : '')
@@ -107,8 +118,8 @@ const ghWorld = (behavior: Behavior = {}): FakeRunner => {
   })
 }
 
-const setup = async ({ config = {}, runner = ghWorld() }: { config?: Partial<Config>, runner?: FakeRunner } = {}): Promise<Harness> => {
-  const { dir: home, cleanup: removeHome } = await tempDir()
+const setup = async ({ config = {}, runner = ghWorld(), restarting }: { config?: Partial<Config>, runner?: FakeRunner, restarting?: Harness } = {}): Promise<Harness> => {
+  const { dir: home, cleanup: removeHome } = restarting === undefined ? await tempDir() : { dir: restarting.home, cleanup: restarting.removeHome }
   const configPath = join(home, '.config', 'pit-view', 'config.json')
   await mkdir(join(configPath, '..'), { recursive: true })
   await writeFile(configPath, JSON.stringify({ repo: scenario.repo, viewer: scenario.viewer, people, ...config }), 'utf8')
@@ -133,7 +144,7 @@ const setup = async ({ config = {}, runner = ghWorld() }: { config?: Partial<Con
     await server.close()
     await removeHome()
   }
-  return { server, runner, launch, base: server.url, home, cleanup }
+  return { server, runner, launch, base: server.url, home, removeHome, cleanup }
 }
 
 const filled = async (h: Harness): Promise<void> => {
@@ -1450,7 +1461,7 @@ test('Post it posts the saved report once with the worker\'s gh command, after t
     assert.deepEqual(answer.body.posted, { form: 'approve', url: `https://github.com/${scenario.repo}/pull/106` })
     const posts = postsOf(h.runner)
     assert.equal(posts.length, 1)
-    assert.deepEqual(posts[0]?.args, ['pr', 'review', '106', '--repo', scenario.repo, '--approve', '--body-file', join(h.home, 'agents', 'output', 'PR-106.md')])
+    assert.deepEqual(posts[0]?.args.slice(0, -1), ['pr', 'review', '106', '--repo', scenario.repo, '--approve', '--body-file'])
     const order = h.runner.calls.map((call) => call.args)
     const writeAt = order.findIndex((args) => args[0] === 'pr' && args[1] === 'review')
     assert.ok(order.slice(0, writeAt).some((args) => args[0] === 'api' && args[1] === 'user'), 'the account was confirmed first')
@@ -1479,7 +1490,7 @@ test('the form follows the findings and CI, and a comment keeps the URL gh print
     assert.equal((await rowOf(requestChanges, 106))?.agent?.text, 'Changes requested · post not made')
     const answer = await postIt(requestChanges, id, postBody(sha, 'requestChanges'))
     assert.equal(answer.status, 200)
-    assert.deepEqual(postsOf(requestChanges.runner)[0]?.args, ['pr', 'review', '106', '--repo', scenario.repo, '--request-changes', '--body-file', join(requestChanges.home, 'agents', 'output', 'PR-106.md')])
+    assert.deepEqual(postsOf(requestChanges.runner)[0]?.args.slice(0, -1), ['pr', 'review', '106', '--repo', scenario.repo, '--request-changes', '--body-file'])
     assert.equal((await rowOf(requestChanges, 106))?.agent?.text, 'Changes requested')
   } finally {
     await requestChanges.cleanup()
@@ -1491,7 +1502,7 @@ test('the form follows the findings and CI, and a comment keeps the URL gh print
     const answer = await postIt(comment, id, postBody(sha, 'comment'))
     assert.equal(answer.status, 200)
     assert.deepEqual(answer.body.posted, { form: 'comment', url })
-    assert.deepEqual(postsOf(comment.runner)[0]?.args, ['pr', 'comment', '106', '--repo', scenario.repo, '--body-file', join(comment.home, 'agents', 'output', 'PR-106.md')])
+    assert.deepEqual(postsOf(comment.runner)[0]?.args.slice(0, -1), ['pr', 'comment', '106', '--repo', scenario.repo, '--body-file'])
   } finally {
     await comment.cleanup()
   }
@@ -1688,5 +1699,205 @@ test('Post it writes through gh and starts no run', async () => {
     assert.equal(h.launch.children.length, before)
   } finally {
     await h.cleanup()
+  }
+})
+
+// a run posts the report it finished with, from a private copy of what was checked
+
+const reportOf = (h: Harness): string => join(h.home, 'agents', 'output', 'PR-106.md')
+const reportText = (sha: string, findings: string): string => `# Review\n\nReviewed commit: \`fix/x\` @ \`${sha.slice(0, 7)}\`\n\n${findings}\n`
+
+test('a report another run replaced at the same head posts nothing, and the run\'s own text posts again once it is back', async () => {
+  const behavior: Behavior = { bodies: [] }
+  const h = await blockedHarness(behavior)
+  try {
+    const { sha } = await listed(106)
+    const own = reportText(sha, 'No actionable findings.')
+    const { id } = await blockedRun(h, {}, own)
+    await writeFile(reportOf(h), reportText(sha, '- **P1**\n\n**[P1] A later run found this**'))
+    const refused = await postIt(h, id, postBody(sha))
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /PR-106\.md has changed since run \d+ finished/)
+    assert.match(String(refused.body.error), /nothing was posted/)
+    assert.deepEqual(postsOf(h.runner), [])
+    // a refusal made before gh ran leaves the offer standing
+    assert.equal((await rowOf(h, 106))?.agent?.postOffer?.runId, id)
+    await writeFile(reportOf(h), own)
+    assert.equal((await postIt(h, id, postBody(sha))).status, 200)
+    assert.equal(behavior.bodies?.[0]?.text, own)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a replacement after the report was checked never reaches GitHub: gh reads a private copy of the checked text, and the copy goes away', async () => {
+  const behavior: Behavior = { bodies: [] }
+  const h = await blockedHarness(behavior)
+  try {
+    const { sha } = await listed(106)
+    const own = reportText(sha, 'No actionable findings.')
+    const later = reportText(sha, '- **P1**\n\n**[P1] A later run found this**')
+    const { id } = await blockedRun(h, {}, own)
+    behavior.onReviews = () => writeFile(reportOf(h), later)
+    assert.equal((await postIt(h, id, postBody(sha))).status, 200)
+    assert.equal(await readFile(reportOf(h), 'utf8'), later)
+    const body = behavior.bodies?.[0]
+    assert.equal(body?.text, own)
+    assert.notEqual(body?.path, reportOf(h))
+    assert.equal(body?.mode, 0o600)
+    await assert.rejects(stat(body?.path ?? ''), /ENOENT/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the copy goes away after a refused post too', async () => {
+  const behavior: Behavior = { bodies: [], writeError: 'HTTP 422: Can not approve your own pull request' }
+  const h = await blockedHarness(behavior)
+  try {
+    const { id, sha } = await blockedRun(h)
+    assert.equal((await postIt(h, id, postBody(sha))).status, 502)
+    assert.equal(behavior.bodies?.length, 1)
+    assert.notEqual(behavior.bodies?.[0]?.path, reportOf(h))
+    await assert.rejects(stat(behavior.bodies?.[0]?.path ?? ''), /ENOENT/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a run with no report of its own on record is offered nothing and posts nothing', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await blockedRun(h)
+    h.server.cache.updateRun(id, { reportHash: null })
+    assert.equal((await rowOf(h, 106))?.agent?.postOffer, null)
+    assert.equal((await postIt(h, id, postBody(sha))).status, 422)
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// one post per run, across a restart: the mark goes on the record before gh writes
+
+const restart = async (h: Harness, runner: FakeRunner): Promise<Harness> => {
+  await h.server.close()
+  return setup({ config: withClone, runner, restarting: h })
+}
+
+test('the mark is on the record before gh writes, and a post stopped before that leaves none', async () => {
+  const behavior: Behavior = {}
+  const h = await blockedHarness(behavior)
+  try {
+    const { id, sha } = await blockedRun(h)
+    behavior.account = 'sam-tran'
+    assert.equal((await postIt(h, id, postBody(sha))).status, 422)
+    assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null)
+    behavior.account = undefined
+    behavior.live = () => ({ state: 'closed' })
+    assert.equal((await postIt(h, id, postBody(sha))).status, 422)
+    assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null)
+    behavior.live = undefined
+    let marked: string | null | undefined
+    behavior.onWrite = () => {
+      marked = h.server.cache.getRun(id)?.postAttemptedAt
+    }
+    assert.equal((await postIt(h, id, postBody(sha))).status, 200)
+    assert.equal(typeof marked, 'string')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a mark that cannot be written posts nothing', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await blockedRun(h)
+    h.server.cache.db.exec('CREATE TEMP TRIGGER refuse_mark BEFORE UPDATE OF post_attempted_at ON runs BEGIN SELECT RAISE(ABORT, \'disk is full\'); END')
+    const answer = await postIt(h, id, postBody(sha))
+    assert.equal(answer.status, 422)
+    assert.match(String(answer.body.error), /nothing was posted/)
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a comment that landed and could not be recorded is not offered or posted again after a restart', async () => {
+  const url = `https://github.com/${scenario.repo}/pull/106#issuecomment-1`
+  const runner = ghWorld({ postOutput: `${url}\n` })
+  let h = await setup({ config: withClone, runner })
+  try {
+    const { id, sha } = await blockedRun(h, { ci: 'failed' })
+    assert.equal((await rowOf(h, 106))?.agent?.postOffer?.form, 'comment')
+    // only this connection's writes to the result are refused, so the restart below finds the database well
+    h.server.cache.db.exec('CREATE TEMP TRIGGER refuse_record BEFORE UPDATE OF result ON runs BEGIN SELECT RAISE(ABORT, \'disk is full\'); END')
+    const answer = await postIt(h, id, postBody(sha, 'comment'))
+    assert.equal(answer.status, 200)
+    assert.deepEqual(answer.body.posted, { form: 'comment', url })
+    assert.equal(answer.body.run, null)
+    assert.equal(postsOf(runner).length, 1)
+    h = await restart(h, runner)
+    const agent = (await rowOf(h, 106))?.agent
+    assert.equal(agent?.postOffer, null)
+    assert.equal(agent?.text, 'Clean · post failed')
+    assert.equal(agent?.result?.kind === 'review' && agent.result.notPostedReason, 'ghFailed')
+    const again = await postIt(h, id, postBody(sha, 'comment'))
+    assert.equal(again.status, 422)
+    assert.match(String(again.body.error), /nothing was posted/)
+    assert.equal(postsOf(runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a server that stopped between the mark and gh\'s answer offers nothing after its restart', async () => {
+  const runner = ghWorld()
+  let h = await setup({ config: withClone, runner })
+  try {
+    const { id, sha } = await blockedRun(h)
+    h.server.cache.updateRun(id, { postAttemptedAt: '2026-10-26T14:04:00Z' })
+    h = await restart(h, runner)
+    assert.equal((await rowOf(h, 106))?.agent?.postOffer, null)
+    assert.equal((await postIt(h, id, postBody(sha))).status, 422)
+    assert.deepEqual(postsOf(runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a post whose fate gh cannot tell keeps its mark and is not offered again; one GitHub refused leaves the offer standing', async () => {
+  const unknown = ['dial tcp 192.0.2.1:443: connection reset by peer', 'HTTP 502: Bad Gateway', 'HTTP 500: Internal Server Error', 'something gh has never said before']
+  for (const writeError of unknown) {
+    const h = await blockedHarness({ writeError })
+    try {
+      const { id, sha } = await blockedRun(h)
+      const answer = await postIt(h, id, postBody(sha))
+      assert.equal(answer.status, 502, writeError)
+      assert.match(String(answer.body.error), /may have landed/, writeError)
+      const agent = (await rowOf(h, 106))?.agent
+      assert.equal(agent?.postOffer, null, writeError)
+      assert.equal(agent?.text, 'Clean · post failed', writeError)
+      assert.equal((await postIt(h, id, postBody(sha))).status, 422, writeError)
+      assert.equal(postsOf(h.runner).length, 1, writeError)
+    } finally {
+      await h.cleanup()
+    }
+  }
+  const refused = ['HTTP 422: Can not approve your own pull request', 'GraphQL: Could not resolve to a PullRequest (repository.pullRequest)', 'HTTP 401: Bad credentials', 'API rate limit exceeded (HTTP 403)']
+  for (const writeError of refused) {
+    const h = await blockedHarness({ writeError })
+    try {
+      const { id, sha } = await blockedRun(h)
+      const answer = await postIt(h, id, postBody(sha))
+      assert.equal(answer.status, 502, writeError)
+      assert.doesNotMatch(String(answer.body.error), /may have landed/, writeError)
+      assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null, writeError)
+      const agent = (await rowOf(h, 106))?.agent
+      assert.equal(agent?.postOffer?.runId, id, writeError)
+      assert.equal(agent?.text, 'Clean · post not made', writeError)
+    } finally {
+      await h.cleanup()
+    }
   }
 })

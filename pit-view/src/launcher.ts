@@ -11,7 +11,7 @@ import type { Stack } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
 import type { Gh, RawOpenPr, Runner } from './github.ts'
 import type { Timers } from './poller.ts'
-import { prReportName } from './reports.ts'
+import { prReportName, reportHash } from './reports.ts'
 import type { ReportInfo } from './reports.ts'
 import { iso } from './time.ts'
 
@@ -938,9 +938,10 @@ export type PostOffer = {
   command: string
 }
 
-// a blocked post stays open to Post it only for the run's own PR, at the head it reviewed, while the viewer has not reviewed that head some other way. The run's own command and flags decide whether it may post at all; its result only names what there is to post, and each thing it names is checked against the run and the config
+// a blocked post stays open to Post it only for the run's own PR, at the head it reviewed, while the viewer has not reviewed that head some other way, with the report it finished with on record and no post begun. The run's own command and flags decide whether it may post at all; its result only names what there is to post, and each thing it names is checked against the run and the config
 export const postOffer = (pr: RawOpenPr, config: Config, run: Run | undefined): PostOffer | null => {
   if (run === undefined || run.status !== 'done' || run.command === 'review-dependabot-sweep' || !mayPost(run.command, run.args) || isMine(pr, config)) return null
+  if (run.reportHash === null || run.postAttemptedAt !== null) return null
   const result = run.result
   if (result?.schema !== 'pit-crew/review-result@1' || result.notPostedReason !== 'postBlocked' || result.posted !== null || result.verdict === null) return null
   const target = result.target
@@ -956,6 +957,12 @@ export const postOffer = (pr: RawOpenPr, config: Config, run: Run | undefined): 
   if (review?.commit?.oid === head && (review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED')) return null
   const form = postFormOf(result, pr, config)
   return { runId: run.id, form, report, reportPath, headSha: head.toLowerCase(), repo: config.repo, viewer: config.viewer, command: `gh ${postArgs(config.repo, run.number, form, reportPath).join(' ')}` }
+}
+
+// a blocked post that was begun and is not on record may or may not have landed, which is what ghFailed says, so the run reads that way; the row keeps what its result said
+const withPostFate = (run: Run): Run => {
+  const result = run.result
+  return run.postAttemptedAt !== null && result?.schema === 'pit-crew/review-result@1' && result.notPostedReason === 'postBlocked' ? { ...run, result: { ...result, notPostedReason: 'ghFailed' } } : run
 }
 
 export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null): AgentCell => {
@@ -993,8 +1000,8 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     tandem: isTandemRun(run.args),
     commit: recordedCommit(run),
     finishedAt: run.finishedAt,
-    text: run.status === 'running' || run.status === 'queued' ? null : doneText(run, mine && pr.isDraft),
-    result: agentResult(run.result),
+    text: run.status === 'running' || run.status === 'queued' ? null : doneText(withPostFate(run), mine && pr.isDraft),
+    result: agentResult(withPostFate(run).result),
     question: run.status === 'needsInput' ? run.result?.question ?? null : null,
     note: run.note,
     resolvedByHand: run.resolvedByHand,
@@ -1008,7 +1015,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
 // a run as the API serves it: the row, with its five step slots always present and whether it was a tandem review
 export type RunView = Omit<Run, 'steps'> & { steps: StepSlot[], tandem: boolean }
 
-export const runView = (run: Run): RunView => ({ ...run, steps: stepsOf(run), tandem: isTandemRun(run.args) })
+export const runView = (run: Run): RunView => ({ ...withPostFate(run), steps: stepsOf(run), tandem: isTandemRun(run.args) })
 
 // the runner's stream: read by event type, never by position, and never for progress or results
 
@@ -1017,15 +1024,15 @@ export type StreamState = {
   outstanding: number
   // tools named in the latest result event's permission_denials
   denials: string[]
-  // every one of those denials is a Bash call that posts a review or a comment: Claude Code's own record of what it refused, which the worker does not write
-  postDenied: boolean
+  // the PRs those denials would have posted on, when every one of them is a Bash call that posts a review or a comment; otherwise null. Claude Code's own record of what it refused, which the worker does not write
+  deniedPosts: number[] | null
   costUsd: number | null
   sessionId: string | null
   // the newest line, for a noResult note
   lastEvent: string | null
 }
 
-export const emptyStream = (): StreamState => ({ outstanding: 0, denials: [], postDenied: false, costUsd: null, sessionId: null, lastEvent: null })
+export const emptyStream = (): StreamState => ({ outstanding: 0, denials: [], deniedPosts: null, costUsd: null, sessionId: null, lastEvent: null })
 
 const finishedTaskStates = new Set(['completed', 'complete', 'done', 'failed', 'error', 'killed', 'stopped', 'cancelled', 'canceled'])
 
@@ -1037,14 +1044,76 @@ export const outstandingTasks = (event: Record<string, unknown>): number => {
   return list.filter((task) => !(isObject(task) && finishedTaskStates.has(String(task.status ?? task.state ?? '').toLowerCase()))).length
 }
 
-// a command that runs gh pr review or gh pr comment, alone or chained with others; a command that only mentions one does not count
-const runsPost = (command: string): boolean =>
-  command.split(/[;&|\n]+/).some((part) => /^\s*(?:[A-Za-z_]\w*=\S*\s+)*gh\s+pr\s+(?:review|comment)(?:\s|$)/.test(part))
+// the commands a shell would run from this text at its top level, each as its words with the quotes taken off; null when it holds anything this reader cannot follow (a quote left open, a substitution, an expansion in braces, an ANSI-C quote, a here-document, or a subshell), so that a mention inside one of those is never read as a command
+export const shellCommands = (text: string): string[][] | null => {
+  const commands: string[][] = []
+  let words: string[] = []
+  let word: string | null = null
+  const endWord = (): void => {
+    if (word !== null) words.push(word)
+    word = null
+  }
+  const endCommand = (): void => {
+    endWord()
+    if (words.length > 0) commands.push(words)
+    words = []
+  }
+  const expands = (at: number): boolean => text[at] === '`' || (text[at] === '$' && ['(', '{', '\'', '"'].includes(text[at + 1] ?? ''))
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at] as string
+    if (expands(at) || char === '(' || char === ')' || (char === '<' && text[at + 1] === '<')) return null
+    if (char === '\\') {
+      at += 1
+      if (at === text.length) return null
+      // a backslash at the end of a line continues the command
+      if (text[at] !== '\n') word = `${word ?? ''}${text[at]}`
+    } else if (char === '\'') {
+      const close = text.indexOf('\'', at + 1)
+      if (close === -1) return null
+      word = `${word ?? ''}${text.slice(at + 1, close)}`
+      at = close
+    } else if (char === '"') {
+      let held = ''
+      at += 1
+      for (; at < text.length && text[at] !== '"'; at += 1) {
+        if (expands(at)) return null
+        if (text[at] === '\\') at += 1
+        held += text[at] ?? ''
+      }
+      if (at >= text.length) return null
+      word = `${word ?? ''}${held}`
+    } else if (char === '#' && word === null) {
+      const end = text.indexOf('\n', at)
+      if (end === -1) break
+      at = end - 1
+    } else if (char === '&' && (text[at - 1] === '>' || text[at - 1] === '<' || text[at + 1] === '>')) {
+      // a redirect such as 2>&1 or &>file, not a separator
+      word = `${word ?? ''}${char}`
+    } else if (char === ';' || char === '|' || char === '&' || char === '\n') {
+      endCommand()
+    } else if (/\s/.test(char)) {
+      endWord()
+    } else {
+      word = `${word ?? ''}${char}`
+    }
+  }
+  endCommand()
+  return commands
+}
 
-const isPostDenial = (denial: unknown): boolean => {
-  if (!isObject(denial) || !isObject(denial.tool_input) || (denial.tool_name ?? denial.toolName) !== 'Bash') return false
+// the PR one command posts on: gh pr review <n> or gh pr comment <n>, the form the permission rule covers and the prompts write, after any variables set for it; null for anything else
+const postedPr = (words: readonly string[]): number | null => {
+  const [gh, pr, verb, number] = words.slice(words.findIndex((word) => !/^[A-Za-z_]\w*=/.test(word)))
+  return gh === 'gh' && pr === 'pr' && (verb === 'review' || verb === 'comment') && /^[1-9]\d*$/.test(number ?? '') ? Number(number) : null
+}
+
+// the PRs a denied call would have posted on, from its own command; null for another tool, a call with no command on record, or a command that posts on nothing
+const deniedPostsOf = (denial: unknown): number[] | null => {
+  if (!isObject(denial) || !isObject(denial.tool_input) || (denial.tool_name ?? denial.toolName) !== 'Bash') return null
   const command = denial.tool_input.command
-  return typeof command === 'string' && runsPost(command)
+  if (typeof command !== 'string') return null
+  const prs = (shellCommands(command) ?? []).map(postedPr).filter((pr) => pr !== null)
+  return prs.length === 0 ? null : prs
 }
 
 const clip = (text: string, length = 300): string => text.length > length ? `${text.slice(0, length)}…` : text
@@ -1069,7 +1138,8 @@ export const foldStream = (state: StreamState, line: string): { state: StreamSta
   if (typeof event.total_cost_usd === 'number') next.costUsd = event.total_cost_usd
   const denials = Array.isArray(event.permission_denials) ? event.permission_denials : []
   next.denials = denials.map((denial) => isObject(denial) ? String(denial.tool_name ?? denial.toolName ?? 'unknown tool') : String(denial))
-  next.postDenied = denials.length > 0 && denials.every(isPostDenial)
+  const posts = denials.map(deniedPostsOf)
+  next.deniedPosts = posts.length > 0 && posts.every((prs) => prs !== null) ? posts.flat() as number[] : null
   return { state: next, closeStdin: next.outstanding === 0 }
 }
 
@@ -1085,7 +1155,7 @@ export type JudgeInput = {
   // whether the report a done result names exists; null when not checked
   reportExists: boolean | null
   denials: readonly string[]
-  // every denial was the post's, from the stream
+  // every denial was this run's own post, from the stream
   postDenied?: boolean
   // the run's own command and flags allow a post
   mayPost?: boolean
@@ -1099,10 +1169,10 @@ const exitText = (exit: Exit | null): string => {
   return exit.signal === null ? `exit code ${exit.code}` : `killed by ${exit.signal}`
 }
 
-// a review that finished, with only its post refused: done, whatever the worker made of the refusal, since nothing waits on an answer and nothing failed. Null when any part of the review is missing, or the result says it was never going to post
+// a review that finished, with only its post refused: done, whatever the worker made of the refusal, since nothing waits on an answer and nothing failed. Null when any part of the review is missing, when the result says it was never going to post, or when it says a post ran and failed, since that post may have landed whatever was refused after it
 const blockedPost = (value: RunResultJson, reportExists: boolean | null): ReviewResult | null => {
   if (value.schema !== 'pit-crew/review-result@1' || value.verdict === null || value.reviewed === null || value.report === null || value.posted !== null || reportExists !== true) return null
-  if (value.notPostedReason === 'noPost' || value.notPostedReason === 'ownPr') return null
+  if (value.notPostedReason === 'noPost' || value.notPostedReason === 'ownPr' || value.notPostedReason === 'ghFailed') return null
   return { ...value, status: 'done', notPostedReason: 'postBlocked', question: null }
 }
 
@@ -1425,6 +1495,8 @@ export type Launcher<T extends Session = Run> = {
   // the owner's re-read of a failed or waiting run's folder (section 8, Re-reading a result): the new result.json replaces the recorded outcome when it passes every guard, and a refusal changes nothing
   reread: (id: number) => Promise<T>
   // records the post Post it made for a blocked run; a sweep has none
+  // marks a run as having begun its post, or takes the mark off
+  markPost: (id: number, posting: boolean) => void
   recordPost: (id: number, posted: Posted) => T
   // at server start: re-watch live runs, settle the rest, and fail what was still queued, since a start of the server starts nothing
   recover: () => Promise<void>
@@ -2062,6 +2134,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
+  // the report a review finished with, recorded by its hash, so Post it can tell it from what a later run wrote to the same name. Only a run has the column, and only a review posts
+  const finishedReport = async (value: RunResultJson): Promise<RunChanges> => {
+    if (store.schema !== null || value.schema !== 'pit-crew/review-result@1') return {}
+    const path = reportPath(value)
+    const text = path === null ? null : await fs.readFile(expandHome(path, home)).catch(() => null)
+    return { reportHash: text === null ? null : reportHash(text) }
+  }
+
   const settle = async (entry: Live, exit: Exit | null, restarted: boolean): Promise<T | null> => {
     if (entry.settling || closed) return null
     entry.settling = true
@@ -2090,10 +2170,12 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (wrong !== null) parsed = { ok: false, error: wrong }
     }
     let reportExists: boolean | null = null
+    let finished: RunChanges = {}
     // any status: a blocked post leaves a finished review whose worker may have stopped to ask or failed over it
     if (parsed?.ok === true) {
       const path = reportPath(parsed.value)
       if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
+      finished = await finishedReport(parsed.value)
     }
     const judgement = judge({
       stopped: entry.stopping,
@@ -2102,7 +2184,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       parsed,
       reportExists,
       denials: entry.stream.denials,
-      postDenied: entry.stream.postDenied,
+      postDenied: entry.stream.deniedPosts?.every((pr) => pr === (started as Partial<Run> | undefined)?.number) ?? false,
       mayPost: started?.command !== undefined && started.args !== undefined && mayPost(started.command, started.args),
       lastEvent: entry.stream.lastEvent,
     })
@@ -2110,7 +2192,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (entry.stdinOpen && entry.child?.stdin != null) entry.child.stdin.end()
     entry.stdinOpen = false
     // the process has ended, so the run ends here even when the database refuses the write: whoever awaits it is woken and its slot is freed
-    const run = end((started ?? { id: entry.id }) as unknown as T, { ...judgement, finishedAt: now() }, `settled as ${judgement.status}`)
+    const run = end((started ?? { id: entry.id }) as unknown as T, { ...judgement, ...finished, finishedAt: now() }, `settled as ${judgement.status}`)
     log(`${noun} ${run.id} (${run.command} ${run.args.join(' ')}) ${run.status}${run.note === null ? '' : `: ${run.note}`}`)
     // a review that ended, however it ended, frees its slot for the next in line
     if (entry.slot !== null) admit()
@@ -2588,7 +2670,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (judgement.status === run.status && note === run.note && JSON.stringify(judgement.result) === JSON.stringify(run.result)) {
         return refuse('result.json has not changed since the run settled')
       }
-      const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true }
+      const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true, ...await finishedReport(value) }
       // the first time a failed re-read replaces the note, the note recorded at exit moves to its own field, so a later finish by hand can still tell why the run first stopped; an original with no note is kept as an empty string, so firstNote stays set and a later failure cannot be copied in as the original
       if (note !== run.note && (run as Partial<Run>).firstNote === null) changes.firstNote = run.note ?? ''
       // the later steps too: every line of events.jsonl, folded from the start
@@ -2605,6 +2687,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     } finally {
       rereading.delete(id)
     }
+  }
+
+  // Post it's mark (section 8, Launching runs, Blocked post): on the record before gh runs, and off it only when GitHub refused the post. Nothing is announced: the row changes when the post is recorded, or when the refresh after a failure arrives
+  const markPost = (id: number, posting: boolean): void => {
+    store.update(id, { postAttemptedAt: posting ? now() : null })
   }
 
   // the post Post it made for a blocked run (section 8, Launching runs, Blocked post): the run now reads as posted, and its step bar with it. Its folder is left as the worker wrote it, and a done run is never read from it again
@@ -2649,5 +2736,5 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     for (const entry of live.values()) clear(entry)
   }
 
-  return { start, stop, reread, recordPost, recover, drain: admit, check: checkAll, settled, queueing, flushed, close }
+  return { start, stop, reread, markPost, recordPost, recover, drain: admit, check: checkAll, settled, queueing, flushed, close }
 }

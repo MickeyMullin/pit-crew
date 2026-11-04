@@ -247,6 +247,13 @@ test('a finished run shows the server\'s text, when it finished, the cost, what 
   assert.deepEqual(clean.result?.facts.map((fact) => fact.value), ['1 finding', 'none', 'nothing: the run was told not to post'])
 })
 
+test('a post that failed may have landed, so the fact does not say nothing was posted', () => {
+  const fact = drawerModel(input(finished({
+    result: { kind: 'review', verdict: 'clean', recommendation: null, findings: 0, ci: 'green', posted: null, notPostedReason: 'ghFailed', report: null },
+  }))).result?.facts.find((entry) => entry.label === 'Posted')
+  assert.deepEqual(fact, { label: 'Posted', value: 'unknown: the post failed, and may have landed', href: null })
+})
+
 test('a posted review links only when its URL is http or https; anything else is shown as plain text', () => {
   const posted = (url: string) => drawerModel(input(finished({
     result: { kind: 'review', verdict: 'changesRequested', recommendation: null, findings: 1, ci: 'green', posted: { form: 'comment', url }, notPostedReason: null, report: null },

@@ -6,7 +6,7 @@ import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { stripTypeScriptTypes } from 'node:module'
 import type { AddressInfo } from 'node:net'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ActionError, createActions, createUpdateWatch } from './actions.ts'
@@ -590,6 +590,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     refreshPr: (repo, number) => poller.refreshPrAfterWrite(repo, number),
     startUpdate: async (repo, number, headSha, action) => runView(await launcher.start(updateRequest(repo, number, headSha, action))),
     reportsFolder: () => expandHome(effective().reportsDir, home),
+    tempFolder: tmpdir(),
+    markPost: (id, posting) => launcher.markPost(id, posting),
     recordPost: (id, posted) => runView(launcher.recordPost(id, posted)),
     log,
   })

@@ -7,8 +7,8 @@ import type { Clock, RunnerName } from './config.ts'
 import type { ClosedResult, GhErrorKind, OpenPage, RawOpenPr } from './github.ts'
 import type { RunResultJson, StepSlot } from './launcher.ts'
 
-// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again
-export const schemaVersion = 10
+// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table
+export const schemaVersion = 11
 
 // the last version that changed what the GitHub tables hold; a cache at this version or later keeps them through a bump, since a bump after it only adds tables
 export const githubTablesVersion = 10
@@ -129,15 +129,15 @@ export type Session = {
   resume: string | null
 }
 
-// one review session Pit View started (section 8 of DESIGN.md, Launching runs); resolvedByHand is set when the owner's re-read replaced the outcome recorded at exit, and firstNote keeps the note recorded at exit once a failed re-read replaced it (an empty string when that note was null)
-export type Run = Session & { number: number, resolvedByHand: boolean, firstNote: string | null }
+// one review session Pit View started (section 8 of DESIGN.md, Launching runs); resolvedByHand is set when the owner's re-read replaced the outcome recorded at exit, and firstNote keeps the note recorded at exit once a failed re-read replaced it (an empty string when that note was null); reportHash is the SHA-256 of the report a review finished with, null when it named none or the report could not be read, and postAttemptedAt is when Post it began a post, written before gh runs and cleared only when GitHub refused it
+export type Run = Session & { number: number, resolvedByHand: boolean, firstNote: string | null, reportHash: string | null, postAttemptedAt: string | null }
 
 // one Dependabot sweep Pit View started (section 8, Sweeps): a record of its own with no PR number
 export type Sweep = Session
 
-export type NewRun = Omit<Run, 'id' | 'dir' | 'steps' | 'resolvedByHand' | 'firstNote'>
+export type NewRun = Omit<Run, 'id' | 'dir' | 'steps' | 'resolvedByHand' | 'firstNote' | 'reportHash' | 'postAttemptedAt'>
 export type NewSweep = Omit<Sweep, 'id' | 'dir' | 'steps'>
-export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>> & { resolvedByHand?: boolean, firstNote?: string | null }
+export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>> & { resolvedByHand?: boolean, firstNote?: string | null, reportHash?: string | null, postAttemptedAt?: string | null }
 
 export type Cache = {
   // starts a cycle; only one may run at a time across all repos
@@ -213,7 +213,7 @@ const schema = [
 
 // kept across rebuilds: no status CHECK, so phase 4's queued and skipped need no rebuild
 const runsSchema = [
-  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, resolved_by_hand INTEGER NOT NULL DEFAULT 0, first_note TEXT)',
+  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, resolved_by_hand INTEGER NOT NULL DEFAULT 0, first_note TEXT, report_hash TEXT, post_attempted_at TEXT)',
   'CREATE INDEX IF NOT EXISTS runs_by_pr ON runs (repo, number, id)',
   'CREATE INDEX IF NOT EXISTS runs_by_status ON runs (status)',
 ]
@@ -268,7 +268,7 @@ const toSession = (row: Row): Session => {
   }
 }
 
-const toRun = (row: Row): Run => ({ ...toSession(row), number: int(row, 'number'), resolvedByHand: int(row, 'resolved_by_hand') === 1, firstNote: strOrNull(row, 'first_note') })
+const toRun = (row: Row): Run => ({ ...toSession(row), number: int(row, 'number'), resolvedByHand: int(row, 'resolved_by_hand') === 1, firstNote: strOrNull(row, 'first_note'), reportHash: strOrNull(row, 'report_hash'), postAttemptedAt: strOrNull(row, 'post_attempted_at') })
 
 // a Run's fields to their columns; JSON columns are stored as text
 const runColumns: Record<keyof RunChanges, string> = {
@@ -294,6 +294,8 @@ const runColumns: Record<keyof RunChanges, string> = {
   resume: 'resume',
   resolvedByHand: 'resolved_by_hand',
   firstNote: 'first_note',
+  reportHash: 'report_hash',
+  postAttemptedAt: 'post_attempted_at',
 }
 
 const runValue = (key: keyof RunChanges, value: unknown): SQLInputValue => {
@@ -404,6 +406,9 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       if (!columns.includes('resolved_by_hand')) db.exec('ALTER TABLE runs ADD COLUMN resolved_by_hand INTEGER NOT NULL DEFAULT 0')
       // version 9 added runs.first_note
       if (!columns.includes('first_note')) db.exec('ALTER TABLE runs ADD COLUMN first_note TEXT')
+      // version 11 added runs.report_hash and runs.post_attempted_at
+      if (!columns.includes('report_hash')) db.exec('ALTER TABLE runs ADD COLUMN report_hash TEXT')
+      if (!columns.includes('post_attempted_at')) db.exec('ALTER TABLE runs ADD COLUMN post_attempted_at TEXT')
       // version 7 added sweeps
       for (const statement of sweepsSchema) db.exec(statement)
       setMeta('schemaVersion', schemaVersion)

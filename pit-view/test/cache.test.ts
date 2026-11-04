@@ -837,6 +837,35 @@ test('a one-PR refresh that wrote nothing leaves the running cycle\'s data in pl
   assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'later copy')
 })
 
+test('a version 10 cache gains runs.report_hash and runs.post_attempted_at in place: its runs stay with neither, and both are stored', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const created = first.createRun(newRun(106), (id) => `~/runs/${id}`)
+    first.close()
+    const old = new DatabaseSync(path)
+    old.exec('ALTER TABLE runs DROP COLUMN report_hash')
+    old.exec('ALTER TABLE runs DROP COLUMN post_attempted_at')
+    old.exec('UPDATE meta SET value = \'10\' WHERE key = \'schemaVersion\'')
+    old.close()
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.equal(cache.getRun(created.id)?.reportHash, null)
+    assert.equal(cache.getRun(created.id)?.postAttemptedAt, null)
+    const stored = cache.updateRun(created.id, { reportHash: 'c'.repeat(64), postAttemptedAt: '2026-10-26T14:04:00Z' })
+    assert.equal(stored.reportHash, 'c'.repeat(64))
+    assert.equal(stored.postAttemptedAt, '2026-10-26T14:04:00Z')
+    assert.equal(cache.updateRun(created.id, { postAttemptedAt: null }).postAttemptedAt, null)
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
+    cache.close()
+    const again = openCache({ path, clock: handClock().clock })
+    assert.equal(again.getRun(created.id)?.reportHash, 'c'.repeat(64))
+    again.close()
+  } finally {
+    await cleanup()
+  }
+})
+
 test('a version 8 cache gains runs.first_note in place: its runs stay with no first note, and the field is stored', async () => {
   const { dir, cleanup } = await tempDir()
   try {

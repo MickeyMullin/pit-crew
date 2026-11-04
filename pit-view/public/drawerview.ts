@@ -263,7 +263,7 @@ export const postItOffer = (cell: AgentCell, open: boolean, number: number): Pos
   return { button: 'Post it', disabled: !open, reason: open ? null : `Posting is off: ${goneText(number)}.`, runId: cell.postOffer.runId }
 }
 
-// the confirmation: the PR, the form, the saved report, the exact command, and whose account it posts under
+// the confirmation: the PR, the form, the saved report, the command, and whose account it posts under
 export type PostAskModel = {
   heading: string
   title: string
@@ -323,7 +323,7 @@ const notPostedWords: Readonly<Record<string, string>> = {
   noPost: 'nothing: the run was told not to post',
   ownPr: 'nothing: it is your own PR',
   awaitingAnswer: 'nothing yet: it waits for your answer',
-  ghFailed: 'nothing: the post failed',
+  ghFailed: 'unknown: the post failed, and may have landed',
   postBlocked: 'nothing: a permission check refused the post',
 }
 

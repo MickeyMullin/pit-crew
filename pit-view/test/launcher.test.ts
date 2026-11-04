@@ -1,5 +1,6 @@
 // test/launcher.test.ts
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -44,7 +45,7 @@ const runRow = (patch: Partial<Run> = {}): Run => ({
   id: 7, repo: scenario.repo, number: 106, command: 'review-pr', args: ['106'], label: 'Re-review', runner: 'claude',
   cwd: '~/dev/orbit', dir: '~/.local/state/pit-view/runs/7', sessionId: 'sess-1', pid: 4001, pidStartedAt: 'start-4001',
   startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, steps: null, finishedAt: null, status: 'running',
-  result: null, note: null, costUsd: null, resume: 'cd ~/dev/orbit && claude --resume sess-1', resolvedByHand: false, firstNote: null, ...patch,
+  result: null, note: null, costUsd: null, resume: 'cd ~/dev/orbit && claude --resume sess-1', resolvedByHand: false, firstNote: null, reportHash: null, postAttemptedAt: null, ...patch,
 })
 
 const spec = (patch: Partial<LaunchSpec> = {}): LaunchSpec => ({
@@ -4279,7 +4280,7 @@ const blockedRow = async (patch: Record<string, unknown> = {}, run: Partial<Run>
   const result = reviewResult({
     target: { repo: scenario.repo, pr: number }, reviewed: { kind: 'commit', sha: pr.headRefOid }, verdict: 'clean', findings: [], ci: 'green', posted: null, notPostedReason: 'postBlocked', report: `~/agents/output/PR-${number}.md`, ...patch,
   }) as unknown as RunResultJson
-  return { pr, row: runRow({ number, args: [String(number)], status: 'done', finishedAt: '2026-10-26T14:03:00Z', result, ...run }) }
+  return { pr, row: runRow({ number, args: [String(number)], status: 'done', finishedAt: '2026-10-26T14:03:00Z', result, reportHash: 'c'.repeat(64), ...run }) }
 }
 
 test('the cell offers the post for a blocked run, in the form the findings and CI select', async () => {
@@ -4341,6 +4342,8 @@ test('nothing but a blocked review of this PR, at its head, is offered the post'
     ['a short SHA', { reviewed: { kind: 'commit', sha: 'f00dfac' } }, {}],
     ['an empty SHA', { reviewed: { kind: 'commit', sha: '' } }, {}],
     ['a head that has moved', { reviewed: { kind: 'commit', sha: '0123456789abcdef0123456789abcdef01234567' } }, {}],
+    ['a run that recorded no report of its own', {}, { reportHash: null }],
+    ['a post already begun', {}, { postAttemptedAt: '2026-10-26T14:04:00Z' }],
   ]
   for (const [name, patch, run] of cases) assert.equal(await offer(patch, run), null, name)
   // the viewer's own PR never posts, and a head already reviewed needs no second post
@@ -4350,4 +4353,173 @@ test('nothing but a blocked review of this PR, at its head, is offered the post'
   const reviewed: RawOpenPr = { ...pr, latestReviews: { nodes: [{ author: { login: scenario.viewer }, state: 'APPROVED', submittedAt: '2026-10-20T10:00:00Z', commit: { oid: pr.headRefOid } }] } } as unknown as RawOpenPr
   assert.equal(agentCell(reviewed, config, row, undefined).postOffer, null)
   assert.equal(agentCell(pr, config, undefined, undefined).postOffer, null)
+})
+
+// what a denied command runs, read as a shell would read it: only the denied call's own command decides, and only a plain gh pr review or gh pr comment on this run's PR is its post
+
+const deniedBash = (command: string): Record<string, unknown> => ({ tool_name: 'Bash', tool_use_id: 'b1', tool_input: { command } })
+
+test('a denied command that only mentions the post is not a denied post, wherever the mention sits', async () => {
+  const mentions: [string, string][] = [
+    ['after a separator in double quotes', 'grep "first; gh pr review 106 --approve" notes.md'],
+    ['after a separator in single quotes', 'echo \'done && gh pr comment 106 --body-file report.md\''],
+    ['on its own line in a quoted message', 'git commit -m "a note\ngh pr review 106 --approve"'],
+    ['in a quoted script', 'bash -c \'cd /tmp; gh pr review 106 --approve\''],
+    ['after an escaped separator', 'echo first \\; gh pr review 106 --approve'],
+    ['in a comment', 'echo first # later; gh pr review 106 --approve'],
+    ['in a here-document', 'cat <<EOF\ngh pr review 106 --approve\nEOF'],
+    ['in a substitution', 'echo "$(true; gh pr review 106 --approve)"'],
+    ['in ANSI-C quotes', 'echo $\'a\\\'; gh pr review 106 #\''],
+    ['behind a quote that never closes', 'echo "first; gh pr review 106 --approve'],
+    ['as a redirect target', 'echo first >& gh pr review 106'],
+  ]
+  for (const [name, command] of mentions) {
+    const h = await harness()
+    try {
+      await h.report(106)
+      const run = await settledWith(h, [deniedBash(command)], askedAboutIt())
+      assert.equal(run.status, 'failed', name)
+      assert.match(run.note ?? '', /^permissionDenied:/, name)
+      assert.notEqual((run.result as ReviewResult).notPostedReason, 'postBlocked', name)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('a denied post counts only as the command the rule covers, on this run\'s own PR', async () => {
+  const others: [string, string][] = [
+    ['another PR', 'gh pr review 999 --approve --body-file report.md'],
+    ['this PR and another', 'gh pr review 106 --approve --body-file report.md; gh pr comment 999 --body-file report.md'],
+    ['no number at all', 'gh pr review --approve --body-file report.md'],
+    ['a number that is not the first argument', 'gh pr review --approve 106'],
+    ['a longer number that starts with this one', 'gh pr review 1060 --approve'],
+  ]
+  for (const [name, command] of others) {
+    const h = await harness()
+    try {
+      await h.report(106)
+      const run = await settledWith(h, [deniedBash(command)], askedAboutIt())
+      assert.equal(run.status, 'failed', name)
+      assert.match(run.note ?? '', /^permissionDenied:/, name)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('a true denial is the post however the shell spells it around the command', async () => {
+  const posts: [string, string][] = [
+    ['alone', 'gh pr review 106 --approve --body-file report.md'],
+    ['the comment form', 'gh pr comment 106 --body-file report.md'],
+    ['chained', 'cd /home/tester/worktrees/orbit-106 && gh pr checks 106 | grep -vc pass; gh pr review 106 --approve --body-file report.md'],
+    ['on its own line', 'cd /tmp\ngh pr review 106 --approve --body-file report.md'],
+    ['with a variable before it', 'GH_PROMPT_DISABLED=1 gh pr review 106 --approve --body-file report.md'],
+    ['with a quoted body file', 'gh pr review 106 --approve --body-file "/home/tester/my reports/PR-106.md"'],
+    ['with a quoted number', 'gh pr review "106" --approve --body-file report.md'],
+    ['continued on the next line', 'gh pr review 106 \\\n  --approve --body-file report.md'],
+    ['with its errors redirected', 'gh pr review 106 --approve --body-file report.md 2>&1'],
+    ['with a note after it', 'gh pr review 106 --approve --body-file report.md # the approval'],
+    ['beside a quoted mention', 'echo "gh pr review 106" && gh pr review 106 --approve --body-file report.md'],
+  ]
+  for (const [name, command] of posts) {
+    const h = await harness()
+    try {
+      await h.report(106)
+      const run = await settledWith(h, [deniedBash(command)], askedAboutIt())
+      assert.equal(run.status, 'done', name)
+      assert.equal((run.result as ReviewResult).notPostedReason, 'postBlocked', name)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('a result the worker marked ghFailed never reads as a blocked post, whatever was denied after it', async () => {
+  const marked = (patch: Record<string, unknown>): Record<string, unknown> => reviewResult({ verdict: 'clean', findings: [], posted: null, notPostedReason: 'ghFailed', error: 'gh pr review: HTTP 502', ...patch })
+  const results: [string, Record<string, unknown>][] = [
+    ['finished', marked({})],
+    ['failed', marked({ status: 'failed' })],
+    ['stopped to ask', marked({ status: 'needsInput', question: 'The post failed. Try again?', error: null })],
+  ]
+  for (const [name, result] of results) {
+    const h = await harness()
+    try {
+      await h.report(106)
+      const run = await settledWith(h, [deniedPost], result)
+      assert.equal(run.status, 'failed', name)
+      assert.match(run.note ?? '', /^permissionDenied:/, name)
+      assert.equal((run.result as ReviewResult).notPostedReason, 'ghFailed', name)
+      assert.equal(agentCell(await prOf(106), baseConfig(), run, undefined).postOffer, null, name)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+// the report a run may post is the one it finished with
+
+const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
+
+test('a run records the hash of the report it finished with, and a re-read records the report it then reads', async () => {
+  const h = await harness()
+  try {
+    await h.report(106)
+    const reportFile = join(h.home, 'agents', 'output', 'PR-106.md')
+    const written = await readFile(reportFile, 'utf8')
+    const blocked = await settledWith(h, [deniedPost], askedAboutIt())
+    assert.equal(blocked.reportHash, sha256(written))
+    assert.equal(h.cache.getRun(blocked.id)?.reportHash, sha256(written))
+    assert.equal(blocked.postAttemptedAt, null)
+  } finally {
+    await h.cleanup()
+  }
+  const again = await harness()
+  try {
+    await again.report(106)
+    const denied = await deniedRun(again)
+    const reportFile = join(again.home, 'agents', 'output', 'PR-106.md')
+    await writeFile(reportFile, 'Reviewed commit: `x` @ `f00dfac`\n\nThe finished report.\n')
+    await writeFile(join(again.launch.children.at(-1)!.runDir, 'result.json'), JSON.stringify(reviewResult({ verdict: 'clean', findings: [], posted: null, notPostedReason: 'postBlocked' })))
+    const read = await again.launcher.reread(denied.id)
+    assert.equal(read.status, 'done')
+    assert.equal(read.reportHash, sha256('Reviewed commit: `x` @ `f00dfac`\n\nThe finished report.\n'))
+  } finally {
+    await again.cleanup()
+  }
+})
+
+test('a blocked post whose report cannot be read at the end records no hash, and so is offered nothing', async () => {
+  const launch = fakeLaunch({ fs: { readFile: async (path) => path.endsWith('PR-106.md') ? null : readFile(path, 'utf8').catch(() => null) } })
+  const h = await harness({ launch })
+  try {
+    await h.report(106)
+    const run = await settledWith(h, [deniedPost], askedAboutIt())
+    assert.equal((run.result as ReviewResult).notPostedReason, 'postBlocked')
+    assert.equal(run.reportHash, null)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// a post begun and never recorded: its fate is unknown, which ghFailed already says
+
+test('a blocked run whose post was begun and never recorded reads as a post that failed, and offers nothing', async () => {
+  const config = baseConfig()
+  const { pr, row } = await blockedRow({}, { postAttemptedAt: '2026-10-26T14:04:00Z' })
+  const cell = agentCell(pr, config, row, undefined)
+  assert.equal(cell.text, 'Clean · post failed')
+  assert.equal(cell.result?.kind === 'review' && cell.result.notPostedReason, 'ghFailed')
+  assert.equal(cell.postOffer, null)
+  assert.equal((runView(row).result as ReviewResult).notPostedReason, 'ghFailed')
+  // the row itself still holds what the worker's result said
+  assert.equal((row.result as ReviewResult).notPostedReason, 'postBlocked')
+  // once the post is on record the mark changes nothing
+  const posted = await blockedRow({ posted: { form: 'approve', url: 'https://example.test/r/1' }, notPostedReason: null }, { postAttemptedAt: '2026-10-26T14:04:00Z' })
+  assert.equal(agentCell(posted.pr, config, posted.row, undefined).text, 'Approved')
+  assert.equal((runView(posted.row).result as ReviewResult).notPostedReason, null)
+  // and with no mark the run reads as before
+  const clean = await blockedRow()
+  assert.equal(agentCell(clean.pr, config, clean.row, undefined).text, 'Clean · post not made')
+  assert.equal((runView(clean.row).result as ReviewResult).notPostedReason, 'postBlocked')
 })

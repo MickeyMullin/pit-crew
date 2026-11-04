@@ -1,4 +1,5 @@
 // src/reports.ts
+import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { open, readdir, realpath, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -21,6 +22,9 @@ export type ReportTarget = { number: number, headRefName: string }
 const headLines = 20
 
 export const prReportName = (number: number): string => `PR-${number}.md`
+
+// what ties a report's text to the run that finished with it
+export const reportHash = (text: string): string => createHash('sha256').update(text).digest('hex')
 
 // fix-pr's report, one per PR and never a self-review
 export const fixReportName = (number: number): string => `FIX-${number}.md`
