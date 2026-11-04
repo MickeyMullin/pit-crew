@@ -983,6 +983,8 @@ test('a one-PR read that began after the completed cycle started survives, liste
   const ticket = cache.beginRefresh()
   for (const page of pages) cache.writeOpenPage(cycle.id, without(page, [gone.number, late.number]))
   cache.writeClosed(cycle.id, closed)
+  // a newer number taken before the finish: the floor is the cycle's start, not the counter when it finishes
+  cache.beginRefresh()
   cache.finishCycle(cycle.id)
   // the PR opened after the list was read: it lands after the finish and reads as current
   const written = cache.writePr(scenario.repo, { ...gone, title: 'newer open read' }, null, ticket)
