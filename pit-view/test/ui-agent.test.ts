@@ -40,6 +40,11 @@ const done = (patch: Partial<AgentCell> = {}): AgentCell => running({
   state: 'done', status: 'done', finishedAt: ago(17 * h), text: 'Changes requested', step: { name: 'post', state: 'done' }, ...patch,
 })
 
+test('the button and its accessible name carry the queue wording the cell holds, so a screen reader hears it too', () => {
+  const queued = idle({ action: { kind: 'review', label: 'Queue review', command: 'review-pr', args: ['101'], runner: 'claude' } })
+  assert.deepEqual(cellModel(queued, 101, now), { state: 'idle', button: 'Queue review', name: 'Queue review #101: open agent', under: null })
+})
+
 test('an idle cell shows its action\'s label on a button that opens the drawer, with the last review under it when there is one', () => {
   assert.deepEqual(cellModel(idle(), 101, now), { state: 'idle', button: 'Review', name: 'Review #101: open agent', under: null })
   const again = idle({ label: 'Re-review', action: { kind: 'reReview', label: 'Re-review', command: 'review-pr', args: ['101'], runner: 'claude' }, lastReviewAt: ago(7 * d + h) })

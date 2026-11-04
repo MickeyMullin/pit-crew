@@ -7,6 +7,7 @@ import type { ClosedView, Counts, DerivedView, Freshness, MineSection, OpenRow, 
 import { fetchClosedPrs, fetchOpenPrs, fetchPr, GhError } from './github.ts'
 import type { Gh, RawOpenPr } from './github.ts'
 import { agentCell } from './launcher.ts'
+import type { Queueing } from './launcher.ts'
 import { baselineOf, compareRows, runEvent } from './notify.ts'
 import type { NotifyEvent, RowBaseline } from './notify.ts'
 import { scanReports } from './reports.ts'
@@ -136,6 +137,8 @@ export type PollerOptions = {
   sweeps?: SweepMemory
   // receives the notification events a transition produces (section 9); the notifier decides whether the config wants them
   notify?: (events: NotifyEvent[]) => void
+  // whether a new review of each kind would wait in the queue now, read from the launcher that decides it; the review buttons in the Agent cells say so. None when left out
+  queueing?: () => Queueing
 }
 
 // thrown from the page callback to stop pagination once the cycle has failed
@@ -243,7 +246,12 @@ export const createPoller = (options: PollerOptions): Poller => {
   const prJobs = new Map<string, Promise<PrRefreshResult>>()
   const prKey = (repo: string, number: number): string => `${repo}#${number}`
 
-  const snapshot = (settings: Config, reportMap: ReadonlyMap<number, ReportInfo>): Snapshot => {
+  // what the pages last received, as the buttons of every row were derived from it; a change is sent as the rows it changes
+  const noQueueing: Queueing = { review: false, selfReview: false }
+  let sentQueueing: Queueing = noQueueing
+  const queueingNow = (): Queueing => options.queueing?.() ?? noQueueing
+
+  const snapshot = (settings: Config, reportMap: ReadonlyMap<number, ReportInfo>, queueing: Queueing = queueingNow()): Snapshot => {
     const cached = cache.readView(settings.repo)
     const runs = cache.latestRuns(settings.repo)
     const freshness = new Map<number, Freshness>(cached.open.map((row) => [row.number, { state: row.freshness.state, fetchedAt: row.freshness.fetchedAt }]))
@@ -258,7 +266,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       reports: reportMap,
       freshness: (number) => freshness.get(number) ?? { state: 'current', fetchedAt: iso(clock.now()) },
       refresh: (number) => rowRefreshes.get(prKey(settings.repo, number)) ?? null,
-      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack),
+      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack, queueing),
     })
     const rows = new Map<number, OpenRow>()
     for (const group of [...view.mine.groups, ...view.others.groups]) {
@@ -562,8 +570,10 @@ export const createPoller = (options: PollerOptions): Poller => {
     const previousReports = reports
     if (reportKeys.some(changed)) await rescan(after)
     // both sides come from the cache as it is now, so the difference is the config's alone
-    const previous = snapshot(before, previousReports)
-    const next = snapshot(after, reports)
+    const queueing = queueingNow()
+    const previous = snapshot(before, previousReports, sentQueueing)
+    const next = snapshot(after, reports, queueing)
+    sentQueueing = queueing
     const body: PatchBody = {
       rows: [...next.rows.values()].filter((row) => !same(row, previous.rows.get(row.number))),
       removed: [...previous.rows.keys()].filter((number) => !next.rows.has(number)),
@@ -596,8 +606,16 @@ export const createPoller = (options: PollerOptions): Poller => {
   const runChanged = (repo: string, number: number): void => {
     if (stopped) return
     const settings = config()
-    const row = settings.repo === repo ? snapshot(settings, reports).rows.get(number) : undefined
-    if (row !== undefined) patch({ rows: [row] })
+    const queueing = queueingNow()
+    const snap = settings.repo === repo ? snapshot(settings, reports, queueing) : undefined
+    const row = snap?.rows.get(number)
+    // a review starting or ending can fill or free the cap, which changes the review buttons of every row: they all go, in the same patch
+    if (snap !== undefined && !same(queueing, sentQueueing)) {
+      sentQueueing = queueing
+      patch({ rows: [...snap.rows.values()] })
+    } else if (row !== undefined) {
+      patch({ rows: [row] })
+    }
     // a watched run is looked up by id, so it counts even when its PR has left the open rows; once settled it is forgotten, which is what makes it fire at most once
     for (const [id, found] of watched) {
       if (found.repo !== repo || found.number !== number) continue
@@ -622,7 +640,9 @@ export const createPoller = (options: PollerOptions): Poller => {
     if (scanned === null) await rescan(config())
     // read and derive in one synchronous step, so version matches what the view holds
     const settings = config()
-    const snap = snapshot(settings, reports)
+    const queueing = queueingNow()
+    sentQueueing = queueing
+    const snap = snapshot(settings, reports, queueing)
     return {
       version,
       repo: settings.repo,

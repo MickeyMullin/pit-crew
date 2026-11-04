@@ -603,17 +603,26 @@ const postsFor = (command: string, args: readonly string[], viewer: string): Sta
   return { kind: 'review', text: `Posts its report to the PR as @${viewer}: an approval, a request for changes, or a comment, per the findings.` }
 }
 
+// the slot a review of this PR takes under the cap: a self-review for the viewer's own PR, otherwise a review
+export const slotOf = (pr: RawOpenPr, config: Config): ReviewSlot => isMine(pr, config) ? 'selfReview' : 'review'
+
+// what a button that starts a review says when the review would wait in the queue
+export const queueText = (text: string): string => `Queue ${text.charAt(0).toLowerCase()}${text.slice(1)}`
+
 const buttons: Readonly<Record<RunKind, string>> = { review: 'Review PR', reReview: 'Re-review PR', selfReview: 'Self-review' }
 
 // the starts a PR offers now; busy is whether a run for it is in flight
-export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null, busy: boolean): StartOption[] => {
+export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null, busy: boolean, queueing: Queueing | null = null): StartOption[] => {
   const plan = defaultRun(pr, config)
+  // a review's button says queue when a review of this PR would wait; a fix session is not a review and keeps its text
+  const waits = queueing !== null && queueing[slotOf(pr, config)]
+  const reviewButton = (text: string): string => waits ? queueText(text) : text
   const { repo, viewer } = config
   const unavailable = busy
     ? `a run for #${pr.number} is already in flight`
     : config.cloneDir === undefined ? `set cloneDir in the config to your local clone of ${config.repo} before starting a run` : null
   const options: StartOption[] = [{
-    kind: 'default', label: plan.label, button: buttons[plan.kind], command: plan.command, args: plan.args,
+    kind: 'default', label: plan.label, button: reviewButton(buttons[plan.kind]), command: plan.command, args: plan.args,
     runners: ['claude', 'codex'], posts: postsFor(plan.command, plan.args, viewer), repo, viewer, unavailable,
   }]
   if (notOffered('tandem', pr, config, stack) === null) {
@@ -621,13 +630,13 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
     const args = [String(pr.number), '--tandem', ...plan.args.slice(1)]
     const label = plan.kind === 'selfReview' ? 'Tandem self-review' : plan.kind === 'reReview' ? 'Tandem re-review' : 'Tandem review'
     options.push({
-      kind: 'tandem', label, button: `${buttons[plan.kind].replace(/ PR$/, '')} in tandem`, command: 'review-pr', args,
+      kind: 'tandem', label, button: reviewButton(`${buttons[plan.kind].replace(/ PR$/, '')} in tandem`), command: 'review-pr', args,
       runners: ['claude'], posts: postsFor('review-pr', args, viewer), repo, viewer, unavailable,
     })
   }
   if (notOffered('stack', pr, config, stack) === null) {
     options.push({
-      kind: 'stack', label: 'Review stack', button: 'Review stack', command: 'review-stack', args: [String(pr.number)],
+      kind: 'stack', label: 'Review stack', button: reviewButton('Review stack'), command: 'review-stack', args: [String(pr.number)],
       runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), repo, viewer, unavailable,
     })
   }
@@ -878,13 +887,14 @@ const recordedCommit = (run: Run): string | null => {
   return null
 }
 
-export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null): AgentCell => {
+export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null): AgentCell => {
   const mine = isMine(pr, config)
   const plan = defaultRun(pr, config)
-  const action: AgentAction = { ...plan, runner: config.agent.runner }
+  // the button's text; the run's own label is unchanged
+  const action: AgentAction = { ...plan, label: queueing !== null && reviewCommands.includes(plan.command) && queueing[slotOf(pr, config)] ? queueText(plan.label) : plan.label, runner: config.agent.runner }
   const lastReviewAt = mine ? report?.at ?? null : viewerReview(pr, config)?.submittedAt ?? null
   const idle: AgentCell = {
-    state: 'idle', label: plan.label, action, starts: startOptions(pr, config, stack, run?.status === 'running' || run?.status === 'queued'), lastReviewAt,
+    state: 'idle', label: plan.label, action, starts: startOptions(pr, config, stack, run?.status === 'running' || run?.status === 'queued', queueing), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
     finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null,
@@ -1233,6 +1243,9 @@ export const reviewCommands: readonly string[] = ['review-pr', 'review-dependabo
 // a review of the viewer's own PR is a self-review; a tandem review is one run, so it takes one slot like any review
 export type ReviewSlot = 'review' | 'selfReview'
 
+// whether a new review of each kind would wait in the queue now: the one answer the launcher's start acts on, and the Agent cell's and the drawer's buttons say
+export type Queueing = Record<ReviewSlot, boolean>
+
 // whether one more review may start beside those in flight: the reviews in flight, not counting one self-review while the setting lets one go over the cap, never number more than the cap
 export const reviewFits = (inFlight: readonly ReviewSlot[], next: ReviewSlot, cap: number, selfReviewOverCap: boolean): boolean => {
   const after = [...inFlight, next]
@@ -1291,6 +1304,8 @@ export type Launcher<T extends Session = Run> = {
   check: () => Promise<void>
   // resolves once the run has settled
   settled: (id: number) => Promise<T>
+  // whether a new review of each kind would wait in the queue now, by the rule a start acts on
+  queueing: () => Queueing
   // stops watching; runs keep going
   close: () => void
 }
@@ -1425,7 +1440,7 @@ export const runStore = (cache: Cache): SessionStore<Run> => ({
   slot: (target, config) => {
     if (!reviewCommands.includes(target.command)) return null
     const pr = cache.readView(target.repo).open.find((entry) => entry.number === target.number)?.pr
-    return pr !== undefined && isMine(pr, config) ? 'selfReview' : 'review'
+    return pr !== undefined ? slotOf(pr, config) : 'review'
   },
   queued: cache.queuedRuns,
 })
@@ -1646,6 +1661,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const reviewsInFlight = (): ReviewSlot[] => [...admitting.values(), ...[...live.values()].flatMap((entry) => entry.slot === null ? [] : [entry.slot])]
 
   const fits = (slot: ReviewSlot, config: Config): boolean => reviewFits(reviewsInFlight(), slot, config.maxConcurrentReviews, config.selfReviewOverCap)
+
+  // whether a new review of this kind waits: with a review ahead of it in the queue or still being launched, or without room under the cap. A start acts on this and nothing else, and the page's buttons say it
+  const waits = (slot: ReviewSlot, config: Config): boolean => queue.length > 0 || opening > 0 || !fits(slot, config)
+
+  const queueing = (): Queueing => {
+    const config = options.config()
+    return { review: waits('review', config), selfReview: waits('selfReview', config) }
+  }
 
   // a queued review's fit counts every review in flight and the slots held for reviews ahead of it in line, never its own or one behind it, so when a lowered cap leaves too many slots held it is always a later review that gives its slot back
   const fitsInLine = (item: Queued, slot: ReviewSlot, config: Config): boolean => {
@@ -2154,7 +2177,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       // whatever already waits and fits goes first
       admit()
       // a new review starts at once only as the sole eligible start: with room, and with no review ahead of it waiting in the queue or still being launched
-      if (queue.length > 0 || opening > 0 || !fits(slot, current)) {
+      if (waits(slot, current)) {
         const queued = enqueue(request, config, request.cwd ?? cloneDir)
         // a save during the checks may have left it confirmed for a repository or a viewer no longer in effect
         admit()
@@ -2403,5 +2426,5 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     for (const entry of live.values()) clear(entry)
   }
 
-  return { start, stop, reread, recover, drain: admit, check: checkAll, settled, close }
+  return { start, stop, reread, recover, drain: admit, check: checkAll, settled, queueing, close }
 }

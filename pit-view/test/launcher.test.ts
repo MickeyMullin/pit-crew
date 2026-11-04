@@ -3399,3 +3399,133 @@ test('the done text adds the finished-by-hand note only to a done run, and a run
   assert.equal(doneText({ status: 'failed', result: clean, note: 'ghFailed', resolvedByHand: true }, false), 'Failed')
   assert.equal(doneText({ status: 'needsInput', result: clean, note: null, resolvedByHand: true }, false), 'Needs your answer')
 })
+
+// the review button says when the review would wait (section 8 of DESIGN.md, Agent cell)
+
+const roomFor = { review: false, selfReview: false }
+const noRoom = { review: true, selfReview: true }
+
+test('the default button reads as before with room, and says queue at the cap; a self-review the overage admits keeps the plain label', async () => {
+  const config = baseConfig()
+  const labels = async (number: number, queueing: { review: boolean, selfReview: boolean } | null) => {
+    const cell = agentCell(await prOf(number), config, undefined, undefined, null, queueing)
+    return [cell.action.label, cell.label, cell.starts[0]!.button, cell.starts[0]!.label]
+  }
+  assert.deepEqual(await labels(106, roomFor), ['Re-review', 'Re-review', 'Re-review PR', 'Re-review'])
+  assert.deepEqual(await labels(106, null), ['Re-review', 'Re-review', 'Re-review PR', 'Re-review'])
+  // the run's own label does not change, only the text of the buttons that start it
+  assert.deepEqual(await labels(106, noRoom), ['Queue re-review', 'Re-review', 'Queue re-review PR', 'Re-review'])
+  assert.deepEqual(await labels(101, noRoom), ['Queue self-review', 'Self-review', 'Queue self-review', 'Self-review'])
+  // a self-review the setting lets in starts at once, so its plain label stays while a review of another's PR queues
+  assert.deepEqual(await labels(101, { review: true, selfReview: false }), ['Self-review', 'Self-review', 'Self-review', 'Self-review'])
+  assert.deepEqual(await labels(106, { review: true, selfReview: false }), ['Queue re-review', 'Re-review', 'Queue re-review PR', 'Re-review'])
+})
+
+test('the tandem and stack buttons say queue at the cap, and the fix button never does', async () => {
+  const config = baseConfig()
+  const mine = agentCell(await prOf(101), config, undefined, undefined, null, noRoom)
+  const buttons = (cell: ReturnType<typeof agentCell>) => Object.fromEntries(cell.starts.map((option) => [option.kind, option.button]))
+  assert.equal(buttons(mine).tandem, 'Queue self-review in tandem')
+  assert.equal(buttons(mine).fix, 'Fix requested changes')
+  const stacked = agentCell(await prOf(106), config, undefined, undefined, { position: 2, size: 3 }, noRoom)
+  assert.equal(buttons(stacked).stack, 'Queue review stack')
+  assert.equal(buttons(stacked).tandem, 'Queue re-review in tandem')
+})
+
+test('the launcher answers what a new review would do the way a start does, with room, at the cap, and with the overage', async () => {
+  for (const over of [false, true]) {
+    const h = await harness({ config: { maxConcurrentReviews: 1, selfReviewOverCap: over } })
+    try {
+      h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+      assert.deepEqual(h.launcher.queueing(), roomFor)
+      // at the cap: the answer is what the next start does
+      const running = await h.launcher.start(request(106))
+      assert.equal(running.status, 'running')
+      assert.deepEqual(h.launcher.queueing(), { review: true, selfReview: !over })
+      const self = await h.launcher.start(selfRequest(101))
+      assert.equal(self.status, over ? 'running' : 'queued', `self-review with overage ${over}`)
+      const other = await h.launcher.start(request(113, { label: 'Review' }))
+      assert.equal(other.status, 'queued')
+      // a review waiting in the queue holds everything behind it, whatever the count
+      assert.deepEqual(h.launcher.queueing().review, true)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('the launcher\'s answer follows a review finishing and a saved cap', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    assert.deepEqual(h.launcher.queueing(), noRoom)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 2 }
+    assert.deepEqual(h.launcher.queueing(), roomFor)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    assert.deepEqual(h.launcher.queueing(), noRoom)
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    assert.deepEqual(h.launcher.queueing(), roomFor)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('every open row\'s buttons follow the cap as reviews start and finish and as the cap is saved, in the patches', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 2 } })
+  const patches: Patch[] = []
+  let launcher: ReturnType<typeof h.make> | null = null
+  const poller = createPoller({
+    cache: h.cache,
+    gh: createGh(h.gh.runner),
+    clock: h.time.clock,
+    timers: h.time.timers,
+    config: () => h.settings.current,
+    home: '/nonexistent/pit-view-test-home',
+    timeZone: scenario.timeZone,
+    emit: (patch) => patches.push(patch),
+    pageSize: scenario.pageSize,
+    queueing: () => launcher!.queueing(),
+  })
+  launcher = h.make((run) => poller.runChanged(run.repo, run.number))
+  const buttonOf = async (number: number): Promise<string | undefined> => {
+    const row = (await poller.view()).others.groups.flatMap((group) => group.rows).find((entry) => entry.number === number)
+    return row?.agent?.action.label
+  }
+  const latest = (number: number): string | undefined => {
+    for (const patch of [...patches].reverse()) {
+      const row = patch.rows.find((entry: OpenRow) => entry.number === number)
+      if (row !== undefined) return row.agent?.action.label
+    }
+    return undefined
+  }
+  try {
+    poller.refresh('manual')
+    await poller.idle()
+    assert.equal(await buttonOf(113), 'Review')
+    const first = await launcher.start(request(106))
+    // one of two: room remains, so no other row's patch is needed
+    assert.equal(await buttonOf(113), 'Review')
+    await launcher.start(request(118, { label: 'Review' }))
+    // at the cap: the patch that announced the second review carries the other rows with the queue wording
+    assert.equal(latest(113), 'Queue review')
+    assert.equal(await buttonOf(113), 'Queue review')
+    // the cap saved higher: the same rows go back, with no reload
+    const before = h.settings.current
+    h.settings.current = { ...before, maxConcurrentReviews: 3 }
+    await poller.configChanged(before)
+    assert.equal(latest(113), 'Review')
+    const lowered = h.settings.current
+    h.settings.current = { ...lowered, maxConcurrentReviews: 2 }
+    await poller.configChanged(lowered)
+    assert.equal(latest(113), 'Queue review')
+    // a review finishing frees a slot
+    h.launch.children[0]!.exit(1)
+    await launcher.settled(first.id)
+    assert.equal(latest(113), 'Review')
+  } finally {
+    launcher.close()
+    poller.stop()
+    await h.cleanup()
+  }
+})

@@ -21,7 +21,7 @@ import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner } from './github.ts'
 import { deriveStacks, latestReviewsOf } from './derive.ts'
 import { createLauncher, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest } from './launcher.ts'
-import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Spawn, StartKind } from './launcher.ts'
+import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Queueing, Spawn, StartKind } from './launcher.ts'
 import { renderMarkdown } from './markdown.ts'
 import { createNotifier, noDeliver, systemDeliver, systemExec } from './notify.ts'
 import type { Deliver } from './notify.ts'
@@ -338,9 +338,12 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   const notifier = createNotifier({ config: effective, deliver: options.deliver ?? noDeliver, log })
   // the sweeps' own memory state, beside the runs: read from the cache here, then kept current by the sweep launcher's changes (recovery included)
   const sweeps = createSweepMemory(cache)
+  // the launcher is made below, from the poller's own callbacks; the poller asks it only once running
+  let queueing: (() => Queueing) | null = null
   const poller = createPoller({
     cache,
     sweeps,
+    queueing: () => queueing?.() ?? { review: false, selfReview: false },
     notify: notifier.send,
     gh,
     clock,
@@ -387,6 +390,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     watchedPollMs: options.launch.watchedPollMs,
     stopGraceMs: options.launch.stopGraceMs,
   })
+  queueing = launcher.queueing
   // runs that outlived the last server: watched again, or settled; local only, no GitHub call
   try {
     await launcher.recover()
