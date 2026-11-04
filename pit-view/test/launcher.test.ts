@@ -17,6 +17,7 @@ import {
 } from '../src/launcher.ts'
 import type { LaunchSpec, RunResultJson, StartRequest, StepEvent } from '../src/launcher.ts'
 import { createPoller } from '../src/poller.ts'
+import { scanReports } from '../src/reports.ts'
 import type { Patch } from '../src/poller.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { fakeLaunch, fakeRemotes, fakeRunner, fakeTime, fixCommits, fixHead, fixPushedHead, fixRequest, fixResult, fixtureRunner, ok, openPage1, openPage2, reviewResult, tempDir, updateHead, updateResult } from './helpers.ts'
@@ -2759,7 +2760,7 @@ test('a run\'s start, steps and settling each patch its row, with consecutive ve
     emit: (patch) => patches.push(patch),
     pageSize: scenario.pageSize,
   })
-  const launcher = h.make((run) => poller.runChanged(run.repo, run.number))
+  const launcher = h.make((run) => poller.runChanged(run.repo, run.number), () => poller.queueingChanged())
   try {
     poller.refresh('manual')
     await poller.idle()
@@ -2768,30 +2769,35 @@ test('a run\'s start, steps and settling each patch its row, with consecutive ve
     assert.equal(before.agent?.label, 'Re-review')
     const from = patches.length
     const run = await launcher.start(request())
+    await launcher.flushed()
     const child = h.launch.children[0]!
     await child.events(step('resolveBase', 'started', '2026-10-26T14:06:00Z'))
     await launcher.check()
+    await launcher.flushed()
     await h.report(106)
     await child.result(reviewResult({ reviewed: { kind: 'commit', sha: (await prOf(106)).headRefOid } }))
     const settled = launcher.settled(run.id)
     child.exit(0)
     await settled
+    await launcher.flushed()
     const runPatches = patches.slice(from)
-    assert.deepEqual(runPatches.map((patch) => patch.version), [from + 1, from + 2, from + 3])
+    // the launcher's announcements coalesce per turn, so the number of patches is not the number of changes; the versions stay consecutive
+    assert.deepEqual(runPatches.map((patch) => patch.version), runPatches.map((_, index) => from + 1 + index))
     const cells = runPatches.map((patch) => {
       // every run change sends every open row, since it may move the queue answer
       assert.equal(patch.rows.filter((row: OpenRow) => row.number === 106).length, 1)
       assert.equal(patch.tiles, undefined)
       return patch.rows.find((row: OpenRow) => row.number === 106)!.agent!
     })
-    assert.deepEqual(cells.map((cell) => [cell.state, cell.step?.name ?? null, cell.text]), [
+    const states = cells.map((cell) => [cell.state, cell.step?.name ?? null, cell.text]).filter((cell, index, all) => index === 0 || JSON.stringify(cell) !== JSON.stringify(all[index - 1]))
+    assert.deepEqual(states, [
       ['running', null, null], ['running', 'resolveBase', null], ['done', 'resolveBase', 'Changes requested'],
     ])
     assert.equal(cells[0]!.runId, run.id)
-    assert.equal(cells[2]!.finishedAt, '2026-10-26T14:05:38Z')
-    // a run in another repo counts against the one cap, so it sends this repository's rows, none of them a run row of its own
+    assert.equal(cells.at(-1)!.finishedAt, '2026-10-26T14:05:38Z')
+    // a run in another repo sends no rows of its own: the launcher's one announcement does, since it counts against the one cap
     poller.runChanged('octo-example/other', 106)
-    assert.equal(patches.length, from + 4)
+    assert.equal(patches.length, from + runPatches.length)
   } finally {
     launcher.close()
     poller.stop()
@@ -3489,7 +3495,7 @@ test('every open row\'s buttons follow the cap as reviews start and finish and a
     pageSize: scenario.pageSize,
     queueing: () => launcher!.queueing(),
   })
-  launcher = h.make((run) => poller.runChanged(run.repo, run.number))
+  launcher = h.make((run) => poller.runChanged(run.repo, run.number), () => poller.queueingChanged())
   const buttonOf = async (number: number): Promise<string | undefined> => {
     const row = (await poller.view()).others.groups.flatMap((group) => group.rows).find((entry) => entry.number === number)
     return row?.agent?.action.label
@@ -3509,6 +3515,7 @@ test('every open row\'s buttons follow the cap as reviews start and finish and a
     // one of two: room remains, so no other row's patch is needed
     assert.equal(await buttonOf(113), 'Review')
     await launcher.start(request(118, { label: 'Review' }))
+    await launcher.flushed()
     // at the cap: the patch that announced the second review carries the other rows with the queue wording
     assert.equal(latest(113), 'Queue review')
     assert.equal(await buttonOf(113), 'Queue review')
@@ -3516,6 +3523,7 @@ test('every open row\'s buttons follow the cap as reviews start and finish and a
     const before = h.settings.current
     h.settings.current = { ...before, maxConcurrentReviews: 3 }
     await poller.configChanged(before)
+    await launcher.flushed()
     assert.equal(latest(113), 'Review')
     const lowered = h.settings.current
     h.settings.current = { ...lowered, maxConcurrentReviews: 2 }
@@ -3524,6 +3532,7 @@ test('every open row\'s buttons follow the cap as reviews start and finish and a
     // a review finishing frees a slot
     h.launch.children[0]!.exit(1)
     await launcher.settled(first.id)
+    await launcher.flushed()
     assert.equal(latest(113), 'Review')
   } finally {
     launcher.close()
@@ -3548,7 +3557,7 @@ test('a page loaded while a config save is rescanning does not stop the open pag
     pageSize: scenario.pageSize,
     queueing: () => launcher!.queueing(),
   })
-  launcher = h.make((run) => poller.runChanged(run.repo, run.number))
+  launcher = h.make((run) => poller.runChanged(run.repo, run.number), () => poller.queueingChanged())
   const latest = (number: number): string | undefined => {
     for (const patch of [...patches].reverse()) {
       const row = patch.rows.find((entry: OpenRow) => entry.number === number)
@@ -3562,6 +3571,7 @@ test('a page loaded while a config save is rescanning does not stop the open pag
     await poller.view()
     await launcher.start(request(106))
     await launcher.start(request(118, { label: 'Review' }))
+    await launcher.flushed()
     // the open pages hold the queue wording
     assert.equal(latest(113), 'Queue review')
     // a save that raises the cap and moves the reports directory yields during the rescan
@@ -3582,8 +3592,10 @@ test('a page loaded while a config save is rescanning does not stop the open pag
 })
 
 // pages as the browser keeps them: the view it loaded, then every later patch applied in order
-const pageRig = async (config: Partial<Config>) => {
+const pageRig = async (config: Partial<Config>, fails: (id: number, changes: RunChanges) => boolean = () => false) => {
   const h = await harness({ config })
+  // while set, every read of the reports folder waits for it, so a test decides when a config save's rescan finishes
+  const gate: { hold: Promise<void> | null } = { hold: null }
   const patches: Patch[] = []
   let launcher: ReturnType<typeof h.make> | null = null
   const poller = createPoller({
@@ -3597,8 +3609,19 @@ const pageRig = async (config: Partial<Config>) => {
     emit: (patch) => patches.push(patch),
     pageSize: scenario.pageSize,
     queueing: () => launcher!.queueing(),
+    scan: async (dir, targets) => {
+      if (gate.hold !== null) await gate.hold
+      return scanReports(dir, targets)
+    },
   })
+  // writes to the runs the test names throw, as an unwritable database's would; the store reads updateRun when the launcher is made
+  const updateRun = h.cache.updateRun
+  h.cache.updateRun = (id, changes) => {
+    if (fails(id, changes)) throw new Error('attempt to write a readonly database')
+    return updateRun(id, changes)
+  }
   launcher = h.make((run) => poller.runChanged(run.repo, run.number), () => poller.queueingChanged())
+  h.cache.updateRun = updateRun
   const labelsOf = (view: { mine: { groups: { rows: OpenRow[] }[] }, others: { groups: { rows: OpenRow[] }[] } }): Map<number, string | undefined> =>
     new Map([...view.mine.groups, ...view.others.groups].flatMap((group) => group.rows).map((row) => [row.number, row.agent?.action.label]))
   const load = async () => {
@@ -3616,7 +3639,7 @@ const pageRig = async (config: Partial<Config>) => {
       },
     }
   }
-  return { h, patches, poller, launcher: launcher, load, labelsOf }
+  return { h, patches, poller, launcher: launcher, load, labelsOf, gate }
 }
 
 test('a cap saved with a new reports directory, a page loaded during the rescan, and a third review before the save resumes leave every page with the queue wording', async () => {
@@ -3627,15 +3650,28 @@ test('a cap saved with a new reports directory, a page loaded during the rescan,
     const open = await r.load()
     await r.launcher.start(request(106))
     await r.launcher.start(request(118, { label: 'Review' }))
+    await r.launcher.flushed()
     assert.equal(open.labels().get(113), 'Queue review')
     const before = r.h.settings.current
     r.h.settings.current = { ...before, maxConcurrentReviews: 3, reportsDir: join(r.h.home, 'other-reports') }
-    const saving = r.poller.configChanged(before)
+    // the save's rescan waits on a promise this test resolves, so the order below is the order that happens
+    let release: () => void = () => {}
+    r.gate.hold = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let saved = false
+    const saving = r.poller.configChanged(before).then(() => {
+      saved = true
+    })
     const mid = await r.load()
     assert.equal(mid.labels().get(113), 'Review')
-    // a third review fills the raised cap before the save resumes
+    // a third review fills the raised cap while the save is still waiting on its rescan
     await r.launcher.start(request(113, { label: 'Review' }))
+    assert.equal(saved, false, 'the third review started before the save resumed')
+    release()
     await saving
+    assert.equal(saved, true)
+    await r.launcher.flushed()
     assert.equal(r.launcher.queueing().review, true)
     const fresh = r.labelsOf(await r.poller.view())
     for (const page of [open, mid]) {
@@ -3689,6 +3725,7 @@ test('after any sequence of review starts, endings, cap saves that yield, and pa
       await Promise.all(saves)
       await r.poller.idle()
       for (let spin = 0; spin < 5; spin++) await new Promise((resolve) => setImmediate(resolve))
+      await r.launcher.flushed()
       const fresh = r.labelsOf(await r.poller.view())
       for (const [index, page] of pages.entries()) {
         for (const [number, label] of fresh) assert.equal(page.labels().get(number), label, `seed ${seed} page ${index} row ${number}`)
@@ -3730,6 +3767,7 @@ test('the buttons settle once a review has finished launching, though the review
     await poller.idle()
     await launcher.start(request(106))
     await launcher.start(request(118, { label: 'Review' }))
+    await launcher.flushed()
     // two of three are running and none is being launched: the answer is room, and the pages were told so
     assert.deepEqual(launcher.queueing(), roomFor)
     assert.equal(latest(113), 'Review')
@@ -3740,7 +3778,7 @@ test('the buttons settle once a review has finished launching, though the review
   }
 })
 
-test('a run in another repository that fills or frees the cap patches the rows of the repository on show', async () => {
+test('a change of the queue answer, whichever repository the run is in, patches the rows of the repository on show', async () => {
   const h = await harness()
   const patches: Patch[] = []
   let answer = roomFor
@@ -3768,10 +3806,10 @@ test('a run in another repository that fills or frees the cap patches the rows o
     await poller.idle()
     await poller.view()
     answer = noRoom
-    poller.runChanged('octo-example/other', 5)
+    poller.queueingChanged()
     assert.equal(latest(113), 'Queue review')
     answer = roomFor
-    poller.runChanged('octo-example/other', 5)
+    poller.queueingChanged()
     assert.equal(latest(113), 'Review')
   } finally {
     poller.stop()
@@ -3786,14 +3824,108 @@ test('the launcher announces whenever the answer may have changed, whatever move
   launcher = h.make(undefined, () => announced.push(launcher!.queueing()))
   try {
     const first = await launcher.start(request(106))
+    await launcher.flushed()
     assert.deepEqual(announced.at(-1), noRoom)
     const before = announced.length
     h.launch.children[0]!.exit(1)
     await launcher.settled(first.id)
+    await launcher.flushed()
     assert.deepEqual(announced.at(-1), roomFor)
     assert.ok(announced.length > before)
   } finally {
     launcher.close()
     await h.cleanup()
+  }
+})
+
+test('a blocked queue read again and again sends no more patches however long it is, and an ordinary run change sends one', async () => {
+  const sent: number[] = []
+  for (const queued of [2, 12]) {
+    const r = await pageRig({ maxConcurrentReviews: 1 })
+    try {
+      r.poller.refresh('manual')
+      await r.poller.idle()
+      await r.load()
+      await r.launcher.start(request(106))
+      for (let index = 0; index < queued; index++) {
+        const waiting = await r.launcher.start(request(200 + index, { label: 'Review' }))
+        assert.equal(waiting.status, 'queued')
+      }
+      await r.launcher.flushed()
+      // five readings of a queue that stays blocked, with nothing awaited between them
+      const from = r.patches.length
+      for (let reading = 0; reading < 5; reading++) r.launcher.drain()
+      await r.launcher.flushed()
+      const reread = r.patches.length - from
+      assert.ok(reread <= 1, `${queued} queued: ${reread} patches for five readings`)
+      sent.push(reread)
+      // a step of the running review is one run change: one patch, with every open row
+      const child = r.h.launch.children[0]!
+      await child.events(step('resolveBase', 'started', '2026-10-26T14:06:00Z'))
+      const beforeStep = r.patches.length
+      await r.launcher.check()
+      await r.launcher.flushed()
+      assert.equal(r.patches.length - beforeStep, 1, `${queued} queued: patches for one step`)
+      assert.ok(r.patches.at(-1)!.rows.length > 0)
+    } finally {
+      r.launcher.close()
+      r.poller.stop()
+      await r.h.cleanup()
+    }
+  }
+  assert.equal(sent[0], sent[1], 'the patches do not grow with the length of the queue')
+})
+
+test('a burst of changes in one turn is announced once, and a blocked queue marks nothing', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  let announced = 0
+  const launcher = h.make(undefined, () => {
+    announced += 1
+  })
+  try {
+    await launcher.start(request(106))
+    for (let index = 0; index < 6; index++) await launcher.start(request(200 + index, { label: 'Review' }))
+    await launcher.flushed()
+    const before = announced
+    for (let reading = 0; reading < 5; reading++) launcher.drain()
+    await launcher.flushed()
+    assert.equal(announced, before, 'readings that change nothing announce nothing')
+    // finishing the review releases the slot, starts the next, and moves the queue: many marks, one announcement per turn
+    h.launch.children[0]!.exit(1)
+    await launcher.settled(1)
+    await launcher.flushed()
+    assert.ok(announced > before)
+    const after = announced
+    await launcher.flushed()
+    assert.equal(announced, after)
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a review whose two settlement writes both fail still frees its slot, and the open pages get the plain label with no other event', async () => {
+  let broken = false
+  const r = await pageRig({ maxConcurrentReviews: 1 }, (_, changes) => broken && changes.status !== undefined && changes.status !== 'running')
+  try {
+    r.poller.refresh('manual')
+    await r.poller.idle()
+    const open = await r.load()
+    const running = await r.launcher.start(request(106))
+    await r.launcher.flushed()
+    assert.equal(open.labels().get(113), 'Queue review')
+    broken = true
+    r.h.launch.children[0]!.exit(1)
+    const ended = await within(r.launcher.settled(running.id))
+    // its row could not be written, so it still reads running, while the launcher has released its slot
+    assert.equal(r.h.cache.getRun(running.id)?.status, 'running')
+    assert.deepEqual(r.launcher.queueing(), roomFor)
+    await r.launcher.flushed()
+    assert.equal(ended.id, running.id)
+    assert.equal(open.labels().get(113), 'Review')
+  } finally {
+    r.launcher.close()
+    r.poller.stop()
+    await r.h.cleanup()
   }
 })

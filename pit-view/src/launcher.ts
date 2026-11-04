@@ -1289,6 +1289,28 @@ export const updateRequest = (repo: string, number: number, headSha: string, act
   repo, number, command: 'update-pr', args: [String(number), `--head=${headSha}`], label: updateLabels[action], runner: 'claude',
 })
 
+// a map of what holds a slot that tells whoever owns it each time an entry is taken or released, so no path can change the cap's accounting silently
+class Moving<V> extends Map<number, V> {
+  readonly #moved: () => void
+
+  constructor(moved: () => void) {
+    super()
+    this.#moved = moved
+  }
+
+  override set(key: number, value: V): this {
+    super.set(key, value)
+    this.#moved()
+    return this
+  }
+
+  override delete(key: number): boolean {
+    const had = super.delete(key)
+    if (had) this.#moved()
+    return had
+  }
+}
+
 export type Launcher<T extends Session = Run> = {
   // identity, clone and one-per-PR checks, then the run directory, request.json and the spawn
   start: (request: StartRequest) => Promise<T>
@@ -1306,6 +1328,8 @@ export type Launcher<T extends Session = Run> = {
   settled: (id: number) => Promise<T>
   // whether a new review of each kind would wait in the queue now, by the rule a start acts on
   queueing: () => Queueing
+  // resolves once the pending announcement of the queue answer, if any, has been made; a test awaits it instead of sleeping
+  flushed: () => Promise<void>
   // stops watching; runs keep going
   close: () => void
 }
@@ -1485,7 +1509,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const watchedPollMs = options.watchedPollMs ?? 10_000
   const stopGraceMs = options.stopGraceMs ?? 10_000
   const runsDir = resolve(options.stateDir, store.folder)
-  const live = new Map<number, Live>()
+  // every place the cap's accounting moves is one of these three, so no path can take or release a slot without marking: the watched runs, the slots held for launches in progress, and (through lineAdd, lineRemove, and opened below) the queue and the count of launches in progress
+  const live = new Moving<Live>(() => mark())
   const waiters = new Map<number, ((run: T) => void)[]>()
   // runs between their running row and their watch, each with whether a stop was asked meanwhile; the stop is carried out once the process is watched
   const launching = new Map<number, boolean>()
@@ -1495,7 +1520,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   type Queued = { id: number, run: T, request: StartRequest, viewer: string, attempt: number | null, checked: string | null }
   const queue: Queued[] = []
   // slots given to reviews whose process is not watched here yet, each held by an attempt of its own, so two quick starts never both take the last slot and an attempt that ends releases only its own
-  const admitting = new Map<number, ReviewSlot>()
+  const admitting = new Moving<ReviewSlot>(() => mark())
   let attempts = 0
   // reviews being launched, new or from the queue, whose launch has not returned yet; none that arrived behind them starts until it has, so reviews spawn in the order they arrived
   let opening = 0
@@ -1514,17 +1539,46 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     } catch (error) {
       log(`${noun} ${run.id}: cannot announce its change: ${messageOf(error)}`)
     }
-    answered()
+    mark()
   }
 
-  // something that can change the queue answer happened: the running count, the queue, or the launches in progress moved; it remembers nothing of what any page received, and whoever listens reads the answer itself
-  const answered = (): void => {
-    if (closed || options.onQueueing === undefined) return
-    try {
-      options.onQueueing()
-    } catch (error) {
-      log(`${noun}: cannot announce the queue answer: ${messageOf(error)}`)
+  // the queue answer may have changed: the running count, the queue, or the launches in progress moved, or a run changed. It only marks; one flush on a later turn of the event loop tells the listener, however many marks came before it, and the listener reads the answer itself, so nothing here remembers what any page received
+  let flushHandle: ReturnType<typeof setImmediate> | null = null
+  let flushWaiters: (() => void)[] = []
+  const flush = (): void => {
+    flushHandle = null
+    if (!closed && options.onQueueing !== undefined) {
+      try {
+        options.onQueueing()
+      } catch (error) {
+        log(`${noun}: cannot announce the queue answer: ${messageOf(error)}`)
+      }
     }
+    const waiting = flushWaiters
+    flushWaiters = []
+    for (const resume of waiting) resume()
+  }
+  const mark = (): void => {
+    if (closed || options.onQueueing === undefined || flushHandle !== null) return
+    flushHandle = setImmediate(flush)
+  }
+  // resolves once the flush that is pending, if any, has run
+  const flushed = (): Promise<void> => flushHandle === null ? Promise.resolve() : new Promise((resumeFlush) => flushWaiters.push(resumeFlush))
+
+  // the queue and the count of launches in progress change only through these, so each marks
+  const lineAdd = (item: Queued): void => {
+    queue.push(item)
+    mark()
+  }
+  const lineRemove = (item: Queued): void => {
+    const at = queue.indexOf(item)
+    if (at < 0) return
+    queue.splice(at, 1)
+    mark()
+  }
+  const opened = (by: number): void => {
+    opening += by
+    mark()
   }
 
   // the page is told a run is watched here; as for a change, a listener that throws is only logged
@@ -1744,15 +1798,12 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (item.attempt !== null) admitting.delete(item.attempt)
     item.attempt = null
     item.checked = null
-    answered()
   }
 
   // takes a review out of the queue, and releases the slot an attempt to start it held
   const dequeue = (item: Queued): void => {
-    const at = queue.indexOf(item)
-    if (at >= 0) queue.splice(at, 1)
+    lineRemove(item)
     giveBack(item)
-    answered()
   }
 
   // a review that does not fit holds the line, however long that lasts, so none behind it keeps a slot or waits on checks passed long ago
@@ -1862,8 +1913,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       failInQueue(item, `spawnFailed: ${messageOf(error)}`)
       return
     }
-    queue.splice(queue.indexOf(item), 1)
-    opening += 1
+    lineRemove(item)
+    opened(1)
     void launchQueued(item, run, config, cwd, { slot, attempt, viewer: item.viewer })
   }
 
@@ -1874,9 +1925,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     } catch (error) {
       log(`${noun} ${item.id}: cannot start from the queue: ${messageOf(error)}`)
     } finally {
-      opening -= 1
+      opened(-1)
       admitting.delete(admitted.attempt)
-      answered()
       // the queue is read again however the start went: the next in line may start now, one that ended at once hands its slot on, and a run that settled before its start returned was still counted here when it settled
       admit()
     }
@@ -2200,14 +2250,13 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         return store.get(queued.id) ?? queued
       }
       const attempt = reserve(slot)
-      opening += 1
+      opened(1)
       turn?.decided()
       try {
         return await launch(request, config, request.cwd ?? cloneDir, null, { slot, attempt, viewer: config.viewer })
       } finally {
-        opening -= 1
+        opened(-1)
         admitting.delete(attempt)
-        answered()
         // as for a queued start: the slot is never left counted for a run that is no longer in flight
         admit()
       }
@@ -2220,7 +2269,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   // at the cap, or behind a review that arrived before it: the review gets its row, queued, and starts when its turn comes and a slot is free
   const enqueue = (request: StartRequest, config: Config, cwd: string): T => {
     const run = newRow(request, config, cwd, 'queued')
-    queue.push({ id: run.id, run, request, viewer: config.viewer, attempt: null, checked: null })
+    lineAdd({ id: run.id, run, request, viewer: config.viewer, attempt: null, checked: null })
     watching(run)
     log(`${noun} ${run.id} queued: ${run.command} ${run.args.join(' ')}, ${reviewsInFlight().length} reviews in flight with a cap of ${config.maxConcurrentReviews}`)
     changed(run)
@@ -2440,8 +2489,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   const close = (): void => {
     closed = true
+    if (flushHandle !== null) clearImmediate(flushHandle)
+    flushHandle = null
+    flush()
     for (const entry of live.values()) clear(entry)
   }
 
-  return { start, stop, reread, recover, drain: admit, check: checkAll, settled, queueing, close }
+  return { start, stop, reread, recover, drain: admit, check: checkAll, settled, queueing, flushed, close }
 }

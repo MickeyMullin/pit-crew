@@ -141,6 +141,8 @@ export type PollerOptions = {
   notify?: (events: NotifyEvent[]) => void
   // whether a new review of each kind would wait in the queue now, read from the launcher that decides it; the review buttons in the Agent cells say so. None when left out
   queueing?: () => Queueing
+  // reads the reports folder; the real scan when left out, and a test holds it open to pin the order of events around a config save
+  scan?: typeof scanReports
 }
 
 // thrown from the page callback to stop pagination once the cycle has failed
@@ -174,6 +176,7 @@ const capKeys = ['maxConcurrentReviews', 'selfReviewOverCap'] as const
 
 export const createPoller = (options: PollerOptions): Poller => {
   const { cache, gh, clock, timers, home, timeZone, emit } = options
+  const scan = options.scan ?? scanReports
   const config = options.config
   const log = options.log ?? (() => {})
   const activeFloorMs = options.activeFloorMs ?? 30_000
@@ -213,7 +216,7 @@ export const createPoller = (options: PollerOptions): Poller => {
   const rescan = async (settings: Config): Promise<void> => {
     const targets = ownTargets(cache.readView(settings.repo).open.map((row) => row.pr), settings)
     try {
-      reports = await scanReports(reportsDir(settings), targets)
+      reports = await scan(reportsDir(settings), targets)
       scanned = new Map(targets.map((target) => [target.number, target.headRefName]))
     } catch (error) {
       log(`reports: cannot scan ${settings.reportsDir}: ${messageOf(error)}`)
@@ -228,7 +231,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     const targets = ownTargets(prs, settings).filter((target) => force || known.get(target.number) !== target.headRefName)
     if (targets.length === 0) return
     try {
-      const found = await scanReports(reportsDir(settings), targets)
+      const found = await scan(reportsDir(settings), targets)
       for (const target of targets) {
         known.set(target.number, target.headRefName)
         const report = found.get(target.number)
@@ -615,11 +618,7 @@ export const createPoller = (options: PollerOptions): Poller => {
 
   const runChanged = (repo: string, number: number): void => {
     if (stopped) return
-    const settings = config()
-    // a run in any repository counts against the one cap, so every run change sends every open row of the repository on show, whichever repository the run is in
-    const snap = snapshot(settings, reports, queueingNow())
-    patch({ rows: [...snap.rows.values()] })
-    const row = settings.repo === repo ? snap.rows.get(number) : undefined
+    // the rows go out with the launcher's one coalesced announcement (queueingChanged), which every run change marks, so this sends none and derives only for a notification
     // a watched run is looked up by id, so it counts even when its PR has left the open rows; once settled it is forgotten, which is what makes it fire at most once
     for (const [id, found] of watched) {
       if (found.repo !== repo || found.number !== number) continue
@@ -629,6 +628,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       watched.delete(id)
       // the repository in effect is the run's own, decided here and not by any scan in flight
       if (run === null || config().repo !== repo) continue
+      const row = snapshot(config(), reports, queueingNow()).rows.get(number)
       const event = runEvent(repo, { number, title: row?.title ?? null }, run.status)
       if (event !== null) notify([event])
     }
