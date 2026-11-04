@@ -20,6 +20,8 @@ What to read:
 
 Do this right after the calling prompt's prior-report read, before the review proper. With `--emit-json` it is part of the `review` step and has no step of its own. Read every page of all three. Every call here is a read: `gh api graphql` carries a `query` only, never a `mutation`, and no other `gh` command is part of this check. Use the PR's `<owner>`, `<repo>`, and `<number>`. If no PR exists for the branch, there is nothing to read: write the section with `Read through: none` and say so there.
 
+**Before the first read, take the start time:** run `date -u +%Y-%m-%dT%H:%M:%SZ`, and keep the result, in UTC, as this run's start time. It goes on the report's `Read through:` line, whatever the reads return. The reads run one after another, so a comment posted after one read and before a later one can be older than the newest comment they return, and a watermark taken from the newest time seen would skip it for good.
+
 Conversation comments:
 
 ```
@@ -58,10 +60,13 @@ gh api --method GET repos/<owner>/<repo>/pulls/<number>/reviews --paginate --jq 
 
 Which comments count:
 
-- A comment's time is its `updatedAt`, so an edit counts as new, or for a review body its `submittedAt`. Each comment and each review body counts once.
-- **After a prior check:** when the prior report has a `## Comments check` section whose `Read through:` line holds a time (grep the report for it rather than reading the whole file), keep every comment from the three reads whose time is later than that.
-- **Otherwise:** with no prior report, or a prior report that has no such section or line, or a line that says `none`, that run read no comments, so its date says nothing about them. Keep the latest 30 across the three kinds, newest first.
-- **The ceiling:** never keep more than the newest 100 comments, whichever rule applied, since anyone able to comment can post any number of them. Say in the section how many the ceiling left out.
+- A comment's time is its `updatedAt`, so an edit counts as new, or for a review body its `submittedAt`; all of these are in UTC. Each comment and each review body counts once in a run. One of the next four rules sets the window.
+- **After a prior check:** when the prior report has a `## Comments check` section whose `Read through:` line holds a time (grep the report for it rather than reading the whole file), keep every comment from the three reads whose time is at or after that time. A comment both runs read is checked again: a duplicate is acceptable, a skip is not.
+- **After a prior report with no such time** (an ordinary review's report, or a `Read through:` line that says `none`): the window opens at the commit time of the tip that report reviewed. Its `Reviewed commit:` line names the tip; read the time with `gh api --method GET repos/<owner>/<repo>/commits/<sha> --jq '.commit.committer.date'`. Keep every comment from the three reads whose time is at or after it. That commit existed before that review began, so the window also covers what was posted while it ran, which the report file's own date would skip.
+- **When that time cannot be established** (the report has no `Reviewed commit:` line, the read fails, or the time is later than this run's start time, since a commit's date is set by whoever made it): keep every comment the three reads returned, and say why on the section's `Window:` line. Never fall back to the latest 30 here.
+- **No prior report at all**, as the calling prompt's prior-report read concludes: only then, keep the latest 30 across the three kinds, newest first.
+- **The ceiling:** whichever rule applied, never keep more than the newest 100 comments, since anyone able to comment can post any number of them.
+- **A cap is always reported.** When the latest 30 or the ceiling leaves a comment out, the section's `Capped:` line says which cap it was, how many comments it omitted, and the time of the oldest one included. The next run's window starts from this run's `Read through:`, so it does not read an omitted comment again, and that line is the only record of it.
 - Read a kept inline comment with the rest of its thread, whatever their dates, since a later reply may answer it or an earlier comment may explain it. Only kept comments raise points.
 - A point the prior report's Comments check recorded as not addressed is a previous finding: verify it again under the calling prompt's "Scope" and list it again here with its new verdict, whatever its date.
 
@@ -86,9 +91,13 @@ The report's section, after Findings and before the closing notes:
 ```
 ## Comments check
 
-Read through: `<the newest time among all comments the three reads returned, or none>`
+Read through: `<the start time this run took before its first read, or none>`
 
-<the number of comments read, the number kept, and the number of points; how many the ceiling left out, only if any>
+Window: <since the prior check's `Read through:`, since the reviewed tip's commit time, every comment with the reason, the latest 30 with no prior report, or none>; opened at `<the time, if it has one>`
+
+Capped: <the latest 30 or the newest 100>: omitted <count>, oldest included `<time>` (this line only when a cap left a comment out)
+
+<the number of comments read, the number kept, and the number of points>
 
 - **addressed**: <the point, in your own words> (`<login>`, [comment](<url>))
   - <citation to the commit or line>
@@ -96,4 +105,4 @@ Read through: `<the newest time among all comments the three reads returned, or 
 - **not applicable**: <the point> (`<login>`, [comment](<url>)); <the reason>
 ```
 
-With no comment to check, the list is the one line "No comments to check." `Read through:` covers every comment the reads returned, kept or not, and the next run's check starts from it.
+With no comment to check, the list is the one line "No comments to check." `Read through:` is the time the collection started, never the newest time the reads returned, and the next run's check keeps everything at or after it.
