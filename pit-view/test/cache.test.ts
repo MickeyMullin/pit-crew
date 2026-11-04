@@ -826,6 +826,55 @@ test('a cycle that starts after a one-PR refresh updates the row, even at an ide
   assert.equal(open.find((row) => row.number === merged.number)?.pr.title, merged.title)
 })
 
+test('a one-PR refresh that began before a cycle and finishes after the cycle wrote a newer page does not replace the newer row', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  const target = pages[0]!.prs[0]!
+  const ticket = cache.beginRefresh()
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  cache.writeOpenPage(cycle.id, { ...pages[0]!, prs: pages[0]!.prs.map((pr) => pr.number === target.number ? { ...pr, title: 'newer page' } : pr) })
+  const returned = cache.writePr(scenario.repo, { ...target, title: 'older refresh' }, null, ticket)
+  assert.equal(returned.pr.title, 'newer page')
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'newer page')
+  cache.writeOpenPage(cycle.id, pages[1]!)
+  cache.writeClosed(cycle.id, closed)
+  cache.finishCycle(cycle.id)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'newer page')
+})
+
+test('a one-PR close that began before a cycle and finishes after the cycle wrote the PR does not close it', async () => {
+  const { pages } = await fetched()
+  const cache = frozenCache()
+  const merged = pages[0]!.prs[1]!
+  const ticket = cache.beginRefresh()
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  cache.writeOpenPage(cycle.id, pages[0]!)
+  assert.equal(cache.closePr(scenario.repo, merged.number, ticket), false)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === merged.number)?.pr.title, merged.title)
+})
+
+test('of two one-PR refreshes of one PR, the one whose read began later wins whichever finishes first', async () => {
+  const { pages } = await fetched()
+  const cache = frozenCache()
+  const target = pages[0]!.prs[0]!
+  const first = cache.beginRefresh()
+  const second = cache.beginRefresh()
+  cache.writePr(scenario.repo, { ...target, title: 'began second' }, null, second)
+  cache.writePr(scenario.repo, { ...target, title: 'began first' }, null, first)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'began second')
+})
+
+test('a one-PR refresh that began after a cycle wrote the PR replaces it, even when it finishes during the cycle', async () => {
+  const { pages } = await fetched()
+  const cache = frozenCache()
+  const target = pages[0]!.prs[0]!
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  cache.writeOpenPage(cycle.id, pages[0]!)
+  const ticket = cache.beginRefresh()
+  cache.writePr(scenario.repo, { ...target, title: 'after the page' }, null, ticket)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'after the page')
+})
+
 test('a one-PR refresh that wrote nothing leaves the running cycle\'s data in place', async () => {
   const { pages } = await fetched()
   const cache = frozenCache()
