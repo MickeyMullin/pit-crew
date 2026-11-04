@@ -5,7 +5,7 @@ import { openCache } from '../src/cache.ts'
 import type { RunStatus } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
-import type { OtherRow } from '../src/derive.ts'
+import type { OpenRow, OtherRow } from '../src/derive.ts'
 import { createGh } from '../src/github.ts'
 import type { RawOpenPr, RawOpenResponse } from '../src/github.ts'
 import {
@@ -14,6 +14,7 @@ import {
 import type { Exec, Notice, NotifyEvent } from '../src/notify.ts'
 import { createPoller } from '../src/poller.ts'
 import type { Patch } from '../src/poller.ts'
+import { scanReports } from '../src/reports.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { closedSearch, failed, fakeRunner, fakeTime, field, gate, ok, openPage1, openPage2, singlePr } from './helpers.ts'
 import type { Gate } from './helpers.ts'
@@ -27,8 +28,8 @@ const harness = async (config: Partial<Config> = {}) => {
   const time = fakeTime()
   const cache = openCache({ path: ':memory:', clock: time.clock })
   const events: NotifyEvent[] = []
-  // `gate` holds page 2 of the open list, and `singleGate` holds every one-PR fetch, until the test releases them; `singleFail` makes a one-PR fetch fail
-  const state = { edits: new Map<number, Edit>(), fail: false, single: new Map<number, Edit>(), singleFail: false, gate: undefined as Gate | undefined, singleGate: undefined as Gate | undefined }
+  // `gate` holds page 2 of the open list, and `singleGate` holds every one-PR fetch, until the test releases them; `singleFail` makes a one-PR fetch fail, and `singleClosed` makes one find the PR merged
+  const state = { edits: new Map<number, Edit>(), fail: false, single: new Map<number, Edit>(), singleFail: false, singleClosed: false, gate: undefined as Gate | undefined, singleGate: undefined as Gate | undefined }
   const base = new Map<number, RawOpenPr>()
   for (const raw of [await openPage1(), await openPage2()]) {
     for (const pr of raw.data.repository!.pullRequests.nodes) base.set(pr.number, pr)
@@ -52,7 +53,7 @@ const harness = async (config: Partial<Config> = {}) => {
       await state.singleGate?.hold()
       if (state.singleFail) return failed('HTTP 502')
       const number = Number(field(args, 'number'))
-      const single = await singlePr(number)
+      const single = await singlePr(number, state.singleClosed ? { state: 'MERGED' } : undefined)
       const pr = single.data.repository!.pullRequest!
       const edit = state.single.get(number)
       return ok(JSON.stringify({ data: { ...single.data, repository: { ...single.data.repository!, pullRequest: edit === undefined ? pr : { ...edit(pr, base), state: 'OPEN' } } } }))
@@ -62,7 +63,7 @@ const harness = async (config: Partial<Config> = {}) => {
   const settings = { current: { ...defaultConfig(), repo: scenario.repo, viewer: scenario.viewer, ...config } }
   const patches: Patch[] = []
   // a poller over the shared cache; a second one stands for a restarted server
-  const build = (beforeCycle?: () => Promise<void>) => createPoller({
+  const build = (beforeCycle?: () => Promise<void>, scan?: typeof scanReports) => createPoller({
     cache,
     gh: createGh(runner.runner),
     clock: time.clock,
@@ -74,6 +75,7 @@ const harness = async (config: Partial<Config> = {}) => {
     pageSize: scenario.pageSize,
     notify: (found) => events.push(...found),
     beforeCycle,
+    scan,
   })
   const poller = build()
   // one finished cycle; the clock moves on so the next is its own
@@ -91,7 +93,7 @@ const harness = async (config: Partial<Config> = {}) => {
     time.advance(60_000)
     return events.slice(before)
   }
-  return { poller, build, cycleOf, cache, state, events, cycle, settings, time, runner }
+  return { poller, build, cycleOf, cache, state, events, patches, cycle, settings, time, runner }
 }
 
 // 104 is mine and awaiting review; these turn it into each watched state
@@ -439,6 +441,221 @@ test('a stale one-PR refresh that fails installs nothing, so the next good cycle
   state.edits.set(113, asRequested)
   // an empty baseline left by the failed refresh would absorb this transition silently
   assert.deepEqual(only(await cycle()), [['reviewRequested', 113]])
+  poller.stop()
+})
+
+// another repository is on show, with a cycle of it held so that the switch below starts no fetch of its own; a one-PR refresh of the repository already filled, as a write there would ask, is held at its fetch; then that repository comes into effect, each step reported to the poller as Settings would
+const refreshCaughtBySwitch = async () => {
+  const h = await harness()
+  await h.cycle()
+  const home = h.settings.current
+  const heldCycle = gate()
+  h.state.gate = heldCycle
+  h.settings.current = { ...home, repo: otherRepo }
+  await h.poller.configChanged(home)
+  await heldCycle.reached
+  const heldRefresh = gate()
+  h.state.singleGate = heldRefresh
+  const refreshing = h.poller.refreshPrAfterWrite(scenario.repo, 113)
+  await heldRefresh.reached
+  const away = h.settings.current
+  h.settings.current = home
+  await h.poller.configChanged(away)
+  return { ...h, heldCycle, heldRefresh, refreshing }
+}
+
+test('a one-PR refresh started for a repository not on show, which comes into effect while it fetches, compares nothing and leaves a fresh baseline', async () => {
+  const { poller, cycle, state, events, heldCycle, heldRefresh, refreshing } = await refreshCaughtBySwitch()
+  state.single.set(113, asRequested)
+  heldRefresh.release()
+  assert.equal((await refreshing).outcome, 'open')
+  assert.deepEqual(events, [])
+  // the cycle the switch asked for finds a real change, which a baseline built from the cache would fire and the empty one records
+  state.edits.set(113, asRequested)
+  state.edits.set(120, asFailing)
+  state.gate = undefined
+  heldCycle.release()
+  await poller.idle()
+  assert.deepEqual(events, [])
+  assert.deepEqual(await cycle(), [])
+  // a positive control: the next real change fires, and fires once
+  state.edits.set(104, asChangesRequested)
+  assert.deepEqual(only(await cycle()), [['changesRequested', 104]])
+  assert.deepEqual(await cycle(), [])
+  poller.stop()
+})
+
+test('a one-PR refresh started for a repository not on show that fails installs nothing, so the next good cycle rebuilds from the cache and fires what it finds', async () => {
+  const { poller, cycle, state, events, heldCycle, heldRefresh, refreshing } = await refreshCaughtBySwitch()
+  state.singleFail = true
+  heldRefresh.release()
+  assert.equal((await refreshing).outcome, 'failed')
+  assert.deepEqual(events, [])
+  state.edits.set(120, asFailing)
+  state.gate = undefined
+  heldCycle.release()
+  await poller.idle()
+  // an empty baseline left by the failed refresh would absorb this transition silently
+  assert.deepEqual(only(events), [['ciFailing', 120]])
+  assert.deepEqual(await cycle(), [])
+  poller.stop()
+})
+
+test('a one-PR refresh started for a repository not on show leaves alone the baseline a cycle of the same generation built from the cache', async () => {
+  const h = await harness()
+  await h.cycle()
+  const home = h.settings.current
+  h.settings.current = { ...home, repo: otherRepo }
+  await h.poller.configChanged(home)
+  await h.poller.idle()
+  const heldRefresh = gate()
+  h.state.singleGate = heldRefresh
+  const refreshing = h.poller.refreshPrAfterWrite(scenario.repo, 113)
+  await heldRefresh.reached
+  // nothing is in flight, so the switch starts a cycle at once, and that cycle builds the baseline
+  const heldCycle = gate()
+  h.state.gate = heldCycle
+  h.state.edits.set(120, asFailing)
+  const away = h.settings.current
+  h.settings.current = home
+  await h.poller.configChanged(away)
+  await heldCycle.reached
+  heldRefresh.release()
+  await refreshing
+  assert.deepEqual(h.events, [])
+  heldCycle.release()
+  await h.poller.idle()
+  assert.deepEqual(only(h.events), [['ciFailing', 120]])
+  h.poller.stop()
+})
+
+test('a one-PR refresh that ends while the switch into its repository is still rescanning leaves a fresh baseline, and the board ends as the view reads', async () => {
+  const { poller, build, cycleOf, cycle, patches, settings, state, events } = await harness()
+  await cycle()
+  poller.stop()
+  let held: Gate | undefined
+  const gated = build(undefined, async (dir, targets) => {
+    await held?.hold()
+    return scanReports(dir, targets)
+  })
+  const home = settings.current
+  settings.current = { ...home, repo: otherRepo }
+  await gated.configChanged(home)
+  await gated.idle()
+  const shown = await gated.view()
+  const heldRefresh = gate()
+  state.singleGate = heldRefresh
+  const refreshing = gated.refreshPrAfterWrite(scenario.repo, 113)
+  await heldRefresh.reached
+  const rescanning = gate()
+  held = rescanning
+  const away = settings.current
+  settings.current = home
+  const saving = gated.configChanged(away)
+  await rescanning.reached
+  heldRefresh.release()
+  await refreshing
+  held = undefined
+  rescanning.release()
+  // the config cycle starts only after the refresh has ended, and finds a real change
+  state.edits.set(120, asFailing)
+  await saving
+  await gated.idle()
+  assert.deepEqual(events, [])
+  const rowsOf = (view: Awaited<ReturnType<typeof gated.view>>): Map<number, OpenRow> => new Map<number, OpenRow>([...view.mine.groups, ...view.others.groups].flatMap((group): OpenRow[] => group.rows).map((row) => [row.number, row]))
+  const board = rowsOf(shown)
+  for (const patch of patches.filter((entry) => entry.version > shown.version)) {
+    for (const row of patch.rows) board.set(row.number, row)
+    for (const number of patch.removed) board.delete(number)
+  }
+  assert.deepEqual(board, rowsOf(await gated.view()))
+  // a positive control: the next real change fires, and fires once
+  state.edits.set(104, asChangesRequested)
+  assert.deepEqual(only(await cycleOf(gated)), [['changesRequested', 104]])
+  assert.deepEqual(await cycleOf(gated), [])
+  gated.stop()
+})
+
+for (const [name, shownAtStart] of [['never on show', false], ['on show when it began', true]] as const) {
+  test(`a one-PR refresh of a repository ${name} and not in effect when it ends sends the board nothing, compares nothing, and leaves the baseline in effect alone`, async () => {
+    const { poller, cycle, patches, settings, state, events } = await harness()
+    await cycle()
+    const home = settings.current
+    const heldRefresh = gate()
+    state.singleGate = heldRefresh
+    state.single.set(113, asRequested)
+    const refreshing = shownAtStart ? poller.refreshPr(113) : undefined
+    if (shownAtStart) await heldRefresh.reached
+    settings.current = { ...home, repo: otherRepo }
+    await poller.configChanged(home)
+    await poller.idle()
+    const running = refreshing ?? poller.refreshPrAfterWrite(scenario.repo, 113)
+    await heldRefresh.reached
+    const from = patches.length
+    heldRefresh.release()
+    assert.equal((await running).outcome, 'open')
+    assert.deepEqual(patches.slice(from), [])
+    assert.deepEqual(events, [])
+    state.singleGate = undefined
+    // the baseline of the repository on show is untouched: its next real change fires, and fires once
+    state.edits.set(120, asFailing)
+    assert.deepEqual(only(await cycle()), [['ciFailing', 120]])
+    assert.deepEqual(await cycle(), [])
+    poller.stop()
+  })
+}
+
+// the refresh state of a row as the last patch carrying it left it on the board
+const refreshOnBoard = (patches: Patch[], number: number): string | undefined =>
+  patches.findLast((patch) => patch.rows.some((row) => row.number === number))?.rows.find((row) => row.number === number)?.refresh?.state
+
+test('a one-PR refresh started for a repository not on show ends its row on the board once that repository has come into effect, with the row as it now stands', async () => {
+  const { poller, state, patches, heldCycle, heldRefresh, refreshing } = await refreshCaughtBySwitch()
+  // the switch's patch put the row on the board with the refresh running
+  assert.equal(refreshOnBoard(patches, 113), 'running')
+  const from = patches.length
+  state.single.set(113, asRequested)
+  heldRefresh.release()
+  await refreshing
+  const [done, ...others] = patches.slice(from)
+  assert.deepEqual(others, [])
+  assert.equal(done?.rows.find((row) => row.number === 113)?.refresh, null)
+  assert.deepEqual(done?.removed, [])
+  // the row's own change can move others (stacks), and this refresh has no earlier rows to tell them by
+  assert.equal((done?.rows.length ?? 0) > 1, true)
+  assert.notEqual(done?.tiles, undefined)
+  assert.notEqual(done?.counts, undefined)
+  state.gate = undefined
+  heldCycle.release()
+  await poller.idle()
+  poller.stop()
+})
+
+test('a one-PR refresh started for a repository not on show that fails leaves its failure on the row, once that repository has come into effect', async () => {
+  const { poller, state, patches, heldCycle, heldRefresh, refreshing } = await refreshCaughtBySwitch()
+  const from = patches.length
+  state.singleFail = true
+  heldRefresh.release()
+  await refreshing
+  assert.equal(refreshOnBoard(patches.slice(from), 113), 'failed')
+  state.gate = undefined
+  heldCycle.release()
+  await poller.idle()
+  poller.stop()
+})
+
+test('a one-PR refresh started for a repository not on show that finds its PR closed takes the row off the board, once that repository has come into effect', async () => {
+  const { poller, state, patches, heldCycle, heldRefresh, refreshing } = await refreshCaughtBySwitch()
+  const from = patches.length
+  state.singleClosed = true
+  heldRefresh.release()
+  assert.equal((await refreshing).outcome, 'closed')
+  const [done] = patches.slice(from)
+  assert.deepEqual(done?.removed, [113])
+  assert.equal(done?.rows.some((row) => row.number === 113), false)
+  state.gate = undefined
+  heldCycle.release()
+  await poller.idle()
   poller.stop()
 })
 

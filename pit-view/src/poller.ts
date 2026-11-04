@@ -522,7 +522,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     return { started: cycle !== null, cycle: cycle?.id ?? null }
   }
 
-  // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that row and any other its change moved (stacks), or its removal once closed; a failure stays on the row and never touches the cycles, so the board does not read offline repo is the repository the caller meant (a write's), not whatever the configuration says now: when Settings has moved on, the cache of that repository is still refreshed, but nothing of it reaches the board, the baseline, or a notification
+  // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that row and any other its change moved (stacks), or its removal once closed; a failure stays on the row and never touches the cycles, so the board does not read offline. repo is the repository the caller meant (a write's), not whatever the configuration says now: while it is not the one in effect, the cache of that repository is still refreshed, but nothing of it reaches the board, the baseline, or a notification
   const runPrRefresh = async (number: number, repo: string): Promise<PrRefreshResult> => {
     const settings = config()
     const key = prKey(repo, number)
@@ -552,10 +552,11 @@ export const createPoller = (options: PollerOptions): Poller => {
       rowRefreshes.set(key, failure)
       log(`PR #${number}: refresh failed: ${failure.error}`)
     }
-    if (before !== null && shown()) {
+    // what happens now is decided by what is on show now: a refresh that began off the board has no earlier rows to tell a change by, so it sends them all, and its own is the only one it can have removed
+    if (shown()) {
       const next = snapshot(config(), reports)
-      const rows = [...next.rows.values()].filter((row) => row.number === number || !same(row, before.rows.get(row.number)))
-      const removed = [...before.rows.keys()].filter((known) => !next.rows.has(known))
+      const rows = [...next.rows.values()].filter((row) => row.number === number || !same(row, before?.rows.get(row.number)))
+      const removed = before === null ? [number].filter((known) => !next.rows.has(known)) : [...before.rows.keys()].filter((known) => !next.rows.has(known))
       patch({ rows, removed, tiles: next.view.tiles, counts: next.view.counts })
       if (failure === null) {
         if (startedGeneration !== generation) {
