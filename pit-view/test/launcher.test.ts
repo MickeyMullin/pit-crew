@@ -1534,6 +1534,397 @@ test('a later queued review whose checks end first never starts ahead of an earl
   }
 })
 
+// strict arrival order: reviews spawn in the order they arrived (section 8 of DESIGN.md, Review cap, Queueing)
+
+// a fake launch that records the most runners alive at once, counted at each spawn, and whose launches wait at the gate on their run folder when the test arms it
+const observedLaunch = () => {
+  const launch = fakeLaunch()
+  const folders = gate()
+  const peak = { alive: 0 }
+  const spawn = launch.deps.spawn
+  launch.deps.spawn = (request) => {
+    const child = spawn(request)
+    peak.alive = Math.max(peak.alive, launch.alive.size)
+    return child
+  }
+  const mkdirRun = launch.deps.fs.mkdir
+  launch.deps.fs = { ...launch.deps.fs, mkdir: async (path) => folders.wait().then(() => mkdirRun(path)) }
+  return { launch, folders, peak }
+}
+
+const selfRequest = (number: number): StartRequest => request(number, { args: [String(number), '--no-post'], label: 'Self-review' })
+
+test('a new start with room waits behind a queued review still making its checks, and they spawn in the order they arrived', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const { launch, peak } = observedLaunch()
+  const h = await harness({ launch, gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+  try {
+    await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    // the cap goes up and the queued review is given a slot, its account check held
+    accounts.arm()
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 3 }
+    h.launcher.drain()
+    await waitFor(() => accounts.held() === 1)
+    // a new start has room and its own checks pass, but it arrived second
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    await quiet()
+    assert.equal(later.status, 'queued')
+    assert.deepEqual(startOrder(h), [106])
+    accounts.open(0)
+    await waitFor(() => h.launch.children.length === 3)
+    assert.deepEqual(startOrder(h), [106, 113, 118])
+    assert.deepEqual([earlier, later].map((run) => h.cache.getRun(run.id)?.status), ['running', 'running'])
+    assert.ok(peak.alive <= 3, `${peak.alive} alive with a cap of 3`)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a new start with room waits behind a queued review already out of the queue and still being launched', async () => {
+  const { launch, folders, peak } = observedLaunch()
+  const h = await harness({ launch, config: { maxConcurrentReviews: 1 } })
+  try {
+    await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    // the queued review's checks pass, it leaves the queue, and its launch waits on its folder
+    folders.arm()
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 3 }
+    h.launcher.drain()
+    await waitFor(() => folders.held() === 1)
+    assert.equal(h.cache.getRun(earlier.id)?.status, 'running')
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    await quiet()
+    assert.equal(later.status, 'queued')
+    assert.deepEqual(startOrder(h), [106])
+    folders.open(0)
+    await waitFor(() => h.launch.children.length === 3)
+    assert.deepEqual(startOrder(h), [106, 113, 118])
+    assert.ok(peak.alive <= 3, `${peak.alive} alive with a cap of 3`)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a self-review that the overage would let in waits behind an earlier queued review that does not fit', async () => {
+  const { launch, peak } = observedLaunch()
+  const h = await harness({ launch, config: { maxConcurrentReviews: 1, selfReviewOverCap: true } })
+  try {
+    h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+    const running = await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    const self = await h.launcher.start(selfRequest(101))
+    await quiet()
+    assert.deepEqual([earlier.status, self.status], ['queued', 'queued'])
+    assert.deepEqual(startOrder(h), [106])
+    // the running review ends: the earlier one takes the cap's slot, and the self-review goes over it, in that order
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length === 3)
+    assert.deepEqual(startOrder(h), [106, 113, 101])
+    assert.ok(peak.alive <= 2, `${peak.alive} alive with a cap of 1 and one self-review over it`)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('switching the overage on never lets a self-review already queued pass an earlier queued review that does not fit', async () => {
+  const { launch, peak } = observedLaunch()
+  const h = await harness({ launch, config: { maxConcurrentReviews: 1 } })
+  try {
+    h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+    const running = await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    const self = await h.launcher.start(selfRequest(101))
+    assert.deepEqual([earlier.status, self.status], ['queued', 'queued'])
+    h.settings.current = { ...h.settings.current, selfReviewOverCap: true }
+    h.launcher.drain()
+    await quiet()
+    assert.deepEqual(startOrder(h), [106])
+    assert.deepEqual([earlier, self].map((run) => h.cache.getRun(run.id)?.status), ['queued', 'queued'])
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length === 3)
+    assert.deepEqual(startOrder(h), [106, 113, 101])
+    assert.ok(peak.alive <= 2, `${peak.alive} alive with a cap of 1 and one self-review over it`)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+for (const [order, closing] of [['the earlier one\'s checks ending first', [0, 1]], ['the self-review\'s checks ending first', [1, 0]]] as const) {
+  test(`a queued review that gives its slot back holds the line: no later self-review passes it, with ${order}`, async () => {
+    const accounts = gate()
+    const login = { current: scenario.viewer as string }
+    const { launch, peak } = observedLaunch()
+    const h = await harness({ launch, gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+    try {
+      h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+      const running = await h.launcher.start(request(106))
+      const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+      const self = await h.launcher.start(selfRequest(101))
+      // both are given slots, their checks held
+      accounts.arm(2)
+      h.settings.current = { ...h.settings.current, maxConcurrentReviews: 3 }
+      h.launcher.drain()
+      await waitFor(() => accounts.held() === 2)
+      // the cap comes back down with the overage on: the earlier one no longer fits, and the self-review alone would
+      h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1, selfReviewOverCap: true }
+      h.launcher.drain()
+      for (const index of closing) {
+        accounts.open(index)
+        await quiet()
+      }
+      assert.deepEqual(startOrder(h), [106])
+      assert.deepEqual([earlier, self].map((run) => h.cache.getRun(run.id)?.status), ['queued', 'queued'])
+      h.launch.children[0]!.exit(1)
+      await h.launcher.settled(running.id)
+      await waitFor(() => h.launch.children.length === 3)
+      assert.deepEqual(startOrder(h), [106, 113, 101])
+      assert.ok(peak.alive <= 2, `${peak.alive} alive with a cap of 1 and one self-review over it`)
+    } finally {
+      await h.cleanup()
+    }
+  })
+}
+
+test('a review held behind one that does not fit makes its checks again when its turn comes, so it never starts on checks passed long ago', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+  try {
+    h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+    const running = await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    const self = await h.launcher.start(selfRequest(101))
+    accounts.arm(2)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 3 }
+    h.launcher.drain()
+    await waitFor(() => accounts.held() === 2)
+    // the self-review's checks pass, then the cap comes down and the earlier one gives its slot back
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1, selfReviewOverCap: true }
+    h.launcher.drain()
+    accounts.open(1)
+    await quiet()
+    accounts.open(0)
+    await quiet()
+    // gh is switched to another account while they wait, and the earlier one fails its checks when its turn comes
+    login.current = 'someone-else'
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.cache.getRun(earlier.id)?.status === 'failed')
+    await waitFor(() => h.cache.getRun(self.id)?.status === 'failed')
+    assert.equal(noteKind(h.cache.getRun(self.id)?.note ?? null), 'spawnFailed')
+    assert.equal(h.launch.children.length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a Stop of the queued review holding the line lets the one behind it go, within the cap', async () => {
+  const { launch, peak } = observedLaunch()
+  const h = await harness({ launch, config: { maxConcurrentReviews: 1, selfReviewOverCap: true } })
+  try {
+    h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+    await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    const self = await h.launcher.start(selfRequest(101))
+    assert.equal(self.status, 'queued')
+    h.launcher.stop(earlier.id)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.deepEqual(startOrder(h), [106, 101])
+    assert.ok(peak.alive <= 2, `${peak.alive} alive with a cap of 1 and one self-review over it`)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a new start with room waits behind an earlier new start still being launched', async () => {
+  const { launch, folders, peak } = observedLaunch()
+  const h = await harness({ launch, config: { maxConcurrentReviews: 3 } })
+  try {
+    folders.arm()
+    const earlier = h.launcher.start(request(106))
+    await waitFor(() => folders.held() === 1)
+    const later = await h.launcher.start(request(113, { label: 'Review' }))
+    await quiet()
+    assert.equal(later.status, 'queued')
+    assert.equal(h.launch.children.length, 0)
+    folders.open(0)
+    assert.equal((await earlier).status, 'running')
+    await waitFor(() => h.launch.children.length === 2)
+    assert.deepEqual(startOrder(h), [106, 113])
+    assert.ok(peak.alive <= 3, `${peak.alive} alive with a cap of 3`)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a queued review waits behind an earlier new start still being launched, even once a slot is free for it', async () => {
+  const { launch, folders, peak } = observedLaunch()
+  const h = await harness({ launch })
+  try {
+    const running = await h.launcher.start(request(106))
+    folders.arm()
+    const earlier = h.launcher.start(request(113, { label: 'Review' }))
+    await waitFor(() => folders.held() === 1)
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    assert.equal(later.status, 'queued')
+    // the running review ends: there is a slot for the queued one, but the start ahead of it has not spawned yet
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await quiet()
+    assert.deepEqual(startOrder(h), [106])
+    folders.open(0)
+    await earlier
+    await waitFor(() => h.launch.children.length === 3)
+    assert.deepEqual(startOrder(h), [106, 113, 118])
+    assert.ok(peak.alive <= 2, `${peak.alive} alive with a cap of 2`)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a new start whose spawn fails hands on to the one that arrived behind it', async () => {
+  const { launch, folders } = observedLaunch()
+  // the spawn error hits one start only
+  const spawn = launch.deps.spawn
+  launch.deps.spawn = (request) => {
+    const error = launch.spawnError
+    launch.spawnError = null
+    if (error !== null) throw error
+    return spawn(request)
+  }
+  const h = await harness({ launch, config: { maxConcurrentReviews: 3 } })
+  try {
+    folders.arm()
+    const earlier = h.launcher.start(request(106))
+    await waitFor(() => folders.held() === 1)
+    const later = await h.launcher.start(request(113, { label: 'Review' }))
+    assert.equal(later.status, 'queued')
+    h.launch.spawnError = new Error('no such runner')
+    folders.open(0)
+    assert.equal((await earlier).status, 'failed')
+    await waitFor(() => h.launch.children.length === 1)
+    assert.deepEqual(startOrder(h), [113])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('starts decide in the order they arrived, however their checks race: a later one waits for an earlier one still in its checks', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const { launch, peak } = observedLaunch()
+  const h = await harness({ launch, gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 3 } })
+  try {
+    accounts.arm()
+    const earlier = h.launcher.start(request(106))
+    await waitFor(() => accounts.held() === 1)
+    // the later start's checks end first, and nothing spawns, though it has room
+    const later = h.launcher.start(request(113, { label: 'Review' }))
+    await quiet()
+    assert.equal(h.launch.children.length, 0)
+    accounts.open(0)
+    assert.equal((await earlier).status, 'running')
+    await within(later)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.deepEqual(startOrder(h), [106, 113])
+    assert.ok(peak.alive <= 3, `${peak.alive} alive with a cap of 3`)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a start refused in its checks is refused at once, whatever is ahead of it, and one behind a start that is refused then starts at once', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 3 } })
+  try {
+    accounts.arm()
+    const earlier = h.launcher.start(request(106))
+    await waitFor(() => accounts.held() === 1)
+    // the middle start is refused while the earlier one still makes its checks
+    login.current = 'someone-else'
+    await assert.rejects(within(h.launcher.start(request(118, { label: 'Review' }))), (error: unknown) => error instanceof LaunchError && error.code === 'identityMismatch')
+    login.current = scenario.viewer
+    // and one behind it still waits for the earlier one, the refusal having moved nothing ahead
+    const later = h.launcher.start(request(113, { label: 'Review' }))
+    await quiet()
+    assert.equal(h.launch.children.length, 0)
+    // the earlier one is refused too: the later one is then the sole start, which goes at once rather than queued
+    login.current = 'someone-else'
+    accounts.open(0)
+    await assert.rejects(earlier, (error: unknown) => error instanceof LaunchError && error.code === 'identityMismatch')
+    assert.equal((await within(later)).status, 'running')
+    assert.deepEqual(startOrder(h), [113])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a sole eligible start goes at once: never queued and no second checks, beside running reviews, over the cap, and once a queue has emptied', async () => {
+  const { launch, peak } = observedLaunch()
+  const h = await harness({ launch, config: { selfReviewOverCap: true } })
+  const accountChecks = (): number => h.gh.calls.filter((call) => call.args[0] === 'api').length
+  try {
+    h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+    const first = await h.launcher.start(request(106))
+    assert.deepEqual([first.status, h.launch.children.length, accountChecks()], ['running', 1, 1])
+    const second = await h.launcher.start(request(113, { label: 'Review' }))
+    assert.deepEqual([second.status, h.launch.children.length, accountChecks()], ['running', 2, 2])
+    // the cap is reached and nothing waits, so a self-review goes over it at once
+    const over = await h.launcher.start(selfRequest(101))
+    assert.deepEqual([over.status, h.launch.children.length, accountChecks()], ['running', 3, 3])
+    assert.equal(peak.alive, 3)
+    assert.ok(!h.changes.some((run) => run.status === 'queued'))
+    // a review that had to wait starts, and once its launch has returned the emptied queue holds no one back
+    const waited = await h.launcher.start(request(118, { label: 'Review' }))
+    assert.equal(waited.status, 'queued')
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(first.id)
+    await waitFor(() => h.launch.children.length === 4)
+    await quiet()
+    h.launch.children[1]!.exit(1)
+    await h.launcher.settled(second.id)
+    await quiet()
+    assert.equal((await h.launcher.start(request(109, { label: 'Review' }))).status, 'running')
+    assert.equal(h.launch.children.length, 5)
+    assert.equal(h.changes.filter((run) => run.number === 109 && run.status === 'queued').length, 0)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a fix or update session is held by nothing in the line: not a queue, not a launch, and not an earlier start in its checks', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const { launch, folders } = observedLaunch()
+  const h = await harness({ launch, gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+  try {
+    h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+    h.cache.writePr(scenario.repo, await prOf(102), scenario.defaultBranch)
+    await h.launcher.start(request(106))
+    await h.launcher.start(request(113, { label: 'Review' }))
+    accounts.arm()
+    const held = h.launcher.start(request(118, { label: 'Review' }))
+    await waitFor(() => accounts.held() === 1)
+    const fix = await within(h.launcher.start(request(101, { command: 'fix-pr', args: ['101'], label: 'Fix session' })))
+    assert.equal(fix.status, 'running')
+    // nor does a session's own launch hold a review back: its folder wait is its own, and it counts for nothing in the line
+    folders.arm()
+    const update = h.launcher.start(updateRequest(scenario.repo, 102, 'a'.repeat(40)))
+    await waitFor(() => folders.held() === 1)
+    accounts.open(0)
+    assert.equal((await within(held)).status, 'queued')
+    folders.open(0)
+    assert.equal((await within(update)).status, 'running')
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('an unexpected failure after a queued review\'s checks fails that review with the error, so it never stays queued, and the queue moves on', async () => {
   const accounts = gate()
   const login = { current: scenario.viewer as string }
@@ -2272,13 +2663,20 @@ test('a stop during a queued review\'s dequeue checks ends that attempt and free
     accounts.open(0)
     await quiet()
     assert.equal(h.launch.children.length, 2)
+    // two more arrive behind it: the new run's slot still counts, so the first of them is given the last slot and makes its checks again, and the second is given none and makes none
+    const accountChecks = (): number => h.gh.calls.filter((call) => call.args[0] === 'api').length
+    const checksBefore = accountChecks()
     const other = await h.launcher.start(request(118, { label: 'Review' }))
     const beyond = await h.launcher.start(request(109, { label: 'Review' }))
-    assert.deepEqual([other.status, beyond.status], ['running', 'queued'])
-    assert.equal(h.launch.children.length, 3)
+    await quiet()
+    assert.deepEqual([other.status, beyond.status], ['queued', 'queued'])
+    assert.equal(accountChecks(), checksBefore + 3)
+    assert.equal(h.launch.children.length, 2)
     starts.open(0)
     assert.equal((await again).status, 'running')
-    assert.equal(h.launch.children.length, 4)
+    await waitFor(() => h.launch.children.length === 4)
+    assert.deepEqual(startOrder(h), [106, 107, 113, 118])
+    assert.equal(h.cache.getRun(beyond.id)?.status, 'queued')
   } finally {
     await h.cleanup()
   }

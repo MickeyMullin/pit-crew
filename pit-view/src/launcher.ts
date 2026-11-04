@@ -1285,7 +1285,7 @@ export type Launcher<T extends Session = Run> = {
   reread: (id: number) => Promise<T>
   // at server start: re-watch live runs, settle the rest, and fail what was still queued, since a start of the server starts nothing
   recover: () => Promise<void>
-  // starts every queued review that fits now, in the order they were queued; the server calls it after a saved config, which may have raised the cap
+  // reads the queue again, earliest first, as far as the first review that does not fit; the server calls it after a saved config, which may have raised the cap
   drain: () => void
   // reads every watched run's files now
   check: () => Promise<void>
@@ -1480,8 +1480,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   // slots given to reviews whose process is not watched here yet, each held by an attempt of its own, so two quick starts never both take the last slot and an attempt that ends releases only its own
   const admitting = new Map<number, ReviewSlot>()
   let attempts = 0
-  // queued reviews taken out of the queue whose launch has not returned yet; none behind them starts until it has, so they spawn in the order they were queued
+  // reviews being launched, new or from the queue, whose launch has not returned yet; none that arrived behind them starts until it has, so reviews spawn in the order they arrived
   let opening = 0
+  // the turn of the review that arrived last, ended once it and every review ahead of it have had their fit decided or been refused
+  let arrivals: Promise<unknown> = Promise.resolve()
   // runs that ended here whose ending could not be written, each as it ended, for whoever awaits it; the row still reads queued or running until a Stop records it or the next server start settles it
   const unrecorded = new Map<number, T>()
   let closed = false
@@ -1701,13 +1703,23 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     end(run, { status: 'failed', finishedAt: now(), note }, 'failed in the queue')
   }
 
+  // ends the attempt to start a queued review, with the slot it held and the checks it passed, so it makes them again when it is next given a slot
+  const giveBack = (item: Queued): void => {
+    if (item.attempt !== null) admitting.delete(item.attempt)
+    item.attempt = null
+    item.checked = null
+  }
+
   // takes a review out of the queue, and releases the slot an attempt to start it held
   const dequeue = (item: Queued): void => {
     const at = queue.indexOf(item)
     if (at >= 0) queue.splice(at, 1)
-    if (item.attempt !== null) admitting.delete(item.attempt)
-    item.attempt = null
-    item.checked = null
+    giveBack(item)
+  }
+
+  // a review that does not fit holds the line, however long that lasts, so none behind it keeps a slot or waits on checks passed long ago
+  const holdLine = (item: Queued): void => {
+    for (const behind of queue.slice(queue.indexOf(item) + 1)) giveBack(behind)
   }
 
   // a queued review that will never start, never to be tried again: its row is recorded as failed before it leaves the queue and its slot is released, so the row, the queue, the slot, and its waiters change together. A record that fails twice, the database unwritable, leaves the row queued for the next server start to fail as serverRestarted, while the review still leaves the queue here and whoever awaits it is given it as failed
@@ -1716,7 +1728,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     dequeue(item)
   }
 
-  // gives a slot to every queued review that fits now, earliest first, each then making its checks in the background, still in the queue; and launches each whose checks have passed once no review ahead of it is still making its checks or being launched, so they start in the order they were queued
+  // reads the queue earliest first: gives a slot to each review that fits now, which then makes its checks in the background, still in the queue, and launches each whose checks have passed once no review ahead of it is still making its checks or being launched. The first that does not fit ends the reading and holds the line, the over-cap allowance included, so reviews start in the order they arrived
   const admit = (): void => {
     if (closed) return
     const config = options.config()
@@ -1735,6 +1747,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
           continue
         }
         proceed(item, item.attempt, item.checked)
+        // one that gave its slot back no longer fits, and still holds its place ahead of every one behind it
+        if (queue.includes(item)) {
+          holdLine(item)
+          return
+        }
         heldBack ||= opening > 0
         continue
       }
@@ -1747,7 +1764,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         failInQueue(item, `spawnFailed: ${messageOf(error)}`)
         continue
       }
-      if (slot === null || !fitsInLine(item, slot, config)) continue
+      if (slot === null || !fitsInLine(item, slot, config)) {
+        holdLine(item)
+        return
+      }
       const attempt = reserve(slot)
       item.attempt = attempt
       heldBack = true
@@ -1791,9 +1811,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
     if (slot === null || !fitsInLine(item, slot, config)) {
       // it no longer fits: it gives its slot back and waits again, in its place in line
-      admitting.delete(attempt)
-      item.attempt = null
-      item.checked = null
+      giveBack(item)
       return
     }
     admitting.set(attempt, slot)
@@ -2096,6 +2114,18 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return store.get(run.id) ?? run
   }
 
+  // a review's place in line, taken as it arrives: the wait for every review ahead of it to have its fit decided or be refused, and the end of its own turn, which the next waits for
+  const takeTurn = (): { ahead: Promise<unknown>, decided: () => void } => {
+    const ahead = arrivals
+    let decided = (): void => {}
+    const own = new Promise<void>((resolveTurn) => {
+      decided = resolveTurn
+    })
+    // a review refused ahead of an earlier one that still makes its checks moves nothing behind it forward
+    arrivals = Promise.all([ahead, own])
+    return { ahead, decided }
+  }
+
   const start = async (request: StartRequest): Promise<T> => {
     const config = options.config()
     // a tandem primary launches its secondary in the background, and the fix and update sessions are pinned to Claude; the runner is the one asked for or the configured default, so no caller gets around this
@@ -2110,35 +2140,44 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       throw new LaunchError('busy', store.busyText(request))
     }
     starting.add(key)
+    // only reviews stand in line; a fix or update session and a sweep wait for nothing
+    const turn = reviewCommands.includes(request.command) ? takeTurn() : null
     try {
       await checkIdentity(config)
       const cloneDir = await checkClone(config)
+      // the checks may race, and a refusal above never waits, but a review's fit is decided in the order they arrived
+      await turn?.ahead
       // a config saved during the checks is the one admission reads, and whether it is a self-review is read from the cache now, with nothing awaited before the slot is held
       const current = options.config()
       const slot = store.slot(request, current)
       if (slot === null) return await launch(request, config, request.cwd ?? cloneDir)
-      // whatever already waits and fits goes first, so a new review never overtakes one queued before it
+      // whatever already waits and fits goes first
       admit()
-      if (!fits(slot, current)) {
+      // a new review starts at once only as the sole eligible start: with room, and with no review ahead of it waiting in the queue or still being launched
+      if (queue.length > 0 || opening > 0 || !fits(slot, current)) {
         const queued = enqueue(request, config, request.cwd ?? cloneDir)
         // a save during the checks may have left it confirmed for a repository or a viewer no longer in effect
         admit()
         return store.get(queued.id) ?? queued
       }
       const attempt = reserve(slot)
+      opening += 1
+      turn?.decided()
       try {
         return await launch(request, config, request.cwd ?? cloneDir, null, { slot, attempt, viewer: config.viewer })
       } finally {
+        opening -= 1
         admitting.delete(attempt)
         // as for a queued start: the slot is never left counted for a run that is no longer in flight
         admit()
       }
     } finally {
+      turn?.decided()
       starting.delete(key)
     }
   }
 
-  // at the cap: the review gets its row, queued, and starts when a slot is free
+  // at the cap, or behind a review that arrived before it: the review gets its row, queued, and starts when its turn comes and a slot is free
   const enqueue = (request: StartRequest, config: Config, cwd: string): T => {
     const run = newRow(request, config, cwd, 'queued')
     queue.push({ id: run.id, run, request, viewer: config.viewer, attempt: null, checked: null })
