@@ -4,7 +4,7 @@ Arguments, all optional and in any order:
 
 - A day: a date (`2026-10-19`), a weekday name (most recent one), `yesterday`, or nothing, which means today.
 - A work window such as `0900-1800`. The default is 09:00 to 18:00 local time.
-- A standup length in minutes. The default is 15, placed first in the window. `no standup` omits it.
+- A standup length in minutes. Standup always begins at 09:00 local time, whatever the work window, and lasts 15 minutes unless the invocation or the record says otherwise. `no standup` omits it. When the window opens before 09:00, the time before the standup is filled with real work from the record.
 - Offline work or meetings with their stated times. Place these as given and never adjust them.
 - `preview`: build and show the timesheet, write the output file, and file nothing in Skuld.
 - `replace`: delete that day's existing Skuld entries before filing (see Existing entries).
@@ -20,7 +20,7 @@ Step 3: learn the house style before writing anything. Call the Skuld API (below
 
 Step 4: build the entries.
 
-- Start with the standup at the window start, then fill the window with no gaps between entries unless the prior weeks or the user's offline items show one. The last entry ends at the window end.
+- Place the standup at 09:00 (see the arguments), then fill the rest of the window, before and after it, with no gaps between entries unless the prior weeks or the user's offline items show one. The last entry ends at the window end.
 - Every boundary lands on a quarter hour, because Skuld floors starts and ceils ends to 15 minutes. Entries of 30 to 90 minutes read naturally; do not file anything under 15 minutes except the standup.
 - Anchor each entry in the record: the PRs reviewed, the branch worked, the ticket moved, with the day's real order of events as the spine.
 - The record rarely covers the whole window. When the user asks for it (or the window is wider than the recorded activity), extend the heaviest recorded activity into the unrecorded stretches, earlier or later, and for today only, extrapolate whatever is in progress now forward to the window end. For a past day there is no in-progress work, so extend the last substantial block instead. Never invent a different kind of work than the record shows, never file activity under a ticket the record does not tie it to, and never move an offline item the user timed.
