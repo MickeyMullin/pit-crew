@@ -419,7 +419,7 @@ test('the Agent card holds the Agent column switch, then Concurrent reviews, the
   assert.match(agent, /<label for="f-maxConcurrentReviews">Concurrent reviews<\/label>/)
   assert.match(agent, /<span class="field-label">Self-review over limit<\/span>/)
   // the setting changes whether a self-review fits, never its place in line
-  assert.match(agent, /may start while the limit is reached, once every review queued before it has started/)
+  assert.match(agent, /may start while the limit is reached, once every review queued before it has started or left the queue/)
   assert.doesNotMatch(agent, /never waits/)
   const behavior = fieldsIn(cardOf(html, 'behavior'))
   assert.deepEqual(behavior, ['refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'timeFormat'])

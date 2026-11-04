@@ -1204,6 +1204,8 @@ test('with the setting on, one self-review may run over the cap and never a seco
     on.launch.children[0]!.exit(1)
     await on.launcher.settled(first.id)
     await waitFor(() => on.launch.children.length === 4)
+    // the spawn count moves before the row is written, so wait for the row
+    await waitFor(() => on.cache.getRun(secondSelf.id)?.status === 'running')
     assert.equal(on.cache.getRun(secondSelf.id)?.status, 'running')
     assert.equal(on.cache.getRun(other.id)?.status, 'queued')
   } finally {
