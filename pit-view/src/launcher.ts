@@ -11,6 +11,7 @@ import type { Stack } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
 import type { Gh, RawOpenPr, Runner } from './github.ts'
 import type { Timers } from './poller.ts'
+import { prReportName } from './reports.ts'
 import type { ReportInfo } from './reports.ts'
 import { iso } from './time.ts'
 
@@ -30,7 +31,7 @@ export type Priority = 'P0' | 'P1' | 'P2' | 'P3'
 export type Finding = { priority: Priority, summary: string, files: string[] }
 export type PostForm = 'approve' | 'requestChanges' | 'comment'
 export type Posted = { form: PostForm, url: string }
-export type NotPostedReason = 'noPost' | 'ownPr' | 'awaitingAnswer' | 'ghFailed'
+export type NotPostedReason = 'noPost' | 'ownPr' | 'awaitingAnswer' | 'ghFailed' | 'postBlocked'
 export type Verdict = 'changesRequested' | 'clean'
 export type Recommendation = 'approve' | 'fixBeforeMerge' | 'hold' | 'doNotMerge'
 export type CiState = 'green' | 'failed' | 'pending' | 'none'
@@ -211,7 +212,7 @@ const checkReview = (value: Record<string, unknown>): void => {
   check(oneOfOrNull(value.ci, ['green', 'failed', 'pending', 'none']), 'ci must be green, failed, pending, none or null')
   check(Number.isInteger(value.fixAttempts) && (value.fixAttempts as number) >= 0, 'fixAttempts must be a whole number')
   checkPosted(value.posted)
-  check(oneOfOrNull(value.notPostedReason, ['noPost', 'ownPr', 'awaitingAnswer', 'ghFailed']), 'notPostedReason must be one of the four or null')
+  check(oneOfOrNull(value.notPostedReason, ['noPost', 'ownPr', 'awaitingAnswer', 'ghFailed', 'postBlocked']), 'notPostedReason must be one of the five or null')
   check(isStringOrNull(value.report), 'report must be a path or null')
 }
 
@@ -439,11 +440,26 @@ export const requestText = (prefix: '/' | '$', command: string, args: readonly s
 export const codexNote = (reportsDir: string): string =>
   `Note: ~/agents/output resolves to ${reportsDir}. Write report files at that resolved path; file patches through the symlink are refused.`
 
+// whether a run may post at all, from its own command and flags and nothing else: never from anything in its result, which an agent wrote after reading other people's PR text. A stack review stops to offer its post, a fix pushes, and an update pushes, so none of them posts by itself
+export const mayPost = (command: string, args: readonly string[]): boolean =>
+  ['review-pr', 'review-dependabot', 'review-dependabot-sweep'].includes(command) && !args.includes('--no-post')
+
+// what a Claude run is told about the post (section 8 of DESIGN.md, Launching runs, Permissions). A run that may post gets one allow rule, for gh pr review on its own PR, or on any PR for a sweep, whose reviewers find theirs. A --no-post run gets a deny rule instead, since the owner's own allow rules may let the post through and a deny wins over them
+export const postPermissionArgs = (command: string, args: readonly string[]): string[] => {
+  if (args.includes('--no-post')) return ['--disallowedTools', 'Bash(gh pr review:*)', 'Bash(gh pr comment:*)']
+  if (!mayPost(command, args)) return []
+  if (command === 'review-dependabot-sweep') return ['--allowedTools', 'Bash(gh pr review:*)']
+  const number = args[0]
+  return number !== undefined && /^[1-9]\d*$/.test(number) ? ['--allowedTools', `Bash(gh pr review ${number}:*)`] : []
+}
+
 export const claudeInvocation = (spec: LaunchSpec): Invocation => ({
   command: 'claude',
   args: [
     '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
-    '--model', spec.claudeModel, '--session-id', spec.sessionId ?? '', '--permission-mode', 'auto', '--add-dir', join(spec.home, 'agents'),
+    '--model', spec.claudeModel, '--session-id', spec.sessionId ?? '', '--permission-mode', 'auto',
+    ...postPermissionArgs(spec.command, spec.args),
+    '--add-dir', join(spec.home, 'agents'),
   ],
   // one user message; stdin then stays open until the result arrives with nothing in the background
   stdin: `${JSON.stringify({ type: 'user', message: { role: 'user', content: requestText('/', spec.command, spec.args, spec.runDir) } })}\n`,
@@ -745,6 +761,8 @@ export type AgentCell = {
   firstNote: string | null
   resume: string | null
   costUsd: number | null
+  // the post a blocked run's report may still get from the drawer's Post it; null for anything else
+  postOffer: PostOffer | null
 }
 
 export type FailureKind = 'noResult' | 'noReport' | 'badResult' | 'permissionDenied' | 'serverRestarted' | 'spawnFailed'
@@ -797,6 +815,8 @@ const updateText = (result: UpdateResult): string => {
 const pushRefused = (result: RunResultJson | null): boolean =>
   (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1') && result.notPushedReason === 'pushFailed'
 
+const postNotes: Partial<Readonly<Record<NotPostedReason, string>>> = { ghFailed: ' · post failed', postBlocked: ' · post not made' }
+
 // the cell's text for a finished run, from section 8's mappings: a review's verdict and posted, a fix's push, an update's method
 export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'> & { resolvedByHand?: boolean }, ownDraft: boolean): string => {
   if (run.status === 'stopped') return 'Stopped'
@@ -816,7 +836,7 @@ export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'> & { resolv
   else if (ownDraft) text = 'Clean · mark ready?'
   else if (result.posted?.form === 'approve') text = 'Approved'
   else if (result.posted?.form === 'comment') text = 'Clean · CI failed'
-  return `${result.notPostedReason === 'ghFailed' ? `${text} · post failed` : text}${byHand}`
+  return `${text}${result.notPostedReason === null ? '' : postNotes[result.notPostedReason] ?? ''}${byHand}`
 }
 
 const countBy = <K extends string>(keys: readonly K[], values: readonly K[]): Record<K, number> =>
@@ -887,6 +907,57 @@ const recordedCommit = (run: Run): string | null => {
   return null
 }
 
+// the form a blocked run's post takes, by the rules the review prompts post under: the findings, then CI, and for Dependabot the recommendation too, as far as the cached PR and the result can tell
+export const postFormOf = (result: ReviewResult, pr: RawOpenPr, config: Config): PostForm => {
+  if (result.verdict === 'changesRequested') return 'requestChanges'
+  const green = result.ci === 'green' || result.ci === 'none'
+  if (result.command !== 'review-dependabot') return green ? 'approve' : 'comment'
+  if (result.recommendation === 'approve') return green && !pr.isDraft && pr.mergeable !== 'CONFLICTING' ? 'approve' : 'comment'
+  // a plain comment does not supersede an earlier approval, which would go on vouching for a version this review says not to merge
+  return result.recommendation !== null && viewerReview(pr, config)?.state === 'APPROVED' ? 'requestChanges' : 'comment'
+}
+
+// gh's arguments for that post: the command the worker would have run, with the repository named, since Pit View's own gh runs in no clone
+export const postArgs = (repo: string, number: number, form: PostForm, bodyFile: string): string[] => {
+  if (form === 'comment') return ['pr', 'comment', String(number), '--repo', repo, '--body-file', bodyFile]
+  return ['pr', 'review', String(number), '--repo', repo, form === 'approve' ? '--approve' : '--request-changes', '--body-file', bodyFile]
+}
+
+// what Post it would do, for the confirmation; the server judges a click by this same function, against the cache as it is then
+export type PostOffer = {
+  runId: number
+  form: PostForm
+  // the saved report's file name, and its path written with ~
+  report: string
+  reportPath: string
+  // the full head the review read, which is the PR's head
+  headSha: string
+  repo: string
+  viewer: string
+  // the command as the confirmation shows it
+  command: string
+}
+
+// a blocked post stays open to Post it only for the run's own PR, at the head it reviewed, while the viewer has not reviewed that head some other way. The run's own command and flags decide whether it may post at all; its result only names what there is to post, and each thing it names is checked against the run and the config
+export const postOffer = (pr: RawOpenPr, config: Config, run: Run | undefined): PostOffer | null => {
+  if (run === undefined || run.status !== 'done' || run.command === 'review-dependabot-sweep' || !mayPost(run.command, run.args) || isMine(pr, config)) return null
+  const result = run.result
+  if (result?.schema !== 'pit-crew/review-result@1' || result.notPostedReason !== 'postBlocked' || result.posted !== null || result.verdict === null) return null
+  const target = result.target
+  if (run.repo !== config.repo || run.number !== pr.number || target === null || !('pr' in target) || target.pr !== run.number || target.repo.toLowerCase() !== config.repo.toLowerCase()) return null
+  // only the file the prompts write for this PR, in the folder they write it to: the name comes from the run's number, never from the result
+  const report = prReportName(run.number)
+  const reportPath = `${config.reportsDir.replace(/\/$/, '')}/${report}`
+  if (result.report !== reportPath) return null
+  const sha = result.reviewed?.sha
+  const head = pr.headRefOid
+  if (!isFullSha(sha) || sha.toLowerCase() !== head.toLowerCase()) return null
+  const review = viewerReview(pr, config)
+  if (review?.commit?.oid === head && (review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED')) return null
+  const form = postFormOf(result, pr, config)
+  return { runId: run.id, form, report, reportPath, headSha: head.toLowerCase(), repo: config.repo, viewer: config.viewer, command: `gh ${postArgs(config.repo, run.number, form, reportPath).join(' ')}` }
+}
+
 export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null): AgentCell => {
   const mine = isMine(pr, config)
   const plan = defaultRun(pr, config)
@@ -897,7 +968,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     state: 'idle', label: plan.label, action, starts: startOptions(pr, config, stack, run?.status === 'running' || run?.status === 'queued', queueing), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
-    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null,
+    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, postOffer: null,
   }
   if (run === undefined) return idle
   const shas = standingShas(run)
@@ -930,6 +1001,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     firstNote: run.firstNote,
     resume: run.resume,
     costUsd: run.costUsd,
+    postOffer: postOffer(pr, config, run),
   }
 }
 
@@ -945,13 +1017,15 @@ export type StreamState = {
   outstanding: number
   // tools named in the latest result event's permission_denials
   denials: string[]
+  // every one of those denials is a Bash call that posts a review or a comment: Claude Code's own record of what it refused, which the worker does not write
+  postDenied: boolean
   costUsd: number | null
   sessionId: string | null
   // the newest line, for a noResult note
   lastEvent: string | null
 }
 
-export const emptyStream = (): StreamState => ({ outstanding: 0, denials: [], costUsd: null, sessionId: null, lastEvent: null })
+export const emptyStream = (): StreamState => ({ outstanding: 0, denials: [], postDenied: false, costUsd: null, sessionId: null, lastEvent: null })
 
 const finishedTaskStates = new Set(['completed', 'complete', 'done', 'failed', 'error', 'killed', 'stopped', 'cancelled', 'canceled'])
 
@@ -961,6 +1035,16 @@ export const outstandingTasks = (event: Record<string, unknown>): number => {
   const list = [event.tasks, event.background_tasks, event.backgroundTasks, data.tasks].find(Array.isArray) as unknown[] | undefined
   if (list === undefined) return 0
   return list.filter((task) => !(isObject(task) && finishedTaskStates.has(String(task.status ?? task.state ?? '').toLowerCase()))).length
+}
+
+// a command that runs gh pr review or gh pr comment, alone or chained with others; a command that only mentions one does not count
+const runsPost = (command: string): boolean =>
+  command.split(/[;&|\n]+/).some((part) => /^\s*(?:[A-Za-z_]\w*=\S*\s+)*gh\s+pr\s+(?:review|comment)(?:\s|$)/.test(part))
+
+const isPostDenial = (denial: unknown): boolean => {
+  if (!isObject(denial) || !isObject(denial.tool_input) || (denial.tool_name ?? denial.toolName) !== 'Bash') return false
+  const command = denial.tool_input.command
+  return typeof command === 'string' && runsPost(command)
 }
 
 const clip = (text: string, length = 300): string => text.length > length ? `${text.slice(0, length)}…` : text
@@ -985,6 +1069,7 @@ export const foldStream = (state: StreamState, line: string): { state: StreamSta
   if (typeof event.total_cost_usd === 'number') next.costUsd = event.total_cost_usd
   const denials = Array.isArray(event.permission_denials) ? event.permission_denials : []
   next.denials = denials.map((denial) => isObject(denial) ? String(denial.tool_name ?? denial.toolName ?? 'unknown tool') : String(denial))
+  next.postDenied = denials.length > 0 && denials.every(isPostDenial)
   return { state: next, closeStdin: next.outstanding === 0 }
 }
 
@@ -1000,6 +1085,10 @@ export type JudgeInput = {
   // whether the report a done result names exists; null when not checked
   reportExists: boolean | null
   denials: readonly string[]
+  // every denial was the post's, from the stream
+  postDenied?: boolean
+  // the run's own command and flags allow a post
+  mayPost?: boolean
   lastEvent: string | null
 }
 
@@ -1010,10 +1099,22 @@ const exitText = (exit: Exit | null): string => {
   return exit.signal === null ? `exit code ${exit.code}` : `killed by ${exit.signal}`
 }
 
+// a review that finished, with only its post refused: done, whatever the worker made of the refusal, since nothing waits on an answer and nothing failed. Null when any part of the review is missing, or the result says it was never going to post
+const blockedPost = (value: RunResultJson, reportExists: boolean | null): ReviewResult | null => {
+  if (value.schema !== 'pit-crew/review-result@1' || value.verdict === null || value.reviewed === null || value.report === null || value.posted !== null || reportExists !== true) return null
+  if (value.notPostedReason === 'noPost' || value.notPostedReason === 'ownPr') return null
+  return { ...value, status: 'done', notPostedReason: 'postBlocked', question: null }
+}
+
 export const judge = (input: JudgeInput): Judgement => {
   const result = input.parsed?.ok === true ? input.parsed.value : null
   if (input.stopped) return { status: 'stopped', note: null, result }
   if (input.exit?.error != null) return { status: 'failed', note: `spawnFailed: ${input.exit.error}`, result }
+  // a denied post leaves a finished review standing, but only on a run allowed to post, and only when the post is all that was denied
+  if (input.denials.length > 0 && input.postDenied === true && input.mayPost === true && input.parsed?.ok === true) {
+    const blocked = blockedPost(input.parsed.value, input.reportExists)
+    if (blocked !== null) return { status: 'done', note: null, result: blocked }
+  }
   // a denied tool call never passes silently, whatever result.json says
   if (input.denials.length > 0) return { status: 'failed', note: `permissionDenied: ${[...new Set(input.denials)].join(', ')}`, result }
   if (input.parsed === null && input.restarted) return { status: 'failed', note: 'serverRestarted', result: null }
@@ -1025,6 +1126,11 @@ export const judge = (input: JudgeInput): Judgement => {
   const mismatch = value.schema === 'pit-crew/fix-result@1' ? fixMismatch(value) : value.schema === 'pit-crew/update-result@1' ? updateMismatch(value) : null
   if (mismatch !== null) return { status: 'failed', note: `badResult: ${mismatch}`, result: value }
   if (value.status === 'failed') return { status: 'failed', note: value.error, result: value }
+  // a worker that recorded the refusal itself and stopped to ask about it is read the same way
+  if (value.status === 'needsInput' && value.schema === 'pit-crew/review-result@1' && value.notPostedReason === 'postBlocked' && input.mayPost === true) {
+    const blocked = blockedPost(value, input.reportExists)
+    if (blocked !== null) return { status: 'done', note: null, result: blocked }
+  }
   if (value.status === 'needsInput') return { status: 'needsInput', note: null, result: value }
   const path = reportPath(value)
   // a sweep with nothing to sweep writes no summary and is still done, and an update writes no report at all
@@ -1318,6 +1424,8 @@ export type Launcher<T extends Session = Run> = {
   stop: (id: number) => T
   // the owner's re-read of a failed or waiting run's folder (section 8, Re-reading a result): the new result.json replaces the recorded outcome when it passes every guard, and a refusal changes nothing
   reread: (id: number) => Promise<T>
+  // records the post Post it made for a blocked run; a sweep has none
+  recordPost: (id: number, posted: Posted) => T
   // at server start: re-watch live runs, settle the rest, and fail what was still queued, since a start of the server starts nothing
   recover: () => Promise<void>
   // reads the queue again, earliest first, as far as the first review that does not fit; the server calls it after a saved config, which may have raised the cap
@@ -1982,7 +2090,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (wrong !== null) parsed = { ok: false, error: wrong }
     }
     let reportExists: boolean | null = null
-    if (parsed?.ok === true && parsed.value.status === 'done') {
+    // any status: a blocked post leaves a finished review whose worker may have stopped to ask or failed over it
+    if (parsed?.ok === true) {
       const path = reportPath(parsed.value)
       if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
     }
@@ -1993,6 +2102,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       parsed,
       reportExists,
       denials: entry.stream.denials,
+      postDenied: entry.stream.postDenied,
+      mayPost: started?.command !== undefined && started.args !== undefined && mayPost(started.command, started.args),
       lastEvent: entry.stream.lastEvent,
     })
     live.delete(entry.id)
@@ -2466,10 +2577,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       const moved = targetMismatch(run, run.result, value) ?? reviewedMismatch(run.result, value)
       if (moved !== null) return refuse(moved)
       let reportExists: boolean | null = null
-      const path = value.status === 'done' ? reportPath(value) : null
+      const path = reportPath(value)
       if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
       // judged on its own: the stream's denials belong to the original attempt, and the owner has resolved them
-      const judgement = judge({ stopped: false, restarted: false, exit: null, parsed, reportExists, denials: [], lastEvent: null })
+      const judgement = judge({ stopped: false, restarted: false, exit: null, parsed, reportExists, denials: [], mayPost: mayPost(run.command, run.args), lastEvent: null })
       // a guard failure is the launcher's own verdict; a valid failed result carries its own error, whatever words that starts with
       const ownFailure = value.status === 'failed' && judgement.note === value.error && (value.schema !== 'pit-crew/fix-result@1' || fixMismatch(value) === null) && (value.schema !== 'pit-crew/update-result@1' || updateMismatch(value) === null)
       if (judgement.status === 'failed' && !ownFailure && noteKind(judgement.note) !== null) return refuse(judgement.note ?? 'the result is not valid')
@@ -2496,6 +2607,25 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
+  // the post Post it made for a blocked run (section 8, Launching runs, Blocked post): the run now reads as posted, and its step bar with it. Its folder is left as the worker wrote it, and a done run is never read from it again
+  const recordPost = (id: number, posted: Posted): T => {
+    const run = store.get(id)
+    if (run === null) throw new LaunchError('unknownRun', `${noun} ${id} does not exist`)
+    const result = run.result
+    if (store.schema !== null || result?.schema !== 'pit-crew/review-result@1') throw new LaunchError('notRunning', `${noun} ${id} has no review to record a post on`)
+    const at = now()
+    const updated = store.update(id, {
+      result: { ...result, posted, notPostedReason: null },
+      steps: foldSteps(stepsOf(run), [{ at, step: 'post', state: 'done', note: 'posted from Pit View' }]),
+      lastStepAt: at,
+      step: 'post',
+      stepState: 'done',
+    })
+    log(`${noun} ${id}: post recorded (${posted.form})`)
+    changed(updated)
+    return updated
+  }
+
   const checkAll = async (): Promise<void> => {
     await Promise.all([...live.values()].map((entry) => pumpOf(entry)))
   }
@@ -2519,5 +2649,5 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     for (const entry of live.values()) clear(entry)
   }
 
-  return { start, stop, reread, recover, drain: admit, check: checkAll, settled, queueing, flushed, close }
+  return { start, stop, reread, recordPost, recover, drain: admit, check: checkAll, settled, queueing, flushed, close }
 }

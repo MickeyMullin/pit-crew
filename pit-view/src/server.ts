@@ -215,6 +215,7 @@ const launchStatus: Readonly<Record<LaunchErrorCode, number>> = {
 // why a direct action was refused, as an HTTP status
 const actionStatus: Readonly<Record<ActionErrorCode, number>> = {
   badRequest: 400,
+  unknownRun: 404,
   notOpen: 422,
   notYours: 422,
   notAllowed: 422,
@@ -588,6 +589,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     config: effective,
     refreshPr: (repo, number) => poller.refreshPrAfterWrite(repo, number),
     startUpdate: async (repo, number, headSha, action) => runView(await launcher.start(updateRequest(repo, number, headSha, action))),
+    reportsFolder: () => expandHome(effective().reportsDir, home),
+    recordPost: (id, posted) => runView(launcher.recordPost(id, posted)),
     log,
   })
 
@@ -703,6 +706,20 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       json(res, 200, runView(await launcher.reread(id)))
     } catch (error) {
       launchFailure(error)
+    }
+  }
+
+  // Post it (section 8 of DESIGN.md, Launching runs, Blocked post): a GitHub write, so it takes a direct action's Origin and token, and what its confirmation showed comes back whole
+  const postRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
+    requireOrigin(req)
+    requireToken(req)
+    if (!/^[1-9]\d{0,9}$/.test(raw)) throw new HttpError(400, 'the run id must be a positive integer')
+    const body = await readJson(req)
+    try {
+      json(res, 200, await actions.post(Number(raw), body))
+    } catch (error) {
+      if (!(error instanceof ActionError)) throw error
+      json(res, actionStatus[error.code], { error: error.message, ...(error.errorKind === null ? {} : { errorKind: error.errorKind }) })
     }
   }
 
@@ -844,6 +861,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'GET', pattern: /^\/api\/reports\/([^/]+)$/, handle: (_req, res, _url, match) => serveReport(res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/runs\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopRun(req, res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/runs\/([^/]+)\/reread$/, handle: (req, res, _url, match) => rereadRun(req, res, match[1] ?? '') },
+    { method: 'POST', pattern: /^\/api\/runs\/([^/]+)\/post$/, handle: (req, res, _url, match) => postRun(req, res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/sweeps$/, handle: (req, res) => startSweep(req, res) },
     { method: 'GET', pattern: /^\/api\/sweeps$/, handle: (_req, res) => json(res, 200, sweeps.list(effective().repo)) },
     { method: 'POST', pattern: /^\/api\/sweeps\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopSweep(req, res, match[1] ?? '') },

@@ -79,6 +79,7 @@ Response, `<run-dir>/result.json`:
   - `"ownPr"`: the PR, or for `review-stack` the top PR, is the active login's own, so the calling prompt does not post on it.
   - `"awaitingAnswer"`: the run stopped to ask before posting, whether at `review-stack`'s offer to post or at any earlier stop to ask.
   - `"ghFailed"`: the post was attempted and `gh` failed. The error goes in `error`, and `status` is still `"done"`.
+  - `"postBlocked"`: a permission check refused the post before it ran, so nothing reached GitHub. `status` is still `"done"`, `question` and `error` are null, and the run does not stop to ask about it: the program watching offers the saved report to the user for posting.
   - It is null as well when nothing was posted for a reason not in this list: the run failed before the post, no PR exists to post to, or the user declined the offer to post. The `post` step's note, or `error`, says which.
 - `report`: the report file's path, with the home directory written as `~` (`~/agents/output/PR-482.md`). Under tandem mode, the consolidated report at the unsuffixed path, never a draft. Null when no report was written.
 - `question`: when `status` is `"needsInput"`, the question exactly as you asked it in chat, with the choices you offered; otherwise null.

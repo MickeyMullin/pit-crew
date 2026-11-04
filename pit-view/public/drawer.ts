@@ -8,7 +8,7 @@ import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
 import { actionBound, actionDoneText, actionRefusalText, actionRequest } from './actionsview.ts'
 import type { ActionConfirmModel, ActionKind, PersonChoice } from './actionsview.ts'
-import { refusalText, rereadRequest, startRequest, stopRequest } from './agent.ts'
+import { postRequest, refusalText, rereadRequest, startRequest, stopRequest } from './agent.ts'
 import type { AgentCell, RunView, StartKind } from './agent.ts'
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
@@ -266,11 +266,13 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       const idleText = confirm?.type === 'stop' ? (model?.stop?.confirm ?? 'Stop run')
         : confirm?.type === 'action' ? (model?.actionAsk?.confirm ?? 'Confirm')
           : confirm?.type === 'reread' ? (model?.rereadAsk?.confirm ?? 'Re-read result')
-            : (model?.confirm?.confirm ?? 'Start')
+            : confirm?.type === 'post' ? (model?.postAsk?.confirm ?? 'Post it')
+              : (model?.confirm?.confirm ?? 'Start')
       const busyText = confirm?.type === 'stop' ? (model?.stop?.busy ?? 'Stopping…')
         : confirm?.type === 'action' ? (model?.actionAsk?.busy ?? 'Working…')
           : confirm?.type === 'reread' ? (model?.rereadAsk?.busy ?? 'Reading…')
-            : (model?.confirm?.busy ?? 'Starting…')
+            : confirm?.type === 'post' ? (model?.postAsk?.busy ?? 'Posting…')
+              : (model?.confirm?.busy ?? 'Starting…')
       setText(go, busy ? busyText : idleText)
     }
   }
@@ -364,6 +366,17 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     byKey('confirm-cancel')?.focus({ preventScroll: true })
   }
 
+  // one click opens the confirmation; nothing is sent until its own button is clicked, and what it shows now is what the request is bound to
+  const askPost = (): void => {
+    const offer = latest()?.postOffer
+    if (offer == null) return
+    confirm = { type: 'post', runId: offer.runId, repo: offer.repo, viewer: offer.viewer, headSha: offer.headSha, form: offer.form }
+    confirmFrom = 'post-it'
+    error = ''
+    render()
+    byKey('confirm-cancel')?.focus({ preventScroll: true })
+  }
+
   const cancelConfirm = (): void => {
     const back = confirmFrom
     confirm = null
@@ -424,6 +437,32 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       return
     }
     error = refusalText('reread', answer.status, answer.error)
+    paintConfirm()
+    byKey('confirm-go')?.focus({ preventScroll: true })
+  }
+
+  const doPost = async (): Promise<void> => {
+    if (busy || confirm?.type !== 'post' || number === null) return
+    const asked = confirm
+    const n = number
+    busy = true
+    error = ''
+    paintConfirm()
+    const answer = await sendRun(postRequest(asked.runId, { repo: asked.repo, viewer: asked.viewer, number: n, headSha: asked.headSha, form: asked.form }, options.token))
+    busy = false
+    if (n !== number) return
+    if (answer.ok) {
+      confirm = null
+      confirmFrom = null
+      error = ''
+      options.say(`#${n}: report posted. The row is refreshing.`)
+      render()
+      // the row arrives as a patch and the card follows it; the heading holds focus meanwhile
+      focusKey(null)
+      void loadRuns()
+      return
+    }
+    error = refusalText('post', answer.status, answer.error)
     paintConfirm()
     byKey('confirm-go')?.focus({ preventScroll: true })
   }
@@ -654,6 +693,24 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     return h('div', { class: 'drawer-run-actions' }, button, offer.reason === null ? null : h('p', { class: 'drawer-note' }, offer.reason))
   }
 
+  // the latest-run card's Post it: a button, or its confirmation once asked
+  const postBlock = (model: DrawerModel): HTMLElement | null => {
+    if (model.postAsk !== null) {
+      const ask = model.postAsk
+      return h('div', { class: 'confirm', role: 'group', 'aria-labelledby': 'drawer-confirm-heading' },
+        h('h4', { id: 'drawer-confirm-heading', class: 'confirm-heading' }, ask.heading),
+        h('p', { class: 'confirm-title' }, ask.title),
+        facts([['Report', ask.report], ['Command', ask.command], ['On GitHub', ask.effect], ['Bound to', ask.bound]]),
+        errorLine(),
+        confirmActions(ask.confirm, 'primary', () => void doPost()))
+    }
+    const offer = model.postIt
+    if (offer === null) return null
+    const button = h('button', { type: 'button', class: 'button button-primary', disabled: offer.disabled, 'data-focus-key': 'post-it' }, offer.button)
+    button.addEventListener('click', () => askPost())
+    return h('div', { class: 'drawer-run-actions' }, button, offer.reason === null ? null : h('p', { class: 'drawer-note' }, offer.reason))
+  }
+
   const waitingCard = (model: DrawerModel, n: number): Part => ({
     key: 'waiting',
     sig: JSON.stringify([model.waiting, model.reread, model.rereadAsk]),
@@ -669,7 +726,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
 
   const resultCard = (model: DrawerModel, n: number): Part => ({
     key: 'result',
-    sig: JSON.stringify([model.result === null ? null : { ...model.result, finishedAt: model.result.finishedAt !== null }, model.reread, model.rereadAsk]),
+    sig: JSON.stringify([model.result === null ? null : { ...model.result, finishedAt: model.result.finishedAt !== null }, model.reread, model.rereadAsk, model.postIt, model.postAsk]),
     build: () => {
       const result = model.result
       if (result === null) return h('section')
@@ -698,6 +755,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           h('span', { class: 'drawer-meta' }, ` · ${result.runnerLabel}`),
           result.cost === null ? null : h('span', { class: 'drawer-meta' }, ` · ${result.cost}`)),
         result.note === null ? null : h('p', { class: 'drawer-note' }, result.note),
+        result.notPosted === null ? null : h('p', { class: 'drawer-notice', 'data-post-not-made': '' }, result.notPosted),
         result.byHand === null ? null : h('p', { class: 'drawer-note', 'data-by-hand': '' }, result.byHand),
         result.stale === null ? null : h('p', { class: 'drawer-note' }, result.stale),
         result.ready === null ? null : h('p', { class: 'drawer-note', 'data-ready-pointer': '' }, result.ready),
@@ -708,6 +766,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
         parts.length === 0 ? null : h('dl', { class: 'drawer-facts' }, parts),
         fix?.worktree == null ? null : h('p', { class: 'drawer-notice' }, fix.worktree),
         fix?.report == null ? null : reportButton(fix.report.name, fix.report.openName, 'Open report'),
+        result.report === null ? null : reportButton(result.report.name, result.report.openName, 'Open report'),
+        postBlock(model),
         resumeBlock(result.resume, result.copyName, n),
         rereadBlock(model))
     },

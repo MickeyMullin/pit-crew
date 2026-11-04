@@ -3,10 +3,10 @@
 // the per-start token, how a refusal reads, and what changes are announced; pure, with every
 // clock reading passed in. The drawer's own words are in drawerview.ts
 import type { RunnerName } from '../src/config.ts'
-import type { AgentCell, AgentResult, RunView, StartKind, StartOption, StepSlot } from '../src/launcher.ts'
+import type { AgentCell, AgentResult, PostForm, RunView, StartKind, StartOption, StepSlot } from '../src/launcher.ts'
 import { formatDuration, formatSince } from './format.ts'
 
-export type { AgentCell, AgentResult, RunnerName, RunView, StartKind, StartOption, StepSlot }
+export type { AgentCell, AgentResult, PostForm, RunnerName, RunView, StartKind, StartOption, StepSlot }
 
 export const runnerNames: readonly RunnerName[] = ['claude', 'codex']
 
@@ -77,11 +77,11 @@ export const stepText = (step: AgentCell['step'], command: string | null = null)
 
 export type DoneTone = 'red' | 'amber' | 'green' | 'gray'
 
-// the done text's color follows what the owner should do next; the words carry the meaning. A fix or an update that left something unpushed wants a look (amber); one with nothing to fix, or a branch already up to date, needs nothing (gray)
+// the done text's color follows what the owner should do next; the words carry the meaning. A fix or an update that left something unpushed wants a look (amber), and so does a review whose post was not made; one with nothing to fix, or a branch already up to date, needs nothing (gray)
 export const doneTone = (cell: Pick<AgentCell, 'status' | 'text'>): DoneTone => {
   const text = cell.text ?? ''
   if (cell.status === 'failed') return 'red'
-  if (cell.status === 'needsInput' || text.endsWith('post failed') || text === 'Clean · CI failed' || text.startsWith('Not pushed')) return 'amber'
+  if (cell.status === 'needsInput' || text.endsWith('post failed') || text.includes('· post not made') || text === 'Clean · CI failed' || text.startsWith('Not pushed')) return 'amber'
   if (cell.status === 'stopped' || text === 'Done' || text === 'Nothing to fix' || text === 'Already up to date') return 'gray'
   return text === 'Changes requested' ? 'red' : 'green'
 }
@@ -182,6 +182,18 @@ export const rereadRequest = (runId: number, ask: RereadAsk, token: string): Run
   },
 })
 
+// what Post it's confirmation showed, which the request carries back whole: the server refuses with 409 and posts nothing when any of it differs from what is in effect now
+export type PostAsk = { repo: string, viewer: string, number: number, headSha: string, form: PostForm }
+
+export const postRequest = (runId: number, ask: PostAsk, token: string): RunRequest => ({
+  url: `/api/runs/${runId}/post`,
+  init: {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', [tokenHeader]: token },
+    body: JSON.stringify(ask),
+  },
+})
+
 // a server message as a sentence: a capital and a full stop, but never a capital on a name such
 // as gh or cloneDir
 export const sentence = (text: string): string => {
@@ -194,8 +206,8 @@ export const sentence = (text: string): string => {
 
 // a refusal in the owner's words: the server's own message, except for the token, where the fix
 // is a reload; status 0 means Pit View did not answer at all
-export const refusalText = (kind: 'start' | 'stop' | 'reread', status: number, error: string | null): string => {
-  if (status === 403) return `Reload the page to ${kind === 'reread' ? 're-read' : kind} runs: Pit View has restarted since this page loaded.`
+export const refusalText = (kind: 'start' | 'stop' | 'reread' | 'post', status: number, error: string | null): string => {
+  if (status === 403) return `Reload the page to ${kind === 'post' ? 'post reports' : `${kind === 'reread' ? 're-read' : kind} runs`}: Pit View has restarted since this page loaded.`
   if (status === 0) return 'Pit View did not answer. Check that it is running, then try again.'
   return sentence(error ?? '') || `Pit View refused with status ${status}.`
 }

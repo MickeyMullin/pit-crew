@@ -1,11 +1,13 @@
 // src/actions.ts
+import { join } from 'node:path'
 import type { Cache, Run } from './cache.ts'
 import type { Config } from './config.ts'
 import { deriveIssues, deriveMerge, isPrimaryBase } from './derive.ts'
 import { GhError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr } from './github.ts'
-import { offersFix } from './launcher.ts'
-import type { RunView, UpdateAction } from './launcher.ts'
+import { isHttpUrl, offersFix, postArgs, postOffer } from './launcher.ts'
+import type { Posted, PostForm, RunView, UpdateAction } from './launcher.ts'
+import { parseReviewedCommit, readReport, ReportReadError } from './reports.ts'
 
 // direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs, each through gh with the viewer's own token. This module decides whether an action is allowed and what gh is asked; it never trusts the page, so every rule is checked here again. merge is always a squash into the repository's primary branch; the method is fixed, not a setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused. update writes nothing itself: it starts an agent session through the launcher, which brings the PR's branch up to date with the primary branch and pushes it. resolveConflicts is that same session, asked for on a PR the cache holds as conflicting
 export const actionNames = ['merge', 'markReady', 'convertToDraft', 'requestReview', 'update', 'resolveConflicts'] as const
@@ -31,7 +33,7 @@ const updateActions: readonly string[] = ['update', 'resolveConflicts'] satisfie
 const isUpdateAction = (action: string): action is UpdateAction => updateActions.includes(action)
 
 export type ActionErrorCode =
-  | 'badRequest' | 'notOpen' | 'notYours' | 'notAllowed' | 'stale' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'ghFailed'
+  | 'badRequest' | 'unknownRun' | 'notOpen' | 'notYours' | 'notAllowed' | 'stale' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'ghFailed'
 
 export class ActionError extends Error {
   override name = 'ActionError'
@@ -110,6 +112,32 @@ const refuseIfMoved = (number: number, live: LivePr, base: string, headSha: stri
 
 const sameLogin = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
 
+// Post it (section 8, Launching runs, Blocked post): everything its confirmation showed comes back, and nothing else is taken from the page
+export type PostRequest = { repo: string, viewer: string, number: number, headSha: string, form: PostForm }
+export type PostResult = { number: number, runId: number, posted: Posted, run: RunView | null }
+
+const postUsage = 'send { "repo": "<owner/name shown>", "viewer": "<login shown>", "number": 106, "headSha": "<full head SHA shown>", "form": "approve" | "requestChanges" | "comment" }, all five as the confirmation showed them'
+
+export const parsePost = (body: unknown): PostRequest => {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ActionError('badRequest', postUsage)
+  const { repo, viewer, number, headSha, form, ...rest } = body as Record<string, unknown>
+  const extra = Object.keys(rest)[0]
+  if (extra !== undefined) throw new ActionError('badRequest', `unknown field ${extra}; ${postUsage}`)
+  if (typeof repo !== 'string' || repo === '' || typeof viewer !== 'string' || viewer === '' || typeof number !== 'number' || !Number.isInteger(number) || number < 1 ||
+    typeof headSha !== 'string' || !/^[0-9a-f]{40}$/i.test(headSha) || (form !== 'approve' && form !== 'requestChanges' && form !== 'comment')) throw new ActionError('badRequest', postUsage)
+  return { repo, viewer, number, headSha: headSha.toLowerCase(), form }
+}
+
+// the reviews on a PR, read live just before a post, one line each: login, commit, and state
+const reviewsArgs = (repo: string, number: number): string[] => ['api', '--paginate', `repos/${repo}/pulls/${number}/reviews`, '--jq', '.[] | [.user.login, .commit_id, .state] | @tsv']
+
+// a decided review of this head by this login, so a post would be a second one
+export const reviewedHead = (lines: string, viewer: string, headSha: string): boolean =>
+  lines.split('\n').some((line) => {
+    const [login, commit, state] = line.split('\t')
+    return login !== undefined && sameLogin(login, viewer) && commit?.toLowerCase() === headSha && (state === 'APPROVED' || state === 'CHANGES_REQUESTED')
+  })
+
 export type ActionsOptions = {
   cache: Cache
   gh: Gh
@@ -119,18 +147,26 @@ export type ActionsOptions = {
   refreshPr: (repo: string, number: number) => Promise<unknown>
   // starts the Update session through the launcher, labeled for the action that asked for it, which makes the identity, clone, and one-run-per-PR checks and throws LaunchError when one refuses
   startUpdate: (repo: string, number: number, headSha: string, action: UpdateAction) => Promise<RunView>
+  // the folder reportsDir resolves to, read afresh at every post
+  reportsFolder: () => string
+  // records a post on its run; a failure here is logged, since the post has landed by then
+  recordPost: (id: number, posted: Posted) => RunView
   log: (line: string) => void
 }
 
 export type Actions = {
   // validates and performs one action; throws ActionError, and answers once gh has finished
   run: (number: number, body: unknown) => Promise<ActionResult>
+  // Post it: validates and posts one blocked run's saved report; throws ActionError, and answers once gh has finished
+  post: (id: number, body: unknown) => Promise<PostResult>
 }
 
 export const createActions = (options: ActionsOptions): Actions => {
   const { cache, gh, log } = options
   // one action per PR in flight, so a double click writes once
   const inFlight = new Set<string>()
+  // runs this server has posted, so a post whose record the database refused is never made twice
+  const postedRuns = new Set<number>()
 
   const refresh = (repo: string, number: number): void => {
     options.refreshPr(repo, number).catch((error: unknown) => log(`PR #${number}: refresh after an action failed: ${messageOf(error)}`))
@@ -253,7 +289,89 @@ export const createActions = (options: ActionsOptions): Actions => {
     }
   }
 
-  return { run }
+  const post = async (id: number, body: unknown): Promise<PostResult> => {
+    const request = parsePost(body)
+    const config = options.config()
+    const { repo, viewer } = config
+    const { number, headSha, form } = request
+    if (request.repo !== repo) throw new ActionError('stale', `the repository is now ${repo}, not ${request.repo}; the confirmation was for ${request.repo}, so nothing was posted`)
+    if (!sameLogin(request.viewer, viewer)) throw new ActionError('stale', `the viewer is now ${viewer || 'nobody'}, not ${request.viewer}; the confirmation was for ${request.viewer}, so nothing was posted`)
+    const run = cache.getRun(id)
+    if (run === null) throw new ActionError('unknownRun', `run ${id} does not exist`)
+    if (run.repo !== repo || run.number !== number) throw new ActionError('stale', `run ${id} is not a run of #${number} in ${repo}; the confirmation was for #${number}, so nothing was posted`)
+    const row = cache.readView(repo).open.find((entry) => entry.number === number)
+    if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched; nothing was posted`)
+    if (request.headSha !== row.pr.headRefOid.toLowerCase()) {
+      refresh(repo, number)
+      throw new ActionError('stale', `#${number} has new commits since you saw it; nothing was posted. Start a new review for the current head`)
+    }
+    if (postedRuns.has(id)) throw new ActionError('notAllowed', `run ${id} has already posted its report; nothing was posted`)
+    const offer = postOffer(row.pr, config, run)
+    if (offer === null) throw new ActionError('notAllowed', `run ${id} has no report waiting to be posted on #${number}; nothing was posted`)
+    if (offer.form !== form) throw new ActionError('stale', `this report would now post as ${offer.form}, not ${form}; nothing was posted. Reload its confirmation to see the current state`)
+    const key = `${repo}#${number}`
+    if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
+    inFlight.add(key)
+    try {
+      // the report on disk must be the one this run wrote: a later run of the PR writes the same name
+      const folder = options.reportsFolder()
+      let reviewedAt: string | null
+      try {
+        reviewedAt = parseReviewedCommit((await readReport(folder, offer.report)).raw.split('\n').slice(0, 20))
+      } catch (error) {
+        if (error instanceof ReportReadError) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} cannot be posted (${error.message}); nothing was posted`)
+        throw error
+      }
+      if (reviewedAt === null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} does not say which commit it reviewed; nothing was posted`)
+      if (!headSha.startsWith(reviewedAt)) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} is about another commit (${reviewedAt}); nothing was posted`)
+      const check = async (read: (args: string[]) => Promise<string>): Promise<void> => {
+        let live: LivePr
+        let reviews: string
+        try {
+          live = JSON.parse(await read(['api', `repos/${repo}/pulls/${number}`])) as LivePr
+          reviews = await read(reviewsArgs(repo, number))
+        } catch (error) {
+          if (error instanceof GhError) throw error
+          throw new ActionError('ghFailed', `cannot read #${number} before posting: ${messageOf(error)}; nothing was posted`)
+        }
+        if (live.state !== 'open' || live.merged === true) throw new ActionError('notAllowed', `#${number} is no longer open; nothing was posted`)
+        if (live.head?.sha?.toLowerCase() !== headSha) throw new ActionError('notAllowed', `#${number} has new commits since you saw it; nothing was posted`)
+        if (reviewedHead(reviews, viewer, headSha)) throw new ActionError('notAllowed', `you have already reviewed this commit of #${number}; nothing was posted`)
+      }
+      let printed: string
+      try {
+        printed = await gh.write(postArgs(repo, number, form, join(folder, offer.report)), viewer, check)
+      } catch (error) {
+        if (error instanceof ActionError) {
+          refresh(repo, number)
+          throw error
+        }
+        if (error instanceof WriteIdentityError) {
+          if (error.login === null) throw new ActionError('identityUnknown', error.message, error.errorKind)
+          throw new ActionError('identityMismatch', error.message)
+        }
+        refresh(repo, number)
+        throw new ActionError('ghFailed', messageOf(error), error instanceof GhError ? error.kind : null)
+      }
+      postedRuns.add(id)
+      // gh pr comment prints the comment's URL; gh pr review prints none, so the post links to the PR, as the prompts' own fallback does
+      const url = printed.trim().split('\n').at(-1) ?? ''
+      const posted: Posted = { form, url: isHttpUrl(url) ? url : `https://github.com/${repo}/pull/${number}` }
+      log(`PR #${number}: run ${id} posted its report (${form})`)
+      let recorded: RunView | null = null
+      try {
+        recorded = options.recordPost(id, posted)
+      } catch (error) {
+        log(`PR #${number}: the post of run ${id} landed but could not be recorded: ${messageOf(error)}`)
+      }
+      refresh(repo, number)
+      return { number, runId: id, posted, run: recorded }
+    } finally {
+      inFlight.delete(key)
+    }
+  }
+
+  return { run, post }
 }
 
 // the PR an Update session worked on is read again once the session has settled, however it ended, since it may have pushed; only a session this server watched, so a run that recovery settles at startup makes no GitHub call. Its updated row arrives as the refresh's patches

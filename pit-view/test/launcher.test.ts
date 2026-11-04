@@ -15,11 +15,12 @@ import {
   emptySteps, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, remoteNamesRepo,
   noteKind, requestText, reviewFits, runners, runView, shellPath, startOptions, stepsOf, updateRequest,
 } from '../src/launcher.ts'
-import type { LaunchSpec, RunResultJson, StartRequest, StepEvent } from '../src/launcher.ts'
+import type { LaunchSpec, ReviewResult, RunResultJson, StartRequest, StepEvent } from '../src/launcher.ts'
 import { createPoller } from '../src/poller.ts'
 import { scanReports } from '../src/reports.ts'
 import type { Patch } from '../src/poller.ts'
 import { scenario } from './fixtures/scenario.ts'
+import { sweepRequest } from '../src/sweeps.ts'
 import { fakeLaunch, fakeRemotes, fakeRunner, fakeTime, fixCommits, fixHead, fixPushedHead, fixRequest, fixResult, fixtureRunner, ok, openPage1, openPage2, reviewResult, tempDir, updateHead, updateResult } from './helpers.ts'
 import type { FakeLaunch, FakeRunner } from './helpers.ts'
 
@@ -58,7 +59,9 @@ test('Claude starts exactly as Launching runs pins it, with the request as one s
   assert.equal(invocation.command, 'claude')
   assert.deepEqual(invocation.args, [
     '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
-    '--model', 'sonnet', '--session-id', '6f1c1f9e-0000-4000-8000-000000000003', '--permission-mode', 'auto', '--add-dir', '/home/tester/agents',
+    '--model', 'sonnet', '--session-id', '6f1c1f9e-0000-4000-8000-000000000003', '--permission-mode', 'auto',
+    '--allowedTools', 'Bash(gh pr review 106:*)',
+    '--add-dir', '/home/tester/agents',
   ])
   assert.ok(invocation.stdin?.endsWith('\n'))
   assert.deepEqual(JSON.parse(invocation.stdin ?? ''), {
@@ -4040,4 +4043,311 @@ test('a review whose two settlement writes both fail still frees its slot, and t
     r.poller.stop()
     await r.h.cleanup()
   }
+})
+
+// the post permission (section 8, Launching runs, Permissions): chosen by the run's own command and flags, and the post it may not make shows as a review done with its post not made
+
+// the values a repeatable Claude flag takes, up to the next flag
+const flagValues = (args: readonly string[], flag: string): string[] | null => {
+  const at = args.indexOf(flag)
+  if (at < 0) return null
+  const end = args.findIndex((arg, index) => index > at && arg.startsWith('--'))
+  return args.slice(at + 1, end < 0 ? undefined : end)
+}
+
+const claudeArgs = (command: string, args: string[]): string[] => claudeInvocation(spec({ command, args })).args
+
+test('a run allowed to post carries one allow rule, for gh pr review on its own PR', () => {
+  const cases: [string, string[], string][] = [
+    ['review-pr', ['106'], 'Bash(gh pr review 106:*)'],
+    ['review-pr', ['106', '--tandem'], 'Bash(gh pr review 106:*)'],
+    ['review-dependabot', ['113'], 'Bash(gh pr review 113:*)'],
+  ]
+  for (const [command, args, rule] of cases) {
+    const built = claudeArgs(command, args)
+    assert.deepEqual(flagValues(built, '--allowedTools'), [rule], `${command} ${args.join(' ')}`)
+    assert.equal(flagValues(built, '--disallowedTools'), null)
+    // auto mode stays, and nothing is bypassed
+    assert.equal(built[built.indexOf('--permission-mode') + 1], 'auto')
+    assert.ok(!built.includes('--dangerously-skip-permissions'))
+  }
+})
+
+test('a sweep may post on the PRs it finds, so its rule names no PR; it is still gh pr review alone', () => {
+  const { command, args } = sweepRequest(scenario.repo, 'claude')
+  assert.deepEqual(flagValues(claudeArgs(command, args), '--allowedTools'), ['Bash(gh pr review:*)'])
+})
+
+test('a --no-post invocation never carries the rule, and withdraws the post the owner\'s own allow rules would let through', () => {
+  const cases: [string, string[]][] = [
+    ['review-pr', ['104', '--no-post']],
+    ['review-pr', ['104', '--tandem', '--no-post']],
+    ['review-dependabot', ['113', '--no-post']],
+    ['review-dependabot-sweep', [scenario.repo, '--parallel', '1', '--no-post']],
+    ['review-stack', ['104', '--no-post']],
+  ]
+  for (const [command, args] of cases) {
+    const built = claudeArgs(command, args)
+    assert.equal(flagValues(built, '--allowedTools'), null, `${command} ${args.join(' ')}`)
+    assert.deepEqual(flagValues(built, '--disallowedTools'), ['Bash(gh pr review:*)', 'Bash(gh pr comment:*)'], `${command} ${args.join(' ')}`)
+  }
+})
+
+test('the run kinds that never post by themselves gain nothing: a stack review, a fix, and an update', () => {
+  const cases: [string, string[]][] = [['review-stack', ['106']], ['fix-pr', ['104']], ['update-pr', ['104', `--head=${'a'.repeat(40)}`]], ['review-local', []]]
+  for (const [command, args] of cases) {
+    const built = claudeArgs(command, args)
+    assert.equal(flagValues(built, '--allowedTools'), null, command)
+    assert.equal(flagValues(built, '--disallowedTools'), null, command)
+  }
+})
+
+test('a target that is not a PR number names no rule', () => {
+  assert.equal(flagValues(claudeArgs('review-pr', ['feature/x']), '--allowedTools'), null)
+  assert.equal(flagValues(claudeArgs('review-pr', []), '--allowedTools'), null)
+})
+
+test('every start the rows offer gets the permission its own flags select, and a Codex run gets no such flag', async () => {
+  const config = baseConfig()
+  const offered = async (number: number): Promise<Record<string, { allow: string[] | null, deny: string[] | null, codex: string[] }>> =>
+    Object.fromEntries(startOptions(await prOf(number), config, null, false).map((option) => {
+      const built = claudeArgs(option.command, option.args)
+      return [option.kind, { allow: flagValues(built, '--allowedTools'), deny: flagValues(built, '--disallowedTools'), codex: codexInvocation(spec({ command: option.command, args: option.args })).args.filter((arg) => arg.includes('gh pr')) }]
+    }))
+  const others = await offered(106)
+  assert.deepEqual(others.default?.allow, ['Bash(gh pr review 106:*)'])
+  assert.deepEqual(others.tandem?.allow, ['Bash(gh pr review 106:*)'])
+  const own = await offered(104)
+  assert.equal(own.default?.allow, null)
+  assert.equal(own.tandem?.allow, null)
+  assert.equal(own.fix?.allow, null)
+  assert.deepEqual(own.default?.deny, ['Bash(gh pr review:*)', 'Bash(gh pr comment:*)'])
+  assert.deepEqual(own.tandem?.deny, ['Bash(gh pr review:*)', 'Bash(gh pr comment:*)'])
+  assert.equal(own.fix?.deny, null)
+  assert.deepEqual(others.default?.codex, [])
+  const dependabot = await offered(114)
+  assert.deepEqual(dependabot.default?.allow, ['Bash(gh pr review 114:*)'])
+  assert.equal(dependabot.default?.deny, null)
+})
+
+test('the permission reaches the spawned process and the argv request.json records', async () => {
+  const h = await harness()
+  try {
+    await h.launcher.start(request())
+    const child = h.launch.children[0]!
+    assert.deepEqual(flagValues(child.request.args, '--allowedTools'), ['Bash(gh pr review 106:*)'])
+    const recorded = JSON.parse(await readFile(join(child.runDir, 'request.json'), 'utf8')) as { argv: string[] }
+    assert.deepEqual(flagValues(recorded.argv, '--allowedTools'), ['Bash(gh pr review 106:*)'])
+    child.exit(0)
+    await h.launcher.start(request(104, { args: ['104', '--no-post'], label: 'Self-review' }))
+    const own = h.launch.children[1]!
+    assert.equal(flagValues(own.request.args, '--allowedTools'), null)
+    assert.deepEqual(flagValues(own.request.args, '--disallowedTools'), ['Bash(gh pr review:*)', 'Bash(gh pr comment:*)'])
+    own.exit(0)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a review result may say postBlocked, and the schema still refuses a reason it does not know', () => {
+  assert.equal(parseResult(JSON.stringify(reviewResult({ posted: null, notPostedReason: 'postBlocked' }))).ok, true)
+  const bad = parseResult(JSON.stringify(reviewResult({ posted: null, notPostedReason: 'refused' })))
+  assert.equal(bad.ok, false)
+  assert.match(bad.ok ? '' : bad.error, /notPostedReason must be one of/)
+})
+
+test('the done text says the review stands and the post was not made', () => {
+  const done = (patch: Record<string, unknown>, resolvedByHand = false): string =>
+    doneText({ status: 'done', note: null, resolvedByHand, result: reviewResult({ posted: null, notPostedReason: 'postBlocked', ...patch }) as unknown as RunResultJson }, false)
+  assert.equal(done({ verdict: 'clean', findings: [] }), 'Clean · post not made')
+  assert.equal(done({ verdict: 'changesRequested' }), 'Changes requested · post not made')
+  assert.equal(done({ verdict: 'clean', findings: [] }, true), 'Clean · post not made · finished by hand')
+})
+
+const deniedPost = { tool_name: 'Bash', tool_use_id: 'b1', tool_input: { command: 'gh pr review 106 --approve --body-file /home/tester/agents/output/PR-106.md' } }
+// how the worker that first met this wrote its stop: a question about the refusal, with the review already done
+const askedAboutIt = (patch: Record<string, unknown> = {}): Record<string, unknown> => reviewResult({
+  status: 'needsInput', verdict: 'clean', findings: [], posted: null, notPostedReason: 'awaitingAnswer',
+  question: 'The approval post was blocked by the permission classifier. Allow it, or post the report by hand?', ...patch,
+})
+
+const settledWith = async (h: Awaited<ReturnType<typeof harness>>, denials: unknown[], result: Record<string, unknown>, start: Partial<StartRequest> = {}): Promise<Run> => {
+  const run = await h.launcher.start(request(106, start))
+  const child = h.launch.children.at(-1)!
+  await child.stream({ type: 'result', total_cost_usd: 0.5, permission_denials: denials })
+  await child.result(result)
+  const settled = h.launcher.settled(run.id)
+  child.exit(0)
+  return settled
+}
+
+test('a finished review whose post alone was denied is done with its post not made, not failed and not waiting', async () => {
+  const shapes: [string, unknown][] = [
+    ['the post alone', deniedPost],
+    ['chained after a cd and a check', { tool_name: 'Bash', tool_use_id: 'b1', tool_input: { command: 'cd /home/tester/agents/worktrees/orbit-106 && gh pr checks 106 | grep -vc pass; gh pr review 106 --approve --body-file /home/tester/agents/output/PR-106.md' } }],
+    ['the comment form', { tool_name: 'Bash', tool_use_id: 'b1', tool_input: { command: 'gh pr comment 106 --body-file /home/tester/agents/output/PR-106.md' } }],
+  ]
+  for (const [name, denial] of shapes) {
+    const h = await harness()
+    try {
+      await h.report(106)
+      const run = await settledWith(h, [denial], askedAboutIt())
+      assert.equal(run.status, 'done', name)
+      assert.equal(run.note, null, name)
+      assert.equal(doneText(run, false), 'Clean · post not made', name)
+      const result = run.result as ReviewResult
+      assert.equal(result.notPostedReason, 'postBlocked', name)
+      assert.equal(result.posted, null, name)
+      // nothing waits on an answer, and the report stays named
+      assert.equal(result.question, null, name)
+      assert.equal(result.report, '~/agents/output/PR-106.md', name)
+      assert.equal(result.verdict, 'clean', name)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('a worker that says the post was blocked is read the same way, however it ended', async () => {
+  const results: [string, Record<string, unknown>, unknown[]][] = [
+    ['done, as the contract says', reviewResult({ verdict: 'clean', findings: [], posted: null, notPostedReason: 'postBlocked' }), []],
+    ['done with the denial on record', reviewResult({ verdict: 'clean', findings: [], posted: null, notPostedReason: 'postBlocked' }), [deniedPost]],
+    ['stopped to ask', askedAboutIt({ notPostedReason: 'postBlocked' }), []],
+    ['failed over it', reviewResult({ status: 'failed', error: 'the post was refused', verdict: 'clean', findings: [], posted: null, notPostedReason: null }), [deniedPost]],
+  ]
+  for (const [name, result, denials] of results) {
+    const h = await harness()
+    try {
+      await h.report(106)
+      const run = await settledWith(h, denials, result)
+      assert.equal(run.status, 'done', name)
+      assert.equal((run.result as ReviewResult).notPostedReason, 'postBlocked', name)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('any other denial still fails the run as permissionDenied: a guarantee about every denied call but the post', async () => {
+  const write = { tool_name: 'Write', tool_use_id: 'w1', tool_input: { file_path: '/home/tester/agents/output/PR-106.md' } }
+  const cases: [string, unknown[], Record<string, unknown>, Partial<StartRequest>, boolean][] = [
+    ['a denied report write beside the denied post', [deniedPost, write], askedAboutIt(), {}, true],
+    ['another command', [{ tool_name: 'Bash', tool_use_id: 'b1', tool_input: { command: 'gh pr merge 106 --squash' } }], askedAboutIt(), {}, true],
+    ['a command that only mentions the post', [{ tool_name: 'Bash', tool_use_id: 'b1', tool_input: { command: 'grep "gh pr review" notes.md' } }], askedAboutIt(), {}, true],
+    ['a denial with no command on record', [{ tool_name: 'Bash', tool_use_id: 'b1' }], askedAboutIt(), {}, true],
+    ['a subagent\'s brief', [{ tool_name: 'Task', tool_use_id: 't1', tool_input: { prompt: 'gh pr review 106 --approve' } }], askedAboutIt(), {}, true],
+    ['a post denied on a --no-post run', [deniedPost], askedAboutIt(), { args: ['106', '--no-post'] }, true],
+    ['a post denied on a stack review, which never posts by itself', [deniedPost], askedAboutIt({ command: 'review-stack', target: { repo: scenario.repo, stack: [106], top: 106 } }), { command: 'review-stack' }, true],
+    ['a review that wrote no verdict', [deniedPost], askedAboutIt({ verdict: null }), {}, true],
+    ['a review that read no commit', [deniedPost], askedAboutIt({ reviewed: null }), {}, true],
+    ['a review that names no report', [deniedPost], askedAboutIt({ report: null }), {}, true],
+    ['a report that is not on disk', [deniedPost], askedAboutIt(), {}, false],
+    ['a result that says it would never post', [deniedPost], askedAboutIt({ notPostedReason: 'noPost' }), {}, true],
+    ['a result that says the post landed', [deniedPost], reviewResult({ verdict: 'clean', findings: [] }), {}, true],
+  ]
+  for (const [name, denials, result, start, reported] of cases) {
+    const h = await harness()
+    try {
+      if (reported) await h.report(106)
+      const run = await settledWith(h, denials, result, start)
+      assert.equal(run.status, 'failed', name)
+      assert.match(run.note ?? '', /^permissionDenied:/, name)
+      assert.equal(doneText(run, false), 'Failed · permission denied', name)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('a question with no denied post stays a question', async () => {
+  const h = await harness()
+  try {
+    await h.report(106)
+    const run = await settledWith(h, [], askedAboutIt({ question: 'Which base should this use?' }))
+    assert.equal(run.status, 'needsInput')
+    assert.equal(run.result?.question, 'Which base should this use?')
+    assert.equal(doneText(run, false), 'Needs your answer')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// the cell's offer of the post, from an invented run that finished at the fixture PR's head
+
+const blockedRow = async (patch: Record<string, unknown> = {}, run: Partial<Run> = {}, number = 106): Promise<{ pr: RawOpenPr, row: Run }> => {
+  const pr = await prOf(number)
+  const result = reviewResult({
+    target: { repo: scenario.repo, pr: number }, reviewed: { kind: 'commit', sha: pr.headRefOid }, verdict: 'clean', findings: [], ci: 'green', posted: null, notPostedReason: 'postBlocked', report: `~/agents/output/PR-${number}.md`, ...patch,
+  }) as unknown as RunResultJson
+  return { pr, row: runRow({ number, args: [String(number)], status: 'done', finishedAt: '2026-10-26T14:03:00Z', result, ...run }) }
+}
+
+test('the cell offers the post for a blocked run, in the form the findings and CI select', async () => {
+  const config = baseConfig()
+  const form = async (patch: Record<string, unknown>, run: Partial<Run> = {}): Promise<unknown> => {
+    const { pr, row } = await blockedRow(patch, run)
+    return agentCell(pr, config, row, undefined).postOffer?.form
+  }
+  assert.equal(await form({}), 'approve')
+  assert.equal(await form({ ci: 'none' }), 'approve')
+  assert.equal(await form({ verdict: 'changesRequested' }), 'requestChanges')
+  assert.equal(await form({ verdict: 'changesRequested', ci: 'failed' }), 'requestChanges')
+  // never an approval that CI did not earn
+  assert.equal(await form({ ci: 'failed' }), 'comment')
+  assert.equal(await form({ ci: 'pending' }), 'comment')
+  assert.equal(await form({ ci: null }), 'comment')
+  const dependabot = { command: 'review-dependabot' }
+  assert.equal(await form({ command: 'review-dependabot', recommendation: 'approve' }, dependabot), 'approve')
+  assert.equal(await form({ command: 'review-dependabot', recommendation: 'approve', ci: 'failed' }, dependabot), 'comment')
+  assert.equal(await form({ command: 'review-dependabot', recommendation: 'hold' }, dependabot), 'comment')
+  assert.equal(await form({ command: 'review-dependabot', verdict: 'changesRequested', recommendation: 'fixBeforeMerge' }, dependabot), 'requestChanges')
+  const { pr, row } = await blockedRow()
+  assert.deepEqual(agentCell(pr, config, row, undefined).postOffer, {
+    runId: 7, form: 'approve', report: 'PR-106.md', reportPath: '~/agents/output/PR-106.md', headSha: pr.headRefOid, repo: scenario.repo, viewer: scenario.viewer,
+    command: `gh pr review 106 --repo ${scenario.repo} --approve --body-file ~/agents/output/PR-106.md`,
+  })
+})
+
+test('a Dependabot comment would leave an earlier approval standing, so it requests changes as the prompt does', async () => {
+  const config = baseConfig()
+  const { pr, row } = await blockedRow({ command: 'review-dependabot', recommendation: 'hold' }, { command: 'review-dependabot' })
+  const approvedEarlier: RawOpenPr = { ...pr, latestReviews: { nodes: [{ author: { login: scenario.viewer }, state: 'APPROVED', submittedAt: '2026-10-20T10:00:00Z', commit: { oid: '0'.repeat(40) } }] } } as unknown as RawOpenPr
+  assert.equal(agentCell(approvedEarlier, config, row, undefined).postOffer?.form, 'requestChanges')
+})
+
+test('nothing but a blocked review of this PR, at its head, is offered the post', async () => {
+  const config = baseConfig()
+  const offer = async (patch: Record<string, unknown>, run: Partial<Run> = {}): Promise<unknown> => {
+    const { pr, row } = await blockedRow(patch, run)
+    return agentCell(pr, config, row, undefined).postOffer
+  }
+  assert.ok((await offer({})) !== null)
+  const cases: [string, Record<string, unknown>, Partial<Run>][] = [
+    ['the run\'s own flags forbid a post, whatever its result says', {}, { args: ['106', '--no-post'] }],
+    ['a stack review', { command: 'review-stack' }, { command: 'review-stack' }],
+    ['a run still going', {}, { status: 'running' }],
+    ['a failed run', {}, { status: 'failed', note: 'permissionDenied: Bash' }],
+    ['a post that landed', { posted: { form: 'approve', url: 'https://example.test/r/1' } }, {}],
+    ['a post that was never blocked', { notPostedReason: 'noPost' }, {}],
+    ['a failed gh', { notPostedReason: 'ghFailed' }, {}],
+    ['another PR\'s result', { target: { repo: scenario.repo, pr: 107 } }, {}],
+    ['another repository\'s result', { target: { repo: 'other-org/other-repo', pr: 106 } }, {}],
+    ['a run of another repository', {}, { repo: 'other-org/other-repo' }],
+    ['no target', { target: null }, {}],
+    ['a report with another name', { report: '~/agents/output/PR-1060.md' }, {}],
+    ['a report out of the folder', { report: '~/.ssh/PR-106.md/../id_rsa' }, {}],
+    ['a report outside the reports folder under its own name', { report: '~/.ssh/PR-106.md' }, {}],
+    ['a review with no verdict', { verdict: null }, {}],
+    ['a short SHA', { reviewed: { kind: 'commit', sha: 'f00dfac' } }, {}],
+    ['an empty SHA', { reviewed: { kind: 'commit', sha: '' } }, {}],
+    ['a head that has moved', { reviewed: { kind: 'commit', sha: '0123456789abcdef0123456789abcdef01234567' } }, {}],
+  ]
+  for (const [name, patch, run] of cases) assert.equal(await offer(patch, run), null, name)
+  // the viewer's own PR never posts, and a head already reviewed needs no second post
+  const own = await blockedRow({}, {}, 104)
+  assert.equal(agentCell(own.pr, config, own.row, undefined).postOffer, null)
+  const { pr, row } = await blockedRow()
+  const reviewed: RawOpenPr = { ...pr, latestReviews: { nodes: [{ author: { login: scenario.viewer }, state: 'APPROVED', submittedAt: '2026-10-20T10:00:00Z', commit: { oid: pr.headRefOid } }] } } as unknown as RawOpenPr
+  assert.equal(agentCell(reviewed, config, row, undefined).postOffer, null)
+  assert.equal(agentCell(pr, config, undefined, undefined).postOffer, null)
 })

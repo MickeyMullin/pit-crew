@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
-import { rereadRequest } from '../public/agent.ts'
+import { postRequest, refusalText, rereadRequest } from '../public/agent.ts'
 import type { AgentCell, RunView, StartOption, StepSlot } from '../public/agent.ts'
 import {
   cardKind, commitModel, readyPointer, cellFromRun, confirmHolds, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
@@ -60,7 +60,7 @@ const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
   lastReviewAt: null,
   runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
   steps: slots(), tandem: false, commit: null,
-  finishedAt: null, text: null, result: null, question: null, note: null, firstNote: null, resolvedByHand: false, resume: null, costUsd: null,
+  finishedAt: null, text: null, result: null, question: null, note: null, firstNote: null, resolvedByHand: false, resume: null, costUsd: null, postOffer: null,
   ...patch,
 })
 
@@ -1013,4 +1013,130 @@ test('readyPointer needs both the done text and the offered action', () => {
   assert.equal(readyPointer('Clean · mark ready?', []), null)
   assert.equal(readyPointer(null, [{ action: 'markReady', text: 'Mark ready for review' }]), null)
   assert.equal(readyPointer('Approved', [{ action: 'markReady', text: 'Mark ready for review' }]), null)
+})
+
+// Post it, on the latest-run card (section 8, Drawer)
+
+const headSha = '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7'
+
+const postOfferOf = (patch: Partial<NonNullable<AgentCell['postOffer']>> = {}): NonNullable<AgentCell['postOffer']> => ({
+  runId: 7, form: 'approve', report: 'PR-101.md', reportPath: '~/agents/output/PR-101.md', headSha, repo: 'octo-example/orbit', viewer: 'viewer',
+  command: 'gh pr review 101 --repo octo-example/orbit --approve --body-file ~/agents/output/PR-101.md', ...patch,
+})
+
+const blocked = (patch: Partial<AgentCell> = {}): AgentCell => finished({
+  text: 'Clean · post not made',
+  result: { kind: 'review', verdict: 'clean', recommendation: null, findings: 0, ci: 'green', posted: null, notPostedReason: 'postBlocked', report: '~/agents/output/PR-101.md' },
+  postOffer: postOfferOf(),
+  ...patch,
+})
+
+const postConfirm = { type: 'post', runId: 7, repo: 'octo-example/orbit', viewer: 'viewer', headSha, form: 'approve' } as const
+
+test('a blocked post reads as a finished review with its post not made, its report one click away', () => {
+  const model = drawerModel(input(blocked()))
+  assert.equal(model.card, 'result')
+  assert.equal(model.waiting, null)
+  assert.equal(model.result?.text, 'Clean · post not made')
+  assert.equal(model.result?.tone, 'amber')
+  assert.equal(model.result?.notPosted, 'Review done, post not made: a permission check refused the post before it ran, so nothing reached GitHub.')
+  assert.deepEqual(model.result?.report, { name: 'PR-101.md', openName: 'Open report PR-101.md' })
+  assert.deepEqual(model.result?.facts.find((fact) => fact.label === 'Posted'), { label: 'Posted', value: 'nothing: a permission check refused the post', href: null })
+  assert.deepEqual(model.postIt, { button: 'Post it', disabled: false, reason: null, runId: 7 })
+  assert.equal(model.postAsk, null)
+  // a denied run is not this: it reads as it always did and offers no post
+  const denied = drawerModel(input(deniedCell()))
+  assert.equal(denied.postIt, null)
+  assert.equal(denied.result?.notPosted, null)
+  assert.equal(denied.result?.report, null)
+})
+
+test('Post it is offered only while the server offers it, and is off for a PR that left the open tables', () => {
+  assert.equal(drawerModel(input(finished())).postIt, null)
+  assert.equal(drawerModel(input(blocked({ postOffer: null }))).postIt, null)
+  const gone = drawerModel(input(blocked(), { open: false }))
+  assert.deepEqual([gone.postIt?.disabled, gone.postIt?.reason], [true, 'Posting is off: #101 is no longer open.'])
+  assert.equal(drawerModel(input(blocked(), { open: false, confirm: postConfirm })).postAsk, null)
+})
+
+test('the confirmation names the PR, the form, the report, the command, and the account, and its button posts', () => {
+  const approve = drawerModel(input(blocked(), { confirm: postConfirm })).postAsk
+  assert.equal(approve?.heading, 'Post the report on #101 as an approval?')
+  assert.equal(approve?.title, 'fix(retry): back off between attempts')
+  assert.equal(approve?.report, 'PR-101.md')
+  assert.equal(approve?.command, 'gh pr review 101 --repo octo-example/orbit --approve --body-file ~/agents/output/PR-101.md')
+  assert.equal(approve?.effect, 'Posts the saved report ~/agents/output/PR-101.md to #101 as an approval, under your account (@viewer), once. Pit View cannot undo it.')
+  assert.equal(approve?.bound, 'For the head 755b78b in octo-example/orbit, as viewer.')
+  assert.equal(approve?.confirm, 'Post it')
+  assert.equal(approve?.busy, 'Posting…')
+  const changes = drawerModel(input(blocked({ postOffer: postOfferOf({ form: 'requestChanges' }) }), { confirm: { ...postConfirm, form: 'requestChanges' } })).postAsk
+  assert.equal(changes?.heading, 'Post the report on #101 as a request for changes?')
+  const comment = drawerModel(input(blocked({ postOffer: postOfferOf({ form: 'comment' }) }), { confirm: { ...postConfirm, form: 'comment' } })).postAsk
+  assert.equal(comment?.heading, 'Post the report on #101 as a comment?')
+})
+
+test('the confirmation holds only while the offer is the one it showed', () => {
+  assert.equal(confirmHolds(postConfirm, blocked(), true), true)
+  assert.equal(confirmHolds(postConfirm, blocked(), false), false)
+  assert.equal(confirmHolds(postConfirm, blocked({ postOffer: null }), true), false)
+  assert.equal(confirmHolds(postConfirm, blocked({ postOffer: postOfferOf({ runId: 8 }) }), true), false)
+  assert.equal(confirmHolds(postConfirm, blocked({ postOffer: postOfferOf({ form: 'comment' }) }), true), false)
+  assert.equal(confirmHolds(postConfirm, blocked({ postOffer: postOfferOf({ headSha: '0'.repeat(40) }) }), true), false)
+  assert.equal(confirmHolds(postConfirm, blocked({ postOffer: postOfferOf({ repo: 'other-org/other-repo' }) }), true), false)
+  assert.equal(confirmHolds(postConfirm, blocked({ postOffer: postOfferOf({ viewer: 'sam-tran' }) }), true), false)
+  assert.equal(confirmHolds(postConfirm, null, true), false)
+})
+
+test('the request carries what the confirmation showed, with the token', () => {
+  const request = postRequest(7, { repo: 'octo-example/orbit', viewer: 'viewer', number: 101, headSha, form: 'approve' }, 'tok')
+  assert.equal(request.url, '/api/runs/7/post')
+  assert.equal(request.init.method, 'POST')
+  assert.equal(request.init.headers['X-Pit-View-Token'], 'tok')
+  assert.deepEqual(JSON.parse(request.init.body ?? ''), { repo: 'octo-example/orbit', viewer: 'viewer', number: 101, headSha, form: 'approve' })
+  assert.equal(refusalText('post', 403, null), 'Reload the page to post reports: Pit View has restarted since this page loaded.')
+  assert.equal(refusalText('post', 0, null), 'Pit View did not answer. Check that it is running, then try again.')
+  assert.equal(refusalText('post', 422, 'the saved report is gone; nothing was posted'), 'The saved report is gone; nothing was posted.')
+})
+
+test('a card rebuilt from the runs list keeps the offer only for the run it was made for', () => {
+  const run = { id: 7, status: 'done', label: 'Re-review', runner: 'claude', command: 'review-pr', args: ['101'], startedAt: ago(h), lastStepAt: null, step: null, stepState: null, steps: slots(), tandem: false, finishedAt: ago(m), note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: 0.5,
+    result: { schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: null, reviewed: null, verdict: 'clean', recommendation: null, findings: [], ci: 'green', fixAttempts: 0, posted: null, notPostedReason: 'postBlocked', report: '~/agents/output/PR-101.md', question: null, error: null } } as unknown as RunView
+  assert.equal(cellFromRun(blocked(), run).postOffer?.runId, 7)
+  assert.equal(cellFromRun(blocked(), { ...run, id: 8 }).postOffer, null)
+  assert.deepEqual(runText(run), { text: 'Clean · post not made', tone: 'amber' })
+  const changes = { ...run, result: { ...run.result, verdict: 'changesRequested' } } as unknown as RunView
+  assert.deepEqual(runText(changes), { text: 'Changes requested · post not made', tone: 'amber' })
+})
+
+test('the card holds nothing back once the post landed: the row\'s own patch carries no offer and the posted link', () => {
+  const posted = drawerModel(input(finished({
+    text: 'Approved',
+    result: { kind: 'review', verdict: 'clean', recommendation: null, findings: 0, ci: 'green', posted: { form: 'approve', url: 'https://example.test/owner/name/pull/101' }, notPostedReason: null, report: '~/agents/output/PR-101.md' },
+  })))
+  assert.equal(posted.postIt, null)
+  assert.equal(posted.result?.notPosted, null)
+  assert.deepEqual(posted.result?.facts.find((fact) => fact.label === 'Posted'), { label: 'Posted', value: 'an approval', href: 'https://example.test/owner/name/pull/101' })
+})
+
+// the page cannot be run here, so the wiring is checked in the source: the button only asks, and the one place that sends is the confirmation's own button
+test('in drawer.ts Post it only asks, and the post is sent from one place, behind the confirmation', async () => {
+  const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
+  assert.match(source, /button\.addEventListener\('click', \(\) => askPost\(\)\)/)
+  assert.equal(source.split('postRequest(').length - 1, 1, 'one call builds the post request')
+  const send = source.indexOf('postRequest(')
+  assert.ok(source.lastIndexOf('const doPost', send) > source.lastIndexOf('const askPost', send), 'it is inside doPost')
+  assert.match(source, /confirmActions\(ask\.confirm, 'primary', \(\) => void doPost\(\)\)/)
+  assert.match(source, /if \(busy \|\| confirm\?\.type !== 'post' \|\| number === null\) return/)
+  // what the confirmation shows is captured from the offer when it opens
+  assert.match(source, /confirm = \{ type: 'post', runId: offer\.runId, repo: offer\.repo, viewer: offer\.viewer, headSha: offer\.headSha, form: offer\.form \}/)
+  // the confirmation's own button reads its words
+  assert.match(source, /confirm\?\.type === 'post' \? \(model\?\.postAsk\?\.confirm \?\? 'Post it'\)/)
+})
+
+test('the report path a confirmation names comes from the server\'s offer, never from the run\'s result', () => {
+  const ask = drawerModel(input(blocked({
+    result: { kind: 'review', verdict: 'clean', recommendation: null, findings: 0, ci: 'green', posted: null, notPostedReason: 'postBlocked', report: '~/.ssh/id_rsa' },
+  }), { confirm: postConfirm })).postAsk
+  assert.equal(ask?.command, 'gh pr review 101 --repo octo-example/orbit --approve --body-file ~/agents/output/PR-101.md')
+  assert.doesNotMatch(ask?.effect ?? '', /\.ssh/)
 })

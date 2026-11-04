@@ -7,7 +7,7 @@ import type { ReportListing } from '../src/reports.ts'
 import { actionConfirmModel, actionOffers } from './actionsview.ts'
 import type { ActionConfirm, ActionConfirmModel, ActionOffer, PersonChoice } from './actionsview.ts'
 import { commandLine, doneTone, runnerLabels, sentence, stepTitle } from './agent.ts'
-import type { AgentCell, AgentResult, DoneTone, RunnerName, RunView, StartKind, StartOption, StepSlot } from './agent.ts'
+import type { AgentCell, AgentResult, DoneTone, PostForm, RunnerName, RunView, StartKind, StartOption, StepSlot } from './agent.ts'
 import { shortSha } from './format.ts'
 import { safeHref } from './safeurl.ts'
 
@@ -19,6 +19,8 @@ export type Confirm =
   | { type: 'stop', andOpen: boolean, runId: number }
   // a re-read of the latest run's result, with everything its confirmation showed
   | { type: 'reread', runId: number, repo: string, viewer: string, headSha: string, baseRef: string }
+  // Post it's confirmation, with everything it showed
+  | { type: 'post', runId: number, repo: string, viewer: string, headSha: string, form: PostForm }
   | ActionConfirm
 
 // the control that opened the drawer, named by its data-focus-key, so focus can go back to it
@@ -253,6 +255,40 @@ export const rereadAskModel = (row: Pick<OpenRow, 'number' | 'title'>, cell: Pic
   busy: 'Reading…',
 })
 
+// Post it, on the latest-run card: only what the server offers, since only the server can tell a run allowed to post
+export type PostOfferModel = { button: string, disabled: boolean, reason: string | null, runId: number }
+
+export const postItOffer = (cell: AgentCell, open: boolean, number: number): PostOfferModel | null => {
+  if (cell.postOffer === null) return null
+  return { button: 'Post it', disabled: !open, reason: open ? null : `Posting is off: ${goneText(number)}.`, runId: cell.postOffer.runId }
+}
+
+// the confirmation: the PR, the form, the saved report, the exact command, and whose account it posts under
+export type PostAskModel = {
+  heading: string
+  title: string
+  report: string
+  command: string
+  effect: string
+  bound: string
+  confirm: string
+  busy: string
+}
+
+export const postAskModel = (row: Pick<OpenRow, 'number' | 'title'>, offer: NonNullable<AgentCell['postOffer']>): PostAskModel => {
+  const words = postedWords[offer.form] ?? offer.form
+  return {
+    heading: `Post the report on #${row.number} as ${words}?`,
+    title: row.title,
+    report: offer.report,
+    command: offer.command,
+    effect: `Posts the saved report ${offer.reportPath} to #${row.number} as ${words}, under your account (@${offer.viewer}), once. Pit View cannot undo it.`,
+    bound: `For the head ${shortSha(offer.headSha)} in ${offer.repo}, as ${offer.viewer}.`,
+    confirm: 'Post it',
+    busy: 'Posting…',
+  }
+}
+
 export type WaitingModel = { question: string, resume: string | null, copyName: string }
 
 export const waitingModel = (cell: AgentCell, number: number): WaitingModel => ({
@@ -288,6 +324,7 @@ const notPostedWords: Readonly<Record<string, string>> = {
   ownPr: 'nothing: it is your own PR',
   awaitingAnswer: 'nothing yet: it waits for your answer',
   ghFailed: 'nothing: the post failed',
+  postBlocked: 'nothing: a permission check refused the post',
 }
 
 export type Fact = { label: string, value: string, href: string | null }
@@ -431,6 +468,10 @@ export type ResultModel = {
   byHand: string | null
   // set when the run's ask is "Clean · mark ready?" and the drawer offers Mark ready for review: says where the action is, and does nothing itself
   ready: string | null
+  // set when the review finished and its post was refused: says so, and that nothing reached GitHub
+  notPosted: string | null
+  // that run's saved report, for the report panel
+  report: { name: string, openName: string } | null
 }
 
 // the quiet line that points the "Clean · mark ready?" ask at the Actions section; null unless the done text is that ask and Mark ready for review is offered now, which already means the viewer's own open draft
@@ -445,6 +486,14 @@ const byHandText = (note: string | null): string => {
   const reread = 'Pit View read the result again at your request.'
   if (note === null || was === null) return `Finished by hand: ${reread}`
   return note.startsWith('permissionDenied') ? `Finished by hand after a denied tool call (${note.slice(note.indexOf(':') + 1).trim() || 'unnamed'}): ${reread}` : `Finished by hand after an earlier failure (${was.replace(/\.$/, '')}): ${reread}`
+}
+
+const isBlockedPost = (result: AgentResult | null): result is Extract<AgentResult, { kind: 'review' }> =>
+  result?.kind === 'review' && result.notPostedReason === 'postBlocked' && result.posted === null
+
+const blockedReport = (result: AgentResult | null): ResultModel['report'] => {
+  const name = isBlockedPost(result) ? reportName(result.report) : null
+  return name === null ? null : { name, openName: `Open report ${name}` }
 }
 
 export const resultModel = (cell: AgentCell, number: number, headOid: string, offers: readonly ActionOffer[]): ResultModel => ({
@@ -465,6 +514,8 @@ export const resultModel = (cell: AgentCell, number: number, headOid: string, of
     : 'The head has moved since this run, so it covers an earlier commit. Start a new review for the current one.',
   byHand: cell.resolvedByHand && cell.status === 'done' ? byHandText(cell.firstNote ?? cell.note) : null,
   ready: readyPointer(cell.text, offers),
+  notPosted: isBlockedPost(cell.result) ? 'Review done, post not made: a permission check refused the post before it ran, so nothing reached GitHub.' : null,
+  report: blockedReport(cell.result),
 })
 
 // which card the latest run gets
@@ -541,6 +592,7 @@ const outcomeText = (run: Pick<RunView, 'status' | 'result' | 'note'>): { text: 
     return { text, tone: doneTone({ status: 'done', text }) }
   }
   if (result === null || result.schema !== 'pit-crew/review-result@1' || result.verdict === null) return { text: 'Done', tone: 'gray' }
+  if (result.notPostedReason === 'postBlocked' && result.posted === null) return { text: `${result.verdict === 'changesRequested' ? 'Changes requested' : 'Clean'} · post not made`, tone: 'amber' }
   const failedPost = result.notPostedReason === 'ghFailed' ? ' · post failed' : ''
   if (result.verdict === 'changesRequested') return { text: `Changes requested${failedPost}`, tone: 'red' }
   if (result.posted?.form === 'approve') return { text: `Approved${failedPost}`, tone: 'green' }
@@ -620,6 +672,9 @@ export type DrawerModel = {
   // the latest-run card's Re-read result, and its confirmation while asked
   reread: RereadOffer | null
   rereadAsk: RereadAskModel | null
+  // the latest-run card's Post it, and its confirmation while asked
+  postIt: PostOfferModel | null
+  postAsk: PostAskModel | null
   // false for a PR that left the open tables until its latest run has been read again: a
   // running card there may be stale, and Stop must not be offered on a guess
   stopsEnabled: boolean
@@ -649,6 +704,8 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
     stop: cell === null ? null : card === 'running' ? stopModel(row.number, cell, confirm?.type === 'stop' && confirm.andOpen) : card === 'queued' ? queuedStopModel(row.number, cell) : null,
     reread: cell !== null && (card === 'result' || card === 'waiting') ? rereadOffer(cell, input.open, row.number) : null,
     rereadAsk: cell !== null && confirm?.type === 'reread' && (card === 'result' || card === 'waiting') && rereadOffer(cell, input.open, row.number)?.disabled === false ? rereadAskModel(row, cell, confirm) : null,
+    postIt: cell !== null && card === 'result' ? postItOffer(cell, input.open, row.number) : null,
+    postAsk: cell !== null && card === 'result' && confirm?.type === 'post' && input.open && cell.postOffer !== null ? postAskModel(row, cell.postOffer) : null,
     stopsEnabled: input.open || input.runs.state === 'ready',
     waiting: cell !== null && card === 'waiting' ? waitingModel(cell, row.number) : null,
     result: cell !== null && card === 'result' ? resultModel(cell, row.number, row.headOid, actionOffers(row, input.open)) : null,
@@ -745,6 +802,8 @@ export const cellFromRun = (cell: AgentCell, run: RunView): AgentCell => {
     firstNote: run.firstNote,
     resume: run.resume,
     costUsd: run.costUsd,
+    // the server's offer is about one run, and a newer run on the list is not it
+    postOffer: cell.runId === run.id ? cell.postOffer : null,
   }
 }
 
@@ -766,6 +825,11 @@ export const confirmHolds = (confirm: Confirm, cell: AgentCell | null, open: boo
   if (confirm.type === 'stop') return (cell.state === 'running' || cell.state === 'queued') && cell.runId === confirm.runId
   // a re-read is about one finished run that still has the status it was asked for, on a PR still open; the head and base it is bound to are judged by rereadBound
   if (confirm.type === 'reread') return open && rereadOffer(cell, open, 0)?.runId === confirm.runId
+  // a post is about what the confirmation showed: any change in the server's offer drops it
+  if (confirm.type === 'post') {
+    const offer = cell.postOffer
+    return open && offer !== null && offer.runId === confirm.runId && offer.form === confirm.form && offer.headSha === confirm.headSha && offer.repo === confirm.repo && offer.viewer === confirm.viewer
+  }
   if (!open) return false
   const option = optionOf(cell, confirm.kind)
   return option !== undefined && option.unavailable === null

@@ -27,7 +27,7 @@ const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
   lastReviewAt: null,
   runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
   steps: [], tandem: false,
-  finishedAt: null, text: null, result: null, question: null, note: null, firstNote: null, resolvedByHand: false, resume: null, costUsd: null,
+  finishedAt: null, text: null, result: null, question: null, note: null, firstNote: null, resolvedByHand: false, resume: null, costUsd: null, postOffer: null,
   ...patch,
 })
 
@@ -100,6 +100,9 @@ test('a done cell shows the server\'s text and when it finished, colored by what
   assert.equal(tones('Clean · mark ready?'), 'green')
   assert.equal(tones('Clean · CI failed'), 'amber')
   assert.equal(tones('Approved · post failed'), 'amber')
+  assert.equal(tones('Clean · post not made'), 'amber')
+  assert.equal(tones('Changes requested · post not made'), 'amber')
+  assert.equal(tones('Clean · post not made · finished by hand'), 'amber')
   assert.equal(tones('Done'), 'gray')
   assert.equal(tones('Needs your answer', 'needsInput'), 'amber')
   assert.equal(tones('Stopped', 'stopped'), 'gray')
