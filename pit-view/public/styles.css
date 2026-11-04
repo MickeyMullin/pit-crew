@@ -1482,6 +1482,12 @@ button.agent:hover {
   cursor: pointer;
 }
 
+.confirm-detail {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+}
+
 .confirm-select {
   max-width: 100%;
   height: 30px;

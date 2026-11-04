@@ -14,7 +14,7 @@ import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import {
-  confirmHolds, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
+  commentsCheckOn, confirmHolds, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
   rereadBound, resumeReadyText, returnSelector,
 } from './drawerview.ts'
 import type { Confirm, DrawerModel, Loadable, Opener, StartConfirmModel, StopModel } from './drawerview.ts'
@@ -159,6 +159,19 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     return h('div', { class: 'confirm-actions' }, cancel, go)
   }
 
+  // the Self-review's box: a choice for this one start, kept in the confirmation as the runner is
+  const commentsBox = (check: NonNullable<StartConfirmModel['commentsCheck']>): HTMLElement => {
+    const input = h('input', { type: 'checkbox', name: 'drawer-comments', 'data-focus-key': 'confirm-comments', 'aria-describedby': 'drawer-comments-detail', checked: check.checked })
+    input.addEventListener('change', () => {
+      if (confirm?.type !== 'start') return
+      confirm = { ...confirm, checkComments: input.checked }
+      paintConfirm()
+    })
+    return h('span', {},
+      h('label', { class: 'confirm-runner' }, input, check.label),
+      h('span', { id: 'drawer-comments-detail', class: 'muted confirm-detail' }, check.detail))
+  }
+
   const startConfirmBlock = (ask: StartConfirmModel): HTMLElement => {
     const command = h('code', { class: 'confirm-command mono', 'data-confirm': 'command' }, ask.command)
     const runner: Node | string = ask.runners.length === 1
@@ -173,7 +186,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           })
           return h('label', { class: 'confirm-runner' }, input, choice.label)
         }))
-    const list = facts([['Command', command], ['Runner', runner], ['On GitHub', ask.effect]])
+    const list = facts([['Command', command], ['Runner', runner], ...(ask.commentsCheck === null ? [] : [['Comments', commentsBox(ask.commentsCheck)] as [string, Node]]), ['On GitHub', ask.effect]])
     list.querySelector('dt:nth-of-type(2)')?.setAttribute('id', 'drawer-runner-term')
     // a start that pushes is told apart from a review's by its caution treatment, a plain line
     // about the push, and a Start that names the session
@@ -254,6 +267,12 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     for (const input of root.querySelectorAll<HTMLInputElement>('input[name="drawer-runner"]')) {
       const wanted = confirm?.type === 'start' && confirm.runner === input.value
       if (input.checked !== wanted) input.checked = wanted
+    }
+    const comments = root.querySelector<HTMLInputElement>('input[name="drawer-comments"]')
+    if (comments !== null) {
+      const wanted = model?.confirm?.commentsCheck?.checked === true
+      if (comments.checked !== wanted) comments.checked = wanted
+      comments.disabled = busy
     }
     const line = root.querySelector<HTMLElement>('#drawer-error')
     if (line !== null) setText(line, error)
@@ -397,7 +416,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     busy = true
     error = ''
     paintConfirm()
-    const answer = await sendRun(startRequest(n, asked.kind, asked.runner, option.repo, option.viewer, options.token))
+    const answer = await sendRun(startRequest(n, asked.kind, asked.runner, option.repo, option.viewer, options.token, commentsCheckOn(asked, option)))
     busy = false
     if (n !== number) return
     if (answer.ok) {
@@ -524,7 +543,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
 
   const startPart = (model: DrawerModel): Part => ({
     key: 'start',
-    sig: JSON.stringify([model.starts, model.confirm === null ? null : { ...model.confirm, runner: '', command: '' }]),
+    sig: JSON.stringify([model.starts, model.confirm === null ? null : { ...model.confirm, runner: '', command: '', commentsCheck: model.confirm.commentsCheck === null ? null : '' }]),
     build: () => {
       if (model.confirm !== null) return section('start', 'Start', startConfirmBlock(model.confirm))
       return section('start', 'Start',

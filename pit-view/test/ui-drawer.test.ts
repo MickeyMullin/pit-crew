@@ -8,10 +8,10 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
-import { postRequest, refusalText, rereadRequest } from '../public/agent.ts'
+import { postRequest, refusalText, rereadRequest, startRequest } from '../public/agent.ts'
 import type { AgentCell, RunView, StartOption, StepSlot } from '../public/agent.ts'
 import {
-  cardKind, commitModel, readyPointer, cellFromRun, confirmHolds, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
+  cardKind, commentsCheckOn, commitModel, readyPointer, cellFromRun, confirmHolds, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
   queuedStopModel, reportName, reportRows, resumeReadyText, returnSelector, runRows, runText, startConfirmModel, startsModel, stepModels, stepsName, stopModel, summaryOf,
 } from '../public/drawerview.ts'
 import type { DrawerInput, Loadable } from '../public/drawerview.ts'
@@ -614,6 +614,65 @@ test('a Fix session\'s confirmation names the push: the branch in its heading, t
   assert.deepEqual(drawerModel(input(own())).starts.buttons.map((button) => button.text), ['Self-review', 'Fix requested changes'])
 })
 
+// the viewer's own PR with the comments check on offer, as the server sends it
+const ownChecking = (): AgentCell => {
+  const cell = own()
+  return { ...cell, starts: cell.starts.map((option) => option.kind === 'default' ? { ...option, checkCommentsArgs: ['101', '--no-post', '--check-comments'] } : option) }
+}
+
+test('the Self-review confirmation shows the comments check unchecked, and checking it changes the command and what the request sends', () => {
+  // a new confirmation opens with it off, and the command is the same as without the option
+  const fresh = drawerModel(input(ownChecking(), { confirm: { type: 'start', kind: 'default', runner: 'claude' } })).confirm
+  assert.deepEqual(fresh?.commentsCheck, { label: 'Also check the latest comments', detail: 'Reads the PR\'s latest comments from anyone and reports which points the branch has not addressed. It changes nothing.', checked: false })
+  assert.equal(fresh?.command, '/review-pr 101 --no-post')
+  // on, the command shows the flag after --no-post for the chosen runner, and the rest stays as it was
+  const on = drawerModel(input(ownChecking(), { confirm: { type: 'start', kind: 'default', runner: 'claude', checkComments: true } })).confirm
+  assert.equal(on?.commentsCheck?.checked, true)
+  assert.equal(on?.command, '/review-pr 101 --no-post --check-comments')
+  assert.equal(on?.heading, fresh?.heading)
+  assert.equal(on?.effect, fresh?.effect)
+  assert.equal(on?.confirm, 'Start')
+  assert.equal(startConfirmModel(row(ownChecking()), ownChecking(), 'default', 'codex', true)?.command, '$review-pr 101 --no-post --check-comments')
+  // the box feeds the request: what the confirmation shows is what is sent
+  const cell = ownChecking()
+  const self = optionOf(cell, 'default') as StartOption
+  const sent = (asked: { type: 'start', kind: 'default', runner: 'claude', checkComments?: boolean }): string | undefined =>
+    startRequest(101, asked.kind, asked.runner, self.repo, self.viewer, 't', commentsCheckOn(asked, self)).init.body
+  assert.equal(JSON.parse(sent({ type: 'start', kind: 'default', runner: 'claude', checkComments: true }) ?? '{}').checkComments, true)
+  assert.equal(sent({ type: 'start', kind: 'default', runner: 'claude', checkComments: false }), '{"kind":"default","runner":"claude","repo":"octo-example/orbit","viewer":"viewer"}')
+  assert.equal(sent({ type: 'start', kind: 'default', runner: 'claude' }), '{"kind":"default","runner":"claude","repo":"octo-example/orbit","viewer":"viewer"}')
+})
+
+test('a start that does not offer the comments check shows no box and sends none, whatever the drawer\'s state says', () => {
+  const asked = { type: 'start', kind: 'default', runner: 'claude', checkComments: true } as const
+  // someone else's PR, and the viewer's own PR's other starts
+  const others = idle()
+  const review = drawerModel(input(others, { confirm: asked })).confirm
+  assert.equal(review?.commentsCheck, null)
+  assert.equal(review?.command, '/review-pr 101')
+  assert.equal(commentsCheckOn(asked, optionOf(others, 'default') as StartOption), false)
+  const fix = drawerModel(input(ownChecking(), { confirm: { ...asked, kind: 'fix' } })).confirm
+  assert.equal(fix?.commentsCheck, null)
+  assert.equal(fix?.command, '/fix-pr 101')
+  assert.equal(commentsCheckOn(asked, optionOf(ownChecking(), 'fix') as StartOption), false)
+})
+
+test('the box\'s state lives in the confirmation: a change of a start\'s entry keeps it without a rebuild for the toggle, and Start, Cancel, or a new ask leave nothing behind', async () => {
+  const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
+  // a new ask opens it off, and nothing else in the drawer holds the state
+  assert.match(source, /confirm = \{ type: 'start', kind, runner: defaultRunner\(option, cell\.action\.runner\) \}/)
+  assert.equal(source.match(/checkComments:/g)?.length, 1)
+  // the signature ignores whether it is checked, so toggling the box or a patch never rebuilds it under the pointer, and the paint keeps it true to the state
+  assert.match(source, /commentsCheck: model\.confirm\.commentsCheck === null \? null : ''/)
+  assert.match(source, /querySelector<HTMLInputElement>\('input\[name="drawer-comments"\]'\)/)
+  // the state keeps the command the confirmation shows through a patch that rebuilds it
+  const before = ownChecking()
+  const patched = { ...before, starts: before.starts.map((option) => ({ ...option, button: option.kind === 'default' ? 'Queue self-review' : option.button })) }
+  assert.equal(drawerModel(input(patched, { confirm: { type: 'start', kind: 'default', runner: 'claude', checkComments: true } })).confirm?.command, '/review-pr 101 --no-post --check-comments')
+  // the confirmation does not hold once the start is unavailable, and with it goes the state
+  assert.equal(confirmHolds({ type: 'start', kind: 'default', runner: 'claude', checkComments: true }, { ...before, starts: before.starts.map((option) => ({ ...option, unavailable: 'a run for #101 is already in flight' })) }, true), false)
+})
+
 test('a running Fix session shows its label, no Tandem tag, and the steps by its own names, in the bar and for screen readers', () => {
   const cell = own({
     state: 'running', runId: 9, runner: 'claude', command: 'fix-pr', args: ['101'], status: 'running', label: 'Fix session',
@@ -774,7 +833,7 @@ test('a run start names the repository and viewer of the option the confirmation
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
   // the confirmation's signature holds every option, so a change of repository rebuilds it too
   assert.match(source, /sig: JSON\.stringify\(\[model\.starts,/)
-  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token\)/)
+  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\)\)/)
 })
 
 // an Update session's finished run: its method and why, the push, and its conflicts and checks

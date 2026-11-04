@@ -277,6 +277,45 @@ test('a PR offers its default run, the same review in tandem, and a stack review
   }
 })
 
+test('only a Self-review offers the comments check, which adds --check-comments after --no-post, and every run kind without it is the invocation it always was', async () => {
+  const config = baseConfig()
+  const stacked = { position: 2, size: 3 }
+  const offered = async (number: number) => startOptions(await prOf(number), config, stacked, false).map((option) => [option.kind, requestText('/', option.command, option.args, '/r/1'), option.checkCommentsArgs])
+  // a Self-review, then the viewer's own PR's other starts
+  assert.deepEqual(await offered(104), [
+    ['default', '/review-pr 104 --no-post --emit-json=/r/1', ['104', '--no-post', '--check-comments']],
+    ['tandem', '/review-pr 104 --tandem --no-post --emit-json=/r/1', undefined],
+    ['stack', '/review-stack 104 --emit-json=/r/1', undefined],
+    ['fix', '/fix-pr 104 --emit-json=/r/1', undefined],
+  ])
+  // a review, a re-review, and a bot's review of someone else's PR offer none of it
+  assert.deepEqual(await offered(113), [
+    ['default', '/review-pr 113 --emit-json=/r/1', undefined],
+    ['tandem', '/review-pr 113 --tandem --emit-json=/r/1', undefined],
+    ['stack', '/review-stack 113 --emit-json=/r/1', undefined],
+  ])
+  assert.deepEqual(await offered(106), [
+    ['default', '/review-pr 106 --emit-json=/r/1', undefined],
+    ['tandem', '/review-pr 106 --tandem --emit-json=/r/1', undefined],
+    ['stack', '/review-stack 106 --emit-json=/r/1', undefined],
+  ])
+  assert.deepEqual(await offered(114), [
+    ['default', '/review-dependabot 114 --emit-json=/r/1', undefined],
+    ['stack', '/review-stack 114 --emit-json=/r/1', undefined],
+  ])
+  // the two run kinds the drawer's Start does not build keep their own arguments
+  assert.deepEqual(updateRequest(scenario.repo, 104, 'a'.repeat(40), 'update').args, ['104', `--head=${'a'.repeat(40)}`])
+  assert.deepEqual(sweepRequest(scenario.repo, 'claude').args, [scenario.repo, '--parallel', '1'])
+  // the same start with the option on, as each runner receives it; what it does on GitHub does not change
+  const [self] = startOptions(await prOf(104), config, null, false)
+  assert.deepEqual(self?.args, ['104', '--no-post'])
+  const checked = self?.checkCommentsArgs ?? []
+  assert.equal(requestText('/', 'review-pr', checked, '/r/1'), '/review-pr 104 --no-post --check-comments --emit-json=/r/1')
+  assert.equal(requestText('$', 'review-pr', checked, '/r/1'), '$review-pr 104 --no-post --check-comments --emit-json=/r/1')
+  assert.deepEqual(self?.posts, { kind: 'nothing', text: 'Posts nothing; writes the report only.' })
+  assert.equal(isTandemRun(checked), false)
+})
+
 test('each start says which runners it works with and what it does on GitHub', async () => {
   const config = baseConfig()
   const stacked = { position: 1, size: 2 }

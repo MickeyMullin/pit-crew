@@ -1602,6 +1602,96 @@ test('a fix session starts only on the viewer\'s own PR: fix-pr with Claude, nev
   }
 })
 
+test('the comments check rides on a Self-review start as a boolean: true adds --check-comments after --no-post, false or none is today\'s start, and nothing else can ask for it', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
+    const stop = async (run: Record<string, unknown>): Promise<void> => {
+      const settled = h.server.launcher.settled(Number(run.id))
+      await send(`${h.base}/api/runs/${run.id}/stop`, 'POST', undefined, token(h))
+      await settled
+    }
+
+    // a value that is not a boolean is 400, whatever the PR, and before anything runs
+    for (const value of ['true', 1, null, [], {}]) {
+      for (const number of [104, 113]) {
+        const bad = await send(url(number), 'POST', { repo: scenario.repo, checkComments: value }, token(h))
+        assert.equal(bad.status, 400, `${JSON.stringify(value)} on #${number}`)
+        assert.match(String(bad.body.error), /checkComments must be true or false/)
+      }
+    }
+    // a start that is not a Self-review is refused, whatever the kind, and nothing runs
+    const refusals: [number, Record<string, unknown>][] = [
+      [113, {}], [113, { kind: 'default' }], [113, { kind: 'tandem' }], [113, { kind: 'stack' }],
+      [106, {}], [114, {}], [115, {}],
+      [104, { kind: 'tandem' }], [104, { kind: 'stack' }], [104, { kind: 'fix' }],
+    ]
+    for (const [number, ask] of refusals) {
+      const refused = await send(url(number), 'POST', { repo: scenario.repo, checkComments: true, ...ask }, token(h))
+      assert.equal(refused.status, 422, `#${number} ${JSON.stringify(ask)}`)
+      assert.match(String(refused.body.error), /not offered|offered only|not part of a stack/, `#${number} ${JSON.stringify(ask)}`)
+    }
+    assert.equal(h.launch.children.length, 0)
+    assert.equal(githubCalls(h.runner).filter((call) => call.args[1] === 'user').length, 0)
+
+    // checked, on the viewer's own PR: the same arguments with the flag after --no-post, with either runner
+    const checked = await send(url(104), 'POST', { repo: scenario.repo, kind: 'default', checkComments: true }, token(h))
+    assert.equal(checked.status, 200)
+    assert.deepEqual([checked.body.command, checked.body.args, checked.body.label, checked.body.tandem], ['review-pr', ['104', '--no-post', '--check-comments'], 'Self-review', false])
+    assert.match(lastWrite(h), /"\/review-pr 104 --no-post --check-comments --emit-json=[^"]+"/)
+    await stop(checked.body)
+    const codex = await send(url(101), 'POST', { repo: scenario.repo, runner: 'codex', checkComments: true }, token(h))
+    assert.deepEqual([codex.status, codex.body.runner, codex.body.args], [200, 'codex', ['101', '--no-post', '--check-comments']])
+    assert.ok(h.launch.children.at(-1)?.request.args.some((arg) => arg.startsWith('$review-pr 101 --no-post --check-comments --emit-json=')))
+    await stop(codex.body)
+
+    // off, or not sent, is today's start, on any PR
+    const off = await send(url(104), 'POST', { repo: scenario.repo, checkComments: false }, token(h))
+    assert.deepEqual([off.status, off.body.args, off.body.label], [200, ['104', '--no-post'], 'Self-review'])
+    assert.match(lastWrite(h), /"\/review-pr 104 --no-post --emit-json=[^"]+"/)
+    await stop(off.body)
+    const unchanged = await send(url(104), 'POST', { repo: scenario.repo }, token(h))
+    assert.deepEqual([unchanged.status, unchanged.body.args], [200, ['104', '--no-post']])
+    await stop(unchanged.body)
+    const others = await send(url(113), 'POST', { repo: scenario.repo, checkComments: false }, token(h))
+    assert.deepEqual([others.status, others.body.args], [200, ['113']])
+    assert.match(lastWrite(h), /"\/review-pr 113 --emit-json=[^"]+"/)
+    await stop(others.body)
+
+    // the feed offers it on the Self-review start alone, and the row's own action stays as it was
+    const view = (await getJson<View>(`${h.base}/api/view`)).body
+    assert.deepEqual((rowIn(view, 104)?.agent?.starts ?? []).map((start) => [start.kind, start.checkCommentsArgs]).filter(([, args]) => args !== undefined), [['default', ['104', '--no-post', '--check-comments']]])
+    assert.deepEqual(rowIn(view, 104)?.agent?.action.args, ['104', '--no-post'])
+    assert.ok((rowIn(view, 113)?.agent?.starts ?? []).every((start) => start.checkCommentsArgs === undefined))
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a checked Self-review meets the review cap as an unchecked one does: it queues at the cap, keeps its flag, and starts with it', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', maxConcurrentReviews: 1 } })
+  try {
+    await filled(h)
+    const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
+    const first = await send(url(113), 'POST', { repo: scenario.repo }, token(h))
+    assert.equal(first.body.status, 'running')
+    const queued = await send(url(104), 'POST', { repo: scenario.repo, checkComments: true }, token(h))
+    assert.deepEqual([queued.status, queued.body.status, queued.body.args], [200, 'queued', ['104', '--no-post', '--check-comments']])
+    assert.equal(h.launch.children.length, 1)
+    // the button that asks for it reads Queue, as for an unchecked one
+    const view = (await getJson<View>(`${h.base}/api/view`)).body
+    assert.equal(rowIn(view, 101)?.agent?.starts[0]?.button, 'Queue self-review')
+    const settled = h.server.launcher.settled(Number(first.body.id))
+    await send(`${h.base}/api/runs/${first.body.id}/stop`, 'POST', undefined, token(h))
+    await settled
+    await until(() => h.launch.children.length === 2)
+    assert.match(lastWrite(h), /"\/review-pr 104 --no-post --check-comments --emit-json=[^"]+"/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a fix start is refused when gh is signed in as someone else, even on the viewer\'s own PR', async () => {
   const fixtures = fixtureRunner()
   const other = fakeRunner((args) => args[0] === 'api' && args[1] === 'user' ? ok('someone-else\n') : fixtures.runner(args))

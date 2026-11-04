@@ -541,17 +541,18 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   const startRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
     requireToken(req)
     const number = prNumber(raw)
-    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex", "repo": "owner/name", "viewer": "login" }'
+    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex", "repo": "owner/name", "viewer": "login", "checkComments": true | false }'
     const length = Number(req.headers['content-length'] ?? 0)
     const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
-    const { runner: asked, kind: askedKind, repo: confirmedRepo, viewer: confirmed, ...rest } = body as Record<string, unknown>
+    const { runner: asked, kind: askedKind, repo: confirmedRepo, viewer: confirmed, checkComments, ...rest } = body as Record<string, unknown>
     if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
     // the page always names the repository its confirmation showed; a start that does not is from an older page and is refused rather than guessed at
     if (typeof confirmedRepo !== 'string') throw new HttpError(400, `repo is required and must be a string; ${usage}`)
     if (confirmed !== undefined && typeof confirmed !== 'string') throw new HttpError(400, 'viewer must be a string')
     if (asked !== undefined && !runnerNames.includes(asked as RunnerName)) throw new HttpError(400, 'runner must be claude or codex')
     if (askedKind !== undefined && !startKinds.includes(askedKind as StartKind)) throw new HttpError(400, 'kind must be default, tandem, stack or fix')
+    if (checkComments !== undefined && typeof checkComments !== 'boolean') throw new HttpError(400, 'checkComments must be true or false')
     const kind = (askedKind ?? 'default') as StartKind
     // a tandem primary launches its secondary in the background, which only Claude can do
     if (kind === 'tandem' && asked === 'codex') throw new HttpError(400, 'Review in tandem runs with Claude only; send runner claude or leave it out')
@@ -568,6 +569,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (refusal !== null) throw new HttpError(422, refusal)
     const option = startOptions(row.pr, config, stack, false).find((candidate) => candidate.kind === kind)
     if (option === undefined) throw new HttpError(422, `${kind} is not offered for #${number}`)
+    // the comments check rides on a Self-review alone: the option carries the args it runs with, and no other start has them
+    const args = checkComments === true ? option.checkCommentsArgs : option.args
+    if (args === undefined) throw new HttpError(422, `Check the latest comments is offered only on a Self-review of your own PR, and this start of #${number} is not one`)
     // a tandem or fix start without a runner is Claude's, whatever the configured default is
     const runner = asked as RunnerName | undefined ?? (kind === 'tandem' || kind === 'fix' ? 'claude' : undefined)
     try {
@@ -575,7 +579,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
         repo: config.repo,
         number,
         command: option.command,
-        args: option.args,
+        args,
         label: option.label,
         ...(runner === undefined ? {} : { runner }),
       })

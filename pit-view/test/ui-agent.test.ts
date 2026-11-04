@@ -185,6 +185,9 @@ test('a start sends JSON with the kind, the runner, the repository, the viewer, 
   assert.equal(startRequest(111, 'stack', 'claude', 'octo-example/orbit', 'vera-quill', 't').init.body, '{"kind":"stack","runner":"claude","repo":"octo-example/orbit","viewer":"vera-quill"}')
   // a Fix session names no runner: the server runs it with Claude; it still names the repository and viewer the confirmation showed
   assert.equal(startRequest(101, 'fix', 'codex', 'octo-example/orbit', 'vera-quill', 't').init.body, '{"kind":"fix","repo":"octo-example/orbit","viewer":"vera-quill"}')
+  // the comments check is sent only when it is on, so every other start's body stays as it was
+  assert.equal(startRequest(101, 'default', 'claude', 'octo-example/orbit', 'vera-quill', 't', true).init.body, '{"kind":"default","runner":"claude","repo":"octo-example/orbit","viewer":"vera-quill","checkComments":true}')
+  assert.equal(startRequest(101, 'default', 'claude', 'octo-example/orbit', 'vera-quill', 't', false).init.body, '{"kind":"default","runner":"claude","repo":"octo-example/orbit","viewer":"vera-quill"}')
   assert.deepEqual(stopRequest(42, 'tok-123'), { url: '/api/runs/42/stop', init: { method: 'POST', headers: { 'X-Pit-View-Token': 'tok-123' } } })
   // the page sends the header the server reads (Node lowercases incoming header names)
   assert.equal(tokenHeader.toLowerCase(), serverTokenHeader)
