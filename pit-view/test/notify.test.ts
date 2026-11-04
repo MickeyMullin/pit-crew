@@ -26,7 +26,8 @@ const harness = async (config: Partial<Config> = {}) => {
   const time = fakeTime()
   const cache = openCache({ path: ':memory:', clock: time.clock })
   const events: NotifyEvent[] = []
-  const state = { edits: new Map<number, Edit>(), fail: false, single: new Map<number, Edit>() }
+  // `gate` holds page 2 of the open list, and `singleGate` holds every one-PR fetch, until the test resolves them
+  const state = { edits: new Map<number, Edit>(), fail: false, single: new Map<number, Edit>(), gate: undefined as Promise<void> | undefined, singleGate: undefined as Promise<void> | undefined }
   const base = new Map<number, RawOpenPr>()
   for (const raw of [await openPage1(), await openPage2()]) {
     for (const pr of raw.data.repository!.pullRequests.nodes) base.set(pr.number, pr)
@@ -41,11 +42,13 @@ const harness = async (config: Partial<Config> = {}) => {
     const query = field(args, 'query') ?? ''
     if (query.includes('query OpenPullRequests')) {
       if (field(args, 'after') === undefined) return ok(JSON.stringify(edited(await openPage1(), state.edits)))
+      await state.gate
       if (state.fail) return failed('HTTP 502')
       return ok(JSON.stringify(edited(await openPage2(), state.edits)))
     }
     if (query.includes('query ClosedPullRequests')) return ok(JSON.stringify(await closedSearch()))
     if (query.includes('query SinglePullRequest')) {
+      await state.singleGate
       const number = Number(field(args, 'number'))
       const single = await singlePr(number)
       const pr = single.data.repository!.pullRequest!
@@ -86,7 +89,7 @@ const harness = async (config: Partial<Config> = {}) => {
     time.advance(60_000)
     return events.slice(before)
   }
-  return { poller, build, cycleOf, cache, state, events, cycle, settings, time }
+  return { poller, build, cycleOf, cache, state, events, cycle, settings, time, runner }
 }
 
 // 104 is mine and awaiting review; these turn it into each watched state
@@ -274,6 +277,96 @@ test('a viewer change rebuilds the baseline silently', async () => {
   settings.current = { ...before, viewer: scenario.viewer }
   await poller.configChanged(before)
   assert.deepEqual(await cycle(), [])
+  poller.stop()
+})
+
+// resolves once gh has been asked for a page matching `seen`, so a test knows the work it gated is in flight
+const reached = async (runner: { calls: { args: string[] }[] }, seen: (args: string[]) => boolean): Promise<void> => {
+  for (let tick = 0; tick < 200 && !runner.calls.some((call) => seen(call.args)); tick += 1) await new Promise((resolve) => setImmediate(resolve))
+  assert.ok(runner.calls.some((call) => seen(call.args)), 'the gated fetch never started')
+}
+const atPage2 = (args: string[]): boolean => field(args, 'after') !== undefined
+const atSingle = (args: string[]): boolean => (field(args, 'query') ?? '').includes('query SinglePullRequest')
+
+// the setting is moved away and back, each step reported to the poller as Settings would
+const awayAndBack = async (poller: { configChanged: (before: Config) => Promise<void> }, settings: { current: Config }, away: Partial<Config>): Promise<void> => {
+  const home = settings.current
+  settings.current = { ...home, ...away }
+  await poller.configChanged(home)
+  const gone = settings.current
+  settings.current = home
+  await poller.configChanged(gone)
+}
+
+for (const [name, away] of [['repository', { repo: otherRepo }], ['viewer', { viewer: 'someone-else' }]] as const) {
+  test(`a cycle in flight while the ${name} is changed away and back notifies nothing and leaves a fresh baseline`, async () => {
+    const { poller, cycle, settings, state, events, runner } = await harness()
+    await cycle()
+    state.edits.set(113, asRequested)
+    let release!: () => void
+    state.gate = new Promise<void>((resolve) => { release = resolve })
+    poller.refresh('manual')
+    await reached(runner, atPage2)
+    await awayAndBack(poller, settings, away)
+    release()
+    await poller.idle()
+    assert.deepEqual(events, [])
+    state.gate = undefined
+    // the empty baseline records the rows without firing, and only a change after that fires
+    assert.deepEqual(await cycle(), [])
+    state.edits.set(120, asFailing)
+    assert.deepEqual(only(await cycle()), [['ciFailing', 120]])
+    poller.stop()
+  })
+}
+
+test('a cycle that finishes after a second away-and-back notifies nothing', async () => {
+  const { poller, cycle, settings, state, events, runner } = await harness()
+  await cycle()
+  state.edits.set(113, asRequested)
+  let release!: () => void
+  state.gate = new Promise<void>((resolve) => { release = resolve })
+  poller.refresh('manual')
+  await reached(runner, atPage2)
+  await awayAndBack(poller, settings, { repo: otherRepo })
+  await awayAndBack(poller, settings, { viewer: 'someone-else' })
+  release()
+  await poller.idle()
+  assert.deepEqual(events, [])
+  state.gate = undefined
+  // the empty baseline records the rows without firing, and only a change after that fires
+  assert.deepEqual(await cycle(), [])
+  state.edits.set(120, asFailing)
+  assert.deepEqual(only(await cycle()), [['ciFailing', 120]])
+  poller.stop()
+})
+
+test('a one-PR refresh that started before an away-and-back notifies nothing and leaves a fresh baseline', async () => {
+  const { poller, cycle, settings, state, events, runner } = await harness()
+  await cycle()
+  state.single.set(113, asRequested)
+  // a cycle held in flight, so the configuration change starts no baseline-building fetch of its own
+  let releaseCycle!: () => void
+  state.gate = new Promise<void>((resolve) => { releaseCycle = resolve })
+  poller.refresh('manual')
+  await reached(runner, atPage2)
+  let release!: () => void
+  state.singleGate = new Promise<void>((resolve) => { release = resolve })
+  const refreshing = poller.refreshPr(113)
+  await reached(runner, atSingle)
+  await awayAndBack(poller, settings, { viewer: 'someone-else' })
+  release()
+  await refreshing
+  assert.deepEqual(events, [])
+  releaseCycle()
+  await poller.idle()
+  assert.deepEqual(events, [])
+  state.gate = undefined
+  state.singleGate = undefined
+  // the empty baseline records the rows without firing, and only a change after that fires
+  assert.deepEqual(await cycle(), [])
+  state.edits.set(120, asFailing)
+  assert.deepEqual(only(await cycle()), [['ciFailing', 120]])
   poller.stop()
 })
 
