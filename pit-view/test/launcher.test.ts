@@ -3531,6 +3531,55 @@ test('every open row\'s buttons follow the cap as reviews start and finish and a
   }
 })
 
+test('a page loaded while a config save is rescanning does not stop the open pages getting the rows the saved cap changes', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 2 } })
+  const patches: Patch[] = []
+  let launcher: ReturnType<typeof h.make> | null = null
+  const poller = createPoller({
+    cache: h.cache,
+    gh: createGh(h.gh.runner),
+    clock: h.time.clock,
+    timers: h.time.timers,
+    config: () => h.settings.current,
+    home: '/nonexistent/pit-view-test-home',
+    timeZone: scenario.timeZone,
+    emit: (patch) => patches.push(patch),
+    pageSize: scenario.pageSize,
+    queueing: () => launcher!.queueing(),
+  })
+  launcher = h.make((run) => poller.runChanged(run.repo, run.number))
+  const latest = (number: number): string | undefined => {
+    for (const patch of [...patches].reverse()) {
+      const row = patch.rows.find((entry: OpenRow) => entry.number === number)
+      if (row !== undefined) return row.agent?.action.label
+    }
+    return undefined
+  }
+  try {
+    poller.refresh('manual')
+    await poller.idle()
+    await poller.view()
+    await launcher.start(request(106))
+    await launcher.start(request(118, { label: 'Review' }))
+    // the open pages hold the queue wording
+    assert.equal(latest(113), 'Queue review')
+    // a save that raises the cap and moves the reports directory yields during the rescan
+    const before = h.settings.current
+    h.settings.current = { ...before, maxConcurrentReviews: 3, reportsDir: join(h.home, 'other-reports') }
+    const saving = poller.configChanged(before)
+    // a fresh page loads in the middle, and reads the new answer
+    const loaded = await poller.view()
+    assert.equal(loaded.others.groups.flatMap((group) => group.rows).find((entry) => entry.number === 113)?.agent?.action.label, 'Review')
+    await saving
+    // the pages that were already open still get the row
+    assert.equal(latest(113), 'Review')
+  } finally {
+    launcher.close()
+    poller.stop()
+    await h.cleanup()
+  }
+})
+
 test('the buttons settle once a review has finished launching, though the review count is below the cap', async () => {
   const h = await harness({ config: { maxConcurrentReviews: 3 } })
   const patches: Patch[] = []

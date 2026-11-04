@@ -248,7 +248,7 @@ export const createPoller = (options: PollerOptions): Poller => {
   const prJobs = new Map<string, Promise<PrRefreshResult>>()
   const prKey = (repo: string, number: number): string => `${repo}#${number}`
 
-  // what the pages last received, as the buttons of every row were derived from it; a change is sent as the rows it changes
+  // what the open pages last received, as the buttons of every row were derived from it; only a patch sent to them moves it, never a page load; a change is sent as the rows it changes
   const noQueueing: Queueing = { review: false, selfReview: false }
   let sentQueueing: Queueing = noQueueing
   const queueingNow = (): Queueing => options.queueing?.() ?? noQueueing
@@ -651,9 +651,8 @@ export const createPoller = (options: PollerOptions): Poller => {
     if (scanned === null) await rescan(config())
     // read and derive in one synchronous step, so version matches what the view holds
     const settings = config()
-    const queueing = queueingNow()
-    sentQueueing = queueing
-    const snap = snapshot(settings, reports, queueing)
+    // a page loaded here is not an open page: it leaves what the open pages last received alone, or a patch they still need could be judged already sent
+    const snap = snapshot(settings, reports)
     return {
       version,
       repo: settings.repo,
