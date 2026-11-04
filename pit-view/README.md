@@ -26,7 +26,7 @@ The deployed app is a clone of `master` at `~/app/pit-crew`, kept running from l
 
 ## Posting a review
 
-Pit View grants a review run no permission to post. A run's post goes through or is refused under your own Claude Code settings and auto mode's classifier. When the classifier refuses it, the run reads "review done, post not made", and you post the saved report with the drawer's confirmed Post it button. DESIGN.md, section 8, has the rules.
+Pit View grants a review run no permission to post. A run's post goes through or is refused under your own Claude Code settings and auto mode's classifier. When the classifier refuses it, the run reads "review done, post not made," and you post the saved report with the drawer's confirmed Post it button. DESIGN.md, section 8, has the rules.
 
 ## Configuration
 
