@@ -7,22 +7,25 @@ import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { openCache } from '../src/cache.ts'
 import type { Config } from '../src/config.ts'
+import type { Notice } from '../src/notify.ts'
 import type { Patch, View } from '../src/poller.ts'
 import { hostAllowed, originAllowed, PortInUseError, resolveRuntime, startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
 import { iso } from '../src/time.ts'
 import { scenario } from './fixtures/scenario.ts'
 import type { MineRow, OpenRow } from '../src/derive.ts'
-import type { RunResult } from '../src/github.ts'
-import { emptySweepResult, failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, gatedRunner, githubCalls, ok, reviewResult, singlePr, sweepResult, tempDir } from './helpers.ts'
-import type { FakeLaunch, FakeRunner, FakeTime } from './helpers.ts'
+import type { RawOpenPr, RunResult } from '../src/github.ts'
+import { emptySweepResult, failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, gate, gatedRunner, githubCalls, ok, openPage1, openPage2, reviewResult, singlePr, sweepResult, tempDir } from './helpers.ts'
+import type { FakeLaunch, FakeRunner, FakeTime, Gate } from './helpers.ts'
 
 type Harness = { server: PitServer, time: FakeTime, runner: FakeRunner, launch: FakeLaunch, home: string, configPath: string, base: string, cleanup: () => Promise<void> }
 
-const setup = async ({ config = {}, runner = fixtureRunner(), files = {}, launch = fakeLaunch() }: {
+const setup = async ({ config = {}, runner = fixtureRunner(), files = {}, launch = fakeLaunch(), deliver }: {
   config?: Partial<Config>
   runner?: FakeRunner
   launch?: FakeLaunch
+  // receives what would reach the OS; nothing is delivered when left out
+  deliver?: (notice: Notice) => Promise<void>
   // files under the temp home, path to contents
   files?: Record<string, string | Buffer>
 } = {}): Promise<Harness> => {
@@ -49,6 +52,7 @@ const setup = async ({ config = {}, runner = fixtureRunner(), files = {}, launch
     launch: launch.deps,
     log: () => {},
     pageSize: scenario.pageSize,
+    deliver,
   })
   // closes the server the harness holds now, which a restart may have replaced
   const cleanup = async (): Promise<void> => {
@@ -724,6 +728,187 @@ test('an empty viewer is read from gh\'s local config at start, not from the Git
     assert.equal(githubCalls(runner).length, 0)
     // the stored config keeps its empty viewer
     assert.equal((await getJson<Config>(`${h.base}/api/config`)).body.viewer, '')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// a server whose notifications are on, with gates on the local login lookup, on page 2 of the open list, and on the one-PR fetch; `requested` is the PR that the open list and the fetch show as asking the viewer for review
+const identityRig = async ({ viewer = scenario.viewer as string, localLogin = scenario.viewer as string | null } = {}) => {
+  const fixtures = fixtureRunner()
+  const state = { logins: [] as Gate[], page2: undefined as Gate | undefined, single: undefined as Gate | undefined, requested: null as number | null }
+  const asking = async (pr: RawOpenPr): Promise<RawOpenPr> => {
+    const nodes = (await openPage1()).data.repository!.pullRequests.nodes
+    return { ...pr, reviewRequests: nodes.find((node) => node.number === 109)!.reviewRequests }
+  }
+  const runner = fakeRunner(async (args) => {
+    if (args[0] === 'config' && args[1] === 'get') {
+      await state.logins.shift()?.hold()
+      return localLogin === null ? failed('no account') : ok(`${localLogin}\n`)
+    }
+    const query = field(args, 'query') ?? ''
+    if (query.includes('query OpenPullRequests')) {
+      const later = field(args, 'after') !== undefined
+      if (later) await state.page2?.hold()
+      const raw = later ? await openPage2() : await openPage1()
+      const repository = raw.data.repository!
+      const nodes = await Promise.all(repository.pullRequests.nodes.map((pr) => pr.number === state.requested ? asking(pr) : pr))
+      return ok(JSON.stringify({ data: { ...raw.data, repository: { ...repository, pullRequests: { ...repository.pullRequests, nodes } } } }))
+    }
+    if (query.includes('query SinglePullRequest')) {
+      await state.single?.hold()
+      const number = Number(field(args, 'number'))
+      if (number !== state.requested) return fixtures.runner(args)
+      const single = await singlePr(number)
+      return ok(JSON.stringify({ data: { ...single.data, repository: { ...single.data.repository!, pullRequest: await asking(single.data.repository!.pullRequest!) } } }))
+    }
+    return fixtures.runner(args)
+  })
+  const notices: Notice[] = []
+  const deliver = async (notice: Notice): Promise<void> => { notices.push(notice) }
+  const h = await setup({ runner, deliver, config: { viewer, notifications: { enabled: true, kinds: ['reviewRequested'] } } })
+  const save = async (patch: Partial<Config>): Promise<{ status: number }> => {
+    const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
+    return send(`${h.base}/api/config`, 'PUT', { ...stored, ...patch })
+  }
+  // delivery is a turn behind the comparison
+  const delivered = async (): Promise<Notice[]> => {
+    await delay(0)
+    return notices
+  }
+  return { h, state, save, delivered }
+}
+
+test('with no change of identity, the same gated cycle fires the transition, so the tests below show the identity is what silences it', async () => {
+  const { h, state, delivered } = await identityRig()
+  try {
+    await filled(h)
+    const fetching = gate()
+    state.page2 = fetching
+    state.requested = 113
+    assert.equal((await send(`${h.base}/api/refresh`, 'POST')).status, 200)
+    await fetching.reached
+    fetching.release()
+    await h.server.poller.idle()
+    assert.deepEqual((await delivered()).map((notice) => notice.subtitle), ['Review requested of you'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a save that moves the viewer away and back across the local login lookup leaves a cycle in flight comparing nothing', async () => {
+  const { h, state, save, delivered } = await identityRig()
+  try {
+    await filled(h)
+    const fetching = gate()
+    state.page2 = fetching
+    state.requested = 113
+    assert.equal((await send(`${h.base}/api/refresh`, 'POST')).status, 200)
+    await fetching.reached
+    // the stored viewer empties, so the effective one is unresolved until the lookup finds the same login
+    const lookup = gate()
+    state.logins.push(lookup)
+    const saving = save({ viewer: '' })
+    await lookup.reached
+    lookup.release()
+    assert.equal((await saving).status, 200)
+    assert.equal((await getJson<View>(`${h.base}/api/view`)).body.viewer.login, scenario.viewer)
+    fetching.release()
+    await h.server.poller.idle()
+    assert.equal(h.server.cache.latestCycle(scenario.repo)?.state, 'finished')
+    assert.deepEqual(await delivered(), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a cycle that ends inside the local login lookup of a save that moves the viewer away and back leaves nothing for the next cycle to fire', async () => {
+  const { h, state, save, delivered } = await identityRig()
+  try {
+    await filled(h)
+    const fetching = gate()
+    state.page2 = fetching
+    state.requested = 113
+    assert.equal((await send(`${h.base}/api/refresh`, 'POST')).status, 200)
+    await fetching.reached
+    const lookup = gate()
+    state.logins.push(lookup)
+    const saving = save({ viewer: '' })
+    await lookup.reached
+    fetching.release()
+    await h.server.poller.idle()
+    lookup.release()
+    assert.equal((await saving).status, 200)
+    await h.server.poller.idle()
+    state.page2 = undefined
+    await filled(h)
+    assert.deepEqual(await delivered(), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a cycle that ends while the second of two overlapping saves is still in its local login lookup compares nothing, once the first has moved the identity away and back', async () => {
+  const { h, state, save, delivered } = await identityRig()
+  try {
+    await filled(h)
+    const fetching = gate()
+    state.page2 = fetching
+    state.requested = 113
+    assert.equal((await send(`${h.base}/api/refresh`, 'POST')).status, 200)
+    await fetching.reached
+    const first = gate()
+    const second = gate()
+    state.logins.push(first, second)
+    const saveAway = save({ repo: 'octo-example/elsewhere', viewer: '' })
+    await first.reached
+    const saveBack = save({ repo: scenario.repo, viewer: '' })
+    await second.reached
+    // the first lookup answers: the repository and the viewer are what they were when the cycle started
+    first.release()
+    assert.equal((await saveAway).status, 200)
+    fetching.release()
+    await h.server.poller.idle()
+    assert.equal(h.server.cache.latestCycle(scenario.repo)?.state, 'finished')
+    assert.deepEqual(await delivered(), [])
+    second.release()
+    assert.equal((await saveBack).status, 200)
+    await h.server.poller.idle()
+    assert.deepEqual(await delivered(), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the cycle that resolves an unresolved viewer is not stale by its own resolution: its comparison is the baseline and the next change fires', async () => {
+  const { h, state, delivered } = await identityRig({ viewer: '', localLogin: null })
+  try {
+    assert.equal((await getJson<View>(`${h.base}/api/view`)).body.viewer.login, '')
+    await filled(h)
+    assert.deepEqual(await delivered(), [])
+    state.requested = 113
+    await filled(h)
+    assert.deepEqual((await delivered()).map((notice) => notice.subtitle), ['Review requested of you'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a one-PR refresh started while the viewer was unresolved is stale once the viewer resolves, so its row fires at the next cycle and not at its own end', async () => {
+  const { h, state, delivered } = await identityRig({ viewer: '', localLogin: null })
+  try {
+    const held = gate()
+    state.single = held
+    const refreshing = h.server.poller.refreshPr(113)
+    await held.reached
+    await filled(h)
+    state.requested = 113
+    held.release()
+    await refreshing
+    assert.deepEqual(await delivered(), [])
+    state.single = undefined
+    await filled(h)
+    assert.deepEqual((await delivered()).map((notice) => notice.subtitle), ['Review requested of you'])
   } finally {
     await h.cleanup()
   }

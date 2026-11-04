@@ -138,6 +138,22 @@ export const gatedRunner = (base: FakeRunner): GatedRunner => {
   }
 }
 
+// holds a fake's answer until the test releases it; `reached` resolves only once the held work has arrived at the hold, so a test knows it is in flight
+export type Gate = { reached: Promise<void>, hold: () => Promise<void>, release: () => void }
+
+export const gate = (): Gate => {
+  const arrived = Promise.withResolvers<void>()
+  const open = Promise.withResolvers<void>()
+  return {
+    reached: arrived.promise,
+    hold: () => {
+      arrived.resolve()
+      return open.promise
+    },
+    release: () => open.resolve(),
+  }
+}
+
 // the gh api calls a runner has answered: every one of them reached GitHub
 export const githubCalls = (fake: FakeRunner): Call[] => fake.calls.filter((call) => call.args[0] === 'api')
 

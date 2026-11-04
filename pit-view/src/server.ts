@@ -303,7 +303,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   const publicDir = resolve(options.publicDir)
   const gh = createGh(runner)
 
-  // the file as stored, and the gh login standing in for an empty viewer
+  // the file as stored, and the gh login standing in for an empty viewer; after startup every write of either is followed, in the same synchronous step, by poller.identityChanged or poller.configChanged
   let stored = await readConfig(options.configPath)
   let ghLogin = stored.viewer === '' ? await localLogin(runner) : ''
   const effective = (): Config => ({ ...stored, viewer: stored.viewer === '' ? ghLogin : stored.viewer })
@@ -356,7 +356,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     pageSize: options.pageSize,
     // only when gh's config named no account: asked at the first cycle, never at startup
     beforeCycle: async () => {
-      if (effective().viewer === '') ghLogin = await fetchViewerLogin(gh)
+      if (effective().viewer !== '') return
+      ghLogin = await fetchViewerLogin(gh)
+      poller.identityChanged()
     },
   })
 
@@ -717,6 +719,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     }
     const before = effective()
     stored = saved
+    // the lookup below can leave the viewer unresolved for as long as it takes, and can end on the login the viewer had before, so the change is noted before it
+    poller.identityChanged()
     if (stored.viewer === '' && ghLogin === '') ghLogin = await localLogin(runner)
     await poller.configChanged(before)
     // a raised cap on concurrent reviews starts what waits, and a review queued for another repository or viewer fails now rather than later
