@@ -170,6 +170,7 @@ type Snapshot = { cached: CachedView, view: DerivedView, rows: Map<number, OpenR
 // configs whose change needs GitHub again, since they change which rows exist or what they say
 export const cycleKeys = ['repo', 'viewer', 'people', 'tickets', 'bots'] as const
 const reportKeys = ['repo', 'viewer', 'reportsDir'] as const
+const capKeys = ['maxConcurrentReviews', 'selfReviewOverCap'] as const
 
 export const createPoller = (options: PollerOptions): Poller => {
   const { cache, gh, clock, timers, home, timeZone, emit } = options
@@ -248,9 +249,8 @@ export const createPoller = (options: PollerOptions): Poller => {
   const prJobs = new Map<string, Promise<PrRefreshResult>>()
   const prKey = (repo: string, number: number): string => `${repo}#${number}`
 
-  // what the open pages last received, as the buttons of every row were derived from it; only a patch sent to them moves it, never a page load; a change is sent as the rows it changes
+  // the launcher's answer to whether a new review would wait; nothing remembers what any page received, since one remembered value cannot describe pages that loaded at different moments
   const noQueueing: Queueing = { review: false, selfReview: false }
-  let sentQueueing: Queueing = noQueueing
   const queueingNow = (): Queueing => options.queueing?.() ?? noQueueing
 
   const snapshot = (settings: Config, reportMap: ReadonlyMap<number, ReportInfo>, queueing: Queueing = queueingNow()): Snapshot => {
@@ -567,17 +567,19 @@ export const createPoller = (options: PollerOptions): Poller => {
   }
 
   const configChanged = async (before: Config): Promise<void> => {
+    const previousReports = reports
+    if (reportKeys.some((key) => !same(before[key], config()[key]))) await rescan(config())
+    // read after the rescan, so the new config is the one in effect now and not one taken before the await
     const after = config()
     const changed = (key: keyof Config): boolean => !same(before[key], after[key])
-    const previousReports = reports
-    if (reportKeys.some(changed)) await rescan(after)
     // both sides come from the cache as it is now, so the difference is the config's alone
     const queueing = queueingNow()
-    const previous = snapshot(before, previousReports, sentQueueing)
+    const previous = snapshot(before, previousReports, queueing)
     const next = snapshot(after, reports, queueing)
-    sentQueueing = queueing
+    // a cap or overage setting that moved can change the review buttons of every row, which the launcher cannot announce since it reads the config as it is
+    const everyRow = capKeys.some(changed)
     const body: PatchBody = {
-      rows: [...next.rows.values()].filter((row) => !same(row, previous.rows.get(row.number))),
+      rows: [...next.rows.values()].filter((row) => everyRow || !same(row, previous.rows.get(row.number))),
       removed: [...previous.rows.keys()].filter((number) => !next.rows.has(number)),
       closed: same(previous.view.closed, next.view.closed) ? null : next.view.closed,
       tiles: next.view.tiles,
@@ -605,28 +607,19 @@ export const createPoller = (options: PollerOptions): Poller => {
     watched.set(run.id, { repo: run.repo, number: run.number })
   }
 
+  // something that can change the queue answer happened: every open row of the repository on show goes with the answer now, whether or not it differs from any earlier one
   const queueingChanged = (): void => {
     if (stopped) return
-    const queueing = queueingNow()
-    if (same(queueing, sentQueueing)) return
-    sentQueueing = queueing
-    patch({ rows: [...snapshot(config(), reports, queueing).rows.values()] })
+    patch({ rows: [...snapshot(config(), reports, queueingNow()).rows.values()] })
   }
 
   const runChanged = (repo: string, number: number): void => {
     if (stopped) return
     const settings = config()
-    // a run in any repository counts against the one cap, so the answer is read whichever repository the run is in
-    const queueing = queueingNow()
-    const snap = settings.repo === repo ? snapshot(settings, reports, queueing) : undefined
-    const row = snap?.rows.get(number)
-    if (!same(queueing, sentQueueing)) {
-      // the review buttons of every row changed: they all go, in the same patch
-      sentQueueing = queueing
-      patch({ rows: [...(snap ?? snapshot(settings, reports, queueing)).rows.values()] })
-    } else if (row !== undefined) {
-      patch({ rows: [row] })
-    }
+    // a run in any repository counts against the one cap, so every run change sends every open row of the repository on show, whichever repository the run is in
+    const snap = snapshot(settings, reports, queueingNow())
+    patch({ rows: [...snap.rows.values()] })
+    const row = settings.repo === repo ? snap.rows.get(number) : undefined
     // a watched run is looked up by id, so it counts even when its PR has left the open rows; once settled it is forgotten, which is what makes it fire at most once
     for (const [id, found] of watched) {
       if (found.repo !== repo || found.number !== number) continue
@@ -651,7 +644,6 @@ export const createPoller = (options: PollerOptions): Poller => {
     if (scanned === null) await rescan(config())
     // read and derive in one synchronous step, so version matches what the view holds
     const settings = config()
-    // a page loaded here is not an open page: it leaves what the open pages last received alone, or a patch they still need could be judged already sent
     const snap = snapshot(settings, reports)
     return {
       version,

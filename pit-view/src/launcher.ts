@@ -1517,13 +1517,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     answered()
   }
 
-  // the answer pages last heard; every place the running count, the queue, or the launches in progress can move it calls answered, which says so only when the answer differs
-  let announcedAnswer: Queueing = { review: false, selfReview: false }
+  // something that can change the queue answer happened: the running count, the queue, or the launches in progress moved; it remembers nothing of what any page received, and whoever listens reads the answer itself
   const answered = (): void => {
     if (closed || options.onQueueing === undefined) return
-    const now = queueing()
-    if (now.review === announcedAnswer.review && now.selfReview === announcedAnswer.selfReview) return
-    announcedAnswer = now
     try {
       options.onQueueing()
     } catch (error) {
