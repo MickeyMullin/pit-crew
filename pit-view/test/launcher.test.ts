@@ -556,7 +556,7 @@ const harness = async ({ config = {}, launch = fakeLaunch(), gh = fixtureRunner(
   const watched: number[] = []
   const settings = { current: { ...baseConfig(), ...config } }
   const stateDir = join(home, '.local', 'state', 'pit-view')
-  const make = (onChange: (run: Run) => void = (run) => changes.push(run)) => createLauncher({
+  const make = (onChange: (run: Run) => void = (run) => changes.push(run), onQueueing?: () => void) => createLauncher({
     cache,
     gh: createGh(gh.runner),
     git: launch.deps.git,
@@ -573,6 +573,7 @@ const harness = async ({ config = {}, launch = fakeLaunch(), gh = fixtureRunner(
     newSessionId: launch.deps.newSessionId,
     onWatch: (run) => watched.push(run.id),
     onChange,
+    ...(onQueueing === undefined ? {} : { onQueueing }),
   })
   const launcher = make()
   const report = (number: number): Promise<void> => writeFile(join(home, 'agents', 'output', `PR-${number}.md`), 'Reviewed commit: `x` @ `f00dfac`\n')
@@ -3526,6 +3527,104 @@ test('every open row\'s buttons follow the cap as reviews start and finish and a
   } finally {
     launcher.close()
     poller.stop()
+    await h.cleanup()
+  }
+})
+
+test('the buttons settle once a review has finished launching, though the review count is below the cap', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 3 } })
+  const patches: Patch[] = []
+  let launcher: ReturnType<typeof h.make> | null = null
+  const poller = createPoller({
+    cache: h.cache,
+    gh: createGh(h.gh.runner),
+    clock: h.time.clock,
+    timers: h.time.timers,
+    config: () => h.settings.current,
+    home: '/nonexistent/pit-view-test-home',
+    timeZone: scenario.timeZone,
+    emit: (patch) => patches.push(patch),
+    pageSize: scenario.pageSize,
+    queueing: () => launcher!.queueing(),
+  })
+  launcher = h.make((run) => poller.runChanged(run.repo, run.number), () => poller.queueingChanged())
+  const latest = (number: number): string | undefined => {
+    for (const patch of [...patches].reverse()) {
+      const row = patch.rows.find((entry: OpenRow) => entry.number === number)
+      if (row !== undefined) return row.agent?.action.label
+    }
+    return undefined
+  }
+  try {
+    poller.refresh('manual')
+    await poller.idle()
+    await launcher.start(request(106))
+    await launcher.start(request(118, { label: 'Review' }))
+    // two of three are running and none is being launched: the answer is room, and the pages were told so
+    assert.deepEqual(launcher.queueing(), roomFor)
+    assert.equal(latest(113), 'Review')
+  } finally {
+    launcher.close()
+    poller.stop()
+    await h.cleanup()
+  }
+})
+
+test('a run in another repository that fills or frees the cap patches the rows of the repository on show', async () => {
+  const h = await harness()
+  const patches: Patch[] = []
+  let answer = roomFor
+  const poller = createPoller({
+    cache: h.cache,
+    gh: createGh(h.gh.runner),
+    clock: h.time.clock,
+    timers: h.time.timers,
+    config: () => h.settings.current,
+    home: '/nonexistent/pit-view-test-home',
+    timeZone: scenario.timeZone,
+    emit: (patch) => patches.push(patch),
+    pageSize: scenario.pageSize,
+    queueing: () => answer,
+  })
+  const latest = (number: number): string | undefined => {
+    for (const patch of [...patches].reverse()) {
+      const row = patch.rows.find((entry: OpenRow) => entry.number === number)
+      if (row !== undefined) return row.agent?.action.label
+    }
+    return undefined
+  }
+  try {
+    poller.refresh('manual')
+    await poller.idle()
+    await poller.view()
+    answer = noRoom
+    poller.runChanged('octo-example/other', 5)
+    assert.equal(latest(113), 'Queue review')
+    answer = roomFor
+    poller.runChanged('octo-example/other', 5)
+    assert.equal(latest(113), 'Review')
+  } finally {
+    poller.stop()
+    await h.cleanup()
+  }
+})
+
+test('the launcher announces each change of its answer once, whatever moved it', async () => {
+  const announced: unknown[] = []
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  let launcher: ReturnType<typeof h.make> | null = null
+  launcher = h.make(undefined, () => announced.push(launcher!.queueing()))
+  try {
+    const first = await launcher.start(request(106))
+    assert.deepEqual(announced.at(-1), noRoom)
+    const before = announced.length
+    h.launch.children[0]!.exit(1)
+    await launcher.settled(first.id)
+    assert.deepEqual(announced.at(-1), roomFor)
+    assert.ok(announced.length > before)
+    for (let at = 1; at < announced.length; at++) assert.notDeepEqual(announced[at], announced[at - 1])
+  } finally {
+    launcher.close()
     await h.cleanup()
   }
 })

@@ -385,6 +385,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       poller.runChanged(run.repo, run.number)
       updates.change(run)
     },
+    onQueueing: () => poller.queueingChanged(),
     log,
     pollMs: options.launch.pollMs,
     watchedPollMs: options.launch.watchedPollMs,

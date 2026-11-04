@@ -1353,6 +1353,8 @@ export type LauncherOptions<T extends Session = Run> = {
   onWatch: (run: T) => void
   // a run's row changed: started, stepped, or settled
   onChange: (run: T) => void
+  // the launcher's answer to whether a new review would wait changed, for any run in any repository: sent once per change of the answer, after the change that moved it
+  onQueueing?: () => void
   // rows the cache pruned, called as soon as they are gone from the table and before their folders are removed, so what holds the rows in memory can drop them too
   onPruned?: (gone: T[]) => void
   log?: (line: string) => void
@@ -1511,6 +1513,21 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       onChange(run)
     } catch (error) {
       log(`${noun} ${run.id}: cannot announce its change: ${messageOf(error)}`)
+    }
+    answered()
+  }
+
+  // the answer pages last heard; every place the running count, the queue, or the launches in progress can move it calls answered, which says so only when the answer differs
+  let announcedAnswer: Queueing = { review: false, selfReview: false }
+  const answered = (): void => {
+    if (closed || options.onQueueing === undefined) return
+    const now = queueing()
+    if (now.review === announcedAnswer.review && now.selfReview === announcedAnswer.selfReview) return
+    announcedAnswer = now
+    try {
+      options.onQueueing()
+    } catch (error) {
+      log(`${noun}: cannot announce the queue answer: ${messageOf(error)}`)
     }
   }
 
@@ -1731,6 +1748,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (item.attempt !== null) admitting.delete(item.attempt)
     item.attempt = null
     item.checked = null
+    answered()
   }
 
   // takes a review out of the queue, and releases the slot an attempt to start it held
@@ -1738,6 +1756,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     const at = queue.indexOf(item)
     if (at >= 0) queue.splice(at, 1)
     giveBack(item)
+    answered()
   }
 
   // a review that does not fit holds the line, however long that lasts, so none behind it keeps a slot or waits on checks passed long ago
@@ -1861,6 +1880,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     } finally {
       opening -= 1
       admitting.delete(admitted.attempt)
+      answered()
       // the queue is read again however the start went: the next in line may start now, one that ended at once hands its slot on, and a run that settled before its start returned was still counted here when it settled
       admit()
     }
@@ -2191,6 +2211,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       } finally {
         opening -= 1
         admitting.delete(attempt)
+        answered()
         // as for a queued start: the slot is never left counted for a run that is no longer in flight
         admit()
       }

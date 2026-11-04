@@ -106,6 +106,8 @@ export type Poller = {
   runWatched: (run: { id: number, repo: string, number: number }) => void
   // a run of this PR started, stepped or settled: one patch upserting its row
   runChanged: (repo: string, number: number) => void
+  // the launcher's answer to whether a new review would wait changed: every open row's buttons are re-derived and sent if it differs from what pages last received
+  queueingChanged: () => void
   // a sweep of this repo started, stepped, or settled: one patch carrying the sweeps whole
   sweepsChanged: (repo: string) => void
   // resolves once no cycle is running, including any follow-up cycle
@@ -603,16 +605,25 @@ export const createPoller = (options: PollerOptions): Poller => {
     watched.set(run.id, { repo: run.repo, number: run.number })
   }
 
+  const queueingChanged = (): void => {
+    if (stopped) return
+    const queueing = queueingNow()
+    if (same(queueing, sentQueueing)) return
+    sentQueueing = queueing
+    patch({ rows: [...snapshot(config(), reports, queueing).rows.values()] })
+  }
+
   const runChanged = (repo: string, number: number): void => {
     if (stopped) return
     const settings = config()
+    // a run in any repository counts against the one cap, so the answer is read whichever repository the run is in
     const queueing = queueingNow()
     const snap = settings.repo === repo ? snapshot(settings, reports, queueing) : undefined
     const row = snap?.rows.get(number)
-    // a review starting or ending can fill or free the cap, which changes the review buttons of every row: they all go, in the same patch
-    if (snap !== undefined && !same(queueing, sentQueueing)) {
+    if (!same(queueing, sentQueueing)) {
+      // the review buttons of every row changed: they all go, in the same patch
       sentQueueing = queueing
-      patch({ rows: [...snap.rows.values()] })
+      patch({ rows: [...(snap ?? snapshot(settings, reports, queueing)).rows.values()] })
     } else if (row !== undefined) {
       patch({ rows: [row] })
     }
@@ -678,5 +689,5 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
-  return { view, refresh, refreshPr, refreshPrAfterWrite, setActive, configChanged, runWatched, runChanged, sweepsChanged, idle, stop, version: () => version }
+  return { view, refresh, refreshPr, refreshPrAfterWrite, setActive, configChanged, runWatched, runChanged, queueingChanged, sweepsChanged, idle, stop, version: () => version }
 }
