@@ -109,7 +109,8 @@ test('a prior report always sets the window, from the tip its Reviewed commit li
   const unknown = '- **When that time cannot be established'
   const none = '- **No prior report at all'
   const order = [priorCheck, ordinary, unknown, none].map((start) => prompt.indexOf(start))
-  assert.ok(order[0] > 0 && order[0] < order[1] && order[1] < order[2] && order[2] < order[3], 'the rules read in the order they apply')
+  assert.ok(!order.includes(-1), 'all four rules are there')
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), 'the rules read in the order they apply')
   // an ordinary review's report opens the window at the commit it reviewed, and takes every comment since
   const fromTip = lineFrom(prompt, ordinary)
   assert.match(fromTip, /`Reviewed commit:` line/)
