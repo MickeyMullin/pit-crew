@@ -100,6 +100,8 @@ export type Poller = {
   refreshPrAfterWrite: (repo: string, number: number) => Promise<PrRefreshResult>
   // the clients changed; returns the cycle started or joined under the active rule, or null
   setActive: (activeCount: number, becameActive: boolean) => number | null
+  // whatever writes the effective repo or viewer calls this in the same synchronous step: if either differs from what the poller last saw, the notification baseline's generation moves on at once; calling it with no change does nothing
+  identityChanged: () => void
   // a saved config replaced `before`; emits the recomputed rows and starts a config cycle when needed
   configChanged: (before: Config) => Promise<void>
   // the launcher created this run in this process, or adopted it as still running at startup; only such runs notify, and each at most once when it settles
@@ -200,7 +202,11 @@ export const createPoller = (options: PollerOptions): Poller => {
   const notify = options.notify ?? (() => {})
   const sweeps = options.sweeps ?? createSweepMemory(cache)
   // notifications (section 9): the rows as last compared, and the runs this process is responsible for watching, by run id, until each settles
+  // the baseline carries the identity it was built for: its repo and viewer, and the generation, which identityChanged bumps at the moment either changes, since work begun before a change away and back cannot be told apart from work of the identity in effect by repo and viewer alone
   let baseline: RowBaseline | null = null
+  let generation = 0
+  let baselineGeneration = 0
+  let identity = { repo: config().repo, viewer: config().viewer }
   const watched = new Map<number, { repo: string, number: number }>()
 
   // self-review reports for the viewer's PRs, and the head branch each was looked up for
@@ -284,15 +290,30 @@ export const createPoller = (options: PollerOptions): Poller => {
   const ensureBaseline = (settings: Config): void => {
     if (settings.viewer === '') {
       baseline = null
-    } else if (baseline === null || baseline.repo !== settings.repo || baseline.viewer !== settings.viewer) {
+    } else if (baselineFor(settings) === null) {
       const snap = snapshot(settings, reports)
       baseline = baselineOf(settings.repo, settings.viewer, [...snap.rows.values()], snap.cached.lastSuccessAt !== null)
+      baselineGeneration = generation
     }
   }
 
-  // the baseline, if it is for the repo and viewer in effect
+  const identityChanged = (): void => {
+    const { repo, viewer } = config()
+    if (repo === identity.repo && viewer === identity.viewer) return
+    identity = { repo, viewer }
+    generation += 1
+  }
+
+  // the baseline, if it is for the repo, viewer, and generation in effect
   const baselineFor = (settings: Config): RowBaseline | null =>
-    baseline !== null && baseline.repo === settings.repo && baseline.viewer === settings.viewer ? baseline : null
+    baseline !== null && baseline.repo === settings.repo && baseline.viewer === settings.viewer && baselineGeneration === generation ? baseline : null
+
+  // a cycle or a one-PR refresh that began under an older generation compares nothing; when it succeeds, the baseline for the settings in effect is an empty one unless a newer path has already built one, so the next comparison records the rows and fires nothing
+  const installEmptyBaseline = (settings: Config): void => {
+    if (settings.viewer === '' || baselineFor(settings) !== null) return
+    baseline = baselineOf(settings.repo, settings.viewer, [], false)
+    baselineGeneration = generation
+  }
 
   // the next interval cycle: refreshSeconds after the last start of any trigger, only while a client is active
   const nextDue = (): number | null => {
@@ -381,6 +402,8 @@ export const createPoller = (options: PollerOptions): Poller => {
     let failureKind: CycleErrorKind | null = null
     let pagesDone = 0
     const sent = new Map<number, string>()
+    let startedGeneration = generation
+    const startedUnresolved = config().viewer === ''
     if (!stopped && config().repo === repo) ensureBaseline(config())
     const live = (): boolean => !stopped && failure === null
     // a cycle for a repo the config has since left still fills the cache but patches nothing
@@ -406,9 +429,12 @@ export const createPoller = (options: PollerOptions): Poller => {
     } catch (error) {
       fail('open-page', 1, error)
     }
-    // a viewer that was unresolved at the start is known now: its first comparison is a baseline
-    if (live() && !stopped && config().repo === repo && baselineFor(config()) === null && config().viewer !== '') {
+    // a cycle that began with the viewer unresolved has no baseline and has fetched nothing yet, and it may be the one whose beforeCycle just resolved the viewer, so its generation starts here
+    if (startedUnresolved) startedGeneration = generation
+    // a viewer that was unresolved at the start is known now: its first comparison is a baseline. A cycle the generation has left installs nothing here, so that it installs nothing if it goes on to fail
+    if (live() && startedGeneration === generation && config().repo === repo && baselineFor(config()) === null && config().viewer !== '') {
       baseline = baselineOf(repo, config().viewer, [], false)
+      baselineGeneration = generation
     }
     if (live()) await rescan(config())
 
@@ -441,9 +467,13 @@ export const createPoller = (options: PollerOptions): Poller => {
     const finished = cache.finishCycle(cycle.id, failure, failureKind)
     log(`cycle ${cycle.id} (${cycle.trigger}) ${failure === null ? `finished: ${finished.cycle.prsUpdated} PRs, ${finished.removed.length} removed` : `failed: ${failure}`}`)
     if (shown()) applyFinish(finished, sent)
-    // only a finished cycle compares; after a failed one the next success compares against the same baseline, so a transition is neither lost nor fired from stale rows
+    // only a finished cycle compares; after a failed one the next success compares against the same baseline, so a transition is neither lost nor fired from stale rows, and a failed one the generation has left installs nothing, so the next cycle or refresh rebuilds from the cache
     if (failure === null && shown()) {
       const current = config()
+      if (startedGeneration !== generation) {
+        installEmptyBaseline(current)
+        return
+      }
       const known = baselineFor(current)
       if (known !== null) notify(compareRows(known, snapshot(current, reports).rows))
     }
@@ -492,10 +522,11 @@ export const createPoller = (options: PollerOptions): Poller => {
     return { started: cycle !== null, cycle: cycle?.id ?? null }
   }
 
-  // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that row and any other its change moved (stacks), or its removal once closed; a failure stays on the row and never touches the cycles, so the board does not read offline repo is the repository the caller meant (a write's), not whatever the configuration says now: when Settings has moved on, the cache of that repository is still refreshed, but nothing of it reaches the board, the baseline, or a notification
+  // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that row and any other its change moved (stacks), or its removal once closed; a failure stays on the row and never touches the cycles, so the board does not read offline. repo is the repository the caller meant (a write's), not whatever the configuration says now: while it is not the one in effect, the cache of that repository is still refreshed, but nothing of it reaches the board, the baseline, or a notification
   const runPrRefresh = async (number: number, repo: string): Promise<PrRefreshResult> => {
     const settings = config()
     const key = prKey(repo, number)
+    const startedGeneration = generation
     const shown = (): boolean => !stopped && config().repo === repo
     const before = shown() ? snapshot(settings, reports) : null
     if (shown()) ensureBaseline(settings)
@@ -521,13 +552,20 @@ export const createPoller = (options: PollerOptions): Poller => {
       rowRefreshes.set(key, failure)
       log(`PR #${number}: refresh failed: ${failure.error}`)
     }
-    if (before !== null && shown()) {
+    // what happens now is decided by what is on show now: a refresh that began off the board has no earlier rows to tell a change by, so it sends them all, and its own is the only one it can have removed
+    if (shown()) {
       const next = snapshot(config(), reports)
-      const rows = [...next.rows.values()].filter((row) => row.number === number || !same(row, before.rows.get(row.number)))
-      const removed = [...before.rows.keys()].filter((known) => !next.rows.has(known))
+      const rows = [...next.rows.values()].filter((row) => row.number === number || !same(row, before?.rows.get(row.number)))
+      const removed = before === null ? [number].filter((known) => !next.rows.has(known)) : [...before.rows.keys()].filter((known) => !next.rows.has(known))
       patch({ rows, removed, tiles: next.view.tiles, counts: next.view.counts })
-      const known = baselineFor(config())
-      if (failure === null && known !== null) notify(compareRows(known, next.rows, number))
+      if (failure === null) {
+        if (startedGeneration !== generation) {
+          installEmptyBaseline(config())
+        } else {
+          const known = baselineFor(config())
+          if (known !== null) notify(compareRows(known, next.rows, number))
+        }
+      }
     }
     return { number, outcome, joined: false, error: failure?.error ?? null, errorKind: failure?.errorKind ?? null }
   }
@@ -570,6 +608,8 @@ export const createPoller = (options: PollerOptions): Poller => {
   }
 
   const configChanged = async (before: Config): Promise<void> => {
+    // synchronously, before any await: a change made in the caller's own synchronous step, such as the login a save just looked up, is noted here
+    identityChanged()
     const previousReports = reports
     if (reportKeys.some((key) => !same(before[key], config()[key]))) await rescan(config())
     // read after the rescan, so the new config is the one in effect now and not one taken before the await
@@ -680,5 +720,5 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
-  return { view, refresh, refreshPr, refreshPrAfterWrite, setActive, configChanged, runWatched, runChanged, queueingChanged, sweepsChanged, idle, stop, version: () => version }
+  return { view, refresh, refreshPr, refreshPrAfterWrite, setActive, identityChanged, configChanged, runWatched, runChanged, queueingChanged, sweepsChanged, idle, stop, version: () => version }
 }
