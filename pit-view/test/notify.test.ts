@@ -28,15 +28,15 @@ const harness = async (config: Partial<Config> = {}) => {
   const time = fakeTime()
   const cache = openCache({ path: ':memory:', clock: time.clock })
   const events: NotifyEvent[] = []
-  // `gate` holds page 2 of the open list, and `singleGate` holds every one-PR fetch, until the test releases them; `singleFail` makes a one-PR fetch fail, and `singleClosed` makes one find the PR merged
-  const state = { edits: new Map<number, Edit>(), fail: false, single: new Map<number, Edit>(), singleFail: false, singleClosed: false, gate: undefined as Gate | undefined, singleGate: undefined as Gate | undefined }
+  // `gate` holds page 2 of the open list, and `singleGate` holds every one-PR fetch, until the test releases them; `singleFail` makes a one-PR fetch fail, and `singleClosed` makes one find the PR merged; `omit` leaves PRs out of the open list
+  const state = { edits: new Map<number, Edit>(), omit: new Set<number>(), fail: false, single: new Map<number, Edit>(), singleFail: false, singleClosed: false, gate: undefined as Gate | undefined, singleGate: undefined as Gate | undefined }
   const base = new Map<number, RawOpenPr>()
   for (const raw of [await openPage1(), await openPage2()]) {
     for (const pr of raw.data.repository!.pullRequests.nodes) base.set(pr.number, pr)
   }
   const edited = (raw: RawOpenResponse, edits: Map<number, Edit>): RawOpenResponse => {
     const repository = raw.data.repository!
-    const nodes = repository.pullRequests.nodes.map((pr) => edits.get(pr.number)?.(pr, base) ?? pr)
+    const nodes = repository.pullRequests.nodes.filter((pr) => !state.omit.has(pr.number)).map((pr) => edits.get(pr.number)?.(pr, base) ?? pr)
     return { data: { ...raw.data, repository: { ...repository, pullRequests: { ...repository.pullRequests, nodes } } } }
   }
   const runner = fakeRunner(async (args) => {
@@ -363,6 +363,69 @@ test('a one-PR refresh that started before an away-and-back notifies nothing and
   assert.deepEqual(await cycle(), [])
   state.edits.set(120, asFailing)
   assert.deepEqual(only(await cycle()), [['ciFailing', 120]])
+  poller.stop()
+})
+
+test('a one-PR refresh that began before a completed cycle omitted the uncached PR leaves no row and no stale baseline, so the PR coming back fires nothing', async () => {
+  const { poller, cycle, cache, state } = await harness()
+  state.omit.add(113)
+  await cycle()
+  const held = gate()
+  state.singleGate = held
+  const refreshing = poller.refreshPr(113)
+  await held.reached
+  await cycle()
+  held.release()
+  // the answer is what the cache holds, not the older read's open
+  assert.equal((await refreshing).outcome, 'closed')
+  assert.equal(cache.readView(scenario.repo).open.some((row) => row.number === 113), false)
+  state.singleGate = undefined
+  // had the stale row entered the baseline, this would read as a transition; a row with no previous state records and fires nothing
+  state.omit.clear()
+  state.edits.set(113, asRequested)
+  assert.deepEqual(await cycle(), [])
+  poller.stop()
+})
+
+test('a one-PR refresh that began before a cycle and landed during it leaves the board and the baseline when the cycle completes without the PR', async () => {
+  const { poller, cycle, cache, state, patches } = await harness()
+  state.omit.add(113)
+  await cycle()
+  const heldRefresh = gate()
+  state.singleGate = heldRefresh
+  const refreshing = poller.refreshPr(113)
+  await heldRefresh.reached
+  const heldCycle = gate()
+  state.gate = heldCycle
+  poller.refresh('manual')
+  await heldCycle.reached
+  heldRefresh.release()
+  assert.equal((await refreshing).outcome, 'open')
+  assert.equal(cache.readView(scenario.repo).open.some((row) => row.number === 113), true)
+  heldCycle.release()
+  await poller.idle()
+  assert.equal(cache.readView(scenario.repo).open.some((row) => row.number === 113), false)
+  assert.ok(patches.some((patch) => patch.removed.includes(113)))
+  state.gate = undefined
+  state.singleGate = undefined
+  state.omit.clear()
+  state.edits.set(113, asRequested)
+  assert.deepEqual(await cycle(), [])
+  poller.stop()
+})
+
+test('a one-PR close that lost to a newer cycle answers with what the cache holds, and the row stays', async () => {
+  const { poller, cycle, cache, state } = await harness()
+  await cycle()
+  state.singleClosed = true
+  const held = gate()
+  state.singleGate = held
+  const refreshing = poller.refreshPr(113)
+  await held.reached
+  await cycle()
+  held.release()
+  assert.equal((await refreshing).outcome, 'open')
+  assert.equal(cache.readView(scenario.repo).open.some((row) => row.number === 113), true)
   poller.stop()
 })
 

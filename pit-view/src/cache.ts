@@ -146,14 +146,15 @@ export type Cache = {
   writeOpenPage: (cycleId: number, page: OpenPage) => CachedPr[]
   // stores the closed search, which covers both Closed ranges
   writeClosed: (cycleId: number, result: ClosedResult) => CachedClosed
-  // stores one PR fetched on its own, outside any cycle, stamped with the repo's latest cycle so
-  // it reads as current; returns the row as written
-  writePr: (repo: string, pr: RawOpenPr, defaultBranch: string | null) => CachedPr
-  // marks a PR found closed or merged on its own as gone from the open list; false when it was not open
-  closePr: (repo: string, number: number) => boolean
+  // takes the ordering number of a one-PR refresh; call it before the GitHub read begins and hand it to writePr or closePr
+  beginRefresh: () => number
+  // stores one PR fetched on its own, outside any cycle, stamped with the repo's latest cycle so it reads as current; returns the row as written. A stale read (section 3 of DESIGN.md, the prs row) writes nothing: it returns the row already there, or null when there is none. ticket is beginRefresh's number; without one the write takes its number now
+  writePr: (repo: string, pr: RawOpenPr, defaultBranch: string | null, ticket?: number) => CachedPr | null
+  // marks a PR found closed or merged on its own as gone from the open list; false when it was not open or the read is stale
+  closePr: (repo: string, number: number, ticket?: number) => boolean
   // stores a failed response, so the section can report the error it hit
   recordError: (cycleId: number, kind: SnapshotKind, page: number | null, error: string) => void
-  // a null error marks the cycle successful and removes PRs absent from its full open list
+  // a null error marks the cycle successful; one that reached the last page of the open list also removes the PRs absent from it and sets the repo's floor
   finishCycle: (cycleId: number, error?: string | null, errorKind?: CycleErrorKind | null) => FinishResult
   readView: (repo: string) => CachedView
   cycle: (id: number) => Cycle | null
@@ -491,17 +492,27 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     const running = runningCycle()
     if (running !== null) throw new CacheError(`cycle ${running.id} is still running`)
     const id = Number(db.prepare('INSERT INTO cycles (repo, trigger, started_at) VALUES ($repo, $trigger, $at)').run({ repo, trigger, at: now() }).lastInsertRowid)
-    // every stamp so far is older than this cycle, so none can hold one of its pages back
-    refreshStamps.clear()
     cycleSequence.set(id, ++sequence)
     return requireRunning(id)
   }
 
-  // Ordering between a cycle's pages and a one-PR refresh, which the clock cannot give (it has one-second resolution). One counter owned by this cache instance: a cycle takes a number when it starts, and a one-PR refresh stamps the PR it wrote or closed with a newer one. A page may write a PR only if no refresh stamped it after the cycle started. Held in memory only: no cycle runs across a restart
+  // reads are ordered by when they began, which the clock cannot give (it has one-second resolution). One counter owned by this cache instance: a cycle takes a number when it starts, and a one-PR refresh takes one before its GitHub read begins. A PR remembers the number of the newest read that wrote or closed it, and a repo remembers as its floor the start number of its newest cycle whose omissions are authoritative, which is a read of the whole repo. A read may write a PR only if its number is older than neither. Held in memory only: no read runs across a restart
   let sequence = 0
   const cycleSequence = new Map<number, number>()
-  const refreshStamps = new Map<string, number>()
-  const stamp = (repo: string, number: number): void => { refreshStamps.set(`${repo}#${number}`, ++sequence) }
+  const writtenBy = new Map<string, number>()
+  // keyed by repo exactly as prs is, so one floor covers exactly the rows of one repo. One running cycle at a time means start numbers finish in order, so the newest floor is also the highest
+  const floors = new Map<string, number>()
+  const beginRefresh = (): number => ++sequence
+  const writerKey = (repo: string, number: number): string => `${repo}#${number}`
+  // true when a read numbered order may write the PR, and then records it as the newest writer
+  const claim = (repo: string, number: number, order: number): boolean => {
+    if (order < (floors.get(repo) ?? 0)) return false
+    const key = writerKey(repo, number)
+    const newest = writtenBy.get(key)
+    if (newest !== undefined && newest > order) return false
+    writtenBy.set(key, order)
+    return true
+  }
 
   const writeOpenPage = (cycleId: number, page: OpenPage): CachedPr[] => transaction(() => {
     const { repo } = requireRunning(cycleId)
@@ -512,9 +523,8 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     // a PR updated mid-pagination can appear on two pages; the later copy wins
     const written = new Map<number, CachedPr>()
     for (const pr of page.prs) {
-      // a page was fetched after its cycle started and before any refresh that stamped the PR since finished, so a one-PR refresh after the cycle started holds newer state than this page can have (even a merge that closed it), and the page does not overwrite it
-      const refreshed = refreshStamps.get(`${repo}#${pr.number}`)
-      if (refreshed !== undefined && refreshed > cycleStarted) continue
+      // a page was fetched after its cycle started, so a one-PR refresh whose read began after the cycle started holds newer state than this page can have (even a merge that closed it), and the page does not overwrite it
+      if (!claim(repo, pr.number, cycleStarted)) continue
       upsert.run({ repo, number: pr.number, updatedAt: pr.updatedAt, headOid: pr.headRefOid, at, cycle: cycleId, data: JSON.stringify(pr) })
       written.set(pr.number, {
         repo,
@@ -547,16 +557,20 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     return { cycle: cycleId, fetchedAt: at, result }
   })
 
-  const writePr = (repo: string, pr: RawOpenPr, defaultBranch: string | null): CachedPr => transaction(() => {
+  const writePr = (repo: string, pr: RawOpenPr, defaultBranch: string | null, ticket: number = beginRefresh()): CachedPr | null => transaction(() => {
     const at = now()
     const latest = latestCycle(repo)
+    // a stale read writes nothing, so any row there stays (and keeps the cycle id it was written with), and with no row there the PR stays absent
+    if (!claim(repo, pr.number, ticket)) {
+      const kept = get('SELECT * FROM prs WHERE repo = $repo AND number = $number', { repo, number: pr.number })
+      return kept === undefined ? null : toPr(kept, latest)
+    }
     // no cycle yet is cycle 0, which no real cycle id ever is
     const cycleId = latest?.id ?? 0
     run('INSERT INTO prs (repo, number, state, updated_at, head_oid, fetched_at, cycle, last_seen_at, data) VALUES ($repo, $number, \'open\', $updatedAt, $headOid, $at, $cycle, $at, $data) ON CONFLICT (repo, number) DO UPDATE SET state = \'open\', updated_at = excluded.updated_at, head_oid = excluded.head_oid, fetched_at = excluded.fetched_at, cycle = excluded.cycle, last_seen_at = excluded.last_seen_at, data = excluded.data', {
       repo, number: pr.number, updatedAt: pr.updatedAt, headOid: pr.headRefOid, at, cycle: cycleId, data: JSON.stringify(pr),
     })
     if (defaultBranch !== null) setMeta(metaKey('defaultBranch', repo), defaultBranch)
-    stamp(repo, pr.number)
     return {
       repo,
       number: pr.number,
@@ -571,8 +585,8 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     }
   })
 
-  const closePr = (repo: string, number: number): boolean => {
-    stamp(repo, number)
+  const closePr = (repo: string, number: number, ticket: number = beginRefresh()): boolean => {
+    if (!claim(repo, number, ticket)) return false
     return run('UPDATE prs SET state = \'closed\', fetched_at = $at WHERE repo = $repo AND number = $number AND state = \'open\'', { repo, number, at: now() }) > 0
   }
 
@@ -611,11 +625,14 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     let stale: CachedPr[] = []
     if (error === null) {
       setMeta(metaKey('lastSuccess', repo), { cycle: cycleId, startedAt: finished.startedAt, finishedAt: at } satisfies LastSuccess)
-      // only a cycle that saw the whole open list can say what left it
+      // only a cycle that saw the whole open list can say what left it, so only that cycle is a read of the whole repo: one that failed or never reached the last page says nothing about a PR it did not list, and leaves the floor where it was
       if (getMeta<Stamp>(metaKey('openListed', repo))?.cycle === cycleId) {
-        removed = all('SELECT number FROM prs WHERE repo = $repo AND state = \'open\' AND cycle != $id ORDER BY number', { repo, id: cycleId })
-          .map((row) => int(row, 'number'))
-        run('UPDATE prs SET state = \'closed\' WHERE repo = $repo AND state = \'open\' AND cycle != $id', { repo, id: cycleId })
+        const cycleStarted = cycleSequence.get(cycleId) ?? 0
+        // the cycle wrote each PR it listed with its own number, so a row whose newest read is older is one it did not list, even when that read landed during the cycle and took the cycle's id
+        const open = all('SELECT number FROM prs WHERE repo = $repo AND state = \'open\' ORDER BY number', { repo }).map((row) => int(row, 'number'))
+        removed = open.filter((number) => (writtenBy.get(writerKey(repo, number)) ?? 0) < cycleStarted)
+        for (const number of removed) run('UPDATE prs SET state = \'closed\' WHERE repo = $repo AND number = $number', { repo, number })
+        floors.set(repo, cycleStarted)
       }
     } else {
       setMeta(metaKey('lastError', repo), { cycle: cycleId, at, error })
@@ -776,6 +793,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     startCycle,
     writeOpenPage,
     writeClosed,
+    beginRefresh,
     writePr,
     closePr,
     recordError,

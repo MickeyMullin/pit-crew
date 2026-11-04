@@ -826,6 +826,277 @@ test('a cycle that starts after a one-PR refresh updates the row, even at an ide
   assert.equal(open.find((row) => row.number === merged.number)?.pr.title, merged.title)
 })
 
+test('a one-PR refresh that began before a cycle and finishes after the cycle wrote a newer page does not replace the newer row', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  const target = pages[0]!.prs[0]!
+  const ticket = cache.beginRefresh()
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  cache.writeOpenPage(cycle.id, { ...pages[0]!, prs: pages[0]!.prs.map((pr) => pr.number === target.number ? { ...pr, title: 'newer page' } : pr) })
+  const returned = cache.writePr(scenario.repo, { ...target, title: 'older refresh' }, null, ticket)
+  assert.equal(returned?.pr.title, 'newer page')
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'newer page')
+  cache.writeOpenPage(cycle.id, pages[1]!)
+  cache.writeClosed(cycle.id, closed)
+  cache.finishCycle(cycle.id)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'newer page')
+})
+
+test('a one-PR close that began before a cycle and finishes after the cycle wrote the PR does not close it', async () => {
+  const { pages } = await fetched()
+  const cache = frozenCache()
+  const merged = pages[0]!.prs[1]!
+  const ticket = cache.beginRefresh()
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  cache.writeOpenPage(cycle.id, pages[0]!)
+  assert.equal(cache.closePr(scenario.repo, merged.number, ticket), false)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === merged.number)?.pr.title, merged.title)
+})
+
+test('a one-PR refresh that began before a cycle which omitted the PR cannot reopen it when it finishes after the cycle', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  fullCycle(cache, () => {}, pages, closed)
+  const gone = pages[0]!.prs[1]!
+  const ticket = cache.beginRefresh()
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  for (const page of pages) cache.writeOpenPage(cycle.id, without(page, [gone.number]))
+  cache.writeClosed(cycle.id, closed)
+  const finished = cache.finishCycle(cycle.id)
+  assert.deepEqual(finished.removed, [gone.number])
+  const returned = cache.writePr(scenario.repo, { ...gone, title: 'older open read' }, null, ticket)
+  assert.equal(returned?.state, 'closed')
+  assert.notEqual(returned?.cycle, cycle.id)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === gone.number), undefined)
+  assert.equal(cache.closePr(scenario.repo, gone.number, ticket), false)
+})
+
+test('a one-PR refresh that began after a cycle started keeps its row through the cycle\'s finish', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  fullCycle(cache, () => {}, pages, closed)
+  const kept = pages[0]!.prs[1]!
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  const ticket = cache.beginRefresh()
+  cache.writeOpenPage(cycle.id, { ...pages[0]!, prs: pages[0]!.prs.filter((pr) => pr.number !== kept.number) })
+  cache.writePr(scenario.repo, { ...kept, title: 'refreshed mid-cycle' }, null, ticket)
+  cache.writeClosed(cycle.id, closed)
+  const finished = cache.finishCycle(cycle.id)
+  assert.equal(finished.removed.includes(kept.number), false)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === kept.number)?.pr.title, 'refreshed mid-cycle')
+})
+
+const otherRepo = 'octo-example/elsewhere'
+
+// the PR's row as stored, whatever its state, or undefined when there is none
+const stored = (cache: Cache, number: number, repo: string = scenario.repo) => cache.db.prepare('SELECT state, cycle FROM prs WHERE repo = ? AND number = ?').get(repo, number)
+const inOpenTable = (cache: Cache, number: number, repo: string = scenario.repo): boolean => cache.readView(repo).open.some((row) => row.number === number)
+
+// a whole cycle that reached the last page of an open list without these PRs
+const omittingCycle = (cache: Cache, pages: OpenPage[], closed: ClosedResult, numbers: number[], repo: string = scenario.repo) => {
+  const cycle = cache.startCycle(repo, 'manual')
+  for (const page of pages) cache.writeOpenPage(cycle.id, without(page, numbers))
+  cache.writeClosed(cycle.id, closed)
+  return cache.finishCycle(cycle.id)
+}
+
+test('a one-PR refresh that began before a completed cycle adds no row for a PR the cycle omitted and the cache never held', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  const gone = pages[0]!.prs[1]!
+  const ticket = cache.beginRefresh()
+  const finished = omittingCycle(cache, pages, closed, [gone.number])
+  assert.deepEqual(finished.removed, [])
+  assert.equal(cache.writePr(scenario.repo, { ...gone, title: 'older open read' }, null, ticket), null)
+  assert.equal(stored(cache, gone.number), undefined)
+  assert.equal(inOpenTable(cache, gone.number), false)
+  assert.equal(cache.closePr(scenario.repo, gone.number, ticket), false)
+  // nothing a notification baseline is built from carries the stale row, and the view still holds the cycle's rows
+  assert.deepEqual(cache.readView(scenario.repo).open.map((row) => row.cycle).filter((id) => id !== finished.cycle.id), [])
+})
+
+for (const cached of [false, true]) {
+  test(`a one-PR refresh that began before a cycle and landed during it is removed when the cycle completes without listing the PR (${cached ? 'cached' : 'not cached'} beforehand)`, async () => {
+    const { pages, closed } = await fetched()
+    const cache = frozenCache()
+    if (cached) fullCycle(cache, () => {}, pages, closed)
+    const gone = pages[0]!.prs[1]!
+    const ticket = cache.beginRefresh()
+    const cycle = cache.startCycle(scenario.repo, 'manual')
+    // no page of this cycle has spoken yet, so this older read lands and carries the running cycle's id
+    assert.equal(cache.writePr(scenario.repo, { ...gone, title: 'older open read' }, null, ticket)?.cycle, cycle.id)
+    for (const page of pages) cache.writeOpenPage(cycle.id, without(page, [gone.number]))
+    cache.writeClosed(cycle.id, closed)
+    assert.deepEqual(cache.finishCycle(cycle.id).removed, [gone.number])
+    assert.equal(inOpenTable(cache, gone.number), false)
+    assert.equal(cache.writePr(scenario.repo, { ...gone, title: 'older open read' }, null, ticket)?.state, 'closed')
+  })
+}
+
+test('a failed cycle sets no floor: an older one-PR refresh of a PR it did not list still lands, and a PR it listed still beats that refresh', async () => {
+  const { pages } = await fetched()
+  const cache = frozenCache()
+  const gone = pages[0]!.prs[1]!
+  const listed = pages[0]!.prs[0]!
+  const ticket = cache.beginRefresh()
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  cache.writeOpenPage(cycle.id, without(pages[0]!, [gone.number]))
+  assert.deepEqual(cache.finishCycle(cycle.id, 'closed search failed').removed, [])
+  assert.equal(cache.writePr(scenario.repo, { ...gone, title: 'older open read' }, null, ticket)?.pr.title, 'older open read')
+  assert.equal(inOpenTable(cache, gone.number), true)
+  assert.equal(cache.writePr(scenario.repo, { ...listed, title: 'older open read' }, null, ticket)?.pr.title, listed.title)
+})
+
+test('a cycle that never saw the last page sets no floor: an older one-PR refresh of a PR it did not list still lands', async () => {
+  const { pages } = await fetched()
+  const cache = frozenCache()
+  const unlisted = pages[1]!.prs[0]!
+  const ticket = cache.beginRefresh()
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  cache.writeOpenPage(cycle.id, pages[0]!)
+  assert.equal(cache.finishCycle(cycle.id).cycle.state, 'finished')
+  assert.equal(cache.writePr(scenario.repo, { ...unlisted, title: 'older open read' }, null, ticket)?.pr.title, 'older open read')
+  assert.equal(inOpenTable(cache, unlisted.number), true)
+})
+
+test('a floor outlives the start of the next cycle and its failure', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  const gone = pages[0]!.prs[1]!
+  const ticket = cache.beginRefresh()
+  omittingCycle(cache, pages, closed, [gone.number])
+  const next = cache.startCycle(scenario.repo, 'manual')
+  assert.equal(cache.writePr(scenario.repo, gone, null, ticket), null)
+  cache.finishCycle(next.id, 'HTTP 502')
+  assert.equal(cache.writePr(scenario.repo, gone, null, ticket), null)
+  assert.equal(cache.closePr(scenario.repo, gone.number, ticket), false)
+  assert.equal(stored(cache, gone.number), undefined)
+})
+
+test('a one-PR read that began after the completed cycle started survives, listed or not, and so does one begun after it finished', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  const gone = pages[0]!.prs[1]!
+  const listed = pages[0]!.prs[0]!
+  const late = pages[1]!.prs[0]!
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  const ticket = cache.beginRefresh()
+  for (const page of pages) cache.writeOpenPage(cycle.id, without(page, [gone.number, late.number]))
+  cache.writeClosed(cycle.id, closed)
+  // a newer number taken before the finish: the floor is the cycle's start, not the counter when it finishes
+  cache.beginRefresh()
+  cache.finishCycle(cycle.id)
+  // the PR opened after the list was read: it lands after the finish and reads as current
+  const written = cache.writePr(scenario.repo, { ...gone, title: 'newer open read' }, null, ticket)
+  assert.deepEqual([written?.state, written?.cycle, written?.freshness.state, written?.pr.title], ['open', cycle.id, 'current', 'newer open read'])
+  assert.equal(cache.closePr(scenario.repo, listed.number, ticket), true)
+  assert.equal(inOpenTable(cache, listed.number), false)
+  assert.equal(cache.writePr(scenario.repo, late, null, cache.beginRefresh())?.state, 'open')
+  assert.equal(inOpenTable(cache, late.number), true)
+})
+
+test('a floor belongs to one repository, keyed exactly as the rows are', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  const gone = pages[0]!.prs[1]!
+  const ticket = cache.beginRefresh()
+  omittingCycle(cache, pages, closed, [gone.number])
+  assert.equal(cache.writePr(scenario.repo, gone, null, ticket), null)
+  // another repository, and the same name in another case, which SQLite keeps as a row of its own
+  for (const repo of [otherRepo, scenario.repo.toUpperCase()]) {
+    assert.equal(cache.writePr(repo, gone, null, ticket)?.state, 'open')
+    assert.equal(inOpenTable(cache, gone.number, repo), true)
+    assert.equal(cache.closePr(repo, gone.number, ticket), true)
+    assert.equal(inOpenTable(cache, gone.number, repo), false)
+  }
+  assert.equal(stored(cache, gone.number), undefined)
+})
+
+test('a read that loses to a newer read writes nothing, even when no row is there to return', async () => {
+  const { pages } = await fetched()
+  const cache = frozenCache()
+  const target = pages[0]!.prs[0]!
+  const first = cache.beginRefresh()
+  const second = cache.beginRefresh()
+  // the newer read found it closed, with no row to close
+  assert.equal(cache.closePr(scenario.repo, target.number, second), false)
+  assert.equal(cache.writePr(scenario.repo, { ...target, title: 'older open read' }, 'older-default', first), null)
+  assert.equal(stored(cache, target.number), undefined)
+  assert.equal(cache.readView(scenario.repo).defaultBranch, null)
+})
+
+test('a stale refresh finding no row after prune adds none, whether a completed cycle or a newer close closed the row', async () => {
+  const { pages, closed } = await fetched()
+  const cache = openCache({ path: ':memory:', clock: handClock().clock, keepCycles: 2 })
+  const gone = pages[0]!.prs[1]!
+  const closedByClose = pages[0]!.prs[2]!
+  fullCycle(cache, () => {}, pages, closed)
+
+  const beforeCycle = cache.beginRefresh()
+  const first = cache.beginRefresh()
+  cache.closePr(scenario.repo, closedByClose.number, cache.beginRefresh())
+  omittingCycle(cache, pages, closed, [gone.number, closedByClose.number])
+  for (let i = 0; i < 3; i += 1) omittingCycle(cache, pages, closed, [gone.number, closedByClose.number])
+  assert.equal(stored(cache, gone.number), undefined)
+  assert.equal(stored(cache, closedByClose.number), undefined)
+  assert.equal(cache.writePr(scenario.repo, gone, null, beforeCycle), null)
+  assert.equal(cache.writePr(scenario.repo, closedByClose, null, first), null)
+  assert.equal(stored(cache, gone.number), undefined)
+  assert.equal(stored(cache, closedByClose.number), undefined)
+  cache.close()
+})
+
+test('with only failed cycles since, a stale refresh still loses to the newer close of a row that prune deleted', async () => {
+  const { pages, closed } = await fetched()
+  const cache = openCache({ path: ':memory:', clock: handClock().clock, keepCycles: 2 })
+  const target = pages[0]!.prs[0]!
+  fullCycle(cache, () => {}, pages, closed)
+  const older = cache.beginRefresh()
+  cache.closePr(scenario.repo, target.number, cache.beginRefresh())
+  for (let i = 0; i < 3; i += 1) cache.finishCycle(cache.startCycle(scenario.repo, 'manual').id, 'HTTP 502')
+  assert.equal(stored(cache, target.number), undefined)
+  assert.equal(cache.writePr(scenario.repo, target, null, older), null)
+  assert.equal(stored(cache, target.number), undefined)
+  cache.close()
+})
+
+test('a PR last written by an older cycle\'s page is unaffected by a later cycle that proves nothing, and a later page still replaces it', async () => {
+  const { pages, closed } = await fetched()
+  const cache = frozenCache()
+  const target = pages[0]!.prs[0]!
+  fullCycle(cache, () => {}, pages, closed)
+  const ticket = cache.beginRefresh()
+  const failedCycle = cache.startCycle(scenario.repo, 'manual')
+  cache.writeOpenPage(failedCycle.id, without(pages[0]!, [target.number]))
+  cache.finishCycle(failedCycle.id, 'HTTP 502')
+  assert.equal(inOpenTable(cache, target.number), true)
+  assert.equal(cache.writePr(scenario.repo, { ...target, title: 'refreshed' }, null, ticket)?.pr.title, 'refreshed')
+  fullCycle(cache, () => {}, pages, closed)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, target.title)
+})
+
+test('of two one-PR refreshes of one PR, the one whose read began later wins whichever finishes first', async () => {
+  const { pages } = await fetched()
+  const cache = frozenCache()
+  const target = pages[0]!.prs[0]!
+  const first = cache.beginRefresh()
+  const second = cache.beginRefresh()
+  cache.writePr(scenario.repo, { ...target, title: 'began second' }, null, second)
+  cache.writePr(scenario.repo, { ...target, title: 'began first' }, null, first)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'began second')
+})
+
+test('a one-PR refresh that began after a cycle wrote the PR replaces it, even when it finishes during the cycle', async () => {
+  const { pages } = await fetched()
+  const cache = frozenCache()
+  const target = pages[0]!.prs[0]!
+  const cycle = cache.startCycle(scenario.repo, 'manual')
+  cache.writeOpenPage(cycle.id, pages[0]!)
+  const ticket = cache.beginRefresh()
+  cache.writePr(scenario.repo, { ...target, title: 'after the page' }, null, ticket)
+  assert.equal(cache.readView(scenario.repo).open.find((row) => row.number === target.number)?.pr.title, 'after the page')
+})
+
 test('a one-PR refresh that wrote nothing leaves the running cycle\'s data in place', async () => {
   const { pages } = await fetched()
   const cache = frozenCache()
