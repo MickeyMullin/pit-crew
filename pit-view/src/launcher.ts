@@ -578,6 +578,8 @@ export type StartOption = {
   viewer: string
   // why it cannot start right now, from what the server knows without asking GitHub; null otherwise
   unavailable: string | null
+  // only a Self-review's default start has this: its args with the comments check on, which the page shows and the server runs, so neither builds the flag itself
+  checkCommentsArgs?: string[]
 }
 
 export const isTandemRun = (args: readonly string[]): boolean => args.includes('--tandem')
@@ -629,6 +631,7 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
   const options: StartOption[] = [{
     kind: 'default', label: plan.label, button: reviewButton(buttons[plan.kind]), command: plan.command, args: plan.args,
     runners: ['claude', 'codex'], posts: postsFor(plan.command, plan.args, viewer), repo, viewer, unavailable,
+    ...(plan.kind === 'selfReview' ? { checkCommentsArgs: [...plan.args, '--check-comments'] } : {}),
   }]
   if (notOffered('tandem', pr, config, stack) === null) {
     // --tandem goes before --no-post; the review-pr prompt reads either flag wherever it stands

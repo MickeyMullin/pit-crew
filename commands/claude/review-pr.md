@@ -1,6 +1,6 @@
 ---
-description: "Review one GitHub PR against its real base branch and post the report as an approval, a request-changes review, or a comment, depending on the findings. Add --tandem to launch a second reviewer and post one consolidated report (--tandem=<id> picks it, --tandem=manual means you start it yourself), or --tandem-secondary to be that second reviewer. Add --no-post to write the report without posting anything or entering fix mode, and --emit-json=<run-dir> to also write machine-readable progress and results to that directory."
-argument-hint: "[PR number | branch | PR URL] [--tandem[=<id>,... | =manual] | --tandem-secondary[@sha]] [--no-post] [--emit-json=<run-dir>]"
+description: "Review one GitHub PR against its real base branch and post the report as an approval, a request-changes review, or a comment, depending on the findings. Add --tandem to launch a second reviewer and post one consolidated report (--tandem=<id> picks it, --tandem=manual means you start it yourself), or --tandem-secondary to be that second reviewer. Add --no-post to write the report without posting anything or entering fix mode, --check-comments to start by checking the PR's most recent comments against the branch and report what is not addressed, and --emit-json=<run-dir> to also write machine-readable progress and results to that directory."
+argument-hint: "[PR number | branch | PR URL] [--tandem[=<id>,... | =manual] | --tandem-secondary[@sha]] [--no-post] [--check-comments] [--emit-json=<run-dir>]"
 ---
 
 Follow the instructions in `{{HOME}}/agents/prompts/review/review-pr.md` in full. You are
@@ -14,4 +14,4 @@ prompt's default and needs no worktree.
 
 A `--tandem[=<id>,...]`, `--tandem=manual`, or `--tandem-secondary[@<sha>]` flag in the arguments is not part of the target: follow the prompt's Tandem mode section, remove the flag, and resolve the rest.
 
-A `--no-post` or `--emit-json=<run-dir>` flag in the arguments is not part of the target either: follow the prompt's No-post mode or Machine-readable output section, remove the flag, and resolve the rest.
+A `--no-post`, `--check-comments`, or `--emit-json=<run-dir>` flag in the arguments is not part of the target either: follow the prompt's No-post mode, Comments check, or Machine-readable output section, remove the flag, and resolve the rest.

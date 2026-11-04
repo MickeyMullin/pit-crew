@@ -15,7 +15,8 @@ export type Loadable<T> = { state: 'loading' } | { state: 'error', message: stri
 
 // what the drawer is asking about: a start waiting for its Start, a stop waiting for its Stop, or a direct action on the PR waiting for its confirmation
 export type Confirm =
-  | { type: 'start', kind: StartKind, runner: RunnerName }
+  // checkComments is the Self-review's box: it lives here, so it lasts as long as this confirmation and no longer
+  | { type: 'start', kind: StartKind, runner: RunnerName, checkComments?: boolean }
   | { type: 'stop', andOpen: boolean, runId: number }
   // a re-read of the latest run's result, with everything its confirmation showed
   | { type: 'reread', runId: number, repo: string, viewer: string, headSha: string, baseRef: string }
@@ -78,6 +79,10 @@ export const defaultRunner = (option: Pick<StartOption, 'kind' | 'runners'>, con
   return option.runners.includes(configured) ? configured : option.runners[0] ?? 'claude'
 }
 
+// whether a start asks for the comments check: the box is checked and this start offers it
+export const commentsCheckOn = (asked: { checkComments?: boolean }, option: Pick<StartOption, 'checkCommentsArgs'>): boolean =>
+  asked.checkComments === true && option.checkCommentsArgs !== undefined
+
 export type StartConfirmModel = {
   kind: StartKind
   heading: string
@@ -88,6 +93,8 @@ export type StartConfirmModel = {
   runners: { name: RunnerName, label: string }[]
   runner: RunnerName
   runnerLabel: string
+  // the Self-review's box; null for a start that does not offer it
+  commentsCheck: { label: string, detail: string, checked: boolean } | null
   effect: string
   effectKind: StartOption['posts']['kind']
   // a start that pushes to the PR's branch is confirmed with a caution treatment and this plain
@@ -99,19 +106,25 @@ export type StartConfirmModel = {
 
 // null when the PR no longer offers that start. A Fix session pushes commits, so its confirmation
 // names the branch in its heading, says plainly what the push does, and has a Start of its own
-export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headRef'>, cell: AgentCell, kind: StartKind, runner: RunnerName): StartConfirmModel | null => {
+export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headRef'>, cell: AgentCell, kind: StartKind, runner: RunnerName, checkComments = false): StartConfirmModel | null => {
   const option = optionOf(cell, kind)
   if (option === undefined) return null
   const chosen = option.runners.includes(runner) ? runner : defaultRunner(option, cell.action.runner)
   const push = option.posts.kind === 'push'
+  const checked = commentsCheckOn({ checkComments }, option)
   return {
     kind,
     heading: push ? `Push fixes to ${row.headRef}?` : `${option.label} #${row.number}?`,
     title: row.title,
-    command: commandLine(option, chosen),
+    command: commandLine({ command: option.command, args: checked ? option.checkCommentsArgs ?? option.args : option.args }, chosen),
     runners: option.runners.map((name) => ({ name, label: runnerLabels[name] })),
     runner: chosen,
     runnerLabel: runnerLabels[chosen],
+    commentsCheck: option.checkCommentsArgs === undefined ? null : {
+      label: 'Also check the latest comments',
+      detail: 'Reads the PR\'s latest comments from anyone and reports which points the branch has not addressed. It changes nothing.',
+      checked,
+    },
     effect: option.posts.text,
     effectKind: option.posts.kind,
     caution: push ? `It pushes new commits to ${row.headRef} on GitHub under your account, and never force-pushes.` : null,
@@ -688,7 +701,7 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
   const { row, confirm } = input
   const cell = row.agent
   const card = cell === null ? 'none' : cardKind(cell)
-  const startAsk = confirm?.type === 'start' && cell !== null ? startConfirmModel(row, cell, confirm.kind, confirm.runner) : null
+  const startAsk = confirm?.type === 'start' && cell !== null ? startConfirmModel(row, cell, confirm.kind, confirm.runner, confirm.checkComments) : null
   const runs = input.runs
   const reports = input.reports
   return {
