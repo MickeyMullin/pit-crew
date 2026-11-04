@@ -496,7 +496,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     return requireRunning(id)
   }
 
-  // Reads are ordered by when they began, which the clock cannot give (it has one-second resolution). One counter owned by this cache instance: a cycle takes a number when it starts, and a one-PR refresh takes one before its GitHub read begins. A PR remembers the number of the newest read that wrote or closed it, and a repo remembers as its floor the start number of its newest cycle whose omissions are authoritative, which is a read of the whole repo. A read may write a PR only if its number is older than neither. Held in memory only: no read runs across a restart
+  // reads are ordered by when they began, which the clock cannot give (it has one-second resolution). One counter owned by this cache instance: a cycle takes a number when it starts, and a one-PR refresh takes one before its GitHub read begins. A PR remembers the number of the newest read that wrote or closed it, and a repo remembers as its floor the start number of its newest cycle whose omissions are authoritative, which is a read of the whole repo. A read may write a PR only if its number is older than neither. Held in memory only: no read runs across a restart
   let sequence = 0
   const cycleSequence = new Map<number, number>()
   const writtenBy = new Map<string, number>()
