@@ -1486,12 +1486,16 @@ export type ReviewLine = {
   // holds a slot for one attempt to start; a caller tests the fit with nothing awaited between that and this
   reserve: (slot: ReviewSlot) => number
   release: (attempt: number) => void
+  // whether a launch about to spawn still fits under this config: everything in flight counts, but neither its own slot nor one held for an entry in the line, all of which stand behind it
+  fitsAtSpawn: (attempt: number, slot: ReviewSlot, config: Config) => boolean
   // the count of launches in progress
   opened: (by: number) => void
   takeTurn: () => LineTurn
   add: (entry: LineEntry) => void
   // the entry an engine has in the line under this id
   entry: (member: LineMember, id: number) => LineEntry | undefined
+  // puts an entry whose launch no longer fits back at the head of the line, where it stood; the end of that launch releases the slot its attempt held
+  putBack: (entry: LineEntry) => void
   // takes an entry out of the line and releases the slot an attempt to start it held
   dequeue: (entry: LineEntry) => void
   // reads the line earliest first, as far as the first entry that does not fit
@@ -1603,12 +1607,21 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
     return { review: waits('review', config), selfReview: waits('selfReview', config) }
   }
 
-  // a queued entry's fit counts everything in flight and the slots held for entries ahead of it in line, never its own or one behind it, so when a lowered cap leaves too many slots held it is always a later entry that gives its slot back
-  const fitsInLine = (item: LineEntry, slot: ReviewSlot, config: Config): boolean => {
-    const behind = new Set(queue.slice(queue.indexOf(item)).flatMap((entry) => entry.attempt === null ? [] : [entry.attempt]))
-    const counted = [...admitting].flatMap(([attempt, held]) => behind.has(attempt) ? [] : [held])
+  // whether a slot fits beside everything in flight except what these attempts hold
+  const fitsBeside = (ignored: ReadonlySet<number>, slot: ReviewSlot, config: Config): boolean => {
+    const counted = [...admitting].flatMap(([attempt, held]) => ignored.has(attempt) ? [] : [held])
     return reviewFits([...counted, ...watchedSlots()], slot, config.maxConcurrentReviews, config.selfReviewOverCap)
   }
+
+  const attemptsOf = (entries: readonly LineEntry[]): number[] => entries.flatMap((entry) => entry.attempt === null ? [] : [entry.attempt])
+
+  // a queued entry's fit counts everything in flight and the slots held for entries ahead of it in line, never its own or one behind it, so when a lowered cap leaves too many slots held it is always a later entry that gives its slot back
+  const fitsInLine = (item: LineEntry, slot: ReviewSlot, config: Config): boolean =>
+    fitsBeside(new Set(attemptsOf(queue.slice(queue.indexOf(item)))), slot, config)
+
+  // the same rule for a launch that has left the line: every entry still in it arrived later, or was let go only after it
+  const fitsAtSpawn = (attempt: number, slot: ReviewSlot, config: Config): boolean =>
+    fitsBeside(new Set([attempt, ...attemptsOf(queue)]), slot, config)
 
   const reserve = (slot: ReviewSlot): number => {
     attempts += 1
@@ -1793,10 +1806,15 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
     release: (attempt) => {
       admitting.delete(attempt)
     },
+    fitsAtSpawn,
     opened,
     takeTurn,
     add: lineAdd,
     entry: (member, id) => queue.find((item) => item.member === member && item.id === id),
+    putBack: (item) => {
+      queue.unshift(item)
+      mark()
+    },
     dequeue,
     admit,
   }
@@ -2444,8 +2462,20 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
+  // a launch that no longer fits at the last moment before its spawn: nothing has started, so a stop asked meanwhile ends it here, and otherwise its row reads queued again, since when it first waited, and it stands at the head of the line. A write the database refuses throws, for the launch to fail it. Either way the end of the launch releases its slot and reads the queue again
+  const notStarted = (run: T, request: StartRequest, admitted: Admitted, waitingSince: string): T => {
+    const stopAsked = launching.get(run.id) === true
+    launching.delete(run.id)
+    if (stopAsked) return end(run, { status: 'stopped', finishedAt: now() }, 'stopped before it started')
+    const back = store.update(run.id, { status: 'queued', startedAt: waitingSince })
+    line.putBack(lineEntry(back, request, admitted.viewer))
+    log(`${noun} ${run.id}: not started, the cap is now lower; it waits again at the head of the queue`)
+    changed(back)
+    return back
+  }
+
   // a queued review's row already exists, was announced when it was queued, and was marked running as it left the queue; it starts now, in the folder the checks just confirmed
-  const launch = async (request: StartRequest, config: Config, cwd: string, queued: T | null = null, admitted: Admitted | null = null): Promise<T> => {
+  const launch = async (request: StartRequest, config: Config, cwd: string, queued: T | null = null, admitted: Admitted | null = null, queuedSince: string | null = null): Promise<T> => {
     let run = queued ?? newRow(request, config, cwd, 'running')
     const runner = run.runner
     const sessionId = run.sessionId
@@ -2477,9 +2507,13 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         startedAt: run.startedAt,
       }
       await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid: null, pidStartedAt: null }, null, 2)}\n`)
-      // the last thing before the spawn: a review starts only for the repository and the viewer its start was confirmed for, under the config in effect now
-      const why = admitted === null ? null : unbound(request.repo, admitted.viewer, options.config())
-      if (why !== null) throw new Error(`not started: ${why}`)
+      // the last thing before the spawn, with nothing awaited between this reading and it: a review or a sweep starts only for the repository and the viewer its start was confirmed for, and only while it still fits, under the config in effect now
+      if (admitted !== null) {
+        const current = options.config()
+        const why = unbound(request.repo, admitted.viewer, current)
+        if (why !== null) throw new Error(`not started: ${why}`)
+        if (!line.fitsAtSpawn(admitted.attempt, admitted.slot, current)) return notStarted(run, request, admitted, queuedSince ?? run.startedAt)
+      }
       child = spawn({
         command: invocation.command,
         args: invocation.args,
@@ -2596,29 +2630,32 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
+  // a queued row's place in the line, holding no slot and with no checks passed
+  const lineEntry = (run: T, request: StartRequest, viewer: string): LineEntry => ({
+    member,
+    id: run.id,
+    name: `${noun} ${run.id}`,
+    request,
+    viewer,
+    attempt: null,
+    checked: null,
+    rowGone: () => store.get(run.id) === null,
+    slot: (current) => store.slot(request, current),
+    check: async (current) => {
+      await checkIdentity(current)
+      return checkClone(current)
+    },
+    fail: (note) => failQueued(run, note),
+    markRunning: (at) => {
+      const marked = store.update(run.id, { status: 'running', startedAt: now(), cwd: tildePath(at, home) })
+      return (current, admitted) => launch(request, current, at, marked, admitted, run.startedAt)
+    },
+  })
+
   // at the cap, or behind what arrived before it: the review or the sweep gets its row, queued, and starts when its turn comes and a slot is free
   const enqueue = (request: StartRequest, config: Config, cwd: string): T => {
     const run = newRow(request, config, cwd, 'queued')
-    line.add({
-      member,
-      id: run.id,
-      name: `${noun} ${run.id}`,
-      request,
-      viewer: config.viewer,
-      attempt: null,
-      checked: null,
-      rowGone: () => store.get(run.id) === null,
-      slot: (current) => store.slot(request, current),
-      check: async (current) => {
-        await checkIdentity(current)
-        return checkClone(current)
-      },
-      fail: (note) => failQueued(run, note),
-      markRunning: (at) => {
-        const marked = store.update(run.id, { status: 'running', startedAt: now(), cwd: tildePath(at, home) })
-        return (current, admitted) => launch(request, current, at, marked, admitted)
-      },
-    })
+    line.add(lineEntry(run, request, config.viewer))
     watching(run)
     log(`${noun} ${run.id} queued: ${run.command} ${run.args.join(' ')}, ${line.inFlight().length} reviews in flight with a cap of ${config.maxConcurrentReviews}`)
     changed(run)

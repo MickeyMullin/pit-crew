@@ -10,7 +10,7 @@ import type { Config } from '../src/config.ts'
 import { createGh } from '../src/github.ts'
 import type { RawOpenPr } from '../src/github.ts'
 import { createLauncher, createReviewLine, createSweepLauncher, LaunchError, parseResult } from '../src/launcher.ts'
-import type { StartRequest } from '../src/launcher.ts'
+import type { ReviewLine, StartRequest } from '../src/launcher.ts'
 import { createSweepMemory, sweepRequest, sweepStartOf, sweepText, sweepView, sweepsView } from '../src/sweeps.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { armedGate, emptySweepResult, fakeLaunch, fakeRemotes, fakeRunner, fakeTime, fixtureRunner, gatedGh, ok, openPage1, openPage2, quiet, reviewResult, sweepHead201, sweepResult, tempDir, waitFor, within } from './helpers.ts'
@@ -57,23 +57,33 @@ const harness = async ({ config = {}, launch = fakeLaunch(), gh = fixtureRunner(
     env: launch.deps.env,
     newSessionId: launch.deps.newSessionId,
   }
+  // each slot an attempt held, in the order the launches released them
+  const released: number[] = []
   // the two engines over one review line, as the server makes them; called again it stands for a new server start
   const pair = () => {
-    const line = createReviewLine({ config: options.config, timers: time.timers, ...(onQueueing === undefined ? {} : { onQueueing }) })
+    const made = createReviewLine({ config: options.config, timers: time.timers, ...(onQueueing === undefined ? {} : { onQueueing }) })
+    const line: ReviewLine = {
+      ...made,
+      release: (attempt) => {
+        released.push(attempt)
+        made.release(attempt)
+      },
+    }
     return {
+      line,
       sweeps: createSweepLauncher({ ...options, line, onWatch: (sweep) => watched.push(sweep.id), onChange: (sweep) => changes.push(sweep) }),
       runs: createLauncher({ ...options, line, onWatch: () => {}, onChange: () => {} }),
     }
   }
   const make = () => pair().sweeps
-  const { sweeps: launcher, runs } = pair()
+  const { sweeps: launcher, runs, line } = pair()
   const cleanup = async (): Promise<void> => {
     launcher.close()
     runs.close()
     cache.close()
     await temp.cleanup()
   }
-  return { home, time, cache, launcher, runs, make, pair, changes, watched, settings, stateDir, launch, gh, cleanup }
+  return { home, time, cache, launcher, runs, line, released, make, pair, changes, watched, settings, stateDir, launch, gh, cleanup }
 }
 
 const start = (runner?: StartRequest['runner']): StartRequest => sweepRequest(scenario.repo, runner)
@@ -674,6 +684,247 @@ test('a cap lowered below what is in flight holds a sweep back until the count i
     await h.runs.settled(two.id)
     await waitFor(() => h.launch.children.length === 3)
     assert.equal(startOrder(h)[2], 'sweep')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// a launch whose folder the test holds, so the cap can be saved while it is prepared
+const heldFolders = () => {
+  const launch = fakeLaunch()
+  const folders = armedGate()
+  const makeFolder = launch.deps.fs.mkdir
+  launch.deps.fs = {
+    ...launch.deps.fs,
+    mkdir: async (path) => {
+      await folders.wait()
+      await makeFolder(path)
+    },
+  }
+  return { launch, folders }
+}
+
+test('a cap lowered while a new sweep is prepared keeps it from spawning: it waits again at the head of the line, and its slot is released once', async () => {
+  const { launch, folders } = heldFolders()
+  const h = await harness({ launch, config: { maxConcurrentReviews: 2 } })
+  try {
+    const running = await h.runs.start(review(113))
+    const releasedBefore = h.released.length
+    folders.arm()
+    const pending = h.launcher.start(start())
+    await waitFor(() => folders.held() === 1)
+    const row = h.cache.sweepsFor(scenario.repo)[0]!
+    assert.equal(row.status, 'running')
+    // one arriving during the launch queues behind it
+    const behind = await h.runs.start(review(118))
+    assert.equal(behind.status, 'queued')
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    h.launcher.drain()
+    h.time.advance(60_000)
+    folders.open(0)
+    // the caller is answered with the row as it stands: waiting, so it is told the truth
+    const answered = await within(pending)
+    assert.deepEqual([answered.id, answered.status], [row.id, 'queued'])
+    await quiet()
+    assert.deepEqual(startOrder(h), [113])
+    const waiting = h.cache.getSweep(row.id)!
+    assert.deepEqual([waiting.status, waiting.pid, waiting.finishedAt, waiting.note, waiting.startedAt], ['queued', null, null, null, row.startedAt])
+    assert.equal(h.changes.at(-1)?.status, 'queued')
+    // the running review alone holds a slot: the attempt's was released exactly once
+    assert.equal(h.released.length, releasedBefore + 1)
+    assert.deepEqual(h.line.inFlight(), ['review'])
+    assert.equal(h.line.queueing().review, true)
+    // the sweep kept its place: a freed slot goes to it, and the review behind it follows it
+    h.launch.children[0]!.exit(1)
+    await h.runs.settled(running.id)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.deepEqual(startOrder(h), [113, 'sweep'])
+    assert.equal(h.cache.getSweep(row.id)?.status, 'running')
+    assert.equal(h.cache.getRun(behind.id)?.status, 'queued')
+    h.launch.children[1]!.exit(1)
+    await h.launcher.settled(row.id)
+    await waitFor(() => h.launch.children.length === 3)
+    assert.deepEqual(startOrder(h), [113, 'sweep', 118])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a cap lowered while a queued sweep is prepared, its row already running, puts it back where it stood, with the time it first waited', async () => {
+  const { launch, folders } = heldFolders()
+  const h = await harness({ launch, config: { maxConcurrentReviews: 2 } })
+  try {
+    const leaving = await h.runs.start(review(113))
+    const staying = await h.runs.start(review(118))
+    const queued = await h.launcher.start(start())
+    const behind = await h.runs.start(review(127))
+    assert.deepEqual([queued.status, behind.status], ['queued', 'queued'])
+    h.time.advance(60_000)
+    // a slot frees, the sweep's checks pass, and its folder is held
+    folders.arm()
+    h.launch.children[0]!.exit(1)
+    await h.runs.settled(leaving.id)
+    await waitFor(() => folders.held() === 1)
+    const marked = h.cache.getSweep(queued.id)!
+    assert.equal(marked.status, 'running')
+    assert.notEqual(marked.startedAt, queued.startedAt)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    h.launcher.drain()
+    folders.open(0)
+    await waitFor(() => h.cache.getSweep(queued.id)?.status === 'queued')
+    await quiet()
+    assert.deepEqual(startOrder(h), [113, 118])
+    const waiting = h.cache.getSweep(queued.id)!
+    assert.deepEqual([waiting.pid, waiting.finishedAt, waiting.note, waiting.startedAt], [null, null, null, queued.startedAt])
+    assert.equal(h.changes.at(-1)?.status, 'queued')
+    // the running review alone holds a slot: the launch's end released the attempt's, and nothing else went with it
+    assert.deepEqual(h.line.inFlight(), ['review'])
+    assert.equal(h.cache.getRun(behind.id)?.status, 'queued')
+    // it makes its checks again when it is next given a slot, and starts ahead of the review behind it
+    const calls = h.launch.gitCalls.length
+    h.launch.children[1]!.exit(1)
+    await h.runs.settled(staying.id)
+    await waitFor(() => h.launch.children.length === 3)
+    assert.deepEqual(startOrder(h), [113, 118, 'sweep'])
+    assert.equal(h.launch.gitCalls.length, calls + 1)
+    const started = h.cache.getSweep(queued.id)!
+    assert.equal(started.status, 'running')
+    assert.notEqual(started.startedAt, queued.startedAt)
+    assert.equal(h.cache.getRun(behind.id)?.status, 'queued')
+    h.launch.children[2]!.exit(1)
+    await h.launcher.settled(queued.id)
+    await waitFor(() => h.launch.children.length === 4)
+    assert.deepEqual(startOrder(h), [113, 118, 'sweep', 127])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a sweep sent back by a lowered cap starts again as soon as a saved cap has room', async () => {
+  const { launch, folders } = heldFolders()
+  const h = await harness({ launch, config: { maxConcurrentReviews: 2 } })
+  try {
+    await h.runs.start(review(113))
+    folders.arm()
+    const pending = h.launcher.start(start())
+    await waitFor(() => folders.held() === 1)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    folders.open(0)
+    const sent = await within(pending)
+    assert.equal(sent.status, 'queued')
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 2 }
+    h.launcher.drain()
+    await waitFor(() => h.launch.children.length === 2)
+    assert.deepEqual(startOrder(h), [113, 'sweep'])
+    assert.equal(h.cache.getSweep(sent.id)?.status, 'running')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a Stop finds a sweep sent back by a lowered cap in the line, and takes it out', async () => {
+  const { launch, folders } = heldFolders()
+  const h = await harness({ launch, config: { maxConcurrentReviews: 2 } })
+  try {
+    await h.runs.start(review(113))
+    folders.arm()
+    const pending = h.launcher.start(start())
+    await waitFor(() => folders.held() === 1)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    folders.open(0)
+    const sent = await within(pending)
+    assert.equal(sent.status, 'queued')
+    assert.equal(h.launcher.stop(sent.id).status, 'stopped')
+    // nothing is left in the line for a slot to start: only the running review still counts
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 2 }
+    h.launcher.drain()
+    await quiet()
+    assert.deepEqual(startOrder(h), [113])
+    assert.deepEqual(h.line.inFlight(), ['review'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a Stop asked during the launch ends a sweep the lowered cap would have sent back: it never spawns, and the next in line goes', async () => {
+  const { launch, folders } = heldFolders()
+  const h = await harness({ launch, config: { maxConcurrentReviews: 2 } })
+  try {
+    const running = await h.runs.start(review(113))
+    const releasedBefore = h.released.length
+    folders.arm()
+    const pending = h.launcher.start(start())
+    await waitFor(() => folders.held() === 1)
+    const behind = await h.runs.start(review(118))
+    const row = h.cache.sweepsFor(scenario.repo)[0]!
+    assert.equal(h.launcher.stop(row.id).status, 'running')
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    folders.open(0)
+    const answered = await within(pending)
+    assert.deepEqual([answered.id, answered.status], [row.id, 'stopped'])
+    assert.equal(h.cache.getSweep(row.id)?.status, 'stopped')
+    assert.equal((await within(h.launcher.settled(row.id))).status, 'stopped')
+    assert.deepEqual(startOrder(h), [113])
+    assert.equal(h.released.length, releasedBefore + 1)
+    h.launch.children[0]!.exit(1)
+    await h.runs.settled(running.id)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.deepEqual(startOrder(h), [113, 118])
+    assert.equal(h.cache.getRun(behind.id)?.status, 'running')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a write the database refuses as a sweep goes back fails it as spawnFailed: it never spawns, and its slot is released', async () => {
+  const { launch, folders } = heldFolders()
+  const h = await harness({ launch, config: { maxConcurrentReviews: 2 } })
+  const updateSweep = h.cache.updateSweep
+  h.cache.updateSweep = (id, changes) => {
+    if (changes.status === 'queued') throw new Error('attempt to write a readonly database')
+    return updateSweep(id, changes)
+  }
+  const { sweeps, runs, line } = h.pair()
+  h.cache.updateSweep = updateSweep
+  try {
+    await runs.start(review(113))
+    const releasedBefore = h.released.length
+    folders.arm()
+    const pending = sweeps.start(start())
+    await waitFor(() => folders.held() === 1)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    folders.open(0)
+    const answered = await within(pending)
+    assert.deepEqual([answered.status, answered.note], ['failed', 'spawnFailed: attempt to write a readonly database'])
+    assert.deepEqual(startOrder(h), [113])
+    assert.equal(h.released.length, releasedBefore + 1)
+    assert.deepEqual(line.inFlight(), ['review'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a lowered cap that still has room for a launching sweep does not send it back: the entry behind it gives its slot back instead', async () => {
+  const { launch, folders } = heldFolders()
+  const h = await harness({ launch, config: { maxConcurrentReviews: 3 } })
+  try {
+    await h.runs.start(review(113))
+    folders.arm()
+    const pending = h.launcher.start(start())
+    await waitFor(() => folders.held() === 1)
+    // this one is let in behind the launch, and holds a slot of its own while it waits for it
+    const behind = await h.runs.start(review(118))
+    assert.equal(behind.status, 'queued')
+    assert.equal(h.line.inFlight().length, 3)
+    await quiet()
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 2 }
+    folders.open(0)
+    const answered = await within(pending)
+    assert.equal(answered.status, 'running')
+    await quiet()
+    assert.deepEqual(startOrder(h), [113, 'sweep'])
+    assert.equal(h.cache.getRun(behind.id)?.status, 'queued')
+    assert.deepEqual(h.line.inFlight(), ['review', 'review'])
   } finally {
     await h.cleanup()
   }

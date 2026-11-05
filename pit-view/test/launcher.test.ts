@@ -1472,6 +1472,89 @@ test('a queued review whose repository changes after its checks, while it is bei
   }
 })
 
+test('a cap lowered while a review is prepared keeps it from spawning, new or from the queue: it waits again at the head of the line', async () => {
+  const launch = fakeLaunch()
+  const folders = gate()
+  const mkdir = launch.deps.fs.mkdir
+  launch.deps.fs = {
+    ...launch.deps.fs,
+    mkdir: async (path) => {
+      await folders.wait()
+      await mkdir(path)
+    },
+  }
+  const h = await harness({ launch })
+  try {
+    const running = await h.launcher.start(request(106))
+    folders.arm()
+    const pending = h.launcher.start(request(113, { label: 'Review' }))
+    await waitFor(() => folders.held() === 1)
+    const row = h.cache.runsFor(scenario.repo, 113, 1)[0]!
+    assert.equal(row.status, 'running')
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    h.launcher.drain()
+    folders.open(0)
+    const sent = await within(pending)
+    assert.deepEqual([sent.id, sent.status, sent.startedAt], [row.id, 'queued', row.startedAt])
+    assert.equal(h.launch.children.length, 1)
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    assert.equal(later.status, 'queued')
+
+    // a saved cap lets it go, its row running, but the cap is saved lower again while its folder is held
+    h.time.advance(60_000)
+    folders.arm()
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 2 }
+    h.launcher.drain()
+    await waitFor(() => folders.held() === 2)
+    assert.equal(h.cache.getRun(row.id)?.status, 'running')
+    assert.notEqual(h.cache.getRun(row.id)?.startedAt, row.startedAt)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    h.launcher.drain()
+    folders.open(1)
+    await waitFor(() => h.cache.getRun(row.id)?.status === 'queued')
+    await quiet()
+    assert.equal(h.launch.children.length, 1)
+    assert.equal(h.cache.getRun(row.id)?.startedAt, row.startedAt)
+
+    // it is still first: it starts when the running review ends, ahead of the one behind it
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.match(h.launch.children[1]!.writes[0] ?? '', /\/review-pr 113 /)
+    assert.equal(h.cache.getRun(row.id)?.status, 'running')
+    assert.equal(h.cache.getRun(later.id)?.status, 'queued')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a self-review the one place over the cap still fits when a cap is lowered during its launch, so it spawns', async () => {
+  const launch = fakeLaunch()
+  const folders = gate()
+  const mkdir = launch.deps.fs.mkdir
+  launch.deps.fs = {
+    ...launch.deps.fs,
+    mkdir: async (path) => {
+      await folders.wait()
+      await mkdir(path)
+    },
+  }
+  const h = await harness({ launch, config: { selfReviewOverCap: true } })
+  try {
+    h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+    await h.launcher.start(request(106))
+    folders.arm()
+    const pending = h.launcher.start(request(101, { args: ['101', '--no-post'], label: 'Self-review' }))
+    await waitFor(() => folders.held() === 1)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    folders.open(0)
+    assert.equal((await within(pending)).status, 'running')
+    assert.equal(h.launch.children.length, 2)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('admission reads the cap as it is once the checks finish: a cap lowered during them queues a new start and puts back a queued one', async () => {
   const accounts = gate()
   const login = { current: scenario.viewer as string }
