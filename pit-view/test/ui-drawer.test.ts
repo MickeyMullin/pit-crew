@@ -11,7 +11,7 @@ import type { ReportListing } from '../src/reports.ts'
 import { postRequest, refusalText, rereadRequest, startRequest } from '../public/agent.ts'
 import type { AgentCell, RunView, StartOption, StepSlot } from '../public/agent.ts'
 import {
-  cardKind, commentsCheckOn, commitModel, readyPointer, cellFromRun, confirmHolds, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
+  cardKind, commentsCheckOn, commitModel, readyPointer, cellFromRun, confirmHolds, closeOnOutsidePress, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
   queuedStopModel, reportName, reportRows, resumeReadyText, returnSelector, runRows, runText, startConfirmModel, startsModel, stepModels, stepsName, stopModel, summaryOf,
 } from '../public/drawerview.ts'
 import type { DrawerInput, Loadable } from '../public/drawerview.ts'
@@ -413,7 +413,7 @@ test('the page closes the drawer on a press outside it and leaves the controls t
   const [app, drawer, tables] = [await read('app.ts'), await read('drawer.ts'), await read('tables.ts')]
   // the press is caught on the page, and the drawer owns the guard for a request on its way
   assert.match(app, /addEventListener\('pointerdown', \(event\) => \{/)
-  assert.match(app, /drawer\.outside\(\{/)
+  assert.match(app, /closeOnOutsidePress\(\[drawer, sweepDrawer\], target\)/)
   assert.match(drawer, /if \(number === null \|\| !outsidePressCloses\(\{ \.\.\.where, busy \}\)\) return false\s+close\(\)/)
   // every control that opens a drawer is named, so none of them closes it first
   for (const attribute of ['data-agent="open"', 'data-open-agent', 'data-fix-session', 'data-sweep']) {
@@ -1205,4 +1205,54 @@ test('the report path a confirmation names comes from the server\'s offer, never
   }), { confirm: postConfirm })).postAsk
   assert.equal(ask?.command, 'gh pr review 101 --repo octo-example/orbit --approve --body-file ~/agents/output/PR-101.md')
   assert.doesNotMatch(ask?.effect ?? '', /\.ssh/)
+})
+
+// the real caller: the page's one pointerdown handler hands the press to both drawers through closeOnOutsidePress; a fake drawer stands in for each, applying the same guard the drawers apply
+const pressOn = (...matching: string[]) => ({ closest: (selector: string) => selector.split(', ').some((part) => matching.includes(part)) ? {} : null })
+
+const fakeDrawer = (open: boolean, busy = false) => {
+  const state = { open, closes: 0 }
+  return {
+    state,
+    isOpen: () => state.open,
+    outside: (where: { inPanel: boolean, opener: boolean }): boolean => {
+      if (!state.open || !outsidePressCloses({ ...where, busy })) return false
+      state.open = false
+      state.closes += 1
+      return true
+    },
+  }
+}
+
+test('a press outside the open sweep drawer closes it; one inside it, its confirmation, or the report panel does not', () => {
+  const sweep = fakeDrawer(true)
+  const agent = fakeDrawer(false)
+  assert.equal(closeOnOutsidePress([agent, sweep], pressOn('#sweep-drawer')), false)
+  assert.equal(closeOnOutsidePress([agent, sweep], pressOn('#report-panel')), false)
+  assert.equal(sweep.state.open, true)
+  assert.equal(closeOnOutsidePress([agent, sweep], pressOn()), true)
+  assert.equal(sweep.state.open, false)
+  assert.equal(closeOnOutsidePress([agent, sweep], pressOn()), false)
+})
+
+test('a press on another sweep control switches the sweep drawer instead of closing it, and a request on its way keeps it open', () => {
+  const sweep = fakeDrawer(true)
+  assert.equal(closeOnOutsidePress([fakeDrawer(false), sweep], pressOn('button[data-sweep]')), false)
+  assert.equal(sweep.state.closes, 0)
+  const busy = fakeDrawer(true, true)
+  assert.equal(closeOnOutsidePress([busy], pressOn()), false)
+  assert.equal(busy.state.open, true)
+})
+
+test('the Agent drawer still closes on an outside press through the same handler', () => {
+  const agent = fakeDrawer(true)
+  assert.equal(closeOnOutsidePress([agent, fakeDrawer(false)], pressOn('#drawer')), false)
+  assert.equal(closeOnOutsidePress([agent, fakeDrawer(false)], pressOn()), true)
+})
+
+test('the page wires both drawers to the one handler, and the sweep drawer owns its guard like the Agent drawer', async () => {
+  const read = (name: string): Promise<string> => readFile(join(import.meta.dirname, '..', 'public', name), 'utf8')
+  const [app, sweep] = [await read('app.ts'), await read('sweepdrawer.ts')]
+  assert.match(app, /closeOnOutsidePress\(\[drawer, sweepDrawer\], target\)/)
+  assert.match(sweep, /if \(!isOpen \|\| !outsidePressCloses\(\{ \.\.\.where, busy \}\)\) return false\s+close\(\)/)
 })

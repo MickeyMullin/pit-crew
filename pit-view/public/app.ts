@@ -7,7 +7,7 @@ import { announcements } from './agent.ts'
 import { tickTimers, updateAgentCells } from './agentcell.ts'
 import { byId, setText } from './dom.ts'
 import { createDrawer } from './drawer.ts'
-import { drawerOpenerSelector, escapeApplies } from './drawerview.ts'
+import { closeOnOutsidePress, escapeApplies } from './drawerview.ts'
 import { clearFilters, cycleSort, initialControls, pressTile, setClosedRange, setFilter, setGrouped, setPageSearch, toggleSection } from './filters.ts'
 import type { ClosedRangeKey, Controls, Filters } from './filters.ts'
 import { parseTimeFormat, setTimeFormat } from './format.ts'
@@ -451,15 +451,12 @@ document.addEventListener('keydown', (event) => {
   if (applies && (drawer.escape() || sweepDrawer.escape())) event.preventDefault()
 })
 
-// a press outside the drawer closes it, with Escape's focus return. A press inside the drawer or its report panel is the drawer's own, and one on a control that opens a drawer is left to that control: another row's Agent cell switches this drawer to its row rather than closing and reopening it. A request on its way keeps the drawer open, as it does for Escape
+// a press outside the PR drawer or the sweep drawer closes it, with Escape's focus return, through the one handler both share (closeOnOutsidePress). A press inside the drawer or its report panel is the drawer's own, and one on a control that opens a drawer is left to that control: another row's Agent cell switches this drawer to its row rather than closing and reopening it. A request on its way keeps the drawer open, as it does for Escape
 const takesFocus = 'a[href], button, input, select, textarea, [tabindex], [contenteditable=""]'
 document.addEventListener('pointerdown', (event) => {
-  if (!drawer.isOpen()) return
+  if (!drawer.isOpen() && !sweepDrawer.isOpen()) return
   const target = event.target instanceof Element ? event.target : null
-  const closed = drawer.outside({
-    inPanel: target !== null && target.closest('#drawer, #report-panel') !== null,
-    opener: target !== null && target.closest(drawerOpenerSelector) !== null,
-  })
+  const closed = closeOnOutsidePress([drawer, sweepDrawer], target)
   // focus went back to the control that opened the drawer, as Escape's close does; a press on a control that takes focus outside is left to move it there, and a press on plain page area would only drop it on the body, so that press does not undo the return
   if (closed && (target === null || target.closest(takesFocus) === null)) event.preventDefault()
 }, { capture: true })

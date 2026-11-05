@@ -3,7 +3,7 @@
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
-import { focusKeySelector, mayMoveFocus, escapeTarget } from './drawerview.ts'
+import { focusKeySelector, mayMoveFocus, escapeTarget, outsidePressCloses } from './drawerview.ts'
 import { formatSince } from './format.ts'
 import type { ReportPanel } from './reportpanel.ts'
 import { sendRun } from './runapi.ts'
@@ -37,6 +37,8 @@ export type SweepDrawer = {
   update: () => void
   isOpen: () => boolean
   escape: () => boolean
+  // a press on the page: closes the drawer when the press starts outside it and its report panel, off the controls that open a drawer, and with no request on its way; false otherwise
+  outside: (where: { inPanel: boolean, opener: boolean }) => boolean
   focusKey: (key: string | null, force?: boolean) => void
 }
 
@@ -599,6 +601,11 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
       else if (target === 'confirm') cancelConfirm()
       else if (target === 'drawer') close()
       else return false
+      return true
+    },
+    outside: (where) => {
+      if (!isOpen || !outsidePressCloses({ ...where, busy })) return false
+      close()
       return true
     },
     focusKey,

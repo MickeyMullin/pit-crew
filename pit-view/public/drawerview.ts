@@ -914,5 +914,21 @@ export type OutsidePressState = { inPanel: boolean, opener: boolean, busy: boole
 
 export const outsidePressCloses = (press: OutsidePressState): boolean => !press.inPanel && !press.opener && !press.busy
 
+// the one page-level handler for a press outside a drawer, shared by the PR drawer and the sweep drawer: it asks whichever drawer is open and returns whether one closed. The panel selector names every surface whose press is a drawer's own, so a press in either drawer, a confirmation included, or in the report panel closes nothing
+export type PressTarget = { closest: (selector: string) => unknown }
+export type OutsideDrawer = { isOpen: () => boolean, outside: (where: { inPanel: boolean, opener: boolean }) => boolean }
+
+export const drawerPanelSelector = '#drawer, #sweep-drawer, #report-panel'
+
+export const closeOnOutsidePress = (drawers: readonly OutsideDrawer[], target: PressTarget | null): boolean => {
+  const where = {
+    inPanel: target !== null && target.closest(drawerPanelSelector) !== null,
+    opener: target !== null && target.closest(drawerOpenerSelector) !== null,
+  }
+  let closed = false
+  for (const open of drawers) if (open.isOpen() && open.outside(where)) closed = true
+  return closed
+}
+
 // the page's controls whose click opens a drawer: another row's Agent cell, the changes-requested banner's Open agent and Fix session buttons, and a sweep's broom or status
 export const drawerOpenerSelector = 'button[data-agent="open"][data-pr], button[data-open-agent], button[data-fix-session], button[data-sweep]'
