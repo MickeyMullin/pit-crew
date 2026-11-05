@@ -1594,6 +1594,9 @@ test('a fix session starts only on the viewer\'s own PR: fix-pr with Claude, nev
     assert.deepEqual([started.body.runner, started.body.command, started.body.args, started.body.label, started.body.tandem], ['claude', 'fix-pr', ['101'], 'Fix session', false])
     assert.match(lastWrite(h), /"\/fix-pr 101 --emit-json=[^"]+"/)
     assert.ok(!lastWrite(h).includes('--no-post'))
+    // the kind the page asks for reaches the spawn: a Fix session keeps the repository's git hooks
+    assert.equal(h.launch.children.at(-1)?.request.env.GIT_CONFIG_COUNT, '2')
+    assert.equal(h.launch.children.at(-1)?.request.env.GIT_CONFIG_KEY_2, undefined)
     assert.equal(githubCalls(h.runner).filter((call) => call.args[1] === 'user').length, 1)
     // one run per PR, whatever the kind
     assert.equal((await send(url(101), 'POST', { repo: scenario.repo }, token(h))).status, 409)

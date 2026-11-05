@@ -128,11 +128,15 @@ const callOf = async (dir: string): Promise<{ argv: string[], cwd: string, env: 
 const checkEnv = (env: Record<string, string>, home: string): void => {
   assert.equal(env.HOME, home)
   assert.equal(env.USER, 'tester')
-  // the child's own git fetch carries the launcher's credential config, and no agent socket
+  // the child's own git fetch carries the launcher's git config, and no agent socket
   assert.equal(env.GIT_CONFIG_KEY_0, 'url.https://github.com/.insteadOf')
   assert.equal(env.GIT_CONFIG_VALUE_0, 'git@github.com:')
   assert.equal(env.GIT_CONFIG_KEY_1, 'credential.helper')
   assert.equal(env.GIT_CONFIG_VALUE_1, '!gh auth git-credential')
+  // a review runs no git hook, whatever the clone's or the owner's config says
+  assert.equal(env.GIT_CONFIG_COUNT, '3')
+  assert.equal(env.GIT_CONFIG_KEY_2, 'core.hooksPath')
+  assert.equal(env.GIT_CONFIG_VALUE_2, '/dev/null')
   assert.equal(env.SSH_AUTH_SOCK, undefined)
   assert.ok(Object.keys(env).every((key) => !key.startsWith('CLAUDE') && !key.startsWith('ANTHROPIC')), Object.keys(env).join(', '))
 }

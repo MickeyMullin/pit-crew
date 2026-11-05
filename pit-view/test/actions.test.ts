@@ -1160,6 +1160,9 @@ test('an update starts update-pr with Claude in an agent session, bound to the h
     const child = h.launch.children[0]!
     assert.equal(child.request.command, 'claude')
     assert.match(JSON.parse(child.writes[0]!).message.content as string, new RegExp(`^/update-pr 101 --head=${body.headSha} --emit-json=\\S+$`))
+    // an Update session keeps the repository's git hooks, so its push runs a pre-push check
+    assert.equal(child.request.env.GIT_CONFIG_COUNT, '2')
+    assert.equal(child.request.env.GIT_CONFIG_KEY_2, undefined)
     // the account is checked once, by the launcher; Pit View itself writes nothing to GitHub
     assert.equal(userCalls(h.runner), 1)
     assert.equal(writesOf(h.runner).length, 0)
@@ -1295,6 +1298,9 @@ test('Resolve conflicts starts the Update session, update-pr with Claude bound t
     const child = h.launch.children[0]!
     assert.equal(child.request.command, 'claude')
     assert.match(JSON.parse(child.writes[0]!).message.content as string, new RegExp(`^/update-pr 101 --head=${body.headSha} --emit-json=\\S+$`))
+    // it is the Update session, so it keeps the repository's git hooks too
+    assert.equal(child.request.env.GIT_CONFIG_COUNT, '2')
+    assert.equal(child.request.env.GIT_CONFIG_KEY_2, undefined)
     assert.equal(userCalls(h.runner), 1)
     assert.equal(writesOf(h.runner).length, 0)
     // one run per PR, across Update and Resolve conflicts

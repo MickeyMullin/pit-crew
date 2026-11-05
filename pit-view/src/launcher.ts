@@ -511,7 +511,7 @@ export const runners: Readonly<Record<RunnerName, RunnerEntry>> = {
 export const childEnvKeys = ['USER', 'LOGNAME', 'SHELL', 'LANG', 'TMPDIR', 'PATH'] as const
 
 // a run's git traffic, and the credentials it carries: the command's own fetch runs inside the runner's sandbox, where an ssh identity cannot be unlocked (Codex refuses /dev/tty) and where depending on an agent's socket would make the run's success a property of what is listening outside it. Redirecting an SSH remote to HTTPS and letting gh's helper answer means no key, no socket, and no prompt is involved: the run authenticates with the same gh login the launcher already requires for its API reads, and the helper is asked for the token rather than given it
-export const gitConfigEnv = {
+const gitCredentialEnv = {
   GIT_CONFIG_COUNT: '2',
   GIT_CONFIG_KEY_0: 'url.https://github.com/.insteadOf',
   GIT_CONFIG_VALUE_0: 'git@github.com:',
@@ -519,8 +519,17 @@ export const gitConfigEnv = {
   GIT_CONFIG_VALUE_1: '!gh auth git-credential',
 } as const
 
-export const childEnv = (source: Readonly<Record<string, string | undefined>>, home: string): Record<string, string> => {
-  const env: Record<string, string> = { HOME: home, ...gitConfigEnv }
+// the commands whose sessions keep the repository's git hooks: they commit and push on the owner's behalf with prompts that never pass --no-verify, so the repository's own checks, a pre-push one included, are meant to run. The Resolve conflicts button runs update-pr, so it is here too. Nothing else belongs in this list: a command that is not exactly one of these runs no hook, so one nobody thought of never keeps them
+export const hooksKeptCommands: readonly string[] = ['fix-pr', 'update-pr']
+
+// a run's git config, written by the launcher and read by git after every config file, so no clone, global, or system setting overrides it: the credential pair for every run, and a third entry that points core.hooksPath at nothing for every run that does not keep its hooks. A hook in a directory a PR can write would otherwise run as the owner during a review's git commands, possibly before anything has read the PR (section 10 of DESIGN.md, Worktrees, Hooks)
+export const gitConfigEnv = (command: string): Readonly<Record<string, string>> =>
+  hooksKeptCommands.includes(command)
+    ? gitCredentialEnv
+    : { ...gitCredentialEnv, GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_2: 'core.hooksPath', GIT_CONFIG_VALUE_2: '/dev/null' }
+
+export const childEnv = (source: Readonly<Record<string, string | undefined>>, home: string, command: string): Record<string, string> => {
+  const env: Record<string, string> = { HOME: home, ...gitConfigEnv(command) }
   for (const key of childEnvKeys) {
     const value = source[key]
     if (value !== undefined && value !== '') env[key] = value
@@ -2345,7 +2354,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         command: invocation.command,
         args: invocation.args,
         cwd,
-        env: childEnv(options.env, home),
+        env: childEnv(options.env, home, run.command),
         stdoutPath: join(dir, 'stream.jsonl'),
         stderrPath: join(dir, 'stderr.log'),
         stdin: stdin === null ? 'ignore' : 'pipe',

@@ -128,21 +128,51 @@ test('the resume command starts in the run\'s folder; Codex\'s carries its model
   assert.equal(shellPath(`/tmp/it's`), `'/tmp/it'\\''s'`)
 })
 
-test('the child environment is built from scratch: home, user, shell, language, temp, PATH, and the git credential config only', () => {
+// the git entries a child's environment must carry, written out rather than read from the source: the credential pair every run gets, then the count and the third entry that turn hooks off
+const gitCredentials = {
+  GIT_CONFIG_KEY_0: 'url.https://github.com/.insteadOf',
+  GIT_CONFIG_VALUE_0: 'git@github.com:',
+  GIT_CONFIG_KEY_1: 'credential.helper',
+  GIT_CONFIG_VALUE_1: '!gh auth git-credential',
+}
+const gitHooksOff = { ...gitCredentials, GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_2: 'core.hooksPath', GIT_CONFIG_VALUE_2: '/dev/null' }
+const gitHooksKept = { ...gitCredentials, GIT_CONFIG_COUNT: '2' }
+
+test('the child environment is built from scratch: home, user, shell, language, temp, PATH, and the launcher\'s git config only', () => {
   const env = childEnv({
     PATH: '/opt/bin:/usr/bin', USER: 'tester', LOGNAME: 'tester', SHELL: '/bin/zsh', LANG: 'en_US.UTF-8', TMPDIR: '/tmp/x/',
-    HOME: '/elsewhere', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'desktop', ANTHROPIC_API_KEY: 'sk-fake', GH_TOKEN: 'gho_fake', SSH_AUTH_SOCK: '/var/run/com.apple.launchd.abc/Listeners', GIT_CONFIG_COUNT: '9', EMPTY: '',
-  }, '/home/tester')
+    HOME: '/elsewhere', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'desktop', ANTHROPIC_API_KEY: 'sk-fake', GH_TOKEN: 'gho_fake', SSH_AUTH_SOCK: '/var/run/com.apple.launchd.abc/Listeners', GIT_CONFIG_COUNT: '9', GIT_CONFIG_KEY_2: 'core.hooksPath', GIT_CONFIG_VALUE_2: '/tmp/hooks', EMPTY: '',
+  }, '/home/tester', 'review-pr')
   assert.deepEqual(env, {
     HOME: '/home/tester', USER: 'tester', LOGNAME: 'tester', SHELL: '/bin/zsh', LANG: 'en_US.UTF-8', TMPDIR: '/tmp/x/', PATH: '/opt/bin:/usr/bin',
-    ...gitConfigEnv,
+    ...gitHooksOff,
   })
   // no token, no agent socket: the run's git asks the helper for credentials instead of holding any
   assert.equal(Object.keys(env).includes('GH_TOKEN'), false)
   assert.equal(Object.keys(env).includes('SSH_AUTH_SOCK'), false)
-  // the git config is the launcher's, never the server's own
-  assert.equal(env.GIT_CONFIG_COUNT, '2')
-  assert.deepEqual(childEnv({ LANG: '' }, '/home/tester'), { HOME: '/home/tester', ...gitConfigEnv })
+  assert.deepEqual(childEnv({ LANG: '' }, '/home/tester', 'review-pr'), { HOME: '/home/tester', ...gitHooksOff })
+})
+
+test('a server\'s own git config reaches no child, hooks on or off: a session that keeps its hooks does not inherit a third entry', () => {
+  const server = { PATH: '/usr/bin', GIT_CONFIG_COUNT: '9', GIT_CONFIG_KEY_2: 'core.hooksPath', GIT_CONFIG_VALUE_2: '/tmp/hooks', GIT_CONFIG_KEY_8: 'a.b', GIT_CONFIG_VALUE_8: 'c' }
+  for (const command of ['fix-pr', 'update-pr']) assert.deepEqual(childEnv(server, '/home/tester', command), { HOME: '/home/tester', PATH: '/usr/bin', ...gitHooksKept }, command)
+  assert.deepEqual(childEnv(server, '/home/tester', 'review-pr'), { HOME: '/home/tester', PATH: '/usr/bin', ...gitHooksOff })
+})
+
+test('git hooks are off unless the command is exactly fix-pr or update-pr, so a command nobody listed never keeps them', () => {
+  for (const command of ['fix-pr', 'update-pr']) {
+    assert.deepEqual(gitConfigEnv(command), gitHooksKept, command)
+    assert.equal('GIT_CONFIG_KEY_2' in gitConfigEnv(command), false, command)
+    assert.equal('GIT_CONFIG_VALUE_2' in gitConfigEnv(command), false, command)
+  }
+  const off = [
+    'review-pr', 'review-dependabot', 'review-stack', 'review-dependabot-sweep',
+    // never launched today, and a future command nobody thought of
+    'review-local', 'some-future-command', '',
+    // a near miss is not the command, and an object's own property names are not commands either
+    'FIX-PR', 'fix-pr ', ' fix-pr', 'fix-pr 101', 'update-pr --head=abc', 'update', 'fix', '__proto__', 'constructor', 'toString',
+  ]
+  for (const command of off) assert.deepEqual(gitConfigEnv(command), gitHooksOff, JSON.stringify(command))
 })
 
 // default runs
@@ -633,6 +663,81 @@ const request = (number = 106, patch: Partial<StartRequest> = {}): StartRequest 
 
 const step = (name: string, state: string, at = '2026-10-26T14:06:00Z', note: string | null = null) => ({ at, step: name, state, note })
 
+test('each run kind the launcher starts is spawned with its own git hooks setting: every review, tandem, Codex, and unlisted one off, a Fix session, an Update session, and Resolve conflicts on', async () => {
+  const h = await harness()
+  try {
+    const head = 'a'.repeat(40)
+    const cases: Array<[string, StartRequest, Record<string, string>]> = [
+      ['Review', request(113, { label: 'Review' }), gitHooksOff],
+      ['Re-review', request(106), gitHooksOff],
+      ['Self-review', request(104, { args: ['104', '--no-post'], label: 'Self-review' }), gitHooksOff],
+      ['Self-review with the comments check', request(104, { args: ['104', '--no-post', '--check-comments'], label: 'Self-review' }), gitHooksOff],
+      ['a tandem review', request(106, { args: ['106', '--tandem'], label: 'Review in tandem', runner: 'claude' }), gitHooksOff],
+      ['a stack review', request(106, { command: 'review-stack', args: ['106'], label: 'Review stack' }), gitHooksOff],
+      ['a Dependabot review', request(114, { command: 'review-dependabot', args: ['114'], label: 'Review' }), gitHooksOff],
+      ['a Codex review', request(113, { label: 'Review', runner: 'codex' }), gitHooksOff],
+      ['a Codex stack review', request(106, { command: 'review-stack', args: ['106'], label: 'Review stack', runner: 'codex' }), gitHooksOff],
+      ['a command nobody listed', request(113, { command: 'some-future-command', args: ['113'], label: 'Something new' }), gitHooksOff],
+      ['Fix session', request(101, { command: 'fix-pr', args: ['101'], label: 'Fix session' }), gitHooksKept],
+      ['Update session', updateRequest(scenario.repo, 102, head), gitHooksKept],
+      ['Resolve conflicts', updateRequest(scenario.repo, 102, head, 'resolveConflicts'), gitHooksKept],
+    ]
+    for (const [name, start, entries] of cases) {
+      const before = h.launch.children.length
+      const run = await h.launcher.start(start)
+      const child = h.launch.children[before]!
+      assert.deepEqual(child.request.env, { HOME: h.home, USER: 'tester', LANG: 'en_US.UTF-8', PATH: '/usr/bin:/bin', ...entries }, name)
+      child.exit(0)
+      await h.launcher.settled(run.id)
+    }
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('every start a row offers gets the same answer through the launcher: hooks kept for its Fix session, off for all the rest', async () => {
+  const h = await harness()
+  try {
+    const seen = new Set<string>()
+    for (const number of [106, 104, 114, 113]) {
+      for (const option of startOptions(await prOf(number), baseConfig(), null, false)) {
+        const before = h.launch.children.length
+        const run = await h.launcher.start(request(number, { command: option.command, args: option.args, label: option.label, runner: 'claude' }))
+        const child = h.launch.children[before]!
+        assert.deepEqual(child.request.env, { HOME: h.home, USER: 'tester', LANG: 'en_US.UTF-8', PATH: '/usr/bin:/bin', ...(option.kind === 'fix' ? gitHooksKept : gitHooksOff) }, `#${number} ${option.kind}`)
+        seen.add(option.kind)
+        child.exit(0)
+        await h.launcher.settled(run.id)
+      }
+    }
+    assert.deepEqual([...seen].sort(), ['default', 'fix', 'tandem'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a review that waited in the queue starts with hooks off too, and a Fix session started while it waits keeps its own', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  try {
+    const running = await h.launcher.start(request(106))
+    const waiting = await h.launcher.start(request(113, { label: 'Review' }))
+    assert.equal(waiting.status, 'queued')
+    const fix = await h.launcher.start(request(101, { command: 'fix-pr', args: ['101'], label: 'Fix session' }))
+    assert.equal(fix.status, 'running')
+    assert.equal(h.launch.children[1]!.request.env.GIT_CONFIG_COUNT, '2')
+    h.launch.children[0]!.exit(0)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length === 3)
+    assert.deepEqual(h.launch.children[2]!.request.env, { HOME: h.home, USER: 'tester', LANG: 'en_US.UTF-8', PATH: '/usr/bin:/bin', ...gitHooksOff })
+    h.launch.children[1]!.exit(0)
+    h.launch.children[2]!.exit(0)
+    await h.launcher.settled(waiting.id)
+    await h.launcher.settled(fix.id)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a start checks gh\'s account, spawns Claude in cloneDir with a clean environment, and records request.json', async () => {
   const h = await harness()
   try {
@@ -643,8 +748,8 @@ test('a start checks gh\'s account, spawns Claude in cloneDir with a clean envir
     assert.equal(child.request.command, 'claude')
     assert.deepEqual(child.request.args, claudeInvocation(spec({ home: h.home, sessionId: '00000000-0000-4000-8000-000000000001' })).args)
     assert.equal(child.request.cwd, join(h.home, 'dev', 'orbit'))
-    // the git credential config rides along with the clean environment, so the child's own fetch works
-    assert.deepEqual(child.request.env, { HOME: h.home, ...gitConfigEnv, USER: 'tester', LANG: 'en_US.UTF-8', PATH: '/usr/bin:/bin' })
+    // the launcher's git config rides along with the clean environment, so the child's own fetch works and it runs no hook
+    assert.deepEqual(child.request.env, { HOME: h.home, ...gitHooksOff, USER: 'tester', LANG: 'en_US.UTF-8', PATH: '/usr/bin:/bin' })
     assert.equal(child.request.stdoutPath, join(runDir, 'stream.jsonl'))
     assert.equal(child.request.stderrPath, join(runDir, 'stderr.log'))
     assert.equal(child.request.stdin, 'pipe')

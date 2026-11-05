@@ -94,6 +94,26 @@ test('a sweep launches review-dependabot-sweep for the repo with --parallel 1 an
   }
 })
 
+test('a sweep runs no git hook on either runner: its child carries the launcher\'s third git entry', async () => {
+  const h = await harness()
+  try {
+    for (const runner of ['claude', 'codex'] as const) {
+      const before = h.launch.children.length
+      const sweep = await h.launcher.start(start(runner))
+      const child = h.launch.children[before]!
+      assert.deepEqual(
+        [child.request.env.GIT_CONFIG_COUNT, child.request.env.GIT_CONFIG_KEY_0, child.request.env.GIT_CONFIG_KEY_1, child.request.env.GIT_CONFIG_KEY_2, child.request.env.GIT_CONFIG_VALUE_2],
+        ['3', 'url.https://github.com/.insteadOf', 'credential.helper', 'core.hooksPath', '/dev/null'],
+        runner,
+      )
+      child.exit(0)
+      await h.launcher.settled(sweep.id)
+    }
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('Codex gets the same sweep as a $ skill, still serial and never --no-post', async () => {
   const h = await harness({ config: { agent: { runner: 'codex', claudeModel: 'sonnet' } } })
   try {
