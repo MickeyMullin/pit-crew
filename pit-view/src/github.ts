@@ -25,6 +25,8 @@ export type RawReviewRequest = { requestedReviewer: RawReviewer | null }
 export type RawReviewState = 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING'
 
 export type RawReview = {
+  // the number in the review's #pullrequestreview- anchor; absent from a row cached before it was fetched
+  databaseId?: number | null
   author: RawLogin | null
   state: RawReviewState
   // null only for a review still pending
@@ -300,8 +302,8 @@ createdAt updatedAt additions deletions changedFiles
 mergeable mergeStateStatus reviewDecision
 body
 reviewRequests(first: 50) { nodes { requestedReviewer { ${reviewerFields} } } }
-latestReviews(first: 50) { nodes { author { login } state submittedAt commit { oid } } }
-latestOpinionatedReviews(first: 50) { nodes { author { login } state submittedAt commit { oid } } }
+latestReviews(first: 50) { nodes { databaseId author { login } state submittedAt commit { oid } } }
+latestOpinionatedReviews(first: 50) { nodes { databaseId author { login } state submittedAt commit { oid } } }
 headCommit: commits(last: 1) {
   nodes {
     commit {
