@@ -284,3 +284,28 @@ test('the wrappers and the docs list the flag, and no other review prompt accept
     assert.ok(!(await read(`prompts/review/${other}.md`)).includes('--check-comments'), other)
   }
 })
+
+// the ordering rule for the shared-file flags: with more than one of them on the invocation, "before doing anything else" in each flag's bullet cannot all be literally first, so one rule says to read every named file first, in any order
+const orderingRule = '- **Ordering when flags combine.** When the invocation carries more than one of `--tandem`, `--emit-json`, and `--no-post`, read each named shared file in full before doing anything else, in any order, then apply each file\'s own opening step (the emit-json run-directory check, the flag removals) before resolving the target. Where a bullet below says to read its file "before doing anything else", that means before anything other than reading those files.'
+const pointer = 'With more than one of these flags, the ordering rule above applies.'
+
+test('every review prompt that takes more than one shared-file flag states the same ordering rule once, ahead of the flag bullets, and each flag bullet points at it', async () => {
+  const prompts: Record<string, string[]> = {
+    'review-pr': ['--tandem', '--emit-json=<run-dir>', '--no-post'],
+    'review-stack': ['--tandem', '--emit-json=<run-dir>'],
+    'review-dependabot': ['--emit-json=<run-dir>', '--no-post'],
+    'review-dependabot-sweep': ['--emit-json=<run-dir>', '--no-post'],
+  }
+  for (const [name, flags] of Object.entries(prompts)) {
+    const prompt = await read(`prompts/review/${name}.md`)
+    assert.equal(prompt.split(orderingRule).length - 1, 1, `${name}: the rule appears once`)
+    const ruleAt = prompt.indexOf(orderingRule)
+    for (const flag of flags) {
+      const bullet = lineFrom(prompt, `- If the invocation contains \`${flag}`)
+      assert.ok(prompt.indexOf(bullet) > ruleAt, `${name} ${flag}: the rule comes first`)
+      assert.ok(bullet.includes(pointer), `${name} ${flag}: points at the rule`)
+    }
+  }
+  // a prompt with one such flag has nothing to order
+  assert.ok(!(await read('prompts/review/review-local.md')).includes('Ordering when flags combine'))
+})

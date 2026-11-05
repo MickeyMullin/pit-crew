@@ -12,12 +12,13 @@ Re-reviews:
 
 Machine-readable output:
 
-- If the invocation contains `--emit-json=<run-dir>`, read `{{HOME}}/agents/prompts/review/emit-json.md` in full before doing anything else, check the run directory as it says, remove the flag, and resolve what remains under "Target" below. That file says what to write to `<run-dir>` and when; it changes nothing this prompt allows or requires. Without the flag, ignore it.
+- **Ordering when flags combine.** When the invocation carries more than one of `--tandem`, `--emit-json`, and `--no-post`, read each named shared file in full before doing anything else, in any order, then apply each file's own opening step (the emit-json run-directory check, the flag removals) before resolving the target. Where a bullet below says to read its file "before doing anything else", that means before anything other than reading those files.
+- If the invocation contains `--emit-json=<run-dir>`, read `{{HOME}}/agents/prompts/review/emit-json.md` in full before doing anything else, check the run directory as it says, remove the flag, and resolve what remains under "Target" below. That file says what to write to `<run-dir>` and when; it changes nothing this prompt allows or requires. Without the flag, ignore it. With more than one of these flags, the ordering rule above applies.
 - With the flag, record each step as `emit-json.md` describes, at the points this prompt marks. Record `resolveBase` `started` before resolving the PR. This prompt has no tandem mode, so `consolidate` is always recorded as skipped.
 
 No-post mode:
 
-- If the invocation contains `--no-post`, read `{{HOME}}/agents/prompts/review/no-post.md` in full before doing anything else, remove the flag, and resolve what remains under "Target" below. That file removes every GitHub write, and relaxes nothing else; where it and this prompt differ, it wins. This prompt has no fix mode, so the flag removes the post alone. Without the flag, ignore it.
+- If the invocation contains `--no-post`, read `{{HOME}}/agents/prompts/review/no-post.md` in full before doing anything else, remove the flag, and resolve what remains under "Target" below. That file removes every GitHub write, and relaxes nothing else; where it and this prompt differ, it wins. This prompt has no fix mode, so the flag removes the post alone. Without the flag, ignore it. With more than one of these flags, the ordering rule above applies.
 
 Target:
 
