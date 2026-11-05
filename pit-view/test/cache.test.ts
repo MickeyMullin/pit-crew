@@ -613,6 +613,27 @@ test('a version 9 cache lacks the event ids of the timeline, so its cached PRs a
   }
 })
 
+test('a version 11 cache lacks the database ids of the latest reviews, so its cached PRs are dropped and fetched again: its runs stay', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const created = first.createRun(newRun(106), (id) => `~/runs/${id}`)
+    first.close()
+    const old = new DatabaseSync(path)
+    old.exec('INSERT INTO prs (repo, number, state, updated_at, head_oid, fetched_at, cycle, last_seen_at, data) VALUES (\'octo-example/orbit\', 106, \'open\', \'2026-10-26T12:00:00Z\', \'abc\', \'2026-10-26T12:00:00Z\', 1, \'2026-10-26T12:00:00Z\', \'{"number":106}\')')
+    old.exec('UPDATE meta SET value = \'11\' WHERE key = \'schemaVersion\'')
+    old.close()
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.equal(count(cache, 'prs'), 0)
+    assert.equal(cache.getRun(created.id)?.id, created.id)
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
+    cache.close()
+  } finally {
+    await cleanup()
+  }
+})
+
 test('a version 7 cache gains runs.resolved_by_hand in place: its runs stay, not resolved by hand, and the flag is stored', async () => {
   const { dir, cleanup } = await tempDir()
   try {

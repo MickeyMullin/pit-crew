@@ -12,7 +12,7 @@ import { closedSortValues, mineSortValues, othersSortValues } from './filters.ts
 import type { Sort, SortValue } from './filters.ts'
 import { formatAge, formatClock, plural, shortSha } from './format.ts'
 import { hiddenHits, highlighted, hitsLine } from './pagesearch.ts'
-import { activityHref, reReviewHref } from './anchors.ts'
+import { activityHref, changesRequestedHref, reReviewHref } from './anchors.ts'
 import { safeHref } from './safeurl.ts'
 import { rowFreshness } from './state.ts'
 import { sweepLinkFor } from './sweepview.ts'
@@ -110,9 +110,10 @@ const titleCell = (aliasShown: boolean) => (row: OpenRow, { terms, queryTerms }:
   }
 }
 
-const issuesCell = (row: OpenRow): { sig: unknown, build: () => Node[] } => ({
-  sig: row.issues,
-  build: () => [h('span', { class: 'chips' }, row.issues.map(issueChip))],
+// the Changes requested chip links to the review that requested changes, or to the PR URL when its id is unknown
+const issuesCell = (row: OpenRow, { view }: CellContext): { sig: unknown, build: () => Node[] } => ({
+  sig: [row.issues, row.url, view.repo],
+  build: () => [h('span', { class: 'chips' }, row.issues.map((issue) => issueChip(issue, changesRequestedHref(issue.anchor, view.repo, row.number, row.url))))],
 })
 
 // the stale dot sits before the age, and a muted age carries its reason; color is never the only sign

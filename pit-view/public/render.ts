@@ -4,6 +4,7 @@
 import type { ClosedRange, ClosedRow, MineRow, OtherRow } from '../src/derive.ts'
 import type { View } from '../src/poller.ts'
 import { fixStart } from './agent.ts'
+import { changesRequestedHref } from './anchors.ts'
 import { avatar, icons } from './cells.ts'
 import { closedSummary, mondayNote, rangeButtons } from './closed.ts'
 import { byId, h, newTab, setText, svg, sync } from './dom.ts'
@@ -190,9 +191,10 @@ const renderBanner = (frame: Frame, terms: readonly string[]): void => {
     // the Fix session sits beside Open agent while the row offers one, available or not
     const fix = fixStart(row.agent) !== null
     const hits = hiddenHits(terms, row, { tickets: true, alias: false })
+    const reviewHref = changesRequestedHref(row.changesRequested?.anchor, frame.view.repo, row.number, row.url)
     return {
       key: `pr-${row.number}`,
-      sig: JSON.stringify([who, age, row.url, row.title, phrase, fix, terms, hits]),
+      sig: JSON.stringify([who, age, row.url, reviewHref, row.title, phrase, fix, terms, hits]),
       build: () => h('li', { class: 'banner-entry' },
         h('span', { class: 'banner-text' },
           h('span', { class: 'banner-lead' }, `${who} requested changes on `, h('a', { ...newTab, href: safeHref(row.url) }, highlighted(`#${row.number}`, terms)), age === null ? '' : ` · ${age} ago`),
@@ -212,7 +214,7 @@ const renderBanner = (frame: Frame, terms: readonly string[]): void => {
             'data-focus-key': `banner-fix:${row.number}`,
             'aria-label': `Fix session for #${row.number}`,
           }, 'Fix session') : null,
-          h('a', { ...newTab, class: 'button button-danger', href: safeHref(row.url) }, 'Open review'))),
+          h('a', { ...newTab, class: 'button button-danger', href: safeHref(reviewHref) }, 'Open review'))),
     }
   })
   let banner = slot.firstElementChild

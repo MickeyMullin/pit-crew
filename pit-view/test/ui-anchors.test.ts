@@ -2,7 +2,7 @@
 // the links from Last activity and from "push since yours" to the GitHub event they describe: built from a plain owner/name repository, a PR number, and a digits-only or hex-only id, and null for anything else, so the page falls back to the PR URL
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { activityHref, pushHref, reReviewHref } from '../public/anchors.ts'
+import { activityHref, changesRequestedHref, pushHref, reReviewHref } from '../public/anchors.ts'
 import { safeHref } from '../public/safeurl.ts'
 
 const repo = 'octo-example/orbit'
@@ -40,4 +40,14 @@ test('the Re-review flag links to the first commit after the review, and to the 
   assert.equal(reReviewHref(null, repo, 101, pr), pr)
   assert.equal(reReviewHref('9f8e7d6/../x', repo, 101, pr), pr)
   assert.equal(reReviewHref('9f8e7d6', 'not a repo', 101, pr), pr)
+})
+
+test('the Changes requested banner and chip link to the review that requested changes, and to the PR URL when its id is unknown', () => {
+  const review = { kind: 'review', id: '5500456' } as const
+  assert.equal(changesRequestedHref(review, repo, 101, pr), `${pr}#pullrequestreview-5500456`)
+  assert.equal(safeHref(changesRequestedHref(review, repo, 101, pr)), `${pr}#pullrequestreview-5500456`)
+  assert.equal(changesRequestedHref(null, repo, 101, pr), pr)
+  assert.equal(changesRequestedHref(undefined, repo, 101, pr), pr)
+  assert.equal(changesRequestedHref({ kind: 'review', id: '12x' }, repo, 101, pr), pr)
+  assert.equal(changesRequestedHref(review, undefined, 101, pr), pr)
 })

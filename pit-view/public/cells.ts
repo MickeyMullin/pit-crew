@@ -48,8 +48,8 @@ const issueTones: Record<IssueKind, Tone> = {
 }
 
 // a failing check links to its job run, with the job name as its tooltip
-export const issueChip = (issue: Issue): HTMLElement => {
-  const href = safeHref(issue.url)
+export const issueChip = (issue: Issue, reviewHref?: string): HTMLElement => {
+  const href = safeHref(issue.kind === 'changesRequested' ? reviewHref : issue.url)
   if (href === null) return chip(issue.label, issueTones[issue.kind])
   return h('a', { ...newTab, class: `chip chip-link tone-${issueTones[issue.kind]}`, href, title: issue.tip ?? null },
     issue.label, svg(icons.external, { size: 10, stroke: '2.6' }))

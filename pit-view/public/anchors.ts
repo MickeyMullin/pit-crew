@@ -25,3 +25,6 @@ export const activityHref = (anchor: ActivityAnchor | null | undefined, repo: st
 
 // the Re-review flag's link: the first commit after the viewer's review when the flag names one, otherwise the PR URL
 export const reReviewHref = (sinceSha: string | null | undefined, repo: string | undefined, number: number, url: string): string => pushHref(sinceSha, repo, number) ?? url
+
+// the Changes requested banner's and chip's link: the review that requested changes, otherwise the PR URL when its id is unknown
+export const changesRequestedHref = (anchor: ActivityAnchor | null | undefined, repo: string | undefined, number: number, url: string): string => activityHref(anchor, repo, number) ?? url

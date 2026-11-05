@@ -27,7 +27,8 @@ export type Ticket = { system: string, label: string, url?: string }
 export type Stack = { position: number, size: number }
 
 export type IssueKind = 'changesRequested' | 'conflicts' | 'ciFailing' | 'ciRunning' | 'ciCanceled' | 'ciNotRun'
-export type Issue = { kind: IssueKind, label: string, count?: number, url?: string, tip?: string }
+// anchor is the Changes requested chip's link: the review that requested changes, when its id is known
+export type Issue = { kind: IssueKind, label: string, count?: number, url?: string, tip?: string, anchor?: ActivityAnchor }
 
 export type MergeStateKind = 'ready' | 'needsReview' | 'needsApproval' | 'checking' | 'blocked' | 'draft'
 export type MergeState = { state: MergeStateKind, label: string }
@@ -94,7 +95,8 @@ export type SelfReview = {
 }
 
 // the latest changes-requested review, for the Mine call-out banner and its tile
-export type ChangesRequestedBy = { login: string, alias: string, at: string }
+// anchor is that review's { kind: 'review', id }, or null when the fetched data has no id for it (a row cached before version 12)
+export type ChangesRequestedBy = { login: string, alias: string, at: string, anchor: ActivityAnchor | null }
 
 export type MineRow = PrBase & {
   section: 'mine'
@@ -335,7 +337,10 @@ const contextsOf = (pr: RawOpenPr): RawCheckContext[] => pr.headCommit.nodes[0]?
 
 export const deriveIssues = (pr: RawOpenPr): Issue[] => {
   const issues: Issue[] = []
-  if (pr.reviewDecision === 'CHANGES_REQUESTED') issues.push({ kind: 'changesRequested', label: 'Changes requested' })
+  if (pr.reviewDecision === 'CHANGES_REQUESTED') {
+    const anchor = databaseAnchor('review', latestChangesRequest(pr)?.databaseId)
+    issues.push(anchor === null ? { kind: 'changesRequested', label: 'Changes requested' } : { kind: 'changesRequested', label: 'Changes requested', anchor })
+  }
   if (pr.mergeable === 'CONFLICTING') issues.push({ kind: 'conflicts', label: 'Conflicts' })
   const contexts = contextsOf(pr)
   const failing = contexts.filter(isFailing)
@@ -398,7 +403,7 @@ const changesRequestedBy = (pr: RawOpenPr, config: Config): ChangesRequestedBy |
   const review = latestChangesRequest(pr)
   if (pr.reviewDecision !== 'CHANGES_REQUESTED' || review === undefined || review.submittedAt === null) return null
   const login = review.author?.login ?? ghost
-  return { login, alias: aliasOf(login, config), at: review.submittedAt }
+  return { login, alias: aliasOf(login, config), at: review.submittedAt, anchor: databaseAnchor('review', review.databaseId) }
 }
 
 // ready to merge: merge state ready, or approved with no issue chips while GitHub is still checking

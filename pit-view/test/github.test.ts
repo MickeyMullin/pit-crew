@@ -244,8 +244,8 @@ test('the queries name the operations the fixtures are keyed by', () => {
 
 test('the open list and the one-PR refresh both ask for the reviews a re-request leaves out of latestReviews', () => {
   for (const query of [openPrsQuery, singlePrQuery]) {
-    assert.match(query, /latestReviews\(first: 50\) \{ nodes \{ author \{ login \} state submittedAt commit \{ oid \} \} \}/)
-    assert.match(query, /latestOpinionatedReviews\(first: 50\) \{ nodes \{ author \{ login \} state submittedAt commit \{ oid \} \} \}/)
+    assert.match(query, /latestReviews\(first: 50\) \{ nodes \{ databaseId author \{ login \} state submittedAt commit \{ oid \} \} \}/)
+    assert.match(query, /latestOpinionatedReviews\(first: 50\) \{ nodes \{ databaseId author \{ login \} state submittedAt commit \{ oid \} \} \}/)
   }
 })
 

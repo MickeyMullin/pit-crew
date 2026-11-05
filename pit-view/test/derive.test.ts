@@ -301,7 +301,7 @@ test('mine groups and stages', async () => {
   assert.deepEqual(await stage(120), ['awaitingReview', 'approved'])
   assert.deepEqual(await stage(104), ['awaitingReview', 'awaitingReview'])
   assert.deepEqual(await stage(103), ['drafts', 'draft'])
-  assert.deepEqual((await mine(101)).changesRequested, { login: 'alex-mendez', alias: 'Alex', at: '2026-10-25T22:14:00Z' })
+  assert.deepEqual((await mine(101)).changesRequested, { login: 'alex-mendez', alias: 'Alex', at: '2026-10-25T22:14:00Z', anchor: null })
   assert.equal((await mine(102)).changesRequested, null)
   assert.equal('flags' in await mine(101), false)
 })
@@ -369,7 +369,7 @@ test('an answered changes request keeps GitHub\'s decision as the chip, the revi
   for (const pr of [pushed, reRequested]) {
     const found = mineOf(pr)
     assert.equal(found.issues[0]?.kind, 'changesRequested')
-    assert.deepEqual(found.changesRequested, { login: 'alex-mendez', alias: 'Alex', at: '2026-10-25T22:14:00Z' })
+    assert.deepEqual(found.changesRequested, { login: 'alex-mendez', alias: 'Alex', at: '2026-10-25T22:14:00Z', anchor: null })
   }
   // the pip keeps its ✗ after a push; a re-requested reviewer shows as requested, as every pip does
   assert.equal(mineOf(pushed).reviewers.find((pip) => pip.login === 'alex-mendez')?.state, 'changes')
@@ -730,7 +730,7 @@ test('on yours, a change request only in latestOpinionatedReviews is answered by
   const placed = (pr: RawOpenPr) => [mineOf(pr).group, mineOf(pr).stage]
   // not re-requested: still the viewer's move, with the reviewer named
   assert.deepEqual(placed(dropped), ['changesRequested', 'changesRequested'])
-  assert.deepEqual(mineOf(dropped).changesRequested, { login: 'alex-mendez', alias: 'Alex', at: '2026-10-25T22:14:00Z' })
+  assert.deepEqual(mineOf(dropped).changesRequested, { login: 'alex-mendez', alias: 'Alex', at: '2026-10-25T22:14:00Z', anchor: null })
   // re-requested: the PR waits on its reviewer, as it would with the review in latestReviews
   assert.deepEqual(placed(requesting(dropped, 'alex-mendez')), ['awaitingReview', 'reReviewRequested'])
   assert.equal(mineOf(requesting(dropped, 'alex-mendez')).reviewers.find((pip) => pip.login === 'alex-mendez')?.state, 'requested')
@@ -790,7 +790,7 @@ test('a later comment from a reviewer who requested changes keeps the change req
   const pip = (pr: RawOpenPr) => mineOf(pr).reviewers.find((found) => found.login === 'alex-mendez')?.state
   assert.equal(pip(commented), 'changes')
   assert.deepEqual([mineOf(commented).group, mineOf(commented).stage], ['changesRequested', 'changesRequested'])
-  assert.deepEqual(mineOf(commented).changesRequested, { login: 'alex-mendez', alias: 'Alex', at: '2026-10-25T22:14:00Z' })
+  assert.deepEqual(mineOf(commented).changesRequested, { login: 'alex-mendez', alias: 'Alex', at: '2026-10-25T22:14:00Z', anchor: null })
   // a push past the change request still answers it, and so does a re-request
   const pushedAfter = commentedAfter(pushed, 'alex-mendez', '2026-10-25T23:00:00Z')
   assert.deepEqual([mineOf(pushedAfter).group, mineOf(pushedAfter).stage], ['awaitingReview', 'updatedNotRequested'])
@@ -911,4 +911,21 @@ test('the attention comparator is a total order across groups, with Your move ro
   const forward = [...input].sort(attentionOrder).map((entry) => entry.number)
   assert.deepEqual(forward, [4, 3, 5, 1, 2])
   assert.deepEqual([...input].reverse().sort(attentionOrder).map((entry) => entry.number), forward)
+})
+
+test('the Changes requested banner and chip carry the anchor of the review that requested changes, and none when its id is unknown', async () => {
+  const pr = find(await page1(), 101)
+  const withId = (id: number | undefined): RawOpenPr => {
+    const tag = (review: RawOpenPr['latestReviews']['nodes'][number]) => review.state === 'CHANGES_REQUESTED' ? { ...review, databaseId: id } : review
+    return { ...pr, latestReviews: { nodes: pr.latestReviews.nodes.map(tag) }, latestOpinionatedReviews: { nodes: pr.latestOpinionatedReviews.nodes.map(tag) } }
+  }
+  const rowOf = (raw: RawOpenPr): MineRow => deriveOpenRow(raw, ctx(), deriveStacks([], null)) as MineRow
+  const found = rowOf(withId(5500456))
+  assert.deepEqual(found.changesRequested?.anchor, { kind: 'review', id: '5500456' })
+  assert.deepEqual(found.issues.find((issue) => issue.kind === 'changesRequested')?.anchor, { kind: 'review', id: '5500456' })
+  // a row cached before the id was fetched has none, so the page links to the PR URL
+  const old = rowOf(withId(undefined))
+  assert.equal(old.changesRequested?.anchor, null)
+  assert.equal(old.issues.find((issue) => issue.kind === 'changesRequested')?.anchor ?? null, null)
+  assert.equal(old.changesRequested?.login, 'alex-mendez')
 })
