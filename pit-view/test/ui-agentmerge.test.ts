@@ -6,6 +6,8 @@ import { cellModel, showsMerge } from '../public/agent.ts'
 import type { AgentCell } from '../public/agent.ts'
 import { agentCellNodes, agentCellSig } from '../public/agentcell.ts'
 import { actionHolds } from '../public/actionsview.ts'
+import { mineColumns, othersColumns } from '../public/tables.ts'
+import type { CellContext } from '../public/tables.ts'
 
 type Fake = { tag: string, attrs: Map<string, string>, children: Fake[], text?: string, setAttribute: (name: string, value: string) => void, appendChild: (child: Fake) => Fake }
 const fakeElement = (tag: string, text?: string): Fake => {
@@ -97,4 +99,43 @@ test('a merge confirmation opened from the cell is dropped by the existing rule 
   const ready = { section: 'mine', merge: { state: 'ready' }, primaryBase: true, issues: [], headSha: 'a'.repeat(40), baseRef: 'main' } as unknown as Parameters<typeof actionHolds>[1]
   assert.equal(actionHolds(ask, ready, true), true)
   assert.equal(actionHolds(ask, { ...ready, merge: { state: 'blocked' } } as typeof ready, true), false)
+})
+
+// the table's own Agent column, given the row shape the table receives: the live label is pinned here, through the column's `sig` and the nodes `build()` returns, not through the helpers
+const columnCell = (kind: 'mine' | 'others') => {
+  const column = (kind === 'mine' ? mineColumns(true) : othersColumns(true)).find((candidate) => candidate.key === 'agent')!
+  const ctx = { view: { sweeps: { items: [] } }, nowMs: now, paused: false, terms: [], queryTerms: [] } as unknown as CellContext
+  return (tableRow: object) => {
+    const cell = (column.cell as (r: unknown, c: CellContext) => { sig: unknown, build: () => Node[] })(tableRow, ctx)
+    const nodes = cell.build() as unknown as Fake[]
+    const button = nodes[0]!.children[0]!
+    return { sig: JSON.stringify(cell.sig), name: button.attrs.get('aria-label'), ask: button.attrs.get('data-agent-ask'), text: button.children[0]?.text }
+  }
+}
+const tableRow = (patch: object = {}) => ({ number: 101, headOid: 'a'.repeat(40), section: 'mine', merge: { state: 'ready' }, primaryBase: true, agent: selfReview(), ...patch })
+
+test('the Mine table\'s Agent column flips between Self-review and Merge as the row becomes and stops being ready', () => {
+  const cell = columnCell('mine')
+  const idle = cell(tableRow({ merge: { state: 'pending' } }))
+  const ready = cell(tableRow())
+  assert.equal(idle.name, 'Self-review #101: open agent')
+  assert.equal(idle.ask, undefined)
+  assert.equal(ready.name, 'Merge #101: open agent')
+  assert.equal(ready.ask, 'merge')
+  assert.equal(ready.text, 'Merge')
+  // the signature differs, so the keyed render rebuilds the cell on the next patch, both ways
+  assert.notEqual(ready.sig, idle.sig)
+  // a new push, a change request, a base change: each takes Merge away again
+  for (const patch of [{ merge: { state: 'blocked' } }, { merge: { state: 'conflicts' } }, { primaryBase: false }]) {
+    const stopped = cell(tableRow(patch))
+    assert.equal(stopped.name, 'Self-review #101: open agent', JSON.stringify(patch))
+    assert.notEqual(stopped.sig, ready.sig, JSON.stringify(patch))
+    assert.equal(stopped.sig, idle.sig, JSON.stringify(patch))
+  }
+})
+
+test('the Others table\'s Agent column never shows Merge', () => {
+  const stays = columnCell('others')(tableRow({ section: 'others' }))
+  assert.equal(stays.name, 'Self-review #101: open agent')
+  assert.equal(stays.ask, undefined)
 })
