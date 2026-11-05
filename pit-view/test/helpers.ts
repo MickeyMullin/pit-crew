@@ -157,6 +157,51 @@ export const gate = (): Gate => {
 // the gh api calls a runner has answered: every one of them reached GitHub
 export const githubCalls = (fake: FakeRunner): Call[] => fake.calls.filter((call) => call.args[0] === 'api')
 
+// waiting on what the launchers do in the background
+
+// the queue starts its next review in the background; wait for what it does, a short while at most
+export const waitFor = async (done: () => boolean, ms = 2000): Promise<void> => {
+  const until = Date.now() + ms
+  while (!done()) {
+    if (Date.now() > until) throw new Error('timed out waiting for the queue')
+    await new Promise((resolveWait) => setTimeout(resolveWait, 5))
+  }
+}
+
+// a gate a fake dependency waits at once the test arms it, each wait held until the test opens it
+export const armedGate = () => {
+  const held: (() => void)[] = []
+  let armed = 0
+  return {
+    arm: (count = 1): void => {
+      armed += count
+    },
+    wait: async (): Promise<void> => {
+      if (armed === 0) return
+      armed -= 1
+      await new Promise<void>((resolveHeld) => held.push(resolveHeld))
+    },
+    held: (): number => held.length,
+    open: (index: number): void => held[index]!(),
+  }
+}
+
+// a gh whose account lookups wait at the gate, answering with whoever login names
+export const gatedGh = (accounts: ReturnType<typeof armedGate>, login: { current: string }): FakeRunner => fakeRunner(async (args) => {
+  if (args[0] !== 'api') return ok('gho_fixture_token\n')
+  await accounts.wait()
+  return ok(`${login.current}\n`)
+})
+
+// long enough for a start the queue let go to reach its spawn, had it been let go
+export const quiet = (): Promise<void> => new Promise((resolveWait) => setTimeout(resolveWait, 50))
+
+// what a promise settles to, failing the test if it has not settled within a short while
+export const within = <V>(promise: Promise<V>, ms = 2000): Promise<V> => Promise.race([
+  promise,
+  new Promise<never>((_resolveLate, rejectLate) => setTimeout(() => rejectLate(new Error('timed out waiting for the queue')), ms)),
+])
+
 // launching runs with nothing real behind it: no runner, no ps, no signals reach a process
 
 export type FakeChild = {

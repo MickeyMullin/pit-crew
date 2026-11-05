@@ -15,7 +15,7 @@ import { stepTitle } from '../public/agent.ts'
 import { setTimeFormat } from '../public/format.ts'
 import { applyPatch } from '../public/state.ts'
 import {
-  defaultSweepRunner, shownSweep, sweepAnnounceKey, sweepAnnouncement, sweepCards, sweepConfirmModel, sweepConfirmSignature, sweepHeaderModel, sweepLinkFor, sweepList, sweepListSignature,
+  defaultSweepRunner, shownSweep, sweepAnnounceKey, sweepAnnouncement, sweepCards, sweepConfirmModel, sweepConfirmSignature, sweepHeaderModel, sweepLinkFor, sweepList, sweepListSignature, sweepQueuedModel,
   sweepResultModel, sweepRowModel, sweepRunningModel, sweepStartRequest, sweepStopModel, sweepStopRequest, sweepTone, sweepWaitingModel,
 } from '../public/sweepview.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -379,4 +379,78 @@ test('the Earlier sweeps signature is stable for one list and follows which swee
 test('the drawer keys the Earlier sweeps list on that signature', async () => {
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'sweepdrawer.ts'), 'utf8')
   assert.match(source, /key: 'list',\s+sig: sweepListSignature\(view\.items, current\?\.id \?\? null\)/)
+})
+
+// a sweep waiting in the one review queue (section 8, Launching runs, Review cap), wherever a queued review would show
+
+const queuedSweep = (patch: Partial<Sweep> = {}): SweepView => sweepView(record({ status: 'queued', pid: null, pidStartedAt: null, resume: null, sessionId: null, startedAt: '2026-10-26T17:56:00Z', ...patch }))
+
+test('the drawer and the table draw a queued sweep from the same models: its card, Remove from queue, the server\'s button text, and the waiting age that ticks', async () => {
+  const drawer = await readFile(join(import.meta.dirname, '..', 'public', 'sweepdrawer.ts'), 'utf8')
+  assert.match(drawer, /sweepQueuedModel\(/)
+  assert.match(drawer, /Remove from queue/)
+  assert.match(drawer, /view\.start\.button/)
+  assert.match(drawer, /data-sweep-queued/)
+  const tables = await readFile(join(import.meta.dirname, '..', 'public', 'tables.ts'), 'utf8')
+  assert.match(tables, /data-sweep-queued/)
+})
+
+const waitingView = (items: SweepView[]): SweepsView => ({ start: sweepStartOf(config(), items.some((sweep) => sweep.status === 'running' || sweep.status === 'queued'), true), items })
+
+test('Run sweep reads Queue sweep while a sweep would wait, from the server\'s answer, in the label and the accessible name', () => {
+  const model = sweepHeaderModel(waitingView([]), now)
+  assert.deepEqual(model.start, { label: 'Queue sweep', name: `Queue a Dependabot sweep of ${scenario.repo}`, disabled: false, reason: null })
+  // with room it reads as it always did
+  assert.equal(sweepHeaderModel(viewOf([]), now).start.label, 'Run sweep')
+  // the confirmation is unchanged, as a review's is: what a click does is the same
+  assert.equal(sweepConfirmModel(sweepStartOf(config(), false, true), 'claude').confirm, 'Start sweep')
+  assert.equal(sweepConfirmSignature(sweepStartOf(config(), false, true), 'claude'), sweepConfirmSignature(sweepStartOf(config(), false), 'claude'))
+})
+
+test('the group header shows a queued sweep as queued, with how long it has waited, and a second sweep is unavailable', () => {
+  const queued = queuedSweep()
+  const model = sweepHeaderModel(waitingView([queued]), now)
+  assert.equal(model.start.disabled, true)
+  assert.match(model.start.reason ?? '', /already in flight/)
+  assert.deepEqual([model.status?.label, model.status?.tone, model.status?.queued, model.status?.running, model.status?.text], ['Sweep', 'blue', true, false, 'Sweep queued 4m'])
+  assert.equal(model.status?.name, 'Open the queued Dependabot sweep')
+  // its label holds nothing that moves with the clock
+  assert.equal(sweepHeaderModel(waitingView([queued]), now + 60_000).status?.label, model.status?.label)
+  assert.equal(sweepHeaderModel(waitingView([queued]), now + 60_000).status?.text, 'Sweep queued 5m')
+  // a running sweep is not queued
+  assert.equal(sweepHeaderModel(viewOf([sweepView(record())]), now).status?.queued, false)
+})
+
+test('the sweep drawer has a Queued card for a queued sweep: what waits, why, and no step bar or Stop', () => {
+  const queued = queuedSweep()
+  assert.deepEqual(sweepCards(queued), ['queued'])
+  const model = sweepQueuedModel(queued)
+  assert.equal(model.runnerLabel, 'Claude Code')
+  assert.match(model.note, /^Waiting for a review slot: it starts by itself when an earlier review or sweep ends, in the order it was queued\.$/)
+  assert.equal(queued.text, null)
+  assert.equal(queued.result, null)
+})
+
+test('removing a queued sweep asks first, in queue words, and is sent as a stop of that sweep', () => {
+  const stop = sweepStopModel(queuedSweep())
+  assert.deepEqual([stop.heading, stop.detail, stop.confirm, stop.busy], [`Remove the sweep of ${scenario.repo} from the queue?`, 'Dependabot sweep in Claude Code', 'Remove from queue', 'Removing…'])
+  assert.match(stop.effect, /has not started, so nothing ran and nothing was posted/)
+  assert.match(stop.effect, /list of sweeps as stopped/)
+  // a running sweep's is unchanged
+  assert.equal(sweepStopModel(sweepView(record())).confirm, 'Stop sweep')
+  assert.equal(sweepStopRequest(1, 'tok-1').url, '/api/sweeps/1/stop')
+})
+
+test('the list of sweeps, the announcement, and the tone read a queued sweep as queued, never done', () => {
+  const queued = queuedSweep()
+  assert.equal(sweepList([queued], 1)[0]?.text, 'Queued')
+  assert.equal(sweepTone(queued), 'blue')
+  assert.equal(sweepAnnouncement([queued]), `Dependabot sweep of ${scenario.repo} queued`)
+  assert.notEqual(sweepAnnounceKey([queued]), sweepAnnounceKey([sweepView(record())]))
+  // a sweep that never ran links no PR
+  assert.equal(sweepLinkFor([queued], 201, sweepHead201), null)
+  // a queued sweep that failed at a restart reads as a failure
+  const failed = sweepView(record({ status: 'failed', note: 'serverRestarted: it was still queued, so it never started', finishedAt: '2026-10-26T17:58:00Z' }))
+  assert.equal(failed.text, 'Failed · server restarted')
+  assert.deepEqual(sweepCards(failed), ['result'])
 })

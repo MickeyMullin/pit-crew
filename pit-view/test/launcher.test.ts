@@ -12,7 +12,7 @@ import type { OpenRow } from '../src/derive.ts'
 import { createGh } from '../src/github.ts'
 import type { RawOpenPr } from '../src/github.ts'
 import {
-  agentCell, childEnv, claudeInvocation, codexInvocation, codexNote, createLauncher, defaultRun, descendantGroups, doneText, emptyStream, gitConfigEnv,
+  agentCell, childEnv, claudeInvocation, codexInvocation, codexNote, createLauncher, createReviewLine, defaultRun, descendantGroups, doneText, emptyStream, gitConfigEnv,
   emptySteps, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, remoteNamesRepo,
   noteKind, requestText, reviewFits, runners, runView, shellPath, startOptions, stepsOf, updateRequest,
 } from '../src/launcher.ts'
@@ -22,7 +22,7 @@ import { scanReports } from '../src/reports.ts'
 import type { Patch } from '../src/poller.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { sweepRequest } from '../src/sweeps.ts'
-import { fakeLaunch, fakeRemotes, fakeRunner, fakeTime, fixCommits, fixHead, fixPushedHead, fixRequest, fixResult, fixtureRunner, ok, openPage1, openPage2, reviewResult, tempDir, updateHead, updateResult } from './helpers.ts'
+import { fakeLaunch, fakeRemotes, fakeRunner, fakeTime, fixCommits, armedGate as gate, gatedGh, quiet, waitFor, within, fixHead, fixPushedHead, fixRequest, fixResult, fixtureRunner, ok, openPage1, openPage2, reviewResult, tempDir, updateHead, updateResult } from './helpers.ts'
 import type { FakeLaunch, FakeRunner } from './helpers.ts'
 
 const second = 1000
@@ -646,7 +646,7 @@ const harness = async ({ config = {}, launch = fakeLaunch(), gh = fixtureRunner(
     newSessionId: launch.deps.newSessionId,
     onWatch: (run) => watched.push(run.id),
     onChange,
-    ...(onQueueing === undefined ? {} : { onQueueing }),
+    line: createReviewLine({ config: () => settings.current, timers: time.timers, ...(onQueueing === undefined ? {} : { onQueueing }) }),
   })
   const launcher = make()
   const report = (number: number): Promise<void> => writeFile(join(home, 'agents', 'output', `PR-${number}.md`), 'Reviewed commit: `x` @ `f00dfac`\n')
@@ -1155,15 +1155,6 @@ test('a run that cannot spawn fails as spawnFailed and frees its PR', async () =
 
 // the cap on concurrent reviews (section 8, Launching runs, Review cap)
 
-// the queue starts its next review in the background; wait for what it does, a short while at most
-const waitFor = async (done: () => boolean, ms = 2000): Promise<void> => {
-  const until = Date.now() + ms
-  while (!done()) {
-    if (Date.now() > until) assert.fail('timed out waiting for the queue')
-    await new Promise((resolveWait) => setTimeout(resolveWait, 5))
-  }
-}
-
 test('a review fits while the reviews in flight, less one self-review when the setting allows it, stay within the cap', () => {
   const others = (count: number): ('review' | 'selfReview')[] => Array.from({ length: count }, () => 'review')
   assert.equal(reviewFits([], 'review', 1, false), true)
@@ -1422,40 +1413,6 @@ test('a queued review starts only for the repository and viewer it was confirmed
   }
 })
 
-// a gate a fake dependency waits at once the test arms it, each wait held until the test opens it
-const gate = () => {
-  const held: (() => void)[] = []
-  let armed = 0
-  return {
-    arm: (count = 1): void => {
-      armed += count
-    },
-    wait: async (): Promise<void> => {
-      if (armed === 0) return
-      armed -= 1
-      await new Promise<void>((resolveHeld) => held.push(resolveHeld))
-    },
-    held: (): number => held.length,
-    open: (index: number): void => held[index]!(),
-  }
-}
-
-// a gh whose account lookups wait at the gate, answering with whoever login names
-const gatedGh = (accounts: ReturnType<typeof gate>, login: { current: string }): FakeRunner => fakeRunner(async (args) => {
-  if (args[0] !== 'api') return ok('gho_fixture_token\n')
-  await accounts.wait()
-  return ok(`${login.current}\n`)
-})
-
-// long enough for a start the queue let go to reach its spawn, had it been let go
-const quiet = (): Promise<void> => new Promise((resolveWait) => setTimeout(resolveWait, 50))
-
-// what a promise settles to, failing the test if it has not settled within a short while
-const within = <V>(promise: Promise<V>, ms = 2000): Promise<V> => Promise.race([
-  promise,
-  new Promise<never>((_resolveLate, rejectLate) => setTimeout(() => rejectLate(new Error('timed out waiting for the queue')), ms)),
-])
-
 test('a queued review whose viewer changes during its dequeue checks fails and never starts, since it stays in the queue a save reads', async () => {
   const accounts = gate()
   const login = { current: scenario.viewer as string }
@@ -1510,6 +1467,89 @@ test('a queued review whose repository changes after its checks, while it is bei
     await waitFor(() => h.cache.getRun(queued.id)?.status === 'failed')
     assert.match(h.cache.getRun(queued.id)?.note ?? '', /^spawnFailed: not started: the repository is now octo-example\/other, not octo-example\/orbit/)
     assert.equal(h.launch.children.length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a cap lowered while a review is prepared keeps it from spawning, new or from the queue: it waits again at the head of the line', async () => {
+  const launch = fakeLaunch()
+  const folders = gate()
+  const mkdir = launch.deps.fs.mkdir
+  launch.deps.fs = {
+    ...launch.deps.fs,
+    mkdir: async (path) => {
+      await folders.wait()
+      await mkdir(path)
+    },
+  }
+  const h = await harness({ launch })
+  try {
+    const running = await h.launcher.start(request(106))
+    folders.arm()
+    const pending = h.launcher.start(request(113, { label: 'Review' }))
+    await waitFor(() => folders.held() === 1)
+    const row = h.cache.runsFor(scenario.repo, 113, 1)[0]!
+    assert.equal(row.status, 'running')
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    h.launcher.drain()
+    folders.open(0)
+    const sent = await within(pending)
+    assert.deepEqual([sent.id, sent.status, sent.startedAt], [row.id, 'queued', row.startedAt])
+    assert.equal(h.launch.children.length, 1)
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    assert.equal(later.status, 'queued')
+
+    // a saved cap lets it go, its row running, but the cap is saved lower again while its folder is held
+    h.time.advance(60_000)
+    folders.arm()
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 2 }
+    h.launcher.drain()
+    await waitFor(() => folders.held() === 2)
+    assert.equal(h.cache.getRun(row.id)?.status, 'running')
+    assert.notEqual(h.cache.getRun(row.id)?.startedAt, row.startedAt)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    h.launcher.drain()
+    folders.open(1)
+    await waitFor(() => h.cache.getRun(row.id)?.status === 'queued')
+    await quiet()
+    assert.equal(h.launch.children.length, 1)
+    assert.equal(h.cache.getRun(row.id)?.startedAt, row.startedAt)
+
+    // it is still first: it starts when the running review ends, ahead of the one behind it
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.match(h.launch.children[1]!.writes[0] ?? '', /\/review-pr 113 /)
+    assert.equal(h.cache.getRun(row.id)?.status, 'running')
+    assert.equal(h.cache.getRun(later.id)?.status, 'queued')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a self-review the one place over the cap still fits when a cap is lowered during its launch, so it spawns', async () => {
+  const launch = fakeLaunch()
+  const folders = gate()
+  const mkdir = launch.deps.fs.mkdir
+  launch.deps.fs = {
+    ...launch.deps.fs,
+    mkdir: async (path) => {
+      await folders.wait()
+      await mkdir(path)
+    },
+  }
+  const h = await harness({ launch, config: { selfReviewOverCap: true } })
+  try {
+    h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+    await h.launcher.start(request(106))
+    folders.arm()
+    const pending = h.launcher.start(request(101, { args: ['101', '--no-post'], label: 'Self-review' }))
+    await waitFor(() => folders.held() === 1)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    folders.open(0)
+    assert.equal((await within(pending)).status, 'running')
+    assert.equal(h.launch.children.length, 2)
   } finally {
     await h.cleanup()
   }

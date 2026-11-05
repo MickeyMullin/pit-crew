@@ -355,7 +355,7 @@ export type TableModel<R> = {
   onSort: (key: string) => void
 }
 
-// Run sweep and the latest sweep's state beside it. The status leaves out the running timer and the finish age, which updateSweepStatus and tickTimers set in place
+// Run sweep, or Queue sweep while a sweep would wait, and the latest sweep's state beside it. The status leaves out how long it has waited, the running timer, and the finish age, which updateSweepAges and tickTimers set in place
 const sweepControls = (sweep: SweepHeaderModel): HTMLElement => {
   const run = h('button', {
     type: 'button',
@@ -382,9 +382,11 @@ const sweepControls = (sweep: SweepHeaderModel): HTMLElement => {
       title: status.tip,
     },
     h('span', { class: `tone-text-${status.tone}` }, status.label),
-    status.running
-      ? h('span', { 'data-agent-timer': '', 'data-started': status.startedAt, 'data-step-at': status.lastStepAt, 'data-prefix': ' ', class: 'sweep-status-line' }, '')
-      : status.finishedAt === null ? null : h('span', { 'data-sweep-age': status.finishedAt, class: 'sweep-status-line' }, '')))
+    status.queued
+      ? h('span', { 'data-sweep-queued': status.startedAt, class: 'sweep-status-line' }, '')
+      : status.running
+        ? h('span', { 'data-agent-timer': '', 'data-started': status.startedAt, 'data-step-at': status.lastStepAt, 'data-prefix': ' ', class: 'sweep-status-line' }, '')
+        : status.finishedAt === null ? null : h('span', { 'data-sweep-age': status.finishedAt, class: 'sweep-status-line' }, '')))
 }
 
 export const groupHead = <R>(model: TableModel<R>, group: ShownGroup<R>, bodyId: string): Part => {

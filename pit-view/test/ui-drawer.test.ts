@@ -492,7 +492,7 @@ test('a queued run gets a card of its own: no steps or timer, a note on why it w
     label: 'Tandem re-review',
     tandem: true,
     runnerLabel: 'Claude Code',
-    note: 'Waiting for a review slot: it starts by itself when an earlier review ends, in the order it was queued.',
+    note: 'Waiting for a review slot: it starts by itself when an earlier review or sweep ends, in the order it was queued.',
   })
   assert.deepEqual(model.stop, {
     heading: 'Remove #101 from the queue?',

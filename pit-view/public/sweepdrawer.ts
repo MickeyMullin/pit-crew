@@ -1,15 +1,15 @@
 // public/sweepdrawer.ts
-// the Dependabot sweep drawer: a non-modal panel on the right for the repository's sweeps, not for one PR. It starts a sweep behind an inline confirmation, shows the running, waiting, and finished card of the sweep it is on (the whole sweep-result@1: counts, one card per PR, the merge order, and the summary's path), and lists the earlier sweeps. It reads the sweeps from the page's feed on every draw, so a patch updates it in place. sweepview.ts says what every part reads; this file makes the elements, keeps the confirmation's state, and moves focus
+// the Dependabot sweep drawer: a non-modal panel on the right for the repository's sweeps, not for one PR. It starts a sweep behind an inline confirmation, shows the queued, running, waiting, and finished card of the sweep it is on (the whole sweep-result@1: counts, one card per PR, the merge order, and the summary's path), and lists the earlier sweeps. It reads the sweeps from the page's feed on every draw, so a patch updates it in place. sweepview.ts says what every part reads; this file makes the elements, keeps the confirmation's state, and moves focus
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import { focusKeySelector, mayMoveFocus, escapeTarget, outsidePressCloses } from './drawerview.ts'
-import { formatSince } from './format.ts'
+import { formatDuration, formatSince } from './format.ts'
 import type { ReportPanel } from './reportpanel.ts'
 import { sendRun } from './runapi.ts'
 import { safeHref } from './safeurl.ts'
 import {
-  defaultSweepRunner, shownSweep, sweepCards, sweepConfirmModel, sweepConfirmSignature, sweepList, sweepListSignature, sweepRefusal, sweepResultModel, sweepRunningModel, sweepStartRequest,
+  defaultSweepRunner, shownSweep, sweepCards, sweepConfirmModel, sweepConfirmSignature, sweepList, sweepListSignature, sweepQueuedModel, sweepRefusal, sweepResultModel, sweepRunningModel, sweepStartRequest,
   sweepStopModel, sweepStopRefusal, sweepStopRequest, sweepWaitingModel,
 } from './sweepview.ts'
 import type { SweepRowModel, SweepsView, SweepView, Tone } from './sweepview.ts'
@@ -59,6 +59,9 @@ const facts = (rows: [string, Node | string][]): HTMLDListElement =>
 export const updateSweepAges = (root: ParentNode, nowMs: number): void => {
   for (const element of root.querySelectorAll<HTMLElement>('[data-sweep-age]')) {
     setText(element, ` · ${formatSince(element.dataset.sweepAge ?? '', nowMs)}`)
+  }
+  for (const element of root.querySelectorAll<HTMLElement>('[data-sweep-queued]')) {
+    setText(element, ` queued ${formatDuration(element.dataset.sweepQueued ?? '', nowMs)}`)
   }
 }
 
@@ -158,9 +161,12 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
 
   const stopConfirmBlock = (sweep: SweepView): HTMLElement => {
     const stop = sweepStopModel(sweep)
+    const queued = sweep.status === 'queued'
+    // a queued sweep has no timer yet: it says how long it has waited instead
+    const when = queued ? ageSpan(sweep.startedAt, 'queued ', options.nowMs()) : timerLine(sweep, options.nowMs())
     return h('div', { class: 'confirm', role: 'group', 'aria-labelledby': 'sweep-confirm-heading' },
       h('h4', { id: 'sweep-confirm-heading', class: 'confirm-heading' }, stop.heading),
-      facts([['Sweep', h('span', {}, `${stop.detail}, `, timerLine(sweep, options.nowMs()))], ['Stopping', stop.effect]]),
+      facts([['Sweep', h('span', {}, `${stop.detail}, `, when)], [queued ? 'Removing' : 'Stopping', stop.effect]]),
       errorLine(),
       confirmActions(stop.confirm, 'danger', () => void doStop()))
   }
@@ -182,8 +188,10 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     if (go !== null) {
       go.disabled = busy
       const stop = confirm?.type === 'stop'
-      const idle = stop ? 'Stop sweep' : 'Start sweep'
-      const working = stop ? 'Stopping…' : 'Starting sweep…'
+      const asked = confirm
+      const removing = asked?.type === 'stop' && sweeps()?.items.find((sweep) => sweep.id === asked.id)?.status === 'queued'
+      const idle = removing ? 'Remove from queue' : stop ? 'Stop sweep' : 'Start sweep'
+      const working = removing ? 'Removing…' : stop ? 'Stopping…' : 'Starting sweep…'
       setText(go, busy ? working : idle)
     }
   }
@@ -282,23 +290,59 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     return button
   }
 
+  const inFlight = (sweep: SweepView | null): boolean => sweep?.status === 'running' || sweep?.status === 'queued'
+
   const startPart = (view: SweepsView, latest: SweepView | null): Part => ({
     key: 'start',
     // a start confirmation is rebuilt whenever anything it displays changes, so it never shows a repository, viewer, or command that is not the one a start would use
-    sig: JSON.stringify([view.start.unavailable, confirm === null ? null : confirm.type, confirm?.type === 'start' ? sweepConfirmSignature(view.start, confirm.runner) : null, latest?.status === 'running']),
+    // the button's text only while the button shows, so a change of the queue answer never rebuilds a confirmation under the keyboard: a confirmation reads the same whether the sweep would wait or not
+    sig: JSON.stringify([view.start.unavailable, confirm === null ? view.start.button : confirm.type, confirm?.type === 'start' ? sweepConfirmSignature(view.start, confirm.runner) : null, inFlight(latest)]),
     build: () => {
       if (confirm?.type === 'start') return section('start', 'Start', startConfirmBlock(view, confirm))
-      if (latest?.status === 'running') return h('section', { hidden: true })
+      if (inFlight(latest)) return h('section', { hidden: true })
       const run = h('button', {
         type: 'button',
         class: 'button button-primary',
         'aria-disabled': view.start.unavailable === null ? null : 'true',
         'aria-describedby': view.start.unavailable === null ? null : 'sweep-reason',
         'data-focus-key': 'sweep-run',
-      }, 'Run sweep')
+      }, view.start.button)
       run.addEventListener('click', () => askStart())
       return section('start', 'Start',
         h('div', { class: 'drawer-start' }, run, view.start.unavailable === null ? null : h('p', { id: 'sweep-reason', class: 'drawer-reason' }, view.start.unavailable)))
+    },
+  })
+
+  // a queued sweep's card: what waits and since when, and one button that takes it out of the queue after asking
+  const queuedCard = (sweep: SweepView): Keyed => ({
+    key: 'queued',
+    create: () => h('section', { class: 'drawer-section drawer-card drawer-queued', 'aria-labelledby': 'sweep-queued-title' }),
+    update: (card) => {
+      const model = sweepQueuedModel(sweep)
+      const asking = confirm?.type === 'stop'
+      sync(card, [
+        {
+          key: 'head',
+          sig: JSON.stringify([sweep.id, model.runnerLabel, sweep.startedAt]),
+          build: () => h('div', { class: 'drawer-run-head' },
+            h('h3', { id: 'sweep-queued-title', class: 'drawer-section-title drawer-run-title' },
+              h('span', { class: 'agent-dot agent-dot-queued', 'aria-hidden': 'true' }),
+              'Dependabot sweep',
+              tag('Queued', 'blue')),
+            h('p', { class: 'drawer-run-line' }, ageSpan(sweep.startedAt, 'queued ', options.nowMs()), ` · ${model.runnerLabel}`)),
+        },
+        { key: 'note', sig: JSON.stringify(model.note), build: () => h('p', { class: 'drawer-run-note' }, model.note) },
+        {
+          key: 'actions',
+          sig: JSON.stringify([asking ? 'confirm' : 'button', sweep.id]),
+          build: () => {
+            if (asking) return stopConfirmBlock(sweep)
+            const remove = h('button', { type: 'button', class: 'button button-danger-outline', 'data-focus-key': 'sweep-stop' }, 'Remove from queue')
+            remove.addEventListener('click', () => askStop(sweep.id))
+            return h('div', { class: 'drawer-run-actions' }, remove)
+          },
+        },
+      ])
     },
   })
 
@@ -494,7 +538,8 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     const items: (Part | Keyed)[] = [startPart(view, view.items[0] ?? null)]
     if (current !== null) {
       for (const card of sweepCards(current)) {
-        if (card === 'running') items.push(runningCard(current))
+        if (card === 'queued') items.push(queuedCard(current))
+        else if (card === 'running') items.push(runningCard(current))
         else if (card === 'waiting') items.push(waitingCard(current))
         else items.push(resultCard(current))
       }
@@ -523,12 +568,12 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     }
   }
 
-  // a confirmation outlives nothing: a start's confirmation needs the start to still be available, and a stop's confirmation needs its sweep to still be running
+  // a confirmation outlives nothing: a start's confirmation needs the start to still be available, and a stop's confirmation needs its sweep to still be in flight, since removing a queued sweep still holds once it has started: the stop is for the same sweep
   const dropStaleConfirm = (view: SweepsView): void => {
     if (confirm === null || busy) return
     const stillAsked = confirm.type === 'start'
       ? view.start.unavailable === null
-      : view.items.some((sweep) => sweep.id === (confirm as Extract<Confirm, { type: 'stop' }>).id && sweep.status === 'running')
+      : view.items.some((sweep) => sweep.id === (confirm as Extract<Confirm, { type: 'stop' }>).id && inFlight(sweep))
     if (stillAsked) return
     confirm = null
     confirmFrom = null
@@ -546,7 +591,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     const status = `${current?.id}:${current?.status}`
     if (status !== seenStatus) {
       seenStatus = status
-      if (current?.status === 'running' && confirm?.type === 'start') confirm = null
+      if (inFlight(current) && confirm?.type === 'start') confirm = null
     }
     dropStaleConfirm(view)
     render()

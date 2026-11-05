@@ -205,7 +205,7 @@ export const queuedModel = (cell: AgentCell): QueuedModel => ({
   label: cell.label,
   tandem: cell.tandem,
   runnerLabel: cell.runner === null ? 'its runner' : runnerLabels[cell.runner],
-  note: 'Waiting for a review slot: it starts by itself when an earlier review ends, in the order it was queued.',
+  note: 'Waiting for a review slot: it starts by itself when an earlier review or sweep ends, in the order it was queued.',
 })
 
 // the stop confirmation: what stops and what stays behind

@@ -127,11 +127,26 @@ const openStream = async (base: string, query: string) => {
       if (next.sync?.cycle !== null && next.sync?.cycle !== undefined && next.sync.cycle.state !== 'running') return patches
     }
   }
+  // the first patch that says what a test is waiting for, passing over those before it
+  // bounded, so a patch that never comes fails its test rather than holding the whole run open
+  const until = (wanted: (next: Patch) => boolean): Promise<Patch> => {
+    const search = async (): Promise<Patch> => {
+      for (;;) {
+        const next = await patch()
+        if (wanted(next)) return next
+      }
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expired = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('the patch waited for never arrived')), 15_000)
+    })
+    return Promise.race([search(), expired]).finally(() => clearTimeout(timer))
+  }
   const close = (): void => {
     controller.abort()
     reader.cancel().catch(() => {})
   }
-  return { frame, patch, untilCycleEnds, close }
+  return { frame, patch, until, untilCycleEnds, close }
 }
 
 const until = async (check: () => boolean): Promise<void> => {
@@ -2004,10 +2019,10 @@ test('the sweeps the cache prunes leave memory, the list, and the feed with the 
     assert.deepEqual((await getJson<{ id: number }[]>(sweepsUrl(h))).body.map((sweep) => sweep.id), [started.body.id])
     const view = (await getJson<{ sweeps: { items: { id: number }[] } }>(`${h.base}/api/view`)).body
     assert.deepEqual(view.sweeps.items.map((sweep) => sweep.id), [started.body.id])
-    // the feed announced the start, then the removal, each with the sweeps whole
-    const first = await stream.patch()
+    // the feed announced the start, then the removal, each with the sweeps whole; the queue announcement of the slot it took may come between them, with the sweeps as they then stood
+    const first = await stream.until((patch) => patch.sweeps !== undefined)
     assert.deepEqual(first.sweeps?.items.map((sweep) => sweep.id), [started.body.id, oldest.id])
-    const second = await stream.patch()
+    const second = await stream.until((patch) => patch.sweeps?.items.length === 1)
     assert.deepEqual(second.sweeps?.items.map((sweep) => sweep.id), [started.body.id])
     stream.close()
   } finally {
@@ -2087,6 +2102,130 @@ test('GET /api/sweeps lists the repository\'s sweeps newest first with the parse
   }
 })
 
+test('the server\'s review engine and sweep engine share one count and one queue: a sweep waits behind a review, Run sweep says so, and it starts as the review ends', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', maxConcurrentReviews: 1 } })
+  try {
+    await filled(h)
+    const before = (await getJson<View>(`${h.base}/api/view`)).body
+    assert.equal(before.sweeps.start.button, 'Run sweep')
+    assert.doesNotMatch(rowIn(before, 118)?.agent?.action.label ?? '', /^Queue /)
+    const first = await send(`${h.base}/api/prs/113/runs`, 'POST', { repo: scenario.repo }, token(h))
+    assert.equal(first.body.status, 'running')
+    // a loaded view reads the answer as it is
+    const full = (await getJson<View>(`${h.base}/api/view`)).body
+    assert.deepEqual([full.sweeps.start.button, full.sweeps.start.name], ['Queue sweep', 'Queue a Dependabot sweep of octo-example/orbit'])
+
+    const sweep = await send(sweepsUrl(h), 'POST', undefined, token(h))
+    assert.deepEqual([sweep.status, sweep.body.status, sweep.body.text, sweep.body.pid], [200, 'queued', null, null])
+    assert.equal(h.launch.children.length, 1)
+    // a queued sweep holds its repository
+    assert.equal((await send(sweepsUrl(h), 'POST', undefined, token(h))).status, 409)
+    const waiting = (await getJson<View>(`${h.base}/api/view`)).body
+    assert.match(waiting.sweeps.start.unavailable ?? '', /already in flight/)
+    assert.equal(waiting.sweeps.items[0]?.status, 'queued')
+    // and a review of another PR queues behind it, which its button says
+    assert.match(rowIn(waiting, 118)?.agent?.action.label ?? '', /^Queue /)
+
+    const settled = h.server.launcher.settled(Number(first.body.id))
+    h.launch.children[0]!.exit(1)
+    await settled
+    await until(() => h.launch.children.length === 2)
+    assert.match(lastWrite(h), /\/review-dependabot-sweep octo-example\/orbit --parallel 1 --emit-json=/)
+    await until(() => h.server.sweeps.get(Number(sweep.body.id))?.status === 'running')
+    assert.equal(h.server.cache.getSweep(Number(sweep.body.id))?.status, 'running')
+    // the sweep now holds the one slot, so the same cap still reads queue
+    const after = (await getJson<View>(`${h.base}/api/view`)).body
+    assert.equal(after.sweeps.start.button, 'Queue sweep')
+    assert.match(rowIn(after, 118)?.agent?.action.label ?? '', /^Queue /)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a queued sweep stops at its own path and leaves the list as stopped, and a sweep started first holds the review behind it', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', maxConcurrentReviews: 1 } })
+  try {
+    await filled(h)
+    const running = await send(sweepsUrl(h), 'POST', undefined, token(h))
+    assert.equal(running.body.status, 'running')
+    const review = await send(`${h.base}/api/prs/113/runs`, 'POST', { repo: scenario.repo }, token(h))
+    assert.equal(review.body.status, 'queued')
+    await send(`${h.base}/api/sweeps/${String(running.body.id)}/stop`, 'POST', undefined, token(h))
+    const stoppedAt = h.server.sweepLauncher.settled(Number(running.body.id))
+    h.launch.children[0]!.exit(0, 'SIGTERM')
+    assert.equal((await stoppedAt).status, 'stopped')
+    await until(() => h.launch.children.length === 2)
+
+    const queued = await send(sweepsUrl(h), 'POST', undefined, token(h))
+    assert.equal(queued.body.status, 'queued')
+    const stopped = await send(`${h.base}/api/sweeps/${String(queued.body.id)}/stop`, 'POST', undefined, token(h))
+    assert.deepEqual([stopped.status, stopped.body.status, stopped.body.text], [200, 'stopped', 'Stopped'])
+    assert.equal(h.launch.children.length, 2)
+    // it is settled, so a second stop is 409 as for any finished sweep
+    assert.equal((await send(`${h.base}/api/sweeps/${String(queued.body.id)}/stop`, 'POST', undefined, token(h))).status, 409)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the queue answer goes out with the sweeps: a slot moving sends the rows and the sweeps whole, a saved cap sends them in the same patch, and a queued sweep moves on the saved cap', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', maxConcurrentReviews: 1 } })
+  try {
+    await filled(h)
+    const stream = await openStream(h.base, 'client=tab-1&visible=false&paused=false')
+    const first = await send(`${h.base}/api/prs/113/runs`, 'POST', { repo: scenario.repo }, token(h))
+    // the review took the last slot: the coalesced announcement carries the new wording
+    const announced = await stream.until((patch) => patch.sweeps?.start.button === 'Queue sweep')
+    assert.ok(announced.rows.length > 0)
+
+    // with nothing queued, the saved config's own patch carries the new wording with the rows, since nothing in the launcher moved to announce it
+    const stored = (await getJson<Config>(`${h.base}/api/config`)).body
+    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, maxConcurrentReviews: 3 })).status, 200)
+    const raised = await stream.until((patch) => patch.sync !== undefined && patch.sweeps !== undefined)
+    assert.equal(raised.sweeps?.start.button, 'Run sweep')
+    assert.ok(raised.rows.length > 0)
+    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, maxConcurrentReviews: 1 })).status, 200)
+    const lowered = await stream.until((patch) => patch.sync !== undefined && patch.sweeps !== undefined)
+    assert.equal(lowered.sweeps?.start.button, 'Queue sweep')
+
+    const sweep = await send(sweepsUrl(h), 'POST', undefined, token(h))
+    assert.equal(sweep.body.status, 'queued')
+    const queued = await stream.until((patch) => patch.sweeps?.items[0]?.status === 'queued')
+    assert.equal(queued.sweeps?.items[0]?.id, sweep.body.id)
+
+    // a saved cap lets the queued sweep go: its own patch still says queue, as the sweep is ahead of any new start, and the wording follows once the sweep has its slot
+    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, maxConcurrentReviews: 3 })).status, 200)
+    const saved = await stream.until((patch) => patch.sync !== undefined && patch.sweeps !== undefined)
+    assert.equal(saved.sweeps?.start.button, 'Queue sweep')
+    await stream.until((patch) => patch.sweeps?.start.button === 'Run sweep')
+    await until(() => h.launch.children.length === 2)
+    await until(() => h.server.sweeps.get(Number(sweep.body.id))?.status === 'running')
+    assert.notEqual(first.body.id, undefined)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('at a server start a sweep still queued fails as serverRestarted, as a queued review does, and memory shows it', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', maxConcurrentReviews: 1 } })
+  try {
+    await filled(h)
+    const run = await send(`${h.base}/api/prs/113/runs`, 'POST', { repo: scenario.repo }, token(h))
+    const queued = await send(sweepsUrl(h), 'POST', undefined, token(h))
+    assert.equal(queued.body.status, 'queued')
+    const again = await restart(h)
+    const failed = again.sweeps.get(Number(queued.body.id))
+    assert.deepEqual([failed?.status, failed?.note, failed?.text], ['failed', 'serverRestarted: it was still queued, so it never started', 'Failed · server restarted'])
+    assert.equal(again.cache.getSweep(Number(queued.body.id))?.status, 'failed')
+    assert.equal(h.launch.children.length, 1)
+    // nothing about it is left behind: the repository may sweep again, and it queues behind the review whose process is still alive
+    assert.equal(again.cache.getRun(Number(run.body.id))?.status, 'running')
+    assert.equal(again.launcher.queueing().review, true)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('the view carries the sweeps and how to start one, and the live feed sends them whole when a sweep starts, steps, and settles', async () => {
   const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
   try {
@@ -2099,24 +2238,26 @@ test('the view carries the sweeps and how to start one, and the live feed sends 
     const stream = await openStream(h.base, 'client=tab-1&visible=false&paused=false')
 
     const started = await send(sweepsUrl(h), 'POST', undefined, token(h))
-    const first = await stream.patch()
-    assert.deepEqual(first.rows, [])
+    // the start takes a slot, so its patch and the queue announcement both go out, each with the sweeps whole
+    const first = await stream.until((patch) => patch.sweeps?.items[0]?.pid != null)
     assert.deepEqual(first.sweeps?.items.map((sweep) => [sweep.id, sweep.status]), [[started.body.id, 'running']])
     assert.match(first.sweeps?.start.unavailable ?? '', /already in flight/)
 
+    // a step moves no slot, so it is one patch with the sweeps and no rows
+    await h.server.sweepLauncher.flushed()
     const child = h.launch.children[0]!
     await child.events({ at: '2026-10-26T14:06:00Z', step: 'resolveBase', state: 'done', note: null })
     await h.server.sweepLauncher.check()
-    const stepped = await stream.patch()
+    const stepped = await stream.until((patch) => patch.sweeps?.items[0]?.step === 'resolveBase')
     assert.equal(stepped.sweeps?.items[0]?.step, 'resolveBase')
-    assert.equal(stepped.version, first.version + 1)
+    assert.deepEqual(stepped.rows, [])
 
     await writeSweepSummary(h)
     await child.result(sweepResult())
     const settled = h.server.sweepLauncher.settled(Number(started.body.id))
     child.exit(0)
     await settled
-    const done = await stream.patch()
+    const done = await stream.until((patch) => patch.sweeps?.items[0]?.status === 'done')
     assert.deepEqual([done.sweeps?.items[0]?.status, done.sweeps?.items[0]?.text, done.sweeps?.start.unavailable], ['done', 'Done · 2 swept', null])
     assert.equal(done.sweeps?.items[0]?.result?.rows.length, 2)
     // sweeps are not an Agent cell: no row of the view mentions them

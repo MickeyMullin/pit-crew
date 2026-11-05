@@ -2,7 +2,7 @@
 import type { Cache, Sweep } from './cache.ts'
 import type { Config, RunnerName } from './config.ts'
 import { doneText, stepsOf } from './launcher.ts'
-import type { CiState, PostForm, Priority, Recommendation, StartRequest, StepSlot, SweepResult } from './launcher.ts'
+import type { CiState, PostForm, Priority, Queueing, Recommendation, StartRequest, StepSlot, SweepResult } from './launcher.ts'
 
 // the Dependabot sweep as a concept of its own (section 8 of DESIGN.md, Sweeps): the command line it launches, what the confirmation says, the view the page draws from a sweep record, and the sweeps held in memory beside the runs. The launcher launches it (createSweepLauncher in launcher.ts).
 
@@ -37,9 +37,13 @@ export type SweepStart = {
   runner: RunnerName
   // why it cannot start right now; null otherwise
   unavailable: string | null
+  // the button's text and its accessible name, which say queue while a sweep would wait; the page re-derives no part of the rule
+  button: string
+  name: string
 }
 
-export const sweepStartOf = (config: Config, busy: boolean): SweepStart => ({
+// busy is whether a sweep of the repository is in flight or queued; waits is the launcher's one answer, the review flag of its queueing()
+export const sweepStartOf = (config: Config, busy: boolean, waits = false): SweepStart => ({
   heading: `Sweep the open Dependabot PRs in ${config.repo}?`,
   repo: config.repo,
   viewer: config.viewer,
@@ -51,6 +55,8 @@ export const sweepStartOf = (config: Config, busy: boolean): SweepStart => ({
   unavailable: busy
     ? `a sweep for ${config.repo} is already in flight`
     : config.cloneDir === undefined ? `set cloneDir in the config to your local clone of ${config.repo} before starting a sweep` : null,
+  button: waits ? 'Queue sweep' : 'Run sweep',
+  name: `${waits ? 'Queue' : 'Run'} a Dependabot sweep of ${config.repo}`,
 })
 
 // the parsed sweep-result@1, as far as the page draws it. Rows come through the launcher's check only as a list, so each field is read defensively here; notPostedReason is not read at all
@@ -145,7 +151,7 @@ const sweepResultOf = (sweep: Pick<Sweep, 'result'>): SweepResult | null =>
 // the sweep as the page and GET /api/sweeps see it: the record, its steps, the parsed result, and the words for how it ended
 export type SweepView = Omit<Sweep, 'result' | 'steps'> & {
   steps: StepSlot[]
-  // null while it runs
+  // null while it waits in the queue or runs
   text: string | null
   // the question while it waits for an answer
   question: string | null
@@ -154,7 +160,7 @@ export type SweepView = Omit<Sweep, 'result' | 'steps'> & {
 
 // "Done · 7 swept, 1 failed", "Done · nothing to sweep": a sweep with nothing to sweep is done, never a failure
 export const sweepText = (sweep: Pick<Sweep, 'status' | 'result' | 'note'>): string | null => {
-  if (sweep.status === 'running') return null
+  if (sweep.status === 'running' || sweep.status === 'queued') return null
   if (sweep.status !== 'done') return doneText(sweep, false)
   const counts = sweepResultOf(sweep)?.counts
   if (counts == null || counts.swept === 0) return 'Done · nothing to sweep'
@@ -212,10 +218,11 @@ export const createSweepMemory = (cache: Cache, keep = 20): SweepMemory => {
   }
 }
 
-// what the page holds about sweeps: how to start one now, and the repo's recent sweeps. Patches carry it whole whenever a sweep or the config behind the start text changes
+// what the page holds about sweeps: how to start one now, and the repo's recent sweeps. Patches carry it whole whenever a sweep, the queue answer, or the config behind the start text changes
 export type SweepsView = { start: SweepStart, items: SweepView[] }
 
-export const sweepsView = (config: Config, memory: SweepMemory): SweepsView => {
+// queueing is the launcher's answer now, which the button says; left out, nothing waits
+export const sweepsView = (config: Config, memory: SweepMemory, queueing: Queueing | null = null): SweepsView => {
   const items = memory.list(config.repo)
-  return { start: sweepStartOf(config, items.some((sweep) => sweep.status === 'running')), items }
+  return { start: sweepStartOf(config, items.some((sweep) => sweep.status === 'running' || sweep.status === 'queued'), queueing?.review ?? false), items }
 }

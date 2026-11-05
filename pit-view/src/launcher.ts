@@ -1410,13 +1410,13 @@ export const systemFs: LauncherFs = {
 
 // the cap on concurrent reviews (section 8 of DESIGN.md, Launching runs, Review cap)
 
-// the review commands: only their runs count against the cap and wait in its queue; a fix or update session and a sweep do neither
+// the review commands: their runs, and every sweep, count against the cap and wait in its queue; a fix or update session does neither. A sweep is not in this list, since its runs have a table and an engine of their own (its store's counted and slot say it counts)
 export const reviewCommands: readonly string[] = ['review-pr', 'review-dependabot', 'review-stack']
 
-// a review of the viewer's own PR is a self-review; a tandem review is one run, so it takes one slot like any review
+// a review of the viewer's own PR is a self-review; a tandem review is one run, so it takes one slot like any review; a sweep takes one too, of the review kind, since it is never a self-review
 export type ReviewSlot = 'review' | 'selfReview'
 
-// whether a new review of each kind would wait in the queue now: the one answer the launcher's start acts on, and the Agent cell's and the drawer's buttons say
+// whether a new review of each kind would wait in the queue now: the one answer the launcher's start acts on, and the Agent cell's and the drawer's buttons say. A sweep reads the review flag
 export type Queueing = Record<ReviewSlot, boolean>
 
 // whether one more review may start beside those in flight: the reviews in flight, not counting one self-review while the setting lets one go over the cap, never number more than the cap
@@ -1424,6 +1424,400 @@ export const reviewFits = (inFlight: readonly ReviewSlot[], next: ReviewSlot, ca
   const after = [...inFlight, next]
   const over = selfReviewOverCap && after.includes('selfReview') ? 1 : 0
   return after.length - over <= cap
+}
+
+// a log line that cannot be written is dropped: logging sits on the paths that keep a process watched and a slot released, so it must never throw there
+const safeLog = (log: ((line: string) => void) | undefined) => (line: string): void => {
+  try {
+    log?.(line)
+  } catch {
+    // nowhere left to tell it
+  }
+}
+
+// the delays before each retry of a queue announcement the listener failed, so a flush is tried at most one more time than there are delays
+const QUEUE_RETRY_MS = [50, 200, 800]
+
+// how a review was admitted: the slot it was given, the attempt holding that slot until its process is watched, and the viewer its start was confirmed for
+type Admitted = { slot: ReviewSlot, attempt: number, viewer: string }
+
+// an engine on the line: the slots its watched runs hold. Run and sweep ids are counted apart, so an entry in the line is told by its engine and its id together
+export type LineMember = { held: () => ReviewSlot[] }
+
+// a review or a sweep waiting for a slot, with what only the engine that owns its row can do. It stays in the line until it is launched, so a save and a Stop still find it
+export type LineEntry = {
+  member: LineMember
+  id: number
+  // how the logs name it
+  name: string
+  request: StartRequest
+  // the viewer its start was confirmed for
+  viewer: string
+  // the attempt that holds a slot for it while its checks run, and the clone folder those checks confirmed once they pass
+  attempt: number | null
+  checked: string | null
+  rowGone: () => boolean
+  // whether it is a self-review is read from the cache each time, as it is about to start
+  slot: (config: Config) => ReviewSlot | null
+  // the identity and clone checks, which answer with the clone folder
+  check: (config: Config) => Promise<string>
+  // records it as failed in the queue; a record that fails twice leaves its row as it was, and this still returns
+  fail: (note: string) => void
+  // marks its row running as it leaves the line; a write that fails throws with nothing changed. The answer launches it
+  markRunning: (cwd: string) => (config: Config, admitted: Admitted) => Promise<unknown>
+}
+
+export type LineTurn = { ahead: Promise<unknown>, decided: () => void }
+
+// the one slot count and the one queue under the cap, shared by the review engine and the sweep engine: what counts, who is next, and the announcement that the answer may have changed all live here, so neither engine holds an account of its own
+export type ReviewLine = {
+  // an engine takes its place on the line, and leaves as it closes; once the last has left nothing is announced
+  join: (held: () => ReviewSlot[]) => LineMember
+  leave: (member: LineMember) => void
+  // the queue answer may have changed
+  mark: () => void
+  // resolves once the pending announcement of the queue answer, if any, has been made
+  flushed: () => Promise<void>
+  // whether a new review of this kind waits now, the rule a start acts on
+  waits: (slot: ReviewSlot, config: Config) => boolean
+  queueing: () => Queueing
+  // the slots held now, each counted once
+  inFlight: () => ReviewSlot[]
+  // holds a slot for one attempt to start; a caller tests the fit with nothing awaited between that and this
+  reserve: (slot: ReviewSlot) => number
+  release: (attempt: number) => void
+  // whether a launch about to spawn still fits under this config: everything in flight counts, but neither its own slot nor one held for an entry in the line, all of which stand behind it
+  fitsAtSpawn: (attempt: number, slot: ReviewSlot, config: Config) => boolean
+  // the count of launches in progress
+  opened: (by: number) => void
+  takeTurn: () => LineTurn
+  add: (entry: LineEntry) => void
+  // the entry an engine has in the line under this id
+  entry: (member: LineMember, id: number) => LineEntry | undefined
+  // puts an entry whose launch no longer fits back at the head of the line, where it stood; the end of that launch releases the slot its attempt held
+  putBack: (entry: LineEntry) => void
+  // takes an entry out of the line and releases the slot an attempt to start it held
+  dequeue: (entry: LineEntry) => void
+  // reads the line earliest first, as far as the first entry that does not fit
+  admit: () => void
+}
+
+// why a review or a sweep confirmed for one repository and viewer may not start under this config, or null when both still hold: it would act where, or as whom, the confirmation did not say
+const unbound = (repo: string, viewer: string, config: Config): string | null => {
+  if (repo !== config.repo) return `the repository is now ${config.repo}, not ${repo}`
+  return viewer.toLowerCase() !== config.viewer.toLowerCase() ? `the viewer is now ${config.viewer}, not ${viewer}` : null
+}
+
+export type ReviewLineOptions = {
+  // the config in effect, viewer resolved
+  config: () => Config
+  timers: Timers
+  // the answer to whether a new review would wait may have changed, for any run or sweep in any repository: sent once per flush, after the change that moved it, whether or not the answer differs from an earlier one
+  onQueueing?: () => void
+  log?: (line: string) => void
+}
+
+export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
+  const { timers } = options
+  const log = safeLog(options.log)
+  const members = new Set<LineMember>()
+  // nothing is announced or admitted once the last engine has left
+  let closed = false
+
+  // the queue answer may have changed: the running count, the queue, or the launches in progress moved, or a run changed. Every place the cap's accounting moves marks here, so no path can take or release a slot without it: the watched runs (each engine's own Moving map), the slots held for launches in progress, and (through lineAdd, lineRemove, and opened below) the queue and the count of launches in progress. It only marks; one flush on a later turn of the event loop tells the listener, however many marks came before it, and the listener reads the answer itself, so nothing here remembers what any page received
+  let flushHandle: ReturnType<typeof setImmediate> | null = null
+  let flushWaiters: (() => void)[] = []
+  // a flush whose listener threw is marked again after one of these delays, so a transient failure does not leave open pages on the old label; a new mark in the meantime takes the retry's place, and the run of failures ends at the first success or the last delay
+  let retryHandle: unknown = null
+  let failures = 0
+  const flush = (): void => {
+    flushHandle = null
+    if (!closed && options.onQueueing !== undefined) {
+      try {
+        options.onQueueing()
+        failures = 0
+      } catch (error) {
+        failures += 1
+        log(`queue: cannot announce the queue answer (attempt ${failures} of ${QUEUE_RETRY_MS.length + 1}): ${messageOf(error)}`)
+        const delay = QUEUE_RETRY_MS[failures - 1]
+        if (delay === undefined) {
+          log('queue: giving up on announcing the queue answer; labels may stay stale until the next event')
+          failures = 0
+        } else {
+          retryHandle = timers.set(() => {
+            retryHandle = null
+            mark()
+          }, delay)
+        }
+      }
+    }
+    const waiting = flushWaiters
+    flushWaiters = []
+    for (const resume of waiting) resume()
+  }
+  const mark = (): void => {
+    if (closed || options.onQueueing === undefined || flushHandle !== null) return
+    if (retryHandle !== null) {
+      timers.clear(retryHandle)
+      retryHandle = null
+    }
+    flushHandle = setImmediate(flush)
+  }
+  // resolves once the flush that is pending, if any, has run
+  const flushed = (): Promise<void> => flushHandle === null ? Promise.resolve() : new Promise((resumeFlush) => flushWaiters.push(resumeFlush))
+
+  // reviews and sweeps waiting for a slot under the cap, in the order they were queued
+  const queue: LineEntry[] = []
+  // slots given to reviews and sweeps whose process is not watched yet, each held by an attempt of its own, so two quick starts never both take the last slot and an attempt that ends releases only its own
+  const admitting = new Moving<ReviewSlot>(mark)
+  let attempts = 0
+  // reviews and sweeps being launched, new or from the queue, whose launch has not returned yet; none that arrived behind them starts until it has, so they spawn in the order they arrived
+  let opening = 0
+  // the turn of the start that arrived last, ended once it and every start ahead of it have had their fit decided or been refused
+  let arrivals: Promise<unknown> = Promise.resolve()
+
+  // the queue and the count of launches in progress change only through these, so each marks
+  const lineAdd = (item: LineEntry): void => {
+    queue.push(item)
+    mark()
+  }
+  const lineRemove = (item: LineEntry): void => {
+    const at = queue.indexOf(item)
+    if (at < 0) return
+    queue.splice(at, 1)
+    mark()
+  }
+  const opened = (by: number): void => {
+    opening += by
+    mark()
+  }
+
+  const watchedSlots = (): ReviewSlot[] => [...members].flatMap((member) => member.held())
+
+  // the slots the reviews and sweeps in flight hold: those watched by either engine and those given a slot that no watched process holds yet, each counted once, since a launch releases its attempt's slot as it is watched
+  const inFlight = (): ReviewSlot[] => [...admitting.values(), ...watchedSlots()]
+
+  const fits = (slot: ReviewSlot, config: Config): boolean => reviewFits(inFlight(), slot, config.maxConcurrentReviews, config.selfReviewOverCap)
+
+  // whether a new review of this kind waits: with an entry ahead of it in the queue or still being launched, or without room under the cap. A start acts on this and nothing else, and the page's buttons say it
+  const waits = (slot: ReviewSlot, config: Config): boolean => queue.length > 0 || opening > 0 || !fits(slot, config)
+
+  const queueing = (): Queueing => {
+    const config = options.config()
+    return { review: waits('review', config), selfReview: waits('selfReview', config) }
+  }
+
+  // whether a slot fits beside everything in flight except what these attempts hold
+  const fitsBeside = (ignored: ReadonlySet<number>, slot: ReviewSlot, config: Config): boolean => {
+    const counted = [...admitting].flatMap(([attempt, held]) => ignored.has(attempt) ? [] : [held])
+    return reviewFits([...counted, ...watchedSlots()], slot, config.maxConcurrentReviews, config.selfReviewOverCap)
+  }
+
+  const attemptsOf = (entries: readonly LineEntry[]): number[] => entries.flatMap((entry) => entry.attempt === null ? [] : [entry.attempt])
+
+  // a queued entry's fit counts everything in flight and the slots held for entries ahead of it in line, never its own or one behind it, so when a lowered cap leaves too many slots held it is always a later entry that gives its slot back
+  const fitsInLine = (item: LineEntry, slot: ReviewSlot, config: Config): boolean =>
+    fitsBeside(new Set(attemptsOf(queue.slice(queue.indexOf(item)))), slot, config)
+
+  // the same rule for a launch that has left the line: every entry still in it arrived later, or was let go only after it
+  const fitsAtSpawn = (attempt: number, slot: ReviewSlot, config: Config): boolean =>
+    fitsBeside(new Set([attempt, ...attemptsOf(queue)]), slot, config)
+
+  const reserve = (slot: ReviewSlot): number => {
+    attempts += 1
+    admitting.set(attempts, slot)
+    return attempts
+  }
+
+  // ends the attempt to start a queued entry, with the slot it held and the checks it passed, so it makes them again when it is next given a slot
+  const giveBack = (item: LineEntry): void => {
+    if (item.attempt !== null) admitting.delete(item.attempt)
+    item.attempt = null
+    item.checked = null
+  }
+
+  const dequeue = (item: LineEntry): void => {
+    lineRemove(item)
+    giveBack(item)
+  }
+
+  // an entry that does not fit holds the line, however long that lasts, so none behind it keeps a slot or waits on checks passed long ago
+  const holdLine = (item: LineEntry): void => {
+    for (const behind of queue.slice(queue.indexOf(item) + 1)) giveBack(behind)
+  }
+
+  // a queued entry that will never start, never to be tried again: its row is recorded as failed before it leaves the queue and its slot is released, so the row, the queue, the slot, and its waiters change together. A record that fails twice, the database unwritable, leaves the row queued for the next server start to fail as serverRestarted, while the entry still leaves the queue here and whoever awaits it is given it as failed
+  const failInQueue = (item: LineEntry, note: string): void => {
+    item.fail(note)
+    dequeue(item)
+  }
+
+  // reads the queue earliest first: gives a slot to each entry that fits now, which then makes its checks in the background, still in the queue, and launches each whose checks have passed once no entry ahead of it is still making its checks or being launched. The first that does not fit ends the reading and holds the line, the over-cap allowance included, so reviews and sweeps start in the order they arrived
+  const admit = (): void => {
+    if (closed) return
+    const config = options.config()
+    for (const item of [...queue]) {
+      const why = unbound(item.request.repo, item.viewer, config)
+      if (why !== null) failInQueue(item, `spawnFailed: not started: ${why}`)
+    }
+    let heldBack = opening > 0
+    for (const item of [...queue]) {
+      // one taken out of the queue since this pass began is skipped
+      if (!queue.includes(item)) continue
+      if (item.attempt !== null) {
+        // one whose checks are running holds its slot, and holds back every one behind it
+        if (item.checked === null || heldBack) {
+          heldBack = true
+          continue
+        }
+        proceed(item, item.attempt, item.checked)
+        // one that gave its slot back no longer fits, and still holds its place ahead of every one behind it
+        if (queue.includes(item)) {
+          holdLine(item)
+          return
+        }
+        heldBack ||= opening > 0
+        continue
+      }
+      let slot: ReviewSlot | null
+      try {
+        slot = item.slot(config)
+      } catch (error) {
+        // an unexpected failure, such as a cache read that throws, fails the queued entry with the error rather than leaving it in line to fail again
+        failInQueue(item, `spawnFailed: ${messageOf(error)}`)
+        continue
+      }
+      if (slot === null || !fitsInLine(item, slot, config)) {
+        holdLine(item)
+        return
+      }
+      const attempt = reserve(slot)
+      item.attempt = attempt
+      heldBack = true
+      void begin(item, attempt).catch((error: unknown) => log(`${item.name}: cannot start from the queue: ${messageOf(error)}`))
+    }
+  }
+
+  // a queued entry's checks, the ones every start makes, while it stays in the queue; once they pass it keeps its slot and waits for the entries ahead of it, which the queue's next reading launches it after
+  const begin = async (item: LineEntry, attempt: number): Promise<void> => {
+    // false once a Stop or a failure ended this attempt
+    const ours = (): boolean => !closed && item.attempt === attempt && queue.includes(item)
+    try {
+      const cloneDir = await item.check(options.config())
+      if (ours()) item.checked = cloneDir
+    } catch (error) {
+      if (ours()) failInQueue(item, `spawnFailed: ${messageOf(error)}`)
+    }
+    // the queue is read again however the checks went: this one may be next to start, and one that failed hands its slot on
+    admit()
+  }
+
+  // a queued entry whose checks passed and that nothing ahead of it holds back: the fit test again under the config and the cache as they are now, with nothing awaited between the reading and the slot held or given back, then the same launch, on the row it already has
+  const proceed = (item: LineEntry, attempt: number, cloneDir: string): void => {
+    let config: Config
+    let slot: ReviewSlot | null
+    try {
+      if (item.rowGone()) throw new Error('its row is gone')
+      config = options.config()
+      const why = unbound(item.request.repo, item.viewer, config)
+      if (why !== null) {
+        failInQueue(item, `spawnFailed: not started: ${why}`)
+        return
+      }
+      slot = item.slot(config)
+    } catch (error) {
+      // an unexpected failure, such as a cache read that throws, fails the entry, so it is never left in line holding an attempt nothing will finish, nor retried to fail again
+      failInQueue(item, `spawnFailed: ${messageOf(error)}`)
+      return
+    }
+    if (slot === null || !fitsInLine(item, slot, config)) {
+      // it no longer fits: it gives its slot back and waits again, in its place in line
+      giveBack(item)
+      return
+    }
+    admitting.set(attempt, slot)
+    let launchIt: (config: Config, admitted: Admitted) => Promise<unknown>
+    try {
+      // its row says running before it leaves the queue, so a write that fails leaves the two as they were, for it to fail in the queue
+      launchIt = item.markRunning(item.request.cwd ?? cloneDir)
+    } catch (error) {
+      failInQueue(item, `spawnFailed: ${messageOf(error)}`)
+      return
+    }
+    lineRemove(item)
+    opened(1)
+    void launchQueued(item, launchIt, config, { slot, attempt, viewer: item.viewer })
+  }
+
+  // a queued entry's launch, after which the queue is read again
+  const launchQueued = async (item: LineEntry, launchIt: (config: Config, admitted: Admitted) => Promise<unknown>, config: Config, admitted: Admitted): Promise<void> => {
+    try {
+      await launchIt(config, admitted)
+    } catch (error) {
+      log(`${item.name}: cannot start from the queue: ${messageOf(error)}`)
+    } finally {
+      opened(-1)
+      admitting.delete(admitted.attempt)
+      // the queue is read again however the start went: the next in line may start now, one that ended at once hands its slot on, and a run that settled before its start returned was still counted here when it settled
+      admit()
+    }
+  }
+
+  // a start's place in line, taken as it arrives: the wait for every start ahead of it to have its fit decided or be refused, and the end of its own turn, which the next waits for
+  const takeTurn = (): LineTurn => {
+    const ahead = arrivals
+    let decided = (): void => {}
+    const own = new Promise<void>((resolveTurn) => {
+      decided = resolveTurn
+    })
+    // a start refused ahead of an earlier one that still makes its checks moves nothing behind it forward
+    arrivals = Promise.all([ahead, own])
+    return { ahead, decided }
+  }
+
+  const join = (held: () => ReviewSlot[]): LineMember => {
+    const member: LineMember = { held }
+    members.add(member)
+    return member
+  }
+
+  const leave = (member: LineMember): void => {
+    members.delete(member)
+    if (members.size === 0) closed = true
+    // its rows stay queued for the next server start to find
+    for (const item of queue.filter((entry) => entry.member === member)) dequeue(item)
+    if (!closed) return
+    if (flushHandle !== null) clearImmediate(flushHandle)
+    flushHandle = null
+    if (retryHandle !== null) timers.clear(retryHandle)
+    retryHandle = null
+    flush()
+  }
+
+  return {
+    join,
+    leave,
+    mark,
+    flushed,
+    waits,
+    queueing,
+    inFlight,
+    reserve,
+    release: (attempt) => {
+      admitting.delete(attempt)
+    },
+    fitsAtSpawn,
+    opened,
+    takeTurn,
+    add: lineAdd,
+    entry: (member, id) => queue.find((item) => item.member === member && item.id === id),
+    putBack: (item) => {
+      queue.unshift(item)
+      mark()
+    },
+    dequeue,
+    admit,
+  }
 }
 
 // the launcher
@@ -1495,15 +1889,15 @@ export type Launcher<T extends Session = Run> = {
   markPost: (id: number, posting: boolean) => void
   // records the post Post it made for a blocked run; a sweep has none
   recordPost: (id: number, posted: Posted) => T
-  // at server start: re-watch live runs, settle the rest, and fail what was still queued, since a start of the server starts nothing
+  // at server start: re-watch live runs and sweeps, settle the rest, and fail what was still queued, since a start of the server starts nothing
   recover: () => Promise<void>
-  // reads the queue again, earliest first, as far as the first review that does not fit; the server calls it after a saved config, which may have raised the cap
+  // reads the one queue again, earliest first, as far as the first entry that does not fit; the server calls it after a saved config, which may have raised the cap
   drain: () => void
   // reads every watched run's files now
   check: () => Promise<void>
   // resolves once the run has settled
   settled: (id: number) => Promise<T>
-  // whether a new review of each kind would wait in the queue now, by the rule a start acts on
+  // whether a new review of each kind would wait in the queue now, by the rule a start acts on; a sweep reads the review flag, and either engine gives the one answer
   queueing: () => Queueing
   // resolves once the pending announcement of the queue answer, if any, has been made; a test awaits it instead of sleeping
   flushed: () => Promise<void>
@@ -1554,8 +1948,8 @@ export type LauncherOptions<T extends Session = Run> = {
   onWatch: (run: T) => void
   // a run's row changed: started, stepped, or settled
   onChange: (run: T) => void
-  // the launcher's answer to whether a new review would wait changed, for any run in any repository: sent once per change of the answer, after the change that moved it
-  onQueueing?: () => void
+  // the one slot count and the one queue, the same for the review engine and the sweep engine, which also holds who is told when the answer may have changed
+  line: ReviewLine
   // rows the cache pruned, called as soon as they are gone from the table and before their folders are removed, so what holds the rows in memory can drop them too
   onPruned?: (gone: T[]) => void
   log?: (line: string) => void
@@ -1582,7 +1976,9 @@ export type SessionStore<T extends Session> = {
   busyText: (request: StartRequest) => string
   // the schema result.json must carry, when the kind of launch fixes it
   schema: SweepResult['schema'] | null
-  // the slot a launch takes under the cap on concurrent reviews, or null for one the cap does not cover
+  // whether the cap on concurrent reviews covers a launch of this command, so it stands in the line
+  counted: (command: string) => boolean
+  // the slot a launch takes under that cap, or null for one the cap does not cover
   slot: (target: { repo: string, number?: number, command: string }, config: Config) => ReviewSlot | null
   // rows still waiting in the queue, which a restart fails
   queued: () => T[]
@@ -1639,6 +2035,7 @@ export const runStore = (cache: Cache): SessionStore<Run> => ({
   inFlight: (request) => ['running', 'queued'].includes(cache.runsFor(request.repo, request.number, 1)[0]?.status ?? ''),
   busyText: (request) => `a run for #${request.number} is already in flight`,
   schema: null,
+  counted: (command) => reviewCommands.includes(command),
   // a self-review is a review of a PR the cache holds as the viewer's own open PR
   slot: (target, config) => {
     if (!reviewCommands.includes(target.command)) return null
@@ -1648,7 +2045,7 @@ export const runStore = (cache: Cache): SessionStore<Run> => ({
   queued: cache.queuedRuns,
 })
 
-// the sweeps table's store: one sweep in flight per repository and a result.json that must carry the sweep result schema
+// the sweeps table's store: one sweep in flight per repository, queued or running, and a result.json that must carry the sweep result schema
 export const sweepStore = (cache: Cache): SessionStore<Sweep> => ({
   folder: 'sweeps',
   noun: 'sweep',
@@ -1658,54 +2055,38 @@ export const sweepStore = (cache: Cache): SessionStore<Sweep> => ({
   running: cache.runningSweeps,
   prune: cache.pruneSweeps,
   key: (request) => request.repo,
-  inFlight: (request) => cache.sweepsFor(request.repo, 1)[0]?.status === 'running',
+  // a queued sweep holds its repository as a running one does
+  inFlight: (request) => ['running', 'queued'].includes(cache.sweepsFor(request.repo, 1)[0]?.status ?? ''),
   busyText: (request) => `a sweep for ${request.repo} is already in flight`,
   schema: 'pit-crew/sweep-result@1',
-  // a sweep is not a review run: one per repository is its only limit
-  slot: () => null,
-  queued: () => [],
+  // every sweep the owner starts counts as one review: never a self-review, so it fits only in a slot of the cap's own and the overage is never for it. Its serial reviewers run inside this one slot
+  counted: () => true,
+  slot: () => 'review',
+  queued: cache.queuedSweeps,
 })
 
-// the review runs' launcher and the sweeps' launcher are the one engine over two stores
-// the delays before each retry of a queue announcement the listener failed, so a flush is tried at most one more time than there are delays
-const QUEUE_RETRY_MS = [50, 200, 800]
-
+// the review runs' launcher and the sweeps' launcher are the one engine over two stores, on the one line the caller gives them both
 export const createLauncher = (options: LauncherOptions): Launcher => createEngine(options, runStore(options.cache))
 
 export const createSweepLauncher = (options: LauncherOptions<Sweep>): Launcher<Sweep> => createEngine(options, sweepStore(options.cache))
 
 const createEngine = <T extends Session>(options: LauncherOptions<T>, store: SessionStore<T>): Launcher<T> => {
-  const { gh, git, spawn, fs, kill, procs, clock, timers, home, onChange, onWatch } = options
+  const { gh, git, spawn, fs, kill, procs, clock, timers, home, onChange, onWatch, line } = options
   const noun = store.noun
-  // a log line that cannot be written is dropped: logging sits on the paths that keep a process watched and a slot released, so it must never throw there
-  const log = (line: string): void => {
-    try {
-      options.log?.(line)
-    } catch {
-      // nowhere left to tell it
-    }
-  }
+  const log = safeLog(options.log)
   const pollMs = options.pollMs ?? 1000
   const watchedPollMs = options.watchedPollMs ?? 10_000
   const stopGraceMs = options.stopGraceMs ?? 10_000
   const runsDir = resolve(options.stateDir, store.folder)
-  // every place the cap's accounting moves is one of these three, so no path can take or release a slot without marking: the watched runs, the slots held for launches in progress, and (through lineAdd, lineRemove, and opened below) the queue and the count of launches in progress
-  const live = new Moving<Live>(() => mark())
+  // the runs watched here; each one taken or released marks on the line, whichever engine watches it
+  const live = new Moving<Live>(line.mark)
+  // this engine's place on the line: what it adds to the one count
+  const member = line.join(() => [...live.values()].flatMap((entry) => entry.slot === null ? [] : [entry.slot]))
   const waiters = new Map<number, ((run: T) => void)[]>()
   // runs between their running row and their watch, each with whether a stop was asked meanwhile; the stop is carried out once the process is watched
   const launching = new Map<number, boolean>()
   // starts between their checks and their row
   const starting = new Set<string>()
-  // reviews waiting for a slot under the cap, in the order they were queued, each with its row as it was queued, the viewer its start was confirmed for, the attempt that holds a slot for it while its checks run, and the clone folder those checks confirmed once they pass; it stays here until it is launched, so a save and a Stop still find it
-  type Queued = { id: number, run: T, request: StartRequest, viewer: string, attempt: number | null, checked: string | null }
-  const queue: Queued[] = []
-  // slots given to reviews whose process is not watched here yet, each held by an attempt of its own, so two quick starts never both take the last slot and an attempt that ends releases only its own
-  const admitting = new Moving<ReviewSlot>(() => mark())
-  let attempts = 0
-  // reviews being launched, new or from the queue, whose launch has not returned yet; none that arrived behind them starts until it has, so reviews spawn in the order they arrived
-  let opening = 0
-  // the turn of the review that arrived last, ended once it and every review ahead of it have had their fit decided or been refused
-  let arrivals: Promise<unknown> = Promise.resolve()
   // runs that ended here whose ending could not be written, each as it ended, for whoever awaits it; the row still reads queued or running until a Stop records it or the next server start settles it
   const unrecorded = new Map<number, T>()
   let closed = false
@@ -1719,65 +2100,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     } catch (error) {
       log(`${noun} ${run.id}: cannot announce its change: ${messageOf(error)}`)
     }
-    mark()
-  }
-
-  // the queue answer may have changed: the running count, the queue, or the launches in progress moved, or a run changed. It only marks; one flush on a later turn of the event loop tells the listener, however many marks came before it, and the listener reads the answer itself, so nothing here remembers what any page received
-  let flushHandle: ReturnType<typeof setImmediate> | null = null
-  let flushWaiters: (() => void)[] = []
-  // a flush whose listener threw is marked again after one of these delays, so a transient failure does not leave open pages on the old label; a new mark in the meantime takes the retry's place, and the run of failures ends at the first success or the last delay
-  let retryHandle: unknown = null
-  let failures = 0
-  const flush = (): void => {
-    flushHandle = null
-    if (!closed && options.onQueueing !== undefined) {
-      try {
-        options.onQueueing()
-        failures = 0
-      } catch (error) {
-        failures += 1
-        log(`${noun}: cannot announce the queue answer (attempt ${failures} of ${QUEUE_RETRY_MS.length + 1}): ${messageOf(error)}`)
-        const delay = QUEUE_RETRY_MS[failures - 1]
-        if (delay === undefined) {
-          log(`${noun}: giving up on announcing the queue answer; labels may stay stale until the next event`)
-          failures = 0
-        } else {
-          retryHandle = timers.set(() => {
-            retryHandle = null
-            mark()
-          }, delay)
-        }
-      }
-    }
-    const waiting = flushWaiters
-    flushWaiters = []
-    for (const resume of waiting) resume()
-  }
-  const mark = (): void => {
-    if (closed || options.onQueueing === undefined || flushHandle !== null) return
-    if (retryHandle !== null) {
-      timers.clear(retryHandle)
-      retryHandle = null
-    }
-    flushHandle = setImmediate(flush)
-  }
-  // resolves once the flush that is pending, if any, has run
-  const flushed = (): Promise<void> => flushHandle === null ? Promise.resolve() : new Promise((resumeFlush) => flushWaiters.push(resumeFlush))
-
-  // the queue and the count of launches in progress change only through these, so each marks
-  const lineAdd = (item: Queued): void => {
-    queue.push(item)
-    mark()
-  }
-  const lineRemove = (item: Queued): void => {
-    const at = queue.indexOf(item)
-    if (at < 0) return
-    queue.splice(at, 1)
-    mark()
-  }
-  const opened = (by: number): void => {
-    opening += by
-    mark()
+    // a run's row goes out with the one coalesced announcement, which sends the rows. A sweep's change has its own patch and is in no row, and whatever it does to the count marks where the count moves
+    if (store.noun === 'run') line.mark()
   }
 
   // the page is told a run is watched here; as for a change, a listener that throws is only logged
@@ -1923,40 +2247,6 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     entry.killTimer = null
   }
 
-  // the slots the reviews in flight hold: those watched here and those given a slot that no watched process holds yet, each counted once, since a launch releases its attempt's slot as it is watched
-  const reviewsInFlight = (): ReviewSlot[] => [...admitting.values(), ...[...live.values()].flatMap((entry) => entry.slot === null ? [] : [entry.slot])]
-
-  const fits = (slot: ReviewSlot, config: Config): boolean => reviewFits(reviewsInFlight(), slot, config.maxConcurrentReviews, config.selfReviewOverCap)
-
-  // whether a new review of this kind waits: with a review ahead of it in the queue or still being launched, or without room under the cap. A start acts on this and nothing else, and the page's buttons say it
-  const waits = (slot: ReviewSlot, config: Config): boolean => queue.length > 0 || opening > 0 || !fits(slot, config)
-
-  const queueing = (): Queueing => {
-    const config = options.config()
-    return { review: waits('review', config), selfReview: waits('selfReview', config) }
-  }
-
-  // a queued review's fit counts every review in flight and the slots held for reviews ahead of it in line, never its own or one behind it, so when a lowered cap leaves too many slots held it is always a later review that gives its slot back
-  const fitsInLine = (item: Queued, slot: ReviewSlot, config: Config): boolean => {
-    const behind = new Set(queue.slice(queue.indexOf(item)).flatMap((entry) => entry.attempt === null ? [] : [entry.attempt]))
-    const counted = [...admitting].flatMap(([attempt, held]) => behind.has(attempt) ? [] : [held])
-    const watched = [...live.values()].flatMap((entry) => entry.slot === null ? [] : [entry.slot])
-    return reviewFits([...counted, ...watched], slot, config.maxConcurrentReviews, config.selfReviewOverCap)
-  }
-
-  // holds a slot for one attempt to start a review; a caller tests the fit with nothing awaited between that and this
-  const reserve = (slot: ReviewSlot): number => {
-    attempts += 1
-    admitting.set(attempts, slot)
-    return attempts
-  }
-
-  // why a review confirmed for one repository and viewer may not start under this config, or null when both still hold: it would act where, or as whom, the confirmation did not say
-  const unbound = (repo: string, viewer: string, config: Config): string | null => {
-    if (repo !== config.repo) return `the repository is now ${config.repo}, not ${repo}`
-    return viewer.toLowerCase() !== config.viewer.toLowerCase() ? `the viewer is now ${config.viewer}, not ${viewer}` : null
-  }
-
   const wake = (id: number, run: T): void => {
     for (const resolveWaiter of waiters.get(id) ?? []) resolveWaiter(run)
     waiters.delete(id)
@@ -1990,145 +2280,6 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const failQueued = (run: T, note: string): void => {
     log(`${noun} ${run.id}: queued, not started: ${note}`)
     end(run, { status: 'failed', finishedAt: now(), note }, 'failed in the queue')
-  }
-
-  // ends the attempt to start a queued review, with the slot it held and the checks it passed, so it makes them again when it is next given a slot
-  const giveBack = (item: Queued): void => {
-    if (item.attempt !== null) admitting.delete(item.attempt)
-    item.attempt = null
-    item.checked = null
-  }
-
-  // takes a review out of the queue, and releases the slot an attempt to start it held
-  const dequeue = (item: Queued): void => {
-    lineRemove(item)
-    giveBack(item)
-  }
-
-  // a review that does not fit holds the line, however long that lasts, so none behind it keeps a slot or waits on checks passed long ago
-  const holdLine = (item: Queued): void => {
-    for (const behind of queue.slice(queue.indexOf(item) + 1)) giveBack(behind)
-  }
-
-  // a queued review that will never start, never to be tried again: its row is recorded as failed before it leaves the queue and its slot is released, so the row, the queue, the slot, and its waiters change together. A record that fails twice, the database unwritable, leaves the row queued for the next server start to fail as serverRestarted, while the review still leaves the queue here and whoever awaits it is given it as failed
-  const failInQueue = (item: Queued, note: string): void => {
-    failQueued(item.run, note)
-    dequeue(item)
-  }
-
-  // reads the queue earliest first: gives a slot to each review that fits now, which then makes its checks in the background, still in the queue, and launches each whose checks have passed once no review ahead of it is still making its checks or being launched. The first that does not fit ends the reading and holds the line, the over-cap allowance included, so reviews start in the order they arrived
-  const admit = (): void => {
-    if (closed) return
-    const config = options.config()
-    for (const item of [...queue]) {
-      const why = unbound(item.request.repo, item.viewer, config)
-      if (why !== null) failInQueue(item, `spawnFailed: not started: ${why}`)
-    }
-    let heldBack = opening > 0
-    for (const item of [...queue]) {
-      // one taken out of the queue since this pass began is skipped
-      if (!queue.includes(item)) continue
-      if (item.attempt !== null) {
-        // one whose checks are running holds its slot, and holds back every one behind it
-        if (item.checked === null || heldBack) {
-          heldBack = true
-          continue
-        }
-        proceed(item, item.attempt, item.checked)
-        // one that gave its slot back no longer fits, and still holds its place ahead of every one behind it
-        if (queue.includes(item)) {
-          holdLine(item)
-          return
-        }
-        heldBack ||= opening > 0
-        continue
-      }
-      let slot: ReviewSlot | null
-      try {
-        // whether it is a self-review is read from the cache now, as it is about to start
-        slot = store.slot(item.request, config)
-      } catch (error) {
-        // an unexpected failure, such as a cache read that throws, fails the queued review with the error rather than leaving it in line to fail again
-        failInQueue(item, `spawnFailed: ${messageOf(error)}`)
-        continue
-      }
-      if (slot === null || !fitsInLine(item, slot, config)) {
-        holdLine(item)
-        return
-      }
-      const attempt = reserve(slot)
-      item.attempt = attempt
-      heldBack = true
-      void begin(item, attempt).catch((error: unknown) => log(`${noun} ${item.id}: cannot start from the queue: ${messageOf(error)}`))
-    }
-  }
-
-  // a queued review's checks, the ones every start makes, while it stays in the queue; once they pass it keeps its slot and waits for the reviews ahead of it, which the queue's next reading launches it after
-  const begin = async (item: Queued, attempt: number): Promise<void> => {
-    // false once a Stop or a failure ended this attempt
-    const ours = (): boolean => !closed && item.attempt === attempt && queue.includes(item)
-    try {
-      const checked = options.config()
-      await checkIdentity(checked)
-      const cloneDir = await checkClone(checked)
-      if (ours()) item.checked = cloneDir
-    } catch (error) {
-      if (ours()) failInQueue(item, `spawnFailed: ${messageOf(error)}`)
-    }
-    // the queue is read again however the checks went: this one may be next to start, and one that failed hands its slot on
-    admit()
-  }
-
-  // a queued review whose checks passed and that nothing ahead of it holds back: the fit test again under the config and the cache as they are now, with nothing awaited between the reading and the slot held or given back, then the same launch, on the row it already has
-  const proceed = (item: Queued, attempt: number, cloneDir: string): void => {
-    let config: Config
-    let slot: ReviewSlot | null
-    try {
-      if (store.get(item.id) === null) throw new Error('its row is gone')
-      config = options.config()
-      const why = unbound(item.request.repo, item.viewer, config)
-      if (why !== null) {
-        failInQueue(item, `spawnFailed: not started: ${why}`)
-        return
-      }
-      slot = store.slot(item.request, config)
-    } catch (error) {
-      // an unexpected failure, such as a cache read that throws, fails the review, so it is never left in line holding an attempt nothing will finish, nor retried to fail again
-      failInQueue(item, `spawnFailed: ${messageOf(error)}`)
-      return
-    }
-    if (slot === null || !fitsInLine(item, slot, config)) {
-      // it no longer fits: it gives its slot back and waits again, in its place in line
-      giveBack(item)
-      return
-    }
-    admitting.set(attempt, slot)
-    const cwd = item.request.cwd ?? cloneDir
-    let run: T
-    try {
-      // its row says running before it leaves the queue, so a write that fails leaves the two as they were, for it to fail in the queue
-      run = store.update(item.id, { status: 'running', startedAt: now(), cwd: tildePath(cwd, home) })
-    } catch (error) {
-      failInQueue(item, `spawnFailed: ${messageOf(error)}`)
-      return
-    }
-    lineRemove(item)
-    opened(1)
-    void launchQueued(item, run, config, cwd, { slot, attempt, viewer: item.viewer })
-  }
-
-  // a queued review's launch, after which the queue is read again
-  const launchQueued = async (item: Queued, run: T, config: Config, cwd: string, admitted: Admitted): Promise<void> => {
-    try {
-      await launch(item.request, config, cwd, run, admitted)
-    } catch (error) {
-      log(`${noun} ${item.id}: cannot start from the queue: ${messageOf(error)}`)
-    } finally {
-      opened(-1)
-      admitting.delete(admitted.attempt)
-      // the queue is read again however the start went: the next in line may start now, one that ended at once hands its slot on, and a run that settled before its start returned was still counted here when it settled
-      admit()
-    }
   }
 
   // the report a review finished with, recorded by its hash, so Post it can tell it from what a later run wrote to the same name. Only a run has the column, and only a review posts
@@ -2191,8 +2342,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     // the process has ended, so the run ends here even when the database refuses the write: whoever awaits it is woken and its slot is freed
     const run = end((started ?? { id: entry.id }) as unknown as T, { ...judgement, ...finished, finishedAt: now() }, `settled as ${judgement.status}`)
     log(`${noun} ${run.id} (${run.command} ${run.args.join(' ')}) ${run.status}${run.note === null ? '' : `: ${run.note}`}`)
-    // a review that ended, however it ended, frees its slot for the next in line
-    if (entry.slot !== null) admit()
+    // a review or a sweep that ended, however it ended, frees its slot for the next in line
+    if (entry.slot !== null) line.admit()
     return run
   }
 
@@ -2311,11 +2462,20 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
-  // how a review was admitted: the slot it was given, the attempt holding that slot until its process is watched, and the viewer its start was confirmed for
-  type Admitted = { slot: ReviewSlot, attempt: number, viewer: string }
+  // a launch that no longer fits at the last moment before its spawn: nothing has started, so a stop asked meanwhile ends it here, and otherwise its row reads queued again, since when it first waited, and it stands at the head of the line. A write the database refuses throws, for the launch to fail it. Either way the end of the launch releases its slot and reads the queue again
+  const notStarted = (run: T, request: StartRequest, admitted: Admitted, waitingSince: string): T => {
+    const stopAsked = launching.get(run.id) === true
+    launching.delete(run.id)
+    if (stopAsked) return end(run, { status: 'stopped', finishedAt: now() }, 'stopped before it started')
+    const back = store.update(run.id, { status: 'queued', startedAt: waitingSince })
+    line.putBack(lineEntry(back, request, admitted.viewer))
+    log(`${noun} ${run.id}: not started, the cap is now lower; it waits again at the head of the queue`)
+    changed(back)
+    return back
+  }
 
   // a queued review's row already exists, was announced when it was queued, and was marked running as it left the queue; it starts now, in the folder the checks just confirmed
-  const launch = async (request: StartRequest, config: Config, cwd: string, queued: T | null = null, admitted: Admitted | null = null): Promise<T> => {
+  const launch = async (request: StartRequest, config: Config, cwd: string, queued: T | null = null, admitted: Admitted | null = null, queuedSince: string | null = null): Promise<T> => {
     let run = queued ?? newRow(request, config, cwd, 'running')
     const runner = run.runner
     const sessionId = run.sessionId
@@ -2347,9 +2507,13 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         startedAt: run.startedAt,
       }
       await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid: null, pidStartedAt: null }, null, 2)}\n`)
-      // the last thing before the spawn: a review starts only for the repository and the viewer its start was confirmed for, under the config in effect now
-      const why = admitted === null ? null : unbound(request.repo, admitted.viewer, options.config())
-      if (why !== null) throw new Error(`not started: ${why}`)
+      // the last thing before the spawn, with nothing awaited between this reading and it: a review or a sweep starts only for the repository and the viewer its start was confirmed for, and only while it still fits, under the config in effect now
+      if (admitted !== null) {
+        const current = options.config()
+        const why = unbound(request.repo, admitted.viewer, current)
+        if (why !== null) throw new Error(`not started: ${why}`)
+        if (!line.fitsAtSpawn(admitted.attempt, admitted.slot, current)) return notStarted(run, request, admitted, queuedSince ?? run.startedAt)
+      }
       child = spawn({
         command: invocation.command,
         args: invocation.args,
@@ -2392,7 +2556,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
     const entry = watchRun(run, dir, child, stdin !== null && child.stdin !== null, spec, admitted?.slot ?? null)
     // the watched run holds its slot from here, so the attempt's is released at once and the slot never counts twice
-    if (admitted !== null) admitting.delete(admitted.attempt)
+    if (admitted !== null) line.release(admitted.attempt)
     const stopAsked = launching.get(run.id) === true
     launching.delete(run.id)
     // carried out on the watched process itself, with no read of the row that could throw before the start time is recorded
@@ -2415,18 +2579,6 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return store.get(run.id) ?? run
   }
 
-  // a review's place in line, taken as it arrives: the wait for every review ahead of it to have its fit decided or be refused, and the end of its own turn, which the next waits for
-  const takeTurn = (): { ahead: Promise<unknown>, decided: () => void } => {
-    const ahead = arrivals
-    let decided = (): void => {}
-    const own = new Promise<void>((resolveTurn) => {
-      decided = resolveTurn
-    })
-    // a review refused ahead of an earlier one that still makes its checks moves nothing behind it forward
-    arrivals = Promise.all([ahead, own])
-    return { ahead, decided }
-  }
-
   const start = async (request: StartRequest): Promise<T> => {
     const config = options.config()
     // a tandem primary launches its secondary in the background, and the fix and update sessions are pinned to Claude; the runner is the one asked for or the configured default, so no caller gets around this
@@ -2441,36 +2593,36 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       throw new LaunchError('busy', store.busyText(request))
     }
     starting.add(key)
-    // only reviews stand in line; a fix or update session and a sweep wait for nothing
-    const turn = reviewCommands.includes(request.command) ? takeTurn() : null
+    // reviews and sweeps stand in the one line; a fix or update session waits for nothing
+    const turn = store.counted(request.command) ? line.takeTurn() : null
     try {
       await checkIdentity(config)
       const cloneDir = await checkClone(config)
-      // the checks may race, and a refusal above never waits, but a review's fit is decided in the order they arrived
+      // the checks may race, and a refusal above never waits, but a fit is decided in the order they arrived, whichever engine took the start
       await turn?.ahead
       // a config saved during the checks is the one admission reads, and whether it is a self-review is read from the cache now, with nothing awaited before the slot is held
       const current = options.config()
       const slot = store.slot(request, current)
       if (slot === null) return await launch(request, config, request.cwd ?? cloneDir)
       // whatever already waits and fits goes first
-      admit()
-      // a new review starts at once only as the sole eligible start: with room, and with no review ahead of it waiting in the queue or still being launched
-      if (waits(slot, current)) {
+      line.admit()
+      // a new review or sweep starts at once only as the sole eligible start: with room, and with nothing ahead of it waiting in the queue or still being launched
+      if (line.waits(slot, current)) {
         const queued = enqueue(request, config, request.cwd ?? cloneDir)
         // a save during the checks may have left it confirmed for a repository or a viewer no longer in effect
-        admit()
+        line.admit()
         return store.get(queued.id) ?? queued
       }
-      const attempt = reserve(slot)
-      opened(1)
+      const attempt = line.reserve(slot)
+      line.opened(1)
       turn?.decided()
       try {
         return await launch(request, config, request.cwd ?? cloneDir, null, { slot, attempt, viewer: config.viewer })
       } finally {
-        opened(-1)
-        admitting.delete(attempt)
+        line.opened(-1)
+        line.release(attempt)
         // as for a queued start: the slot is never left counted for a run that is no longer in flight
-        admit()
+        line.admit()
       }
     } finally {
       turn?.decided()
@@ -2478,12 +2630,34 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
-  // at the cap, or behind a review that arrived before it: the review gets its row, queued, and starts when its turn comes and a slot is free
+  // a queued row's place in the line, holding no slot and with no checks passed
+  const lineEntry = (run: T, request: StartRequest, viewer: string): LineEntry => ({
+    member,
+    id: run.id,
+    name: `${noun} ${run.id}`,
+    request,
+    viewer,
+    attempt: null,
+    checked: null,
+    rowGone: () => store.get(run.id) === null,
+    slot: (current) => store.slot(request, current),
+    check: async (current) => {
+      await checkIdentity(current)
+      return checkClone(current)
+    },
+    fail: (note) => failQueued(run, note),
+    markRunning: (at) => {
+      const marked = store.update(run.id, { status: 'running', startedAt: now(), cwd: tildePath(at, home) })
+      return (current, admitted) => launch(request, current, at, marked, admitted, run.startedAt)
+    },
+  })
+
+  // at the cap, or behind what arrived before it: the review or the sweep gets its row, queued, and starts when its turn comes and a slot is free
   const enqueue = (request: StartRequest, config: Config, cwd: string): T => {
     const run = newRow(request, config, cwd, 'queued')
-    lineAdd({ id: run.id, run, request, viewer: config.viewer, attempt: null, checked: null })
+    line.add(lineEntry(run, request, config.viewer))
     watching(run)
-    log(`${noun} ${run.id} queued: ${run.command} ${run.args.join(' ')}, ${reviewsInFlight().length} reviews in flight with a cap of ${config.maxConcurrentReviews}`)
+    log(`${noun} ${run.id} queued: ${run.command} ${run.args.join(' ')}, ${line.inFlight().length} reviews in flight with a cap of ${config.maxConcurrentReviews}`)
     changed(run)
     return run
   }
@@ -2509,14 +2683,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (run.status === 'queued') {
       // recorded before it leaves the queue, so a write the database refuses throws with the review still queued in its place, as if the Stop had not been asked
       const stopped = store.update(id, { status: 'stopped', finishedAt: now() })
-      const item = queue.find((entry) => entry.id === id)
+      const item = line.entry(member, id)
       // an attempt to start it whose checks still run ends here, and the slot it held goes to the next in line
-      if (item !== undefined) dequeue(item)
+      if (item !== undefined) line.dequeue(item)
       unrecorded.delete(id)
       log(`${noun} ${id}: taken out of the queue`)
       changed(stopped)
       wake(id, stopped)
-      admit()
+      line.admit()
       return stopped
     }
     if (run.status !== 'running') throw new LaunchError('notRunning', `${noun} ${id} is not running (${run.status})`)
@@ -2560,14 +2734,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     } catch (error) {
       // a cache that cannot be read never keeps a live run from being watched again: a review is then counted as one of the cap's own, which can only hold another back, never let one start over the cap
       log(`${noun} ${run.id}: cannot read whether it is a self-review, so it counts as a review: ${messageOf(error)}`)
-      return reviewCommands.includes(run.command) ? 'review' : null
+      return store.counted(run.command) ? 'review' : null
     }
   }
 
   const recover = async (): Promise<void> => {
-    // a start of the server makes no GitHub call and starts no process, so a review still queued when it stopped is not started now
+    // a start of the server makes no GitHub call and starts no process, so a review or a sweep still queued when it stopped is not started now
     for (const run of store.queued()) {
-      if (queue.some((item) => item.id === run.id)) continue
+      if (line.entry(member, run.id) !== undefined) continue
       // a failure the database refuses to record never keeps the live runs below from being watched again
       failQueued(run, 'serverRestarted: it was still queued, so it never started')
     }
@@ -2725,13 +2899,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   const close = (): void => {
     closed = true
-    if (flushHandle !== null) clearImmediate(flushHandle)
-    flushHandle = null
-    if (retryHandle !== null) timers.clear(retryHandle)
-    retryHandle = null
-    flush()
+    line.leave(member)
     for (const entry of live.values()) clear(entry)
   }
 
-  return { start, stop, reread, markPost, recordPost, recover, drain: admit, check: checkAll, settled, queueing, flushed, close }
+  return { start, stop, reread, markPost, recordPost, recover, drain: line.admit, check: checkAll, settled, queueing: line.queueing, flushed: line.flushed, close }
 }
