@@ -8,6 +8,9 @@ const pullUrl = (repo: string | undefined, number: number): string | null =>
     ? `https://github.com/${repo}/pull/${number}`
     : null
 
+// the PR a based-on indication names: its page, or null when the repository or the number is not plain, so the indication stays text
+export const pullHref = (repo: string | undefined, number: number): string | null => pullUrl(repo, number)
+
 export const pushHref = (sha: string | null | undefined, repo: string | undefined, number: number): string | null => {
   const base = pullUrl(repo, number)
   return base === null || sha == null || !/^[0-9a-f]{7,40}$/i.test(sha) ? null : `${base}/commits/${sha.toLowerCase()}`

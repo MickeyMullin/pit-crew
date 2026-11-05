@@ -4,7 +4,7 @@ import type { ClosedRange, ClosedRow, MineRow, OpenRow, OtherRow } from '../src/
 import type { View } from '../src/poller.ts'
 import { showsMerge } from './agent.ts'
 import { agentCellNodes, agentCellSig } from './agentcell.ts'
-import { avatar, chip, icons, issueChip, mergeChip, pip, ticketChip } from './cells.ts'
+import { avatar, basedOnChip, chip, icons, issueChip, mergeChip, pip, ticketChip } from './cells.ts'
 import { closedTally, hasTickets } from './closed.ts'
 import { h, newTab, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
@@ -99,13 +99,15 @@ const prCell = <R extends { number: number, url: string }>(hover: boolean): Colu
   build: () => [h('a', { ...newTab, class: 'pr-link mono', href: safeHref(row.url), 'data-focus': 'pr', 'data-hover': hover ? 'pr' : null }, highlighted(`#${row.number}`, terms, queryTerms.filter((phrase) => String(row.number).includes(phrase))))],
 })
 
-const titleCell = (aliasShown: boolean) => (row: OpenRow, { terms, queryTerms }: CellContext): { sig: unknown, build: () => Node[] } => {
+const titleCell = (aliasShown: boolean) => (row: OpenRow, { view, terms, queryTerms }: CellContext): { sig: unknown, build: () => Node[] } => {
   const hits = hiddenHits(terms, row, { tickets: true, alias: aliasShown })
   return {
-    sig: [row.title, row.stack, terms, queryTerms, hits],
+    sig: [row.title, row.stack, row.basedOn, view.repo, terms, queryTerms, hits],
     build: () => [h('span', { class: 'title-cell' },
       h('span', { class: 'title-text', 'data-hover': 'title' }, highlighted(row.title, terms, queryTerms)),
-      row.stack === null ? null : chip(`stack ${row.stack.position}/${row.stack.size}`, 'gray', { class: 'chip chip-small tone-gray', title: 'Stacked PR: its position in the stack' }),
+      row.stack === null ? null : chip(`stack ${row.stack.position}/${row.stack.size}`, 'gray', { class: 'chip chip-small tone-gray', title: 'Stacked PR: its position in the stack, as GitHub marks it' }),
+      // a PR GitHub does not mark as a stack but whose base is another open PR's branch: an indication that never says stack
+      row.basedOn === null ? null : basedOnChip(row.basedOn, view.repo),
       hitsLine(hits, terms))],
   }
 }

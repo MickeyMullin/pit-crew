@@ -19,7 +19,7 @@ import { cacheFile, ConfigError, configFile, expandHome, readConfig, runnerNames
 import type { Clock, Config, RunnerName } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner } from './github.ts'
-import { deriveStacks, latestReviewsOf } from './derive.ts'
+import { latestReviewsOf, markedStack } from './derive.ts'
 import { createLauncher, createReviewLine, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Queueing, Spawn, StartKind } from './launcher.ts'
 import { renderMarkdown } from './markdown.ts'
@@ -567,7 +567,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     const cached = cache.readView(config.repo)
     const row = cached.open.find((entry) => entry.number === number)
     if (row === undefined) throw new HttpError(422, `#${number} is not an open PR in ${config.repo} that Pit View has fetched`)
-    const stack = deriveStacks(cached.open.map((entry) => entry.pr), cached.defaultBranch).get(number) ?? null
+    // the stack is GitHub's marker on the cached PR; a base branch that is another PR's never makes one
+    const stack = markedStack(row.pr)
     const refusal = notOffered(kind, row.pr, config, stack)
     if (refusal !== null) throw new HttpError(422, refusal)
     const option = startOptions(row.pr, config, stack, false).find((candidate) => candidate.kind === kind)

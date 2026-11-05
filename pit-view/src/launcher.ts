@@ -603,7 +603,7 @@ export const claudeOnly = (command: string, args: readonly string[]): boolean =>
 // null when the kind is offered for this PR, otherwise why it is not
 export const notOffered = (kind: StartKind, pr: RawOpenPr, config: Config, stack: Stack | null): string | null => {
   if (kind === 'tandem' && defaultRun(pr, config).command !== 'review-pr') return `Review in tandem is not offered for #${pr.number}: review-dependabot has no tandem mode`
-  if (kind === 'stack' && stack === null) return `Review stack is not offered for #${pr.number}: it is not part of a stack`
+  if (kind === 'stack' && stack === null) return `Review stack is not offered for #${pr.number}: GitHub does not mark it as part of a stack`
   if (kind === 'fix' && !offersFix(pr, config)) return `Fix session is offered only on your own PRs, and #${pr.number} is not yours`
   return null
 }

@@ -256,6 +256,15 @@ test('the open list and the one-PR refresh ask for the ids the Last activity lin
   }
 })
 
+test('the open list and the one-PR refresh both ask for GitHub\'s stack marker, and nothing that grows the node count', () => {
+  for (const query of [openPrsQuery, singlePrQuery]) {
+    assert.match(query, /\bstack \{ size \}/)
+    assert.match(query, /\bstackEntry \{ position \}/)
+    // no connection under the marker: the entries list is never asked for
+    assert.doesNotMatch(query, /entries/)
+  }
+})
+
 test('commandRunner reports exit code, stdout, stderr and extra env', async () => {
   const run = commandRunner(process.execPath)
   const script = 'process.stdout.write(process.env.GH_TOKEN + " " + process.env.GH_PROMPT_DISABLED); process.stderr.write("oops"); process.exit(3)'

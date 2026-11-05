@@ -1,6 +1,7 @@
 // public/cells.ts
 // the small pieces rows are made of: avatars, chips, reviewer pips and icons
-import type { Issue, IssueKind, MergeStateKind, PersonView, Reviewer, ReviewerState, Ticket } from '../src/derive.ts'
+import type { BasedOn, Issue, IssueKind, MergeStateKind, PersonView, Reviewer, ReviewerState, Ticket } from '../src/derive.ts'
+import { pullHref } from './anchors.ts'
 import { h, newTab, svg } from './dom.ts'
 import { highlighted } from './pagesearch.ts'
 import { safeHref, safeImage } from './safeurl.ts'
@@ -10,6 +11,16 @@ export type Tone = 'blue' | 'red' | 'amber' | 'green' | 'purple' | 'gray' | 'non
 
 export const chip = (label: string, tone: Tone, attrs: Record<string, string> = {}): HTMLSpanElement =>
   h('span', { ...attrs, class: `chip tone-${tone}` }, label)
+
+// "based on #N (n/m)": the PR this one is based on, for a PR GitHub does not mark as a stack. It never says stack, and it links to the named PR in a new tab only when that PR's URL can be built safely, otherwise it is plain text
+export const basedOnChip = (basedOn: BasedOn, repo: string | undefined): HTMLElement => {
+  const label = `based on #${basedOn.number} (${basedOn.position}/${basedOn.size})`
+  const title = `Based on the branch of #${basedOn.number}; GitHub does not mark these PRs as a stack`
+  const href = safeHref(pullHref(repo, basedOn.number))
+  return href === null
+    ? h('span', { class: 'chip chip-small tone-gray', title }, label)
+    : h('a', { ...newTab, class: 'chip chip-small chip-link tone-gray', href, title }, label)
+}
 
 export const icons = {
   external: [['path', { d: 'M14 4h6v6' }], ['path', { d: 'M20 4l-9 9' }], ['path', { d: 'M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5' }]],

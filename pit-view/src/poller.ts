@@ -387,7 +387,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     patch({ closed: snap.view.closed, tiles: snap.view.tiles, sync: syncOf(snap.cached, settings) })
   }
 
-  // the end of a cycle: removals, every row that changed since its page patch (stacks span
+  // the end of a cycle: removals, every row that changed since its page patch (based-on indications span
   // pages) or that the cycle never reached (now stale), and the final sync
   const applyFinish = (finished: FinishResult, sent: ReadonlyMap<number, string>): void => {
     const settings = config()
@@ -522,7 +522,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     return { started: cycle !== null, cycle: cycle?.id ?? null }
   }
 
-  // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that row and any other its change moved (stacks), or its removal once closed; a failure stays on the row and never touches the cycles, so the board does not read offline. repo is the repository the caller meant (a write's), not whatever the configuration says now: while it is not the one in effect, the cache of that repository is still refreshed, but nothing of it reaches the board, the baseline, or a notification
+  // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that row and any other its change moved (based-on indications), or its removal once closed; a failure stays on the row and never touches the cycles, so the board does not read offline. repo is the repository the caller meant (a write's), not whatever the configuration says now: while it is not the one in effect, the cache of that repository is still refreshed, but nothing of it reaches the board, the baseline, or a notification
   const runPrRefresh = async (number: number, repo: string): Promise<PrRefreshResult> => {
     const settings = config()
     const key = prKey(repo, number)

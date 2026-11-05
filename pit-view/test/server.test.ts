@@ -1102,21 +1102,20 @@ test('a failed one-PR refresh stays on its row with its kind, and the board neve
   }
 })
 
-test('a one-PR refresh re-derives the stacks it moves and rescans its own self-review report', async () => {
-  const runner = withSingle(async (number) => number === 111 ? ok(JSON.stringify(await singlePr(111, { patch: { baseRefName: 'main' } }))) : null)
+test('a one-PR refresh takes the stack from GitHub\'s marker: a layer GitHub no longer marks leaves the stack and shows the based-on indication, and its rescan of a self-review report still works', async () => {
+  const runner = withSingle(async (number) => number === 111 ? ok(JSON.stringify(await singlePr(111, { patch: { stack: null, stackEntry: null } }))) : null)
   const h = await setup({ runner })
   try {
     await filled(h)
     const { body: before } = await getJson<View>(`${h.base}/api/view`)
     assert.deepEqual([110, 111, 112].map((number) => rowIn(before, number)?.stack), [{ position: 1, size: 3 }, { position: 2, size: 3 }, { position: 3, size: 3 }])
+    assert.deepEqual([110, 111, 112].map((number) => rowIn(before, number)?.basedOn), [null, null, null])
     const stream = await openStream(h.base, 'client=tab-1&visible=false&paused=false')
     await send(`${h.base}/api/prs/111/refresh`, 'POST')
     await stream.patch()
     const done = await stream.patch()
-    // #111 now starts its own stack: every row whose stack changed comes along
-    assert.deepEqual(done.rows.map((row) => [row.number, row.stack]).sort((a, b) => Number(a[0]) - Number(b[0])), [
-      [110, null], [111, { position: 1, size: 2 }], [112, { position: 2, size: 2 }],
-    ])
+    // #111 is no longer marked: it is based on #110 now, and the layers GitHub still marks keep their numbers
+    assert.deepEqual(done.rows.map((row) => [row.number, row.stack, row.basedOn]), [[111, null, { number: 110, position: 2, size: 3 }]])
     stream.close()
 
     // a self-review written since the last cycle shows on the next refresh of that PR
@@ -1435,6 +1434,40 @@ test('a re-read refused by a guard is 422 with the reason, and a PR that left th
   }
 })
 
+// the same fixtures with GitHub reporting no stack for any PR, as it does for PRs based on another PR's branch by hand
+const unmarkedRunner = (): FakeRunner => {
+  const fixtures = fixtureRunner()
+  return fakeRunner(async (args) => {
+    const result = await fixtures.runner(args)
+    const query = field(args, 'query') ?? ''
+    if (!query.includes('query OpenPullRequests') && !query.includes('query SinglePullRequest')) return result
+    const strip = (pr: RawOpenPr): RawOpenPr => ({ ...pr, stack: null, stackEntry: null })
+    const body = JSON.parse(result.stdout) as { data: { repository: { pullRequests?: { nodes: RawOpenPr[] }, pullRequest?: RawOpenPr } } }
+    const repository = body.data.repository
+    if (repository.pullRequests !== undefined) repository.pullRequests.nodes = repository.pullRequests.nodes.map(strip)
+    if (repository.pullRequest !== undefined) repository.pullRequest = strip(repository.pullRequest)
+    return { ...result, stdout: JSON.stringify(body) }
+  })
+}
+
+test('a PR based on another PR\'s branch that GitHub does not mark has no stack, shows what it is based on, and is refused a Review stack start', async () => {
+  const h = await setup({ runner: unmarkedRunner(), config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const { body: view } = await getJson<View>(`${h.base}/api/view`)
+    assert.deepEqual([110, 111, 112].map((number) => rowIn(view, number)?.stack), [null, null, null])
+    assert.deepEqual([110, 111, 112].map((number) => rowIn(view, number)?.basedOn), [null, { number: 110, position: 2, size: 3 }, { number: 111, position: 3, size: 3 }])
+    // the Agent cell offers no Review stack to a layer the chain suggests
+    for (const number of [110, 111, 112]) assert.ok(!(rowIn(view, number)?.agent?.starts ?? []).some((start) => start.kind === 'stack'), `#${number}`)
+    const refused = await send(`${h.base}/api/prs/111/runs`, 'POST', { repo: scenario.repo, kind: 'stack', runner: 'claude' }, token(h))
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /#111.*GitHub does not mark it as part of a stack/)
+    assert.equal(h.launch.children.length, 0)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 const lastWrite = (h: Harness): string => h.launch.children.at(-1)?.writes[0] ?? ''
 
 test('a start takes a kind beside the runner: default, tandem (Claude only) or stack, each with its own command line and label', async () => {
@@ -1512,7 +1545,7 @@ test('a kind that cannot start is refused before anything runs: bad kind 400, ta
     assert.match(String(dependabot.body.error), /#114.*no tandem mode/)
     const flat = await send(url(113), 'POST', { repo: scenario.repo, kind: 'stack' }, token(h))
     assert.equal(flat.status, 422)
-    assert.match(String(flat.body.error), /#113.*not part of a stack/)
+    assert.match(String(flat.body.error), /#113.*GitHub does not mark it as part of a stack/)
     assert.equal((await send(url(999), 'POST', { repo: scenario.repo, kind: 'tandem' }, token(h))).status, 422)
     assert.equal((await send(url(111), 'POST', { repo: scenario.repo, kind: 'stack' })).status, 403)
     assert.equal(h.launch.children.length, 0)
@@ -1648,7 +1681,7 @@ test('the comments check rides on a Self-review start as a boolean: true adds --
     for (const [number, ask] of refusals) {
       const refused = await send(url(number), 'POST', { repo: scenario.repo, checkComments: true, ...ask }, token(h))
       assert.equal(refused.status, 422, `#${number} ${JSON.stringify(ask)}`)
-      assert.match(String(refused.body.error), /not offered|offered only|not part of a stack/, `#${number} ${JSON.stringify(ask)}`)
+      assert.match(String(refused.body.error), /not offered|offered only|GitHub does not mark it as part of a stack/, `#${number} ${JSON.stringify(ask)}`)
     }
     assert.equal(h.launch.children.length, 0)
     assert.equal(githubCalls(h.runner).filter((call) => call.args[1] === 'user').length, 0)

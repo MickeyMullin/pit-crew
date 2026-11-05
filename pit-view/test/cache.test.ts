@@ -634,6 +634,30 @@ test('a version 11 cache lacks the database ids of the latest reviews, so its ca
   }
 })
 
+test('a version 12 cache lacks GitHub\'s stack marker, so its cached PRs are dropped and fetched again: its runs and sweeps stay', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const created = first.createRun(newRun(106), (id) => `~/runs/${id}`)
+    const sweep = first.createSweep(newSweep(), (id) => `~/sweeps/${id}`)
+    first.close()
+    const old = new DatabaseSync(path)
+    old.exec('INSERT INTO prs (repo, number, state, updated_at, head_oid, fetched_at, cycle, last_seen_at, data) VALUES (\'octo-example/orbit\', 106, \'open\', \'2026-10-26T12:00:00Z\', \'abc\', \'2026-10-26T12:00:00Z\', 1, \'2026-10-26T12:00:00Z\', \'{"number":106}\')')
+    old.exec('UPDATE meta SET value = \'12\' WHERE key = \'schemaVersion\'')
+    old.close()
+    assert.equal(schemaVersion, 13)
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.equal(count(cache, 'prs'), 0)
+    assert.equal(cache.getRun(created.id)?.id, created.id)
+    assert.deepEqual(cache.sweepsFor(scenario.repo).map((entry) => entry.id), [sweep.id])
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
+    cache.close()
+  } finally {
+    await cleanup()
+  }
+})
+
 test('a version 7 cache gains runs.resolved_by_hand in place: its runs stay, not resolved by hand, and the flag is stored', async () => {
   const { dir, cleanup } = await tempDir()
   try {

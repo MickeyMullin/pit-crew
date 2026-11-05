@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import {
-  attentionOrder, deriveClosed, deriveCounts, deriveIssues, deriveLastActivity, deriveMerge, deriveOpenRow, deriveOpenRows, deriveStacks,
+  attentionOrder, deriveClosed, deriveCounts, deriveIssues, deriveBasedOn, deriveLastActivity, deriveMerge, deriveOpenRow, deriveOpenRows, deriveStacks,
   deriveTickets, deriveTiles, deriveView, groupRows, latestReviewsOf, localAvatarUrl, personView, reviewerPips,
 } from '../src/derive.ts'
 import type { DeriveContext, MineRow, OpenRow, OtherRow } from '../src/derive.ts'
@@ -97,7 +97,7 @@ test('every open PR lands in its section and group; others\' drafts are hidden',
 
 test('bots win over every other group, drafts and ready PRs included', async () => {
   const bump = find(await page2(), 114)
-  const stack = deriveStacks([], null)
+  const stack = deriveStacks([])
   assert.equal(deriveOpenRow(variant(bump, { isDraft: true }), ctx(), stack)?.group, 'bots')
   assert.equal(deriveOpenRow(variant(bump, { mergeStateStatus: 'CLEAN' }), ctx(), stack)?.group, 'bots')
   // with no bots configured it is an ordinary PR
@@ -483,25 +483,77 @@ test('last activity carries the id of the event it describes, where the fetched 
   }
 })
 
-test('stacks are found across page boundaries', async () => {
-  const all = await allOpen()
-  const stacks = deriveStacks(all, scenario.defaultBranch)
-  assert.deepEqual(Object.fromEntries(stacks), { 110: { position: 1, size: 3 }, 111: { position: 2, size: 3 }, 112: { position: 3, size: 3 } })
-  // page 1 alone holds #111 but neither its base #110 nor its child #112
-  assert.equal(deriveStacks(await page1(), scenario.defaultBranch).size, 0)
-  assert.deepEqual((await row(111)).stack, { position: 2, size: 3 })
-  assert.equal((await row(113)).stack, null)
+// the three-PR chain of the fixtures, as GitHub marks it (#110 at the bottom) and as an unmarked chain of branches
+const unmarked = (prs: readonly RawOpenPr[]): RawOpenPr[] => prs.map((pr) => ({ ...structuredClone(pr), stack: null, stackEntry: null }))
+// an old cached row: written before version 13, so it lacks both fields
+const withoutMarkFields = (prs: readonly RawOpenPr[]): RawOpenPr[] => prs.map((pr) => {
+  const copy: Partial<RawOpenPr> = structuredClone(pr)
+  delete copy.stack
+  delete copy.stackEntry
+  return copy as RawOpenPr
 })
 
-test('stacks handle branches, forks named after the default branch, and cycles', () => {
+test('a stack is what GitHub marks, with its position and size, whatever page a layer is on', async () => {
+  const all = await allOpen()
+  assert.deepEqual(Object.fromEntries(deriveStacks(all)), { 110: { position: 1, size: 3 }, 111: { position: 2, size: 3 }, 112: { position: 3, size: 3 } })
+  // page 1 alone holds #111 only, and GitHub's own numbers still place it
+  assert.deepEqual(Object.fromEntries(deriveStacks(await page1())), { 111: { position: 2, size: 3 } })
+  assert.deepEqual((await row(111)).stack, { position: 2, size: 3 })
+  assert.equal((await row(113)).stack, null)
+  // a marked layer is a stack member, not a based-on PR
+  assert.equal((await row(111)).basedOn, null)
+})
+
+test('a PR based on another open PR\'s branch that GitHub does not mark is no stack: it is based on that PR, with the position and size it would have', async () => {
+  const all = unmarked(await allOpen())
+  assert.equal(deriveStacks(all).size, 0)
+  const rows = deriveOpenRows(all, scenario.defaultBranch, ctx())
+  const of = (number: number) => find(rows, number)
+  for (const number of [110, 111, 112]) assert.equal(of(number).stack, null, `#${number}`)
+  assert.equal(of(110).basedOn, null)
+  assert.deepEqual(of(111).basedOn, { number: 110, position: 2, size: 3 })
+  assert.deepEqual(of(112).basedOn, { number: 111, position: 3, size: 3 })
+  assert.equal(of(113).basedOn, null)
+  // the agent cell is handed no stack, so Review stack is not offered
+  const seen: unknown[] = []
+  deriveOpenRows(all, scenario.defaultBranch, ctx({ agent: (_pr, stack) => (seen.push(stack), null) }))
+  assert.ok(seen.length > 0)
+  assert.ok(seen.every((stack) => stack === null))
+})
+
+test('a PR GitHub marks keeps its stack and no based-on even when its base is another PR\'s branch; a half-marked set of fields is no stack', async () => {
+  const all = await allOpen()
+  const rows = deriveOpenRows(all, scenario.defaultBranch, ctx())
+  assert.deepEqual(rows.filter((entry) => entry.stack !== null).map((entry) => [entry.number, entry.basedOn]).sort((a, b) => Number(a[0]) - Number(b[0])), [[110, null], [111, null], [112, null]])
+  const half = find(all, 111)
+  assert.equal(deriveStacks([{ ...half, stackEntry: null }]).size, 0)
+  assert.equal(deriveStacks([{ ...half, stack: null }]).size, 0)
+  // a stack of one that GitHub marks is kept as reported, and a position past the size cannot be a layer
+  assert.deepEqual(Object.fromEntries(deriveStacks([{ ...half, stack: { size: 1 }, stackEntry: { position: 1 } }])), { 111: { position: 1, size: 1 } })
+  assert.equal(deriveStacks([{ ...half, stack: { size: 2 }, stackEntry: { position: 3 } }]).size, 0)
+})
+
+test('an old cached row, from before the stack fields, renders as not stacked and shows the based-on indication where the base rule applies', async () => {
+  const old = withoutMarkFields(await allOpen())
+  assert.ok(old.every((pr) => !('stack' in pr) && !('stackEntry' in pr)))
+  const rows = deriveOpenRows(old, scenario.defaultBranch, ctx())
+  assert.ok(rows.every((entry) => entry.stack === null))
+  assert.deepEqual(find(rows, 111).basedOn, { number: 110, position: 2, size: 3 })
+  assert.deepEqual(find(rows, 112).basedOn, { number: 111, position: 3, size: 3 })
+  assert.equal(find(rows, 110).basedOn, null)
+})
+
+test('the based-on rule handles branches, forks named after the default branch, and cycles', () => {
   const pr = (number: number, headRefName: string, baseRefName: string) => ({ number, headRefName, baseRefName })
-  const branched = deriveStacks([pr(1, 'a', 'main'), pr(2, 'b', 'a'), pr(3, 'c', 'a'), pr(4, 'd', 'c')], 'main')
+  const branched = deriveBasedOn([pr(1, 'a', 'main'), pr(2, 'b', 'a'), pr(3, 'c', 'a'), pr(4, 'd', 'c')], 'main', new Map())
   assert.deepEqual(Object.fromEntries(branched), {
-    1: { position: 1, size: 4 }, 2: { position: 2, size: 4 }, 3: { position: 2, size: 4 }, 4: { position: 3, size: 4 },
+    2: { number: 1, position: 2, size: 4 }, 3: { number: 1, position: 2, size: 4 }, 4: { number: 3, position: 3, size: 4 },
   })
   // a fork PR whose head is called main is nobody's base
-  assert.equal(deriveStacks([pr(5, 'main', 'main'), pr(6, 'x', 'main')], 'main').size, 0)
-  assert.equal(deriveStacks([pr(7, 'p', 'q'), pr(8, 'q', 'p')], 'main').size, 0)
+  assert.equal(deriveBasedOn([pr(5, 'main', 'main'), pr(6, 'x', 'main')], 'main', new Map()).size, 0)
+  assert.equal(deriveBasedOn([pr(7, 'p', 'q'), pr(8, 'q', 'p')], 'main', new Map()).size, 0)
+  // a PR GitHub marks is left out
+  assert.deepEqual([...deriveBasedOn([pr(1, 'a', 'main'), pr(2, 'b', 'a')], 'main', new Map([[2, { position: 2, size: 2 }]])).keys()], [])
 })
 
 test('tickets come from the title, then the branch, then linked issues; bodies only carry no-ticket', async () => {
@@ -643,7 +695,7 @@ test('the derived view has the API shape, with injected freshness', async () => 
   assert.deepEqual(find(shown, 113).freshness, { state: 'stale', fetchedAt: '2026-10-26T14:00:00Z' })
   const sample = find(shown, 110)
   assert.deepEqual(Object.keys(sample).sort(), [
-    'additions', 'agent', 'author', 'baseRef', 'changedFiles', 'createdAt', 'deletions', 'flags', 'freshness', 'group', 'headOid',
+    'additions', 'agent', 'author', 'baseRef', 'basedOn', 'changedFiles', 'createdAt', 'deletions', 'flags', 'freshness', 'group', 'headOid',
     'headRef', 'headSha', 'issues', 'lastActivity', 'merge', 'number', 'primaryBase', 'refresh', 'reviewers', 'section', 'stack', 'tickets', 'title', 'url',
   ])
   assert.deepEqual([sample.headOid, sample.headRef, sample.baseRef, sample.agent, sample.refresh], ['cb052a4', 'feat/import-reader', 'main', null, null])
@@ -919,7 +971,7 @@ test('the Changes requested banner and chip carry the anchor of the review that 
     const tag = (review: RawOpenPr['latestReviews']['nodes'][number]) => review.state === 'CHANGES_REQUESTED' ? { ...review, databaseId: id } : review
     return { ...pr, latestReviews: { nodes: pr.latestReviews.nodes.map(tag) }, latestOpinionatedReviews: { nodes: pr.latestOpinionatedReviews.nodes.map(tag) } }
   }
-  const rowOf = (raw: RawOpenPr): MineRow => deriveOpenRow(raw, ctx(), deriveStacks([], null)) as MineRow
+  const rowOf = (raw: RawOpenPr): MineRow => deriveOpenRow(raw, ctx(), deriveStacks([])) as MineRow
   const found = rowOf(withId(5500456))
   assert.deepEqual(found.changesRequested?.anchor, { kind: 'review', id: '5500456' })
   assert.deepEqual(found.issues.find((issue) => issue.kind === 'changesRequested')?.anchor, { kind: 'review', id: '5500456' })

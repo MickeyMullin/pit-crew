@@ -135,6 +135,9 @@ export type RawOpenPr = {
   author: RawActor | null
   headRefName: string
   baseRefName: string
+  // GitHub's own stack marker, the only source of a stack: stack holds the stack's size and stackEntry this PR's position in it (whether the bottom is position 1 is unverified until a marked stack is read), both null when GitHub does not mark the PR. A row cached before version 13 lacks both fields, and that reads as not marked
+  stack?: { size: number } | null
+  stackEntry?: { position: number } | null
   headRefOid: string
   createdAt: string
   updatedAt: string
@@ -298,6 +301,7 @@ const issueRefFields = 'closingIssuesReferences(first: 10) { nodes { number titl
 const openPrFields = `number title url isDraft
 author { ${actorFields} }
 headRefName baseRefName headRefOid
+stack { size } stackEntry { position }
 createdAt updatedAt additions deletions changedFiles
 mergeable mergeStateStatus reviewDecision
 body

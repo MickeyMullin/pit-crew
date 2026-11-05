@@ -2,7 +2,7 @@
 // the links from Last activity and from "push since yours" to the GitHub event they describe: built from a plain owner/name repository, a PR number, and a digits-only or hex-only id, and null for anything else, so the page falls back to the PR URL
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { activityHref, changesRequestedHref, pushHref, reReviewHref } from '../public/anchors.ts'
+import { activityHref, changesRequestedHref, pullHref, pushHref, reReviewHref } from '../public/anchors.ts'
 import { safeHref } from '../public/safeurl.ts'
 
 const repo = 'octo-example/orbit'
@@ -50,4 +50,14 @@ test('the Changes requested banner and chip link to the review that requested ch
   assert.equal(changesRequestedHref(undefined, repo, 101, pr), pr)
   assert.equal(changesRequestedHref({ kind: 'review', id: '12x' }, repo, 101, pr), pr)
   assert.equal(changesRequestedHref(review, undefined, 101, pr), pr)
+})
+
+test('the PR a based-on indication names links to its page, and a repository or number that is not plain gives null, so the indication stays text', () => {
+  assert.equal(pullHref(repo, 110), 'https://github.com/octo-example/orbit/pull/110')
+  assert.equal(safeHref(pullHref(repo, 110)), 'https://github.com/octo-example/orbit/pull/110')
+  assert.equal(pullHref(undefined, 110), null)
+  assert.equal(pullHref('not a repo', 110), null)
+  assert.equal(pullHref('../..', 110), null)
+  assert.equal(pullHref(repo, 0), null)
+  assert.equal(pullHref(repo, 1.5), null)
 })

@@ -25,6 +25,8 @@ export type Reviewer = PersonView & { state: ReviewerState, team?: true }
 export type Ticket = { system: string, label: string, url?: string }
 
 export type Stack = { position: number, size: number }
+// a PR that is based on another open PR's branch but that GitHub does not mark as a stack: number is the PR it is based on, and position and size are what the stack position and size would be if the chain of base branches were a stack. It is an indication only: no Review stack, no grouping, and no stack report
+export type BasedOn = { number: number, position: number, size: number }
 
 export type IssueKind = 'changesRequested' | 'conflicts' | 'ciFailing' | 'ciRunning' | 'ciCanceled' | 'ciNotRun'
 // anchor is the Changes requested chip's link: the review that requested changes, when its id is known
@@ -63,6 +65,7 @@ export type PrBase = {
   changedFiles: number
   tickets: Ticket[]
   stack: Stack | null
+  basedOn: BasedOn | null
   reviewers: Reviewer[]
   issues: Issue[]
   merge: MergeState
@@ -583,23 +586,43 @@ export const deriveTickets = (source: TicketSource, isBot: boolean, config: Conf
 
 // stacks
 
-type StackPr = { number: number, headRefName: string, baseRefName: string }
+type StackMark = { number: number, stack?: { size: number } | null, stackEntry?: { position: number } | null }
 
-// recomputed over every open PR, since a PR's base may live on another page; a PR whose head
-// is the default branch (a fork's main) never counts as a base
-export const deriveStacks = (prs: readonly StackPr[], defaultBranch: string | null): Map<number, Stack> => {
-  const byHead = new Map<string, StackPr>()
+const isCount = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value > 0
+
+// the stack GitHub marks this PR as part of, from its own fields; null when it marks none, when either field is missing (a row cached before version 13), or when the numbers cannot be a layer of a stack (a position past the size, or a number that is not a positive integer). A stack of one that GitHub marks is kept as GitHub reports it
+export const markedStack = (pr: Pick<StackMark, 'stack' | 'stackEntry'>): Stack | null => {
+  const size = pr.stack?.size
+  const position = pr.stackEntry?.position
+  return isCount(size) && isCount(position) && position <= size ? { position, size } : null
+}
+
+// every open PR GitHub marks as part of a stack. Nothing is inferred from branch names, so a PR on another page or one refreshed alone keeps GitHub's numbers
+export const deriveStacks = (prs: readonly StackMark[]): Map<number, Stack> => {
+  const stacks = new Map<number, Stack>()
+  for (const pr of prs) {
+    const stack = markedStack(pr)
+    if (stack !== null) stacks.set(pr.number, stack)
+  }
+  return stacks
+}
+
+type BasePr = { number: number, headRefName: string, baseRefName: string }
+
+// the indication for a PR whose base ref is another open PR's head ref and that GitHub does not mark (`marked` holds the ones it does). Recomputed over every open PR, since a PR's base may live on another page; a PR whose head is the default branch (a fork's main) never counts as a base. Walk base links down to a PR whose base is not an open PR's branch: that PR is position 1, and the chain's size is the number of PRs that reach it
+export const deriveBasedOn = (prs: readonly BasePr[], defaultBranch: string | null, marked: ReadonlyMap<number, unknown>): Map<number, BasedOn> => {
+  const byHead = new Map<string, BasePr>()
   for (const pr of [...prs].sort((a, b) => a.number - b.number)) {
     if (pr.headRefName !== defaultBranch && !byHead.has(pr.headRefName)) byHead.set(pr.headRefName, pr)
   }
-  const parentOf = (pr: StackPr): StackPr | undefined => {
+  const parentOf = (pr: BasePr): BasePr | undefined => {
     const parent = byHead.get(pr.baseRefName)
     return parent === undefined || parent.number === pr.number ? undefined : parent
   }
-  // root and depth per PR; a cycle of base links is not a stack
+  // root and depth per PR; a cycle of base links is not a chain
   const placed = new Map<number, { root: number, position: number }>()
   for (const pr of prs) {
-    const chain: StackPr[] = [pr]
+    const chain: BasePr[] = [pr]
     const seen = new Set([pr.number])
     let cyclic = false
     for (let parent = parentOf(pr); parent !== undefined; parent = parentOf(parent)) {
@@ -615,12 +638,14 @@ export const deriveStacks = (prs: readonly StackPr[], defaultBranch: string | nu
   }
   const sizes = new Map<number, number>()
   for (const { root } of placed.values()) sizes.set(root, (sizes.get(root) ?? 0) + 1)
-  const stacks = new Map<number, Stack>()
-  for (const [number, { root, position }] of placed) {
-    const size = sizes.get(root) ?? 1
-    if (size > 1) stacks.set(number, { position, size })
+  const basedOn = new Map<number, BasedOn>()
+  for (const pr of prs) {
+    const place = placed.get(pr.number)
+    const parent = parentOf(pr)
+    if (place === undefined || parent === undefined || marked.has(pr.number)) continue
+    basedOn.set(pr.number, { number: parent.number, position: place.position, size: sizes.get(place.root) ?? place.position })
   }
-  return stacks
+  return basedOn
 }
 
 // open rows
@@ -632,7 +657,7 @@ const freshnessOf = (number: number, ctx: DeriveContext): Freshness =>
 export const isPrimaryBase = (baseRef: string, defaultBranch: string | null): boolean =>
   defaultBranch === null || defaultBranch === '' ? baseRef === 'master' || baseRef === 'main' : baseRef === defaultBranch
 
-const prBase = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, Stack>, issues: Issue[], merge: MergeState, defaultBranch: string | null): PrBase => ({
+const prBase = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, Stack>, basedOn: ReadonlyMap<number, BasedOn>, issues: Issue[], merge: MergeState, defaultBranch: string | null): PrBase => ({
   number: pr.number,
   url: pr.url,
   title: pr.title,
@@ -648,6 +673,7 @@ const prBase = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, S
   changedFiles: pr.changedFiles,
   tickets: deriveTickets(pr, isBotLogin(pr.author?.login, ctx.config), ctx.config),
   stack: stacks.get(pr.number) ?? null,
+  basedOn: stacks.has(pr.number) ? null : basedOn.get(pr.number) ?? null,
   reviewers: reviewerPips(pr, ctx.config),
   issues,
   merge,
@@ -658,12 +684,12 @@ const prBase = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, S
 })
 
 // one open PR as a Mine or Others' row; null for rows hidden in v1 (others' drafts)
-export const deriveOpenRow = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, Stack>, defaultBranch: string | null = null): OpenRow | null => {
+export const deriveOpenRow = (pr: RawOpenPr, ctx: DeriveContext, stacks: ReadonlyMap<number, Stack>, defaultBranch: string | null = null, basedOn: ReadonlyMap<number, BasedOn> = new Map()): OpenRow | null => {
   const issues = deriveIssues(pr)
   const merge = deriveMerge(pr, issues)
   if (isMine(pr, ctx.config)) {
     return {
-      ...prBase(pr, ctx, stacks, issues, merge, defaultBranch),
+      ...prBase(pr, ctx, stacks, basedOn, issues, merge, defaultBranch),
       section: 'mine',
       ...mineGroupAndStage(pr, merge),
       selfReview: selfReviewOf(ctx.reports?.get(pr.number), pr.headRefOid),
@@ -672,13 +698,14 @@ export const deriveOpenRow = (pr: RawOpenPr, ctx: DeriveContext, stacks: Readonl
   }
   const group = otherGroup(pr, issues, merge, ctx.config)
   if (group === null) return null
-  return { ...prBase(pr, ctx, stacks, issues, merge, defaultBranch), section: 'others', group, flags: deriveFlags(pr, ctx.config) }
+  return { ...prBase(pr, ctx, stacks, basedOn, issues, merge, defaultBranch), section: 'others', group, flags: deriveFlags(pr, ctx.config) }
 }
 
-// every open PR, with stacks computed across all of them
+// every open PR, with the stacks GitHub marks and the based-on indications computed across all of them
 export const deriveOpenRows = (prs: readonly RawOpenPr[], defaultBranch: string | null, ctx: DeriveContext): OpenRow[] => {
-  const stacks = deriveStacks(prs, defaultBranch)
-  return prs.map((pr) => deriveOpenRow(pr, ctx, stacks, defaultBranch)).filter((row) => row !== null)
+  const stacks = deriveStacks(prs)
+  const basedOn = deriveBasedOn(prs, defaultBranch, stacks)
+  return prs.map((pr) => deriveOpenRow(pr, ctx, stacks, defaultBranch, basedOn)).filter((row) => row !== null)
 }
 
 // attention order. Others' Your move: Re-review first, then the rest of the group (Requested of you included), each oldest activity first, so the PR that has waited longest is on top. Every other group keeps Re-review, then Requested of you, then most recent activity first. Across groups, which only the flat list shows, tiers keep this a total order: Re-review in Your move, Re-review elsewhere, the rest of Your move, Requested of you elsewhere, everything else. Ties go to the higher number

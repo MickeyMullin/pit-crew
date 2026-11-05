@@ -376,8 +376,17 @@ test('why a kind is not offered is a sentence for the refusal', async () => {
   assert.equal(notOffered('default', await prOf(114), config, null), null)
   assert.equal(notOffered('tandem', await prOf(113), config, null), null)
   assert.match(notOffered('tandem', await prOf(114), config, null) ?? '', /#114.*review-dependabot has no tandem mode/)
-  assert.match(notOffered('stack', await prOf(113), config, null) ?? '', /#113.*not part of a stack/)
+  assert.match(notOffered('stack', await prOf(113), config, null) ?? '', /#113.*GitHub does not mark it as part of a stack/)
   assert.equal(notOffered('stack', await prOf(111), config, { position: 2, size: 3 }), null)
+})
+
+test('the Agent cell of a PR GitHub does not mark offers no Review stack, and a marked layer does, through the cell the row carries', async () => {
+  const config = baseConfig()
+  const unmarked = agentCell(await prOf(111), config, undefined, undefined, null)
+  assert.ok(!unmarked.starts.some((option) => option.kind === 'stack'))
+  assert.ok(unmarked.starts.some((option) => option.kind === 'default'))
+  const marked = agentCell(await prOf(111), config, undefined, undefined, { position: 2, size: 3 })
+  assert.ok(marked.starts.some((option) => option.kind === 'stack' && option.command === 'review-stack'))
 })
 
 // step slots
