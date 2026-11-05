@@ -6,7 +6,7 @@
 // confirmation's state, and moves focus
 import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
-import { actionBound, actionDoneText, actionRefusalText, actionRequest } from './actionsview.ts'
+import { actionBound, actionDoneText, actionOffers, actionRefusalText, actionRequest } from './actionsview.ts'
 import type { ActionConfirmModel, ActionKind, PersonChoice } from './actionsview.ts'
 import { postRequest, refusalText, rereadRequest, startRequest, stopRequest } from './agent.ts'
 import type { AgentCell, RunView, StartKind } from './agent.ts'
@@ -46,8 +46,8 @@ export type DrawerOptions = {
 
 export type Drawer = {
   // ask, when given, opens that start's confirmation at once (the banner's Fix session), if the
-  // PR offers it and it can run now; otherwise the drawer opens as usual and says why
-  open: (number: number, opener: Opener, ask?: StartKind) => void
+  // PR offers it and it can run now; otherwise the drawer opens as usual and says why. 'merge' (the Agent cell's Merge button) asks the Squash and merge confirmation the same way, when the row offers it
+  open: (number: number, opener: Opener, ask?: StartKind | 'merge') => void
   close: () => void
   // after every draw: take the live row, refetch what changed, bring the elements up to date
   update: () => void
@@ -1025,7 +1025,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     render()
   }
 
-  const open = (n: number, from: Opener, ask?: StartKind): void => {
+  const open = (n: number, from: Opener, ask?: StartKind | 'merge'): void => {
     const row = options.rowOf(n)
     if (row === undefined) return
     opener = from
@@ -1054,7 +1054,9 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     update()
     heading.focus({ preventScroll: true })
     // a start that cannot run now opens no confirmation: the drawer shows its reason instead
-    if (ask !== undefined && !busy) askStart(ask)
+    if (ask === 'merge') {
+      if (!busy && actionOffers(row, true).some((offer) => offer.action === 'merge')) void askAction('merge')
+    } else if (ask !== undefined && !busy) askStart(ask)
   }
 
   const close = (): void => {

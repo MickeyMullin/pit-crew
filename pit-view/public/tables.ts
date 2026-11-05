@@ -2,6 +2,7 @@
 // the three tables: column definitions, the arrangement of rows into groups, and keyed rendering
 import type { ClosedRange, ClosedRow, MineRow, OpenRow, OtherRow } from '../src/derive.ts'
 import type { View } from '../src/poller.ts'
+import { showsMerge } from './agent.ts'
 import { agentCellNodes, agentCellSig } from './agentcell.ts'
 import { avatar, chip, icons, issueChip, mergeChip, pip, ticketChip } from './cells.ts'
 import { closedTally, hasTickets } from './closed.ts'
@@ -46,9 +47,9 @@ const agentColumn = <R extends OpenRow>(): Column<R> => ({
     // a Dependabot PR that a settled sweep reviewed at this head gets a broom beside the cell's button; the link is read from the sweeps' rows, never from the Agent cell
     const link = sweepLinkFor(view.sweeps.items, row.number, row.headOid)
     return {
-      sig: [agentCellSig(row.agent, row.number, nowMs), link],
+      sig: [agentCellSig(row.agent, row.number, nowMs, showsMerge(row)), link],
       build: () => {
-        const nodes = agentCellNodes(row.agent, row.number, nowMs)
+        const nodes = agentCellNodes(row.agent, row.number, nowMs, showsMerge(row))
         if (link === null) return nodes
         return [h('span', { class: 'agent-with-sweep' }, nodes,
           h('button', {

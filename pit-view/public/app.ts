@@ -432,7 +432,8 @@ document.addEventListener('click', (event) => {
     // the PR drawer and the sweep drawer never show together
     sweepDrawer.close()
   }
-  if (cell !== null) drawer.open(Number(cell.dataset.pr), { key: `agent-open:${cell.dataset.pr}`, number: Number(cell.dataset.pr) })
+  // a Merge button opens the drawer with the Squash and merge confirmation already asked; nothing is sent until that confirmation's own button
+  if (cell !== null) drawer.open(Number(cell.dataset.pr), { key: `agent-open:${cell.dataset.pr}`, number: Number(cell.dataset.pr) }, cell.dataset.agentAsk === 'merge' ? 'merge' : undefined)
   else if (banner !== null) drawer.open(Number(banner.dataset.openAgent), { key: `banner-open:${banner.dataset.openAgent}`, number: Number(banner.dataset.openAgent) })
   else if (fix !== null) drawer.open(Number(fix.dataset.fixSession), { key: `banner-fix:${fix.dataset.fixSession}`, number: Number(fix.dataset.fixSession) }, 'fix')
 })

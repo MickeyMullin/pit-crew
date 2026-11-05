@@ -4,6 +4,7 @@
 // clock reading passed in. The drawer's own words are in drawerview.ts
 import type { RunnerName } from '../src/config.ts'
 import type { AgentCell, AgentResult, PostForm, RunView, StartKind, StartOption, StepSlot } from '../src/launcher.ts'
+import type { OpenRow } from '../src/derive.ts'
 import { formatDuration, formatSince } from './format.ts'
 
 export type { AgentCell, AgentResult, PostForm, RunnerName, RunView, StartKind, StartOption, StepSlot }
@@ -89,7 +90,8 @@ export const doneTone = (cell: Pick<AgentCell, 'status' | 'text'>): DoneTone => 
 // what the cell shows, state by state. Every state has one button that opens the drawer, named
 // with the PR number; starting, stopping and copying happen in the drawer
 export type CellModel =
-  | { state: 'idle', button: string, name: string, under: string | null }
+  // ask is present only on the Merge button: the drawer opens with that confirmation already asked
+  | { state: 'idle', button: string, name: string, under: string | null, ask?: 'merge' }
   | { state: 'queued', label: string, line: string, name: string }
   | { state: 'running', label: string, line: string, step: string, name: string }
   | {
@@ -107,7 +109,11 @@ const failureTip = (note: string | null): string | null => {
   return note
 }
 
-export const cellModel = (cell: AgentCell, number: number, nowMs: number): CellModel => {
+// the idle cell reads Merge instead of the row's default run on the viewer's own PR that is ready to merge into the primary branch: the same condition under which the drawer offers Squash and merge. The page derives it from the row it already has; the server sends no field for it, and the button starts nothing
+export const showsMerge = (row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase'>): boolean =>
+  row.section === 'mine' && row.merge.state === 'ready' && row.primaryBase
+
+export const cellModel = (cell: AgentCell, number: number, nowMs: number, merge = false): CellModel => {
   if (cell.state === 'queued') {
     return { state: 'queued', label: cell.label, line: queuedLine(cell, nowMs), name: `Open agent for #${number}, ${cell.label} queued` }
   }
@@ -132,11 +138,13 @@ export const cellModel = (cell: AgentCell, number: number, nowMs: number): CellM
       name: `Open agent for #${number}, ${text}`,
     }
   }
+  const button = merge ? 'Merge' : cell.action.label
   return {
     state: 'idle',
-    button: cell.action.label,
-    name: `${cell.action.label} #${number}: open agent`,
+    button,
+    name: `${button} #${number}: open agent`,
     under: cell.lastReviewAt === null ? null : `last review ${formatSince(cell.lastReviewAt, nowMs)}`,
+    ...merge ? { ask: 'merge' as const } : {},
   }
 }
 

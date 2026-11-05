@@ -3,16 +3,17 @@
 // timer that moves without a redraw, and the clipboard helper the drawer uses; the cell is one
 // button that opens the drawer, and app.ts handles the click
 import type { AgentCell } from '../src/launcher.ts'
-import { cellModel, runningLine } from './agent.ts'
+import type { OpenRow } from '../src/derive.ts'
+import { cellModel, runningLine, showsMerge } from './agent.ts'
 import { h, setText } from './dom.ts'
 
 // the cell's signature leaves out every text that moves with the clock (the last review's age,
 // the running timer, the finish age) and a running cell's step: a minute going by or a new step
 // never rebuilds the cell, so its button stays the same element under the pointer and the
 // keyboard; updateAgentCells sets those texts in place after each draw, and the ticker the timer
-export const agentCellSig = (cell: AgentCell | null, number: number, nowMs: number): unknown => {
+export const agentCellSig = (cell: AgentCell | null, number: number, nowMs: number, merge = false): unknown => {
   if (cell === null) return null
-  const model = cellModel(cell, number, nowMs)
+  const model = cellModel(cell, number, nowMs, merge)
   if (model.state === 'idle') return { ...model, under: model.under !== null }
   if (model.state === 'queued') return { state: model.state, label: model.label, name: model.name, runId: cell.runId }
   if (model.state === 'running') return { state: model.state, label: model.label, name: model.name, runId: cell.runId, startedAt: cell.startedAt }
@@ -20,14 +21,14 @@ export const agentCellSig = (cell: AgentCell | null, number: number, nowMs: numb
 }
 
 // after each draw: every cell's moving line, and a running cell's step as its tooltip and hidden text
-export const updateAgentCells = (root: ParentNode, rows: readonly { number: number, agent: AgentCell | null }[], nowMs: number): void => {
+export const updateAgentCells = (root: ParentNode, rows: readonly (Pick<OpenRow, 'section' | 'merge' | 'primaryBase'> & { number: number, agent: AgentCell | null })[], nowMs: number): void => {
   for (const row of rows) {
     const cell = row.agent
     if (cell === null) continue
     const box = root.querySelector<HTMLElement>(`tr[data-pr="${row.number}"] .agent`)
     const line = box?.querySelector<HTMLElement>('[data-agent-line]')
     if (box == null || line == null) continue
-    const model = cellModel(cell, row.number, nowMs)
+    const model = cellModel(cell, row.number, nowMs, showsMerge(row))
     if (model.state === 'idle') {
       setText(line, model.under ?? '')
       continue
@@ -76,11 +77,12 @@ export const tickTimers = (root: ParentNode, nowMs: number): void => {
 
 // the cell's one button: it opens the drawer, and carries data-focus so focus comes back to it
 // across a rebuild
-const openButton = (number: number, name: string, extra: string, children: (Node | string | null)[]): HTMLButtonElement =>
+const openButton = (number: number, name: string, extra: string, children: (Node | string | null)[], ask: 'merge' | null = null): HTMLButtonElement =>
   h('button', {
     type: 'button',
     class: `agent-button ${extra}`.trim(),
     'data-agent': 'open',
+    'data-agent-ask': ask,
     'data-pr': number,
     'aria-label': name,
     title: name,
@@ -88,12 +90,12 @@ const openButton = (number: number, name: string, extra: string, children: (Node
     'data-focus-key': `agent-open:${number}`,
   }, children)
 
-export const agentCellNodes = (cell: AgentCell | null, number: number, nowMs: number): Node[] => {
+export const agentCellNodes = (cell: AgentCell | null, number: number, nowMs: number, merge = false): Node[] => {
   if (cell === null) return [h('span', { class: 'muted' }, '—')]
-  const model = cellModel(cell, number, nowMs)
+  const model = cellModel(cell, number, nowMs, merge)
   if (model.state === 'idle') {
     return [h('span', { class: 'agent agent-idle' },
-      openButton(number, model.name, 'agent-start', [model.button]),
+      openButton(number, model.name, 'agent-start', [model.button], model.ask ?? null),
       model.under === null ? null : h('span', { class: 'agent-line', 'data-agent-line': '' }, model.under))]
   }
   if (model.state === 'queued') {
