@@ -20,7 +20,7 @@ import type { Clock, Config, RunnerName } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner } from './github.ts'
 import { deriveStacks, latestReviewsOf } from './derive.ts'
-import { createLauncher, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest } from './launcher.ts'
+import { createLauncher, createReviewLine, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Queueing, Spawn, StartKind } from './launcher.ts'
 import { renderMarkdown } from './markdown.ts'
 import { createNotifier, noDeliver, systemDeliver, systemExec } from './notify.ts'
@@ -365,6 +365,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
 
   // an Update session's PR is read again once the session settles, and its row arrives as a patch
   const updates = createUpdateWatch((repo, number) => poller.refreshPrAfterWrite(repo, number), log)
+  // the one slot count and the one queue under the review cap, which reviews and sweeps share
+  const line = createReviewLine({ config: effective, timers, log, onQueueing: () => poller.queueingChanged() })
   const launcher = createLauncher({
     cache,
     gh,
@@ -388,7 +390,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       poller.runChanged(run.repo, run.number)
       updates.change(run)
     },
-    onQueueing: () => poller.queueingChanged(),
+    line,
     log,
     pollMs: options.launch.pollMs,
     watchedPollMs: options.launch.watchedPollMs,
@@ -428,6 +430,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       sweeps.drop(gone.map((sweep) => sweep.id))
       for (const repo of new Set(gone.map((sweep) => sweep.repo))) poller.sweepsChanged(repo)
     },
+    line,
     log,
     pollMs: options.launch.pollMs,
     watchedPollMs: options.launch.watchedPollMs,
@@ -746,7 +749,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     poller.identityChanged()
     if (stored.viewer === '' && ghLogin === '') ghLogin = await localLogin(runner)
     await poller.configChanged(before)
-    // a raised cap on concurrent reviews starts what waits, and a review queued for another repository or viewer fails now rather than later
+    // a raised cap on concurrent reviews starts what waits, and a review or a sweep queued for another repository or viewer fails now rather than later
     launcher.drain()
     json(res, 200, saved)
   }

@@ -183,6 +183,8 @@ export type Cache = {
   sweepsFor: (repo: string, limit?: number) => Sweep[]
   // every sweep still recorded as running, in any repo
   runningSweeps: () => Sweep[]
+  // sweeps waiting in the review queue, which a restart fails
+  queuedSweeps: () => Sweep[]
   // deletes all but the newest keepSweeps finished sweeps and returns them, so their folders can go
   pruneSweeps: () => Sweep[]
   close: () => void
@@ -779,9 +781,11 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
 
   const runningSweeps = (): Sweep[] => all('SELECT * FROM sweeps WHERE status = \'running\' ORDER BY id').map(toSession)
 
-  // all but the newest sweeps are pruned, but a sweep still in flight is never pruned, however old
+  const queuedSweeps = (): Sweep[] => all('SELECT * FROM sweeps WHERE status = \'queued\' ORDER BY id').map(toSession)
+
+  // all but the newest sweeps are pruned, but a sweep still in flight or waiting in the queue is never pruned, however old
   const pruneSweeps = (): Sweep[] => transaction(() => {
-    const doomed = all('SELECT * FROM sweeps WHERE status != \'running\' AND id NOT IN (SELECT id FROM sweeps ORDER BY id DESC LIMIT $keep) ORDER BY id', { keep: keepSweeps }).map(toSession)
+    const doomed = all('SELECT * FROM sweeps WHERE status NOT IN (\'running\', \'queued\') AND id NOT IN (SELECT id FROM sweeps ORDER BY id DESC LIMIT $keep) ORDER BY id', { keep: keepSweeps }).map(toSession)
     for (const gone of doomed) run('DELETE FROM sweeps WHERE id = $id', { id: gone.id })
     return doomed
   })
@@ -816,6 +820,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     getSweep,
     sweepsFor,
     runningSweeps,
+    queuedSweeps,
     pruneSweeps,
     close: () => db.close(),
     db,

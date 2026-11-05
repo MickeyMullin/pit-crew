@@ -11,7 +11,7 @@ import type { Run } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import { commandRunner, createGh } from '../src/github.ts'
-import { claudeInvocation, codexInvocation, createLauncher, procsFrom, systemFs, systemSpawn } from '../src/launcher.ts'
+import { claudeInvocation, codexInvocation, createLauncher, createReviewLine, procsFrom, systemFs, systemSpawn } from '../src/launcher.ts'
 import { systemTimers } from '../src/poller.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { fakeRemotes, fixtureRunner, ok, tempDir } from './helpers.ts'
@@ -91,6 +91,7 @@ const setup = async (config: Partial<Config> = {}) => {
   await install(bin, 'codex', fakeCodex)
   const cache = openCache({ path: ':memory:', clock: { now: () => Date.now() } })
   const changes: Run[] = []
+  const lineConfig = () => ({ ...defaultConfig(), repo: scenario.repo, viewer: scenario.viewer, cloneDir: '~/dev/orbit', ...config })
   const launcher = createLauncher({
     cache,
     gh: createGh(fixtureRunner().runner),
@@ -101,7 +102,7 @@ const setup = async (config: Partial<Config> = {}) => {
     procs: procsFrom(commandRunner('ps')),
     clock: { now: () => Date.now() },
     timers: systemTimers,
-    config: () => ({ ...defaultConfig(), repo: scenario.repo, viewer: scenario.viewer, cloneDir: '~/dev/orbit', ...config }),
+    config: lineConfig,
     home,
     stateDir: join(home, '.local', 'state', 'pit-view'),
     // a server started inside an agent session must not pass that session on
@@ -109,6 +110,7 @@ const setup = async (config: Partial<Config> = {}) => {
     newSessionId: () => '00000000-0000-4000-8000-0000000000e2',
     onWatch: () => {},
     onChange: (run) => changes.push(run),
+    line: createReviewLine({ config: lineConfig, timers: systemTimers }),
     pollMs: 50,
     watchedPollMs: 200,
   })

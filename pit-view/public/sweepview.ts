@@ -28,7 +28,7 @@ export const sweepStopRequest = (id: number, token: string): RunRequest => ({
 
 // the color of a sweep's outcome follows what the owner does next; the words carry the meaning. A sweep with nothing to sweep is done, never a failure, so it is gray rather than red
 export const sweepTone = (sweep: Pick<SweepView, 'status' | 'result'>): Tone => {
-  if (sweep.status === 'running') return 'blue'
+  if (sweep.status === 'running' || sweep.status === 'queued') return 'blue'
   if (sweep.status === 'failed') return 'red'
   if (sweep.status === 'needsInput') return 'amber'
   if (sweep.status === 'stopped') return 'gray'
@@ -52,6 +52,8 @@ export type SweepHeaderModel = {
     label: string
     tone: Tone
     running: boolean
+    // waiting in the review queue: it reads "queued 4m", with no step or finish age
+    queued: boolean
     startedAt: string
     lastStepAt: string | null
     finishedAt: string | null
@@ -68,22 +70,25 @@ export const sweepHeaderModel = (sweeps: SweepsView, nowMs: number, timeZone?: s
   let status: SweepHeaderModel['status'] = null
   if (latest !== undefined) {
     const running = latest.status === 'running'
-    const label = running ? 'Sweep' : `Sweep: ${latest.text ?? 'Done'}`
+    const queued = latest.status === 'queued'
+    const label = running || queued ? 'Sweep' : `Sweep: ${latest.text ?? 'Done'}`
     status = {
       sweepId: latest.id,
       label,
       tone: sweepTone(latest),
       running,
+      queued,
       startedAt: latest.startedAt,
       lastStepAt: latest.lastStepAt,
       finishedAt: latest.finishedAt,
-      text: running ? `${label} ${runningText(latest, nowMs)}` : `${label}${latest.finishedAt === null ? '' : ` · ${formatSince(latest.finishedAt, nowMs)}`}`,
-      name: running ? 'Open the running Dependabot sweep' : `Open the Dependabot sweep of ${sweepWhen(latest, timeZone)}: ${latest.text ?? 'done'}`,
+      text: queued ? `${label} queued ${formatDuration(latest.startedAt, nowMs)}` : running ? `${label} ${runningText(latest, nowMs)}` : `${label}${latest.finishedAt === null ? '' : ` · ${formatSince(latest.finishedAt, nowMs)}`}`,
+      name: queued ? 'Open the queued Dependabot sweep' : running ? 'Open the running Dependabot sweep' : `Open the Dependabot sweep of ${sweepWhen(latest, timeZone)}: ${latest.text ?? 'done'}`,
       tip: latest.status === 'needsInput' ? latest.question : latest.status === 'failed' ? noteText(latest.note) : null,
     }
   }
   return {
-    start: { label: 'Run sweep', name: `Run a Dependabot sweep of ${start.repo}`, disabled: start.unavailable !== null, reason: start.unavailable },
+    // the words come from the server, which reads the launcher's one answer; the page re-derives no part of the rule
+    start: { label: start.button, name: start.name, disabled: start.unavailable !== null, reason: start.unavailable },
     status,
   }
 }
@@ -135,13 +140,22 @@ export const sweepConfirmSignature = (start: SweepStart, runner: RunnerName): st
   return JSON.stringify([model.heading, model.repo, model.viewer, model.command, model.serial, model.effect, model.runners.map((choice) => choice.name), start.unavailable])
 }
 
-export const sweepStopModel = (sweep: Pick<SweepView, 'repo' | 'runner'>) => ({
-  heading: `Stop the sweep of ${sweep.repo}?`,
-  detail: `Dependabot sweep in ${runnerLabels[sweep.runner]}`,
-  effect: 'Stops the session and everything it started. Reviews it already posted stay on GitHub, and a throwaway worktree under ~/agents/worktrees may remain.',
-  confirm: 'Stop sweep',
-  busy: 'Stopping…',
-})
+// a queued sweep leaves the queue instead of stopping: nothing has run, so nothing stays behind
+export const sweepStopModel = (sweep: Pick<SweepView, 'repo' | 'runner' | 'status'>) => sweep.status === 'queued'
+  ? {
+      heading: `Remove the sweep of ${sweep.repo} from the queue?`,
+      detail: `Dependabot sweep in ${runnerLabels[sweep.runner]}`,
+      effect: 'It has not started, so nothing ran and nothing was posted. It stays in the list of sweeps as stopped.',
+      confirm: 'Remove from queue',
+      busy: 'Removing…',
+    }
+  : {
+      heading: `Stop the sweep of ${sweep.repo}?`,
+      detail: `Dependabot sweep in ${runnerLabels[sweep.runner]}`,
+      effect: 'Stops the session and everything it started. Reviews it already posted stay on GitHub, and a throwaway worktree under ~/agents/worktrees may remain.',
+      confirm: 'Stop sweep',
+      busy: 'Stopping…',
+    }
 
 // ---- the drawer ----
 
@@ -255,12 +269,18 @@ export const sweepRunningModel = (sweep: SweepView): SweepRunningModel => {
   return { runnerLabel: runnerLabels[sweep.runner], steps, stepsName: stepsName(steps), note: newestNote(sweep.steps, sweep.command) }
 }
 
+// a sweep waiting for a slot under the cap: what waits and why, with no steps or timer, since nothing runs yet
+export const sweepQueuedModel = (sweep: Pick<SweepView, 'runner'>): { runnerLabel: string, note: string } => ({
+  runnerLabel: runnerLabels[sweep.runner],
+  note: 'Waiting for a review slot: it starts by itself when an earlier review or sweep ends, in the order it was queued.',
+})
+
 export const sweepWaitingModel = (sweep: SweepView): { question: string, resume: string | null } => ({
   question: sweep.question ?? 'The sweep stopped to ask a question but did not record it. Open its session to see it.',
   resume: sweep.resume,
 })
 
-export type SweepCard = 'running' | 'waiting' | 'result'
+export type SweepCard = 'queued' | 'running' | 'waiting' | 'result'
 
 // a settled sweep shows the whole result it carries, whatever its status: counts, rows, merge order, and summary. A waiting sweep shows its question first and the result it has so far below it
 export const sweepHasResult = (sweep: Pick<SweepView, 'result'>): boolean => {
@@ -269,6 +289,7 @@ export const sweepHasResult = (sweep: Pick<SweepView, 'result'>): boolean => {
 }
 
 export const sweepCards = (sweep: Pick<SweepView, 'status' | 'result'>): SweepCard[] => {
+  if (sweep.status === 'queued') return ['queued']
   if (sweep.status === 'running') return ['running']
   if (sweep.status === 'needsInput') return sweepHasResult(sweep) ? ['waiting', 'result'] : ['waiting']
   return ['result']
@@ -281,7 +302,7 @@ export const sweepList = (items: readonly SweepView[], shownId: number | null): 
   items.map((sweep) => ({
     id: sweep.id,
     label: `Sweep of ${sweepWhen(sweep)}`,
-    text: sweep.text ?? 'Running',
+    text: sweep.text ?? (sweep.status === 'queued' ? 'Queued' : 'Running'),
     tone: sweepTone(sweep),
     startedAt: sweep.startedAt,
     cost: formatCost(sweep.costUsd),
@@ -329,6 +350,7 @@ export const sweepAnnounceKey = (items: readonly SweepView[]): string => {
 export const sweepAnnouncement = (items: readonly SweepView[]): string | null => {
   const latest = items[0]
   if (latest === undefined) return null
+  if (latest.status === 'queued') return `Dependabot sweep of ${latest.repo} queued`
   if (latest.status === 'running') return `Dependabot sweep of ${latest.repo} started`
   return `Dependabot sweep of ${latest.repo} finished: ${latest.text ?? 'Done'}`
 }

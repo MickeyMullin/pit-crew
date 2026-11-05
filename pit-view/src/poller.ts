@@ -633,10 +633,10 @@ export const createPoller = (options: PollerOptions): Poller => {
       counts: next.view.counts,
       sync: syncOf(next.cached, after),
     }
-    // the repository, the viewer, and cloneDir all show in the sweep's start text
-    const sweepsBefore = sweepsView(before, sweeps)
-    const sweepsAfter = sweepsView(after, sweeps)
-    if (!same(sweepsBefore, sweepsAfter)) body.sweeps = sweepsAfter
+    // the repository, the viewer, and cloneDir all show in the sweep's start text, and the cap can change what Run sweep says, as it can a row's buttons
+    const sweepsBefore = sweepsView(before, sweeps, queueing)
+    const sweepsAfter = sweepsView(after, sweeps, queueing)
+    if (everyRow || !same(sweepsBefore, sweepsAfter)) body.sweeps = sweepsAfter
     if (changed('repo')) body.repo = after.repo
     if (!same(previous.view.viewer, next.view.viewer)) body.viewer = next.view.viewer
     patch(body)
@@ -654,10 +654,12 @@ export const createPoller = (options: PollerOptions): Poller => {
     watched.set(run.id, { repo: run.repo, number: run.number })
   }
 
-  // something that can change the queue answer happened: every open row of the repository on show goes with the answer now, whether or not it differs from any earlier one
+  // something that can change the queue answer happened: every open row of the repository on show, and Run sweep, go with the answer now, whether or not it differs from any earlier one
   const queueingChanged = (): void => {
     if (stopped) return
-    patch({ rows: [...snapshot(config(), reports, queueingNow()).rows.values()] })
+    const settings = config()
+    const queueing = queueingNow()
+    patch({ rows: [...snapshot(settings, reports, queueing).rows.values()], sweeps: sweepsView(settings, sweeps, queueing) })
   }
 
   const runChanged = (repo: string, number: number): void => {
@@ -681,7 +683,7 @@ export const createPoller = (options: PollerOptions): Poller => {
   const sweepsChanged = (repo: string): void => {
     if (stopped) return
     const settings = config()
-    if (settings.repo === repo) patch({ sweeps: sweepsView(settings, sweeps) })
+    if (settings.repo === repo) patch({ sweeps: sweepsView(settings, sweeps, queueingNow()) })
   }
 
   const view = async (): Promise<View> => {
@@ -701,7 +703,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       mine: snap.view.mine,
       others: snap.view.others,
       closed: snap.view.closed,
-      sweeps: sweepsView(settings, sweeps),
+      sweeps: sweepsView(settings, sweeps, queueingNow()),
     }
   }
 
