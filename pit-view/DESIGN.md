@@ -1283,7 +1283,7 @@ Decided:
 
 | Question | Decision |
 | --- | --- |
-| Stacked PRs: flat with a `stack n/m` chip, or grouped by stack? | v1 is flat with the chip, for a stack GitHub marks. Grouped, collapsible stacks come in v3 (section 9), revisited after v1. A PR only based on another PR's branch gets a "based on" chip and no grouping. |
+| Stacked PRs: flat with a `stack n/m` chip, or grouped by stack? | v1 is flat with the chip, for a stack GitHub marks. Grouped, collapsible stacks come in v3 (section 9), revisited after v1. A PR only based on another open PR's branch gets a "based on" chip and no grouping, and one whose parent is no longer open gets neither. |
 | Should Pit View merge the viewer's ready PRs? | Not in v1 or phase 2: no merge button, it only links to GitHub. v3 adds merge, as a squash, and other direct actions (section 9). |
 | macOS notifications on state changes? | Not in v1. v3.3 adds them, macOS first, through the built-in `osascript` with no dependency; clicking a notification does nothing, and other platforms deliver nothing yet (section 9). |
 | How does the UI load? | Cache first: render from SQLite at once, then update individual elements as GitHub responses arrive (section 3). |
