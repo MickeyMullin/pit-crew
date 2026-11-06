@@ -342,6 +342,19 @@ export const fakeLaunch = ({ remotes = fakeRemotes('octo-example/orbit'), fs = {
   return fake
 }
 
+// a fake launch whose next clone checks fail as the test asks, with gh's account unchanged
+export const refusableClone = () => {
+  const launch = fakeLaunch()
+  const clone = { refuse: 0 }
+  const git = launch.deps.git
+  launch.deps.git = async (args) => {
+    if (clone.refuse === 0) return git(args)
+    clone.refuse -= 1
+    return failed('fatal: not a git repository (or any of the parent directories): .git')
+  }
+  return { launch, clone }
+}
+
 // a review-result@1 as the commands write it, changed by patch
 export const reviewResult = (patch: Record<string, unknown> = {}): Record<string, unknown> => ({
   schema: 'pit-crew/review-result@1',

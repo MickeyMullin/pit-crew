@@ -593,6 +593,28 @@ test('a sweep behind a full cap waits in the one queue, with no process or folde
   }
 })
 
+test('a sweep never spawns on checks made before it waited: gh switches accounts while it waits behind an earlier review, which is then refused', async () => {
+  const accounts = armedGate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 3 } })
+  try {
+    accounts.arm()
+    const earlier = h.runs.start(review(106))
+    await waitFor(() => accounts.held() === 1)
+    const sweep = h.launcher.start(start())
+    await quiet()
+    login.current = 'someone-else'
+    accounts.open(0)
+    await assert.rejects(earlier, (error: unknown) => error instanceof LaunchError && error.code === 'identityMismatch')
+    const answer = await within(sweep)
+    await quiet()
+    assert.equal(h.launch.children.length, 0, 'the sweep spawned under an account nobody confirmed')
+    assert.equal(h.cache.getSweep(answer.id)?.status, 'failed')
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('with room again a later review does not pass a queued sweep: the sweep is let go first', async () => {
   const h = await harness({ config: { maxConcurrentReviews: 1 } })
   try {

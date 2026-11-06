@@ -1503,8 +1503,9 @@ export type LineEntry = {
   request: StartRequest
   // the viewer its start was confirmed for
   viewer: string
-  // the attempt that holds a slot for it while its checks run, and the clone folder those checks confirmed once they pass
+  // the attempt that holds a slot for it, whether its checks are running now, and the clone folder those checks confirmed, kept only while nothing ahead of it holds it back
   attempt: number | null
+  checking: boolean
   checked: string | null
   rowGone: () => boolean
   // whether it is a self-review is read from the cache each time, as it is about to start
@@ -1517,7 +1518,14 @@ export type LineEntry = {
   markRunning: (cwd: string) => (config: Config, admitted: Admitted) => Promise<unknown>
 }
 
-export type LineTurn = { ahead: Promise<unknown>, decided: () => void }
+export type LineTurn = {
+  // the wait for every start ahead of it to have its fit decided or be refused
+  ahead: Promise<unknown>
+  // whether any start ahead of it is still undecided now
+  behind: () => boolean
+  // the end of its own turn, which the next waits for
+  decided: () => void
+}
 
 // the one slot count and the one queue under the cap, shared by the review engine and the sweep engine: what counts, who is next, and the announcement that the answer may have changed all live here, so neither engine holds an account of its own
 export type ReviewLine = {
@@ -1625,6 +1633,8 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
   let opening = 0
   // the turn of the start that arrived last, ended once it and every start ahead of it have had their fit decided or been refused
   let arrivals: Promise<unknown> = Promise.resolve()
+  // the turns not yet decided, earliest first
+  const undecided = new Set<LineTurn>()
 
   // the queue and the count of launches in progress change only through these, so each marks
   const lineAdd = (item: LineEntry): void => {
@@ -1649,7 +1659,7 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
 
   const fits = (slot: ReviewSlot, config: Config): boolean => reviewFits(inFlight(), slot, config.maxConcurrentReviews, config.selfReviewOverCap)
 
-  // whether a new review of this kind waits: with an entry ahead of it in the queue or still being launched, or without room under the cap. A start acts on this and nothing else, and the page's buttons say it
+  // whether a new review of this kind waits: with an entry ahead of it in the queue or still being launched, or without room under the cap. The page's buttons say it, and a start acts on it once every start ahead of it is decided; one that had to wait for that queues whatever this says, so its checks are made again
   const waits = (slot: ReviewSlot, config: Config): boolean => queue.length > 0 || opening > 0 || !fits(slot, config)
 
   const queueing = (): Queueing => {
@@ -1683,6 +1693,7 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
   const giveBack = (item: LineEntry): void => {
     if (item.attempt !== null) admitting.delete(item.attempt)
     item.attempt = null
+    item.checking = false
     item.checked = null
   }
 
@@ -1702,7 +1713,7 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
     dequeue(item)
   }
 
-  // reads the queue earliest first: gives a slot to each entry that fits now, which then makes its checks in the background, still in the queue, and launches each whose checks have passed once no entry ahead of it is still making its checks or being launched. The first that does not fit ends the reading and holds the line, the over-cap allowance included, so reviews and sweeps start in the order they arrived
+  // reads the queue earliest first: gives a slot to each entry that fits now, which then makes its checks in the background, still in the queue, and launches one whose checks have just passed when no entry ahead of it is still making its checks or being launched. Checks that pass while something ahead holds an entry back are stale by the time it is let go, so they are dropped and it makes them again then: an entry spawns only on checks that passed with nothing ahead of it. The first that does not fit ends the reading and holds the line, the over-cap allowance included, so reviews and sweeps start in the order they arrived
   const admit = (): void => {
     if (closed) return
     const config = options.config()
@@ -1715,18 +1726,22 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
       // one taken out of the queue since this pass began is skipped
       if (!queue.includes(item)) continue
       if (item.attempt !== null) {
-        // one whose checks are running holds its slot, and holds back every one behind it
-        if (item.checked === null || heldBack) {
-          heldBack = true
+        if (heldBack) {
+          item.checked = null
+        } else if (item.checked !== null) {
+          proceed(item, item.attempt, item.checked)
+          // one that gave its slot back no longer fits, and still holds its place ahead of every one behind it
+          if (queue.includes(item)) {
+            holdLine(item)
+            return
+          }
+          heldBack = opening > 0
           continue
+        } else if (!item.checking) {
+          check(item, item.attempt)
         }
-        proceed(item, item.attempt, item.checked)
-        // one that gave its slot back no longer fits, and still holds its place ahead of every one behind it
-        if (queue.includes(item)) {
-          holdLine(item)
-          return
-        }
-        heldBack ||= opening > 0
+        // one that holds a slot and has not started holds back every one behind it
+        heldBack = true
         continue
       }
       let slot: ReviewSlot | null
@@ -1744,17 +1759,25 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
       const attempt = reserve(slot)
       item.attempt = attempt
       heldBack = true
-      void begin(item, attempt).catch((error: unknown) => log(`${item.name}: cannot start from the queue: ${messageOf(error)}`))
+      check(item, attempt)
     }
   }
 
-  // a queued entry's checks, the ones every start makes, while it stays in the queue; once they pass it keeps its slot and waits for the entries ahead of it, which the queue's next reading launches it after
+  const check = (item: LineEntry, attempt: number): void => {
+    void begin(item, attempt).catch((error: unknown) => log(`${item.name}: cannot start from the queue: ${messageOf(error)}`))
+  }
+
+  // a queued entry's checks, the ones every start makes, while it stays in the queue and keeps its slot; the queue's reading right after they pass launches it or, with something ahead of it still holding it back, drops them
   const begin = async (item: LineEntry, attempt: number): Promise<void> => {
     // false once a Stop or a failure ended this attempt
     const ours = (): boolean => !closed && item.attempt === attempt && queue.includes(item)
+    item.checking = true
     try {
       const cloneDir = await item.check(options.config())
-      if (ours()) item.checked = cloneDir
+      if (ours()) {
+        item.checking = false
+        item.checked = cloneDir
+      }
     } catch (error) {
       if (ours()) failInQueue(item, `spawnFailed: ${messageOf(error)}`)
     }
@@ -1813,16 +1836,25 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
     }
   }
 
-  // a start's place in line, taken as it arrives: the wait for every start ahead of it to have its fit decided or be refused, and the end of its own turn, which the next waits for
+  // a start's place in line, taken as it arrives
   const takeTurn = (): LineTurn => {
     const ahead = arrivals
-    let decided = (): void => {}
+    let resolveOwn = (): void => {}
     const own = new Promise<void>((resolveTurn) => {
-      decided = resolveTurn
+      resolveOwn = resolveTurn
     })
     // a start refused ahead of an earlier one that still makes its checks moves nothing behind it forward
     arrivals = Promise.all([ahead, own])
-    return { ahead, decided }
+    const turn: LineTurn = {
+      ahead,
+      behind: () => undecided.values().next().value !== turn,
+      decided: () => {
+        undecided.delete(turn)
+        resolveOwn()
+      },
+    }
+    undecided.add(turn)
+    return turn
   }
 
   const join = (held: () => ReviewSlot[]): LineMember => {
@@ -2647,6 +2679,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     try {
       await checkIdentity(config)
       const cloneDir = await checkClone(config)
+      // a check made before a wait is stale after it: a start with an earlier one still undecided as its checks end has to wait, so it goes to the queue, which makes its checks again when its turn comes. One with nothing ahead of it waits for nothing here, and spawns on these checks
+      const waited = turn?.behind() ?? false
       // the checks may race, and a refusal above never waits, but a fit is decided in the order they arrived, whichever engine took the start
       await turn?.ahead
       // a config saved during the checks is the one admission reads, and whether it is a self-review is read from the cache now, with nothing awaited before the slot is held
@@ -2655,8 +2689,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (slot === null) return await launch(request, config, request.cwd ?? cloneDir)
       // whatever already waits and fits goes first
       line.admit()
-      // a new review or sweep starts at once only as the sole eligible start: with room, and with nothing ahead of it waiting in the queue or still being launched
-      if (line.waits(slot, current)) {
+      // a new review or sweep starts at once only as the sole eligible start: it did not wait, it has room, and nothing ahead of it waits in the queue or is still being launched
+      if (waited || line.waits(slot, current)) {
         const queued = enqueue(request, config, request.cwd ?? cloneDir)
         // a save during the checks may have left it confirmed for a repository or a viewer no longer in effect
         line.admit()
@@ -2687,6 +2721,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     request,
     viewer,
     attempt: null,
+    checking: false,
     checked: null,
     rowGone: () => store.get(run.id) === null,
     slot: (current) => store.slot(request, current),
