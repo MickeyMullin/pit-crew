@@ -32,7 +32,7 @@ const patchPr = (number: number, patch: Partial<RawOpenPr>): RawOpenPr[] => fixt
 const settings = (patch: Partial<AutoReviewSettings> = {}): AutoReviewSettings => ({ ...defaultAutoReview(), enabled: true, ...patch })
 
 const run = (patch: Partial<AutoRun> & Pick<AutoRun, 'id' | 'number'>): AutoRun => ({
-  origin: 'auto', headOid: null, status: 'done', startedAt: null, posting: false, postStarted: false, posted: false, ghFailed: false, ...patch,
+  origin: 'auto', command: 'review-pr', headOid: null, status: 'done', startedAt: null, posting: false, postStarted: false, posted: false, ghFailed: false, ...patch,
 })
 
 const sweep = (patch: Partial<AutoSweep> & Pick<AutoSweep, 'id'>): AutoSweep => ({ origin: 'auto', status: 'done', startedAt: null, ...patch })
@@ -310,6 +310,152 @@ test('a needsInput run keeps its PR out of the queue at that head, and a new hea
   assert.ok(numbers(buildQueue(queueInput(moved, { runs: waiting })).items).includes(113))
 })
 
+// a stopped auto run leaves its PR alone at that head
+
+const atNewHead = (rows: readonly OpenRow[], number: number, head: string): OpenRow[] => rows.map((candidate) => candidate.number === number ? { ...candidate, headSha: head } as OpenRow : candidate)
+
+test('a PR whose auto run ended stopped is not queued again at that head, and says so', async () => {
+  const rows = await fixtureRows()
+  const head = byNumber(rows, 113).headSha
+  const started = '2026-10-26T13:00:00Z'
+  // stopped while it ran, or taken out of the queue before it started
+  for (const startedAt of [started, null]) {
+    const queue = buildQueue(queueInput(rows, { runs: [run({ id: 1, number: 113, headOid: head, status: 'stopped', startedAt })] }))
+    assert.ok(!numbers(queue.items).includes(113), `started ${startedAt}`)
+    assert.deepEqual(queue.leftForOwner, [{ number: 113, outcome: 'stopped' }])
+    assert.equal(queue.alreadyCurrent, 0)
+    assert.equal(queue.qualified, 5)
+  }
+  // heads compare as prefixes here too
+  assert.ok(!numbers(buildQueue(queueInput(rows, { runs: [run({ id: 1, number: 113, headOid: head.slice(0, 7), status: 'stopped' })] })).items).includes(113))
+  // and it holds for an own PR
+  const own = settings({ others: false, own: true })
+  const mine = buildQueue(queueInput(rows, { settings: own, runs: [run({ id: 1, number: 101, headOid: byNumber(rows, 101).headSha, status: 'stopped' })] }))
+  assert.ok(!numbers(mine.items).includes(101))
+  assert.deepEqual(mine.leftForOwner, [{ number: 101, outcome: 'stopped' }])
+})
+
+test('a stopped run is the PR\'s own and its head\'s: a new head qualifies again, and another PR is not affected', async () => {
+  const rows = await fixtureRows()
+  const head = byNumber(rows, 113).headSha
+  const stopped = [run({ id: 1, number: 113, headOid: head, status: 'stopped' })]
+  const moved = buildQueue(queueInput(atNewHead(rows, 113, 'f'.repeat(40)), { runs: stopped }))
+  // the stop was not a failure, so the new head is a fresh start and no retry
+  assert.equal(moved.items.find((item) => item.number === 113)?.retry, false)
+  assert.deepEqual(moved.leftForOwner, [])
+  assert.ok(numbers(buildQueue(queueInput(rows, { runs: stopped })).items).includes(111))
+  // a manual run stopped by the owner is not an auto run, and holds nothing back
+  assert.ok(numbers(buildQueue(queueInput(rows, { runs: [{ ...stopped[0]!, origin: 'manual' }] })).items).includes(113))
+})
+
+test('a manual review that finished at the head supersedes the stop, and the ordinary rules then apply', async () => {
+  const rows = await fixtureRows()
+  const head = byNumber(rows, 113).headSha
+  const stopped = run({ id: 1, number: 113, headOid: head, status: 'stopped' })
+  const manual = run({ id: 2, number: 113, headOid: head.slice(0, 7), status: 'done', origin: 'manual', startedAt: '2026-10-26T13:00:00Z' })
+  // its report names the head, so the PR is already reviewed and waits for the next push
+  const reviewed = buildQueue(queueInput(rows, { runs: [stopped, manual], reports: new Map([[113, reportAt(head.slice(0, 7))]]) }))
+  assert.ok(!numbers(reviewed.items).includes(113))
+  assert.equal(reviewed.alreadyCurrent, 1)
+  assert.deepEqual(reviewed.leftForOwner, [])
+  // the next push qualifies, as any new head does
+  const pushed = buildQueue(queueInput(atNewHead(rows, 113, 'f'.repeat(40)), { runs: [stopped, manual], reports: new Map([[113, reportAt(head.slice(0, 7))]]) }))
+  assert.equal(pushed.items.find((item) => item.number === 113)?.retry, false)
+  // with no report naming the head the guard does not hold, so the PR is a candidate like any other
+  const unreported = buildQueue(queueInput(rows, { runs: [stopped, manual] }))
+  assert.ok(numbers(unreported.items).includes(113))
+  assert.deepEqual(unreported.leftForOwner, [])
+  // and a stop after that review stands again
+  const again = buildQueue(queueInput(rows, { runs: [stopped, manual, run({ id: 3, number: 113, headOid: head, status: 'stopped' })] }))
+  assert.deepEqual(again.leftForOwner, [{ number: 113, outcome: 'stopped' }])
+  // a failure after the superseded stop is the retry rule's business
+  const failedAfter = buildQueue(queueInput(rows, { runs: [stopped, manual, run({ id: 3, number: 113, headOid: head, status: 'failed' })] }))
+  assert.equal(failedAfter.items.find((item) => item.number === 113)?.retry, true)
+})
+
+test('only a finished manual review, newer than the stop, of that PR and head, supersedes it', async () => {
+  const rows = await fixtureRows()
+  const head = byNumber(rows, 113).headSha
+  const stopped = run({ id: 5, number: 113, headOid: head, status: 'stopped' })
+  const manual = (patch: Partial<AutoRun>) => run({ id: 6, number: 113, headOid: head, status: 'done', origin: 'manual', startedAt: '2026-10-26T13:00:00Z', ...patch })
+  const cases: [string, AutoRun][] = [
+    ['still queued', manual({ status: 'queued' })],
+    ['still running', manual({ status: 'running' })],
+    ['waiting for input', manual({ status: 'needsInput' })],
+    ['failed', manual({ status: 'failed' })],
+    ['stopped', manual({ status: 'stopped' })],
+    ['before the stop', manual({ id: 4 })],
+    ['at another head', manual({ headOid: 'aaaaaaa1' })],
+    ['with no head known', manual({ headOid: null })],
+    ['of another PR', manual({ number: 111 })],
+    ['a fix session', manual({ command: 'fix-pr' })],
+    ['an update session', manual({ command: 'update-pr' })],
+  ]
+  for (const [label, other] of cases) {
+    const queue = buildQueue(queueInput(rows, { runs: [stopped, other] }))
+    assert.ok(!numbers(queue.items).includes(113), label)
+    assert.deepEqual(queue.leftForOwner.filter((entry) => entry.number === 113), [{ number: 113, outcome: 'stopped' }], label)
+  }
+  // a stack review started from this PR is a review of it, as the launcher's review commands say
+  assert.ok(numbers(buildQueue(queueInput(rows, { runs: [stopped, manual({ command: 'review-stack' })] })).items).includes(113))
+})
+
+// one live auto run per PR, at whatever head
+
+test('while an auto run is queued or running at an older head, the tick queues nothing else for the PR', async () => {
+  const rows = atNewHead(await fixtureRows(), 113, 'f'.repeat(40))
+  for (const status of ['queued', 'running'] as const) {
+    for (const headOid of ['aaaaaaa1', null]) {
+      const queue = buildQueue(queueInput(rows, { runs: [run({ id: 1, number: 113, headOid, status })] }))
+      assert.ok(!numbers(queue.items).includes(113), `${status} at ${headOid}`)
+      assert.deepEqual(queue.leftForOwner, [], `${status} at ${headOid}`)
+      // it qualifies and is not reviewed at this head; it just waits for that run to end
+      assert.equal(queue.alreadyCurrent, 0, `${status} at ${headOid}`)
+      assert.equal(queue.qualified, 5, `${status} at ${headOid}`)
+    }
+  }
+  // an own PR the same
+  const own = atNewHead(await fixtureRows(), 101, 'f'.repeat(40))
+  const mine = buildQueue(queueInput(own, { settings: settings({ others: false, own: true }), runs: [run({ id: 1, number: 101, headOid: 'aaaaaaa1', status: 'running' })] }))
+  assert.ok(!numbers(mine.items).includes(101))
+  // another PR's run holds nothing
+  assert.ok(numbers(buildQueue(queueInput(rows, { runs: [run({ id: 1, number: 111, headOid: 'aaaaaaa1', status: 'running' })] })).items).includes(113))
+})
+
+test('once the older run ends, the PR is judged afresh at its current head', async () => {
+  const rows = atNewHead(await fixtureRows(), 113, 'f'.repeat(40))
+  for (const status of ['done', 'failed', 'stopped', 'needsInput', 'skipped'] as const) {
+    const queue = buildQueue(queueInput(rows, { runs: [run({ id: 1, number: 113, headOid: 'aaaaaaa1', status })] }))
+    assert.equal(queue.items.find((item) => item.number === 113)?.retry, false, status)
+  }
+})
+
+test('across ticks a moved head never gives a PR two live runs, and the run that started records the head it ran at', async () => {
+  const rows = await fixtureRows()
+  const first = byNumber(rows, 113).headSha
+  const second = 'b'.repeat(40)
+  const openAt = patchPr(113, { headRefOid: second })
+  const tick = (headSha: string, runs: AutoRun[]) => buildQueue(queueInput(atNewHead(rows, 113, headSha), { runs })).items.filter((item) => item.number === 113)
+  // the first tick queues it at the old head, and the push lands while it waits
+  const [queuedItem] = tick(first, [])
+  assert.ok(queuedItem)
+  const queuedRow = run({ id: 1, number: 113, headOid: first, status: 'queued' })
+  assert.deepEqual(tick(second, [queuedRow]), [])
+  // the check before it starts neither drops it nor asks for another: it runs at the new head
+  assert.deepEqual(recheckQueued(queuedItem, openAt), { action: 'start', headSha: second })
+  const runningRow = { ...queuedRow, headOid: second, status: 'running' as const, startedAt: '2026-10-26T13:00:00Z' }
+  assert.deepEqual(tick(second, [runningRow]), [])
+  // it ended, so that head is reviewed, and only the next push qualifies
+  const doneRow = { ...runningRow, status: 'done' as const }
+  assert.deepEqual(tick(second, [doneRow]), [])
+  assert.equal(tick('c'.repeat(40), [doneRow]).length, 1)
+})
+
+test('a manual run in flight is not an auto run, so the live rule does not read it', async () => {
+  const rows = atNewHead(await fixtureRows(), 113, 'f'.repeat(40))
+  assert.ok(numbers(buildQueue(queueInput(rows, { runs: [run({ id: 1, number: 113, headOid: 'aaaaaaa1', status: 'running', origin: 'manual' })] })).items).includes(113))
+})
+
 // retry once, then failedTwice
 
 test('a failed run is retried once, then recorded as failedTwice and left for the owner', async () => {
@@ -390,6 +536,129 @@ test('at most one sweep is queued or running', async () => {
   // finished and failed sweeps do not hold the slot; a manual sweep in flight does
   assert.equal(buildQueue(queueInput(rows, { settings: only, sweeps: [sweep({ id: 1, status: 'failed' })] })).items.length, 1)
   assert.equal(buildQueue(queueInput(rows, { settings: only, sweeps: [sweep({ id: 1, status: 'running', origin: 'manual' })] })).items.length, 0)
+})
+
+// a scheduled sweep waiting for input blocks a new one
+
+test('a scheduled sweep that ends needsInput blocks a new scheduled sweep, however due it is', async () => {
+  const rows = await fixtureRows()
+  const only = settings({ others: false, dependabot: true })
+  const waiting = sweep({ id: 1, status: 'needsInput', startedAt: '2026-10-26T13:00:00Z' })
+  // nothing has been swept, a Dependabot PR moved, and a waiting result carries no rows
+  for (const lastSweepRows of [null, [{ number: 114, head: 'a'.repeat(40) }]]) {
+    const queue = buildQueue(queueInput(rows, { settings: only, sweeps: [waiting], lastSweepRows }))
+    assert.deepEqual(queue.items, [])
+    assert.equal(queue.sweepFailedTwice, false)
+  }
+  // so its worktree, which a later started sweep would settle, stays
+  assert.deepEqual(selectOrphanWorktrees({ listed: [`${dir}/sweep-1`], dir, runs: [], sweeps: [waiting], openPrs: fixturePrs }).keep.map((entry) => entry.id), [1])
+})
+
+test('a waiting sweep lets go when the owner finished its session or started a sweep of their own', async () => {
+  const rows = await fixtureRows()
+  const only = settings({ others: false, dependabot: true })
+  const started = '2026-10-26T13:00:00Z'
+  const waiting = sweep({ id: 1, status: 'needsInput', startedAt: started })
+  const items = (sweeps: AutoSweep[]) => buildQueue(queueInput(rows, { settings: only, sweeps })).items.map((item) => item.kind)
+  // the caller knows its session ended, or the row left needsInput
+  assert.deepEqual(items([{ ...waiting, settled: true }]), ['dependabot'])
+  assert.deepEqual(items([{ ...waiting, status: 'done' }]), ['dependabot'])
+  // a newer sweep the owner started, once it has started and left the slot free
+  assert.deepEqual(items([waiting, sweep({ id: 2, origin: 'manual', status: 'done', startedAt: started })]), ['dependabot'])
+  assert.deepEqual(items([waiting, sweep({ id: 2, origin: 'manual', status: 'stopped', startedAt: started })]), ['dependabot'])
+  // one in flight holds the slot in any case
+  assert.deepEqual(items([waiting, sweep({ id: 2, origin: 'manual', status: 'running', startedAt: started })]), [])
+  // one that never started settles nothing, as for the worktree
+  assert.deepEqual(items([waiting, sweep({ id: 2, origin: 'manual', status: 'stopped' })]), [], 'stopped before it started')
+  assert.deepEqual(items([waiting, sweep({ id: 2, status: 'skipped' })]), [], 'skipped')
+  // an older sweep settles nothing
+  assert.deepEqual(items([sweep({ id: 0, origin: 'manual', status: 'done', startedAt: started }), waiting]), [], 'older')
+})
+
+test('a sweep the owner started that waits for input does not block a scheduled one, as a manual run does not block its PR', async () => {
+  const rows = await fixtureRows()
+  const only = settings({ others: false, dependabot: true })
+  const queue = buildQueue(queueInput(rows, { settings: only, sweeps: [sweep({ id: 1, origin: 'manual', status: 'needsInput', startedAt: '2026-10-26T13:00:00Z' })] }))
+  assert.deepEqual(queue.items.map((item) => item.kind), ['dependabot'])
+})
+
+// a failed sweep retries once, then failedTwice
+
+const failedSweep = (id: number, patch: Partial<AutoSweep> = {}): AutoSweep => sweep({ id, status: 'failed', startedAt: '2026-10-26T14:00:00Z', ...patch })
+
+test('a failed scheduled sweep is retried once, then recorded failedTwice and not retried again', async () => {
+  const rows = await fixtureRows()
+  const only = settings({ others: false, dependabot: true })
+  const tick = (sweeps: AutoSweep[]) => buildQueue(queueInput(rows, { settings: only, sweeps }))
+  const none = tick([])
+  assert.deepEqual([none.items.length, none.sweepFailedTwice], [1, false])
+  const once = tick([failedSweep(1)])
+  assert.deepEqual(once.items.map((item) => item.kind), ['dependabot'])
+  assert.equal(once.sweepFailedTwice, false)
+  for (const sweeps of [[failedSweep(1), failedSweep(2)], [failedSweep(1), failedSweep(2), failedSweep(3)]]) {
+    const twice = tick(sweeps)
+    assert.deepEqual(twice.items, [])
+    assert.equal(twice.sweepFailedTwice, true)
+    assert.equal(twice.qualified, 1)
+    assert.equal(twice.alreadyCurrent, 0)
+  }
+  // an attempt that failed before it started is still an attempt
+  assert.equal(tick([failedSweep(1, { startedAt: null }), failedSweep(2, { startedAt: null })]).sweepFailedTwice, true)
+})
+
+test('a sweep that ends done clears the count, whoever started it, and nothing else does', async () => {
+  const rows = await fixtureRows()
+  const only = settings({ others: false, dependabot: true })
+  const started = '2026-10-26T14:00:00Z'
+  const tick = (sweeps: AutoSweep[]) => buildQueue(queueInput(rows, { settings: only, sweeps }))
+  const kinds = (sweeps: AutoSweep[]) => tick(sweeps).items.map((item) => item.kind)
+  // a retry that succeeded, a scheduled sweep or one by hand
+  assert.deepEqual(kinds([failedSweep(1), failedSweep(2), sweep({ id: 3, status: 'done', startedAt: started })]), ['dependabot'])
+  assert.deepEqual(kinds([failedSweep(1), failedSweep(2), sweep({ id: 3, origin: 'manual', status: 'done', startedAt: started })]), ['dependabot'])
+  assert.equal(tick([failedSweep(1), failedSweep(2), sweep({ id: 3, origin: 'manual', status: 'done', startedAt: started })]).sweepFailedTwice, false)
+  // after it, one more failure is a first failure again, and two are failedTwice again
+  assert.deepEqual(kinds([failedSweep(1), failedSweep(2), sweep({ id: 3, status: 'done', startedAt: started }), failedSweep(4)]), ['dependabot'])
+  assert.equal(tick([failedSweep(1), sweep({ id: 3, status: 'done', startedAt: started }), failedSweep(4), failedSweep(5)]).sweepFailedTwice, true)
+  // a sweep by hand that failed, or was stopped, does not clear it
+  for (const status of ['failed', 'stopped'] as const) {
+    const queue = tick([failedSweep(1), failedSweep(2), sweep({ id: 3, origin: 'manual', status, startedAt: started })])
+    assert.deepEqual(queue.items, [], status)
+    assert.equal(queue.sweepFailedTwice, true, status)
+  }
+  // nor is a sweep by hand that failed a scheduled failure
+  assert.deepEqual(kinds([failedSweep(1), failedSweep(2, { origin: 'manual' })]), ['dependabot'])
+})
+
+test('failedTwice is recorded only for a sweep that would be due and is opted in', async () => {
+  const rows = await fixtureRows()
+  const failures = [failedSweep(1), failedSweep(2)]
+  const seen = [{ number: 114, head: byNumber(rows, 114).headSha }]
+  const notDue = buildQueue(queueInput(rows, { settings: settings({ others: false, dependabot: true }), sweeps: failures, lastSweepRows: seen }))
+  assert.deepEqual([notDue.items, notDue.sweepFailedTwice, notDue.qualified], [[], false, 0])
+  const optedOut = buildQueue(queueInput(rows, { settings: settings({ others: false }), sweeps: failures }))
+  assert.deepEqual([optedOut.items, optedOut.sweepFailedTwice], [[], false])
+  // in flight, the slot rule answers first
+  const inFlight = buildQueue(queueInput(rows, { settings: settings({ others: false, dependabot: true }), sweeps: [...failures, sweep({ id: 3, origin: 'manual', status: 'running', startedAt: '2026-10-26T14:00:00Z' })] }))
+  assert.deepEqual([inFlight.items, inFlight.sweepFailedTwice], [[], false])
+  // a waiting sweep blocks whatever failed before it
+  const waiting = buildQueue(queueInput(rows, { settings: settings({ others: false, dependabot: true }), sweeps: [...failures, sweep({ id: 3, status: 'needsInput' })] }))
+  assert.deepEqual([waiting.items, waiting.sweepFailedTwice], [[], false])
+})
+
+test('a failing sweep spends the daily limit once per attempt, and stops at two attempts', async () => {
+  const rows = await fixtureRows()
+  const only = settings({ others: false, dependabot: true, dailyLimit: 10 })
+  const sweeps: AutoSweep[] = []
+  // ticks with room in the limit: each attempt fails, and only the first two ever queue
+  for (let id = 1; id <= 6; id += 1) {
+    const budget = startBudget({ concurrency: 1, inFlight: 0, dailyLimit: only.dailyLimit, startedToday: startedToday([], sweeps, now, tz), capRoom: 2 })
+    assert.equal(budget.count, 1)
+    if (buildQueue(queueInput(rows, { settings: only, sweeps })).items.length > 0) sweeps.push(failedSweep(id))
+  }
+  assert.equal(sweeps.length, 2)
+  assert.equal(startedToday([], sweeps, now, tz), 2)
+  // attempts that failed before they started, such as worktreeFailed, spend nothing
+  assert.equal(startedToday([], [failedSweep(1, { startedAt: null }), failedSweep(2, { startedAt: null })], now, tz), 0)
 })
 
 // Dependabot is told by its author, not by the owner's bots grouping

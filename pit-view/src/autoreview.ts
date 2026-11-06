@@ -4,7 +4,7 @@ import type { RunStatus } from './cache.ts'
 import { attentionOrder, selfReviewOf } from './derive.ts'
 import type { OpenRow, OtherRow } from './derive.ts'
 import type { RawOpenPr } from './github.ts'
-import { isDependabot } from './launcher.ts'
+import { isDependabot, reviewCommands } from './launcher.ts'
 import type { ReportInfo } from './reports.ts'
 import { addDays, clockChangeOn, instantAt, localDateOf, minute, minutesOfDay, startOfDate, startOfDay, weekdayOf } from './time.ts'
 import type { LocalDate } from './time.ts'
@@ -84,11 +84,13 @@ export type AutoRunStatus = RunStatus | 'skipped'
 export type AutoRun = {
   id: number
   origin: 'manual' | 'auto'
+  // the pit-crew command, which tells a manual review from a manual fix or update session
+  command: string
   number: number
-  // the head the run reviewed, full or short; null before it is known
+  // the head the run reviewed, full or short; null before it is known. An auto run's is known from when it is queued; a manual review's comes from its result
   headOid: string | null
   status: AutoRunStatus
-  // when it really started; null while it is only queued, and for a run stopped or skipped before it started. A launcher row's started_at holds the time it was queued until then, so the scheduler's mapping does not copy it for those
+  // when it really started; null while it is only queued, and for a run that was stopped, skipped, or failed before it started, such as worktreeFailed. A launcher row's started_at holds the time it was queued until then, so the scheduler's mapping does not copy it for those
   startedAt: string | null
   // whether the run was allowed to post (false for a --no-post run)
   posting: boolean
@@ -126,10 +128,19 @@ export const sameHead = (a: string | null | undefined, b: string | null | undefi
 const autoRunsFor = (runs: readonly AutoRun[], row: { number: number, headSha: string }): AutoRun[] =>
   runs.filter((entry) => entry.origin === 'auto' && entry.number === row.number && sameHead(entry.headOid, row.headSha))
 
-// the duplicate-run guard: the report names the head (section 5's detection, whoever ran it), or an auto run at that head has finished, is waiting for input, or is already queued or running
+// the duplicate-run guard: the report names the head (section 5's detection, whoever ran it), or an auto run at that head has ended done, is waiting for input, or is already queued or running. A stopped run is not reviewed at its head: stoppedAtHead holds that PR back instead
 export const isReviewedAtHead = (row: { number: number, headSha: string }, report: ReportInfo | undefined, runs: readonly AutoRun[]): boolean =>
   selfReviewOf(report, row.headSha).state === 'current'
   || autoRunsFor(runs, row).some((entry) => entry.status === 'done' || entry.status === 'needsInput' || entry.status === 'queued' || entry.status === 'running')
+
+// an auto run for this PR is queued or running, at whatever head, so the tick leaves the PR alone until it ends; once it has, the PR is judged afresh at its current head
+const hasLiveAutoRun = (number: number, runs: readonly AutoRun[]): boolean =>
+  runs.some((entry) => entry.origin === 'auto' && entry.number === number && (entry.status === 'queued' || entry.status === 'running'))
+
+// the owner stopped an auto run at this head, so the PR is left alone at it, unless a manual review of this PR and head finished after that stop. A manual review still in flight has not run yet, and one that failed, waits for input, or was stopped did not get the PR past the stop
+const stoppedAtHead = (row: { number: number, headSha: string }, runs: readonly AutoRun[]): boolean =>
+  autoRunsFor(runs, row).some((stopped) => stopped.status === 'stopped' && !runs.some((other) =>
+    other.origin === 'manual' && other.status === 'done' && other.number === row.number && other.id > stopped.id && reviewCommands.includes(other.command) && sameHead(other.headOid, row.headSha)))
 
 export type RetryDecision = 'retry' | 'failedTwice' | 'postUnknown'
 
@@ -157,14 +168,15 @@ export type QueueInput = {
   settings: AutoReviewSettings
   // report lookup by PR number (scanReports or findReport), for others' PRs
   reports: ReadonlyMap<number, ReportInfo>
-  // every recorded run and sweep that may matter; manual ones are ignored
+  // every recorded run and sweep that may matter. Manual runs count only as what supersedes a stopped auto run; a manual sweep counts as what holds the slot, settles a waiting one, or clears the failure count
   runs: readonly AutoRun[]
   sweeps: readonly AutoSweep[]
   // the last scheduler sweep's rows, or null when it has none
   lastSweepRows: readonly SweepMemoryRow[] | null
 }
 
-export type LeftForOwner = { number: number, outcome: 'failedTwice' | 'postUnknown' }
+// a PR the tick qualified and left alone; failedTwice and postUnknown are recorded as a note on its newest failed run, and stopped is what that run's status already says
+export type LeftForOwner = { number: number, outcome: 'failedTwice' | 'postUnknown' | 'stopped' }
 
 export type QueueResult = {
   // new runs to queue, in order: others, then own, then the sweep
@@ -173,6 +185,8 @@ export type QueueResult = {
   qualified: number
   alreadyCurrent: number
   leftForOwner: LeftForOwner[]
+  // a sweep is due and its two attempts have failed, so it is recorded as failedTwice on the newest of them and not retried
+  sweepFailedTwice: boolean
 }
 
 const isOthersCandidate = (row: OpenRow): row is OtherRow => row.section === 'others' && row.group === 'yourMove'
@@ -194,6 +208,20 @@ const sweepIsDue = (dependabot: readonly RawOpenPr[], last: readonly SweepMemory
   return due ? dependabot.map((pr) => pr.number) : []
 }
 
+// a needsInput or failed sweep waits for the owner until it is settled: a newer sweep has started, or the caller knows its session ended
+const sweepSettled = (record: AutoSweep, sweeps: readonly AutoSweep[]): boolean =>
+  record.settled === true || sweeps.some((other) => other.id > record.id && hasStarted(other))
+
+// at most one sweep is queued or running, and a scheduled one waiting for input holds the worktree the owner may be answering in, which a new sweep would settle
+const sweepHeld = (sweeps: readonly AutoSweep[]): boolean =>
+  sweeps.some((entry) => entry.status === 'queued' || entry.status === 'running' || (entry.origin === 'auto' && entry.status === 'needsInput' && !sweepSettled(entry, sweeps)))
+
+// scheduled sweeps that failed since the newest sweep that ended done, whoever started that one. A sweep has no head to start over at, so success is what clears the count
+const sweepFailures = (sweeps: readonly AutoSweep[]): number => {
+  const cleared = Math.max(-Infinity, ...sweeps.filter((entry) => entry.status === 'done').map((entry) => entry.id))
+  return sweeps.filter((entry) => entry.origin === 'auto' && entry.status === 'failed' && entry.id > cleared).length
+}
+
 export const buildQueue = ({ rows, openPrs, settings, reports, runs, sweeps, lastSweepRows }: QueueInput): QueueResult => {
   // Dependabot is told by its author, not by the bots list, and only ever goes through the sweep
   const dependabot = openPrs.filter(isDependabot)
@@ -202,10 +230,16 @@ export const buildQueue = ({ rows, openPrs, settings, reports, runs, sweeps, las
   const leftForOwner: LeftForOwner[] = []
   let qualified = 0
   let alreadyCurrent = 0
+  let sweepFailedTwice = false
   const consider = (row: OpenRow, kind: 'others' | 'own', reason: Exclude<QueueReason, 'dependabot'>): void => {
     qualified += 1
     if (isReviewedAtHead(row, reports.get(row.number), runs)) {
       alreadyCurrent += 1
+      return
+    }
+    if (hasLiveAutoRun(row.number, runs)) return
+    if (stoppedAtHead(row, runs)) {
+      leftForOwner.push({ number: row.number, outcome: 'stopped' })
       return
     }
     const failures = autoRunsFor(runs, row).filter((entry) => entry.status === 'failed')
@@ -222,18 +256,19 @@ export const buildQueue = ({ rows, openPrs, settings, reports, runs, sweeps, las
   if (settings.own) {
     for (const row of reviewable.filter(isOwnCandidate).sort(attentionOrder)) consider(row, 'own', 'selfReview')
   }
-  // a sweep reviews the whole set, and at most one is queued or running
-  if (settings.dependabot && !sweeps.some((entry) => entry.status === 'queued' || entry.status === 'running')) {
+  // a sweep reviews the whole set, one attempt and one retry
+  if (settings.dependabot && !sweepHeld(sweeps)) {
     const prs = sweepIsDue(dependabot, lastSweepRows)
     if (prs.length > 0) {
       qualified += 1
-      items.push({ kind: 'dependabot', reason: 'dependabot', prs })
+      if (sweepFailures(sweeps) >= 2) sweepFailedTwice = true
+      else items.push({ kind: 'dependabot', reason: 'dependabot', prs })
     }
   }
-  return { items, qualified, alreadyCurrent, leftForOwner }
+  return { items, qualified, alreadyCurrent, leftForOwner, sweepFailedTwice }
 }
 
-// the check before a queued run starts: a PR that left the open list closed and is dropped, and one still there, a draft included, runs and records the head it is at now, which may have moved
+// the check before a queued run starts: a PR that left the open list closed and is dropped, and one still there, a draft included, runs and records the head it is at now, which may have moved. It moves that one run to the new head and asks for no other, so it never gives a PR a second live run
 export type Recheck = { action: 'start', headSha: string | null } | { action: 'drop', note: 'closed' }
 
 export const recheckQueued = (item: QueueItem, openPrs: readonly RawOpenPr[]): Recheck => {
@@ -244,7 +279,7 @@ export const recheckQueued = (item: QueueItem, openPrs: readonly RawOpenPr[]): R
 
 // the daily limit and the slots a tick may fill
 
-// auto runs and sweeps that started on ms's local day; manual ones, queued ones, and skipped ones never count
+// auto runs and sweeps that started on ms's local day, each attempt once; manual ones, queued ones, skipped ones, and any that never started never count
 export const startedToday = (runs: readonly AutoRun[], sweeps: readonly AutoSweep[], ms: number, timeZone: string): number => {
   const from = startOfDay(ms, timeZone)
   const to = startOfDate(addDays(localDateOf(ms, timeZone), 1), timeZone)
@@ -311,7 +346,7 @@ const worktreeKept = (entry: WorktreeEntry, { runs, sweeps, openPrs }: OrphanInp
   if (record === undefined) return false
   if (record.status === 'queued' || record.status === 'running') return true
   if (record.status !== 'needsInput' && record.status !== 'failed') return false
-  if (entry.kind === 'sweep') return record.settled !== true && !sweeps.some((other) => other.id > record.id && hasStarted(other))
+  if (entry.kind === 'sweep') return !sweepSettled(record, sweeps)
   return !runSettled(record as AutoRun, runs, openPrs)
 }
 
