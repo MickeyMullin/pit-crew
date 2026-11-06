@@ -1248,9 +1248,10 @@ for (const [kind, watched] of watchedKinds) {
       h.launch.startTimes.set(pid, 'a replacement')
       const settled = launcher.settled(run.id)
       assert.equal(launcher.stop(run.id).status, 'running')
-      assert.equal((await within(settled)).status, 'stopped')
+      await quiet()
       assert.deepEqual(h.launch.kills, [])
       assert.ok(h.launch.alive.has(pid), 'the replacement is never signaled')
+      assert.equal((await within(settled)).status, 'stopped')
       await waitFor(() => h.cache.getRun(queued.id)?.status === 'running')
     } finally {
       launcher.close()
