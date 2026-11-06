@@ -113,6 +113,8 @@ test('drawer.ts draws a Model fact in the start and the action confirmations, an
   assert.match(source, /\.\.\.\(ask\.session === null \? \[\] : \[\['Runner', ask\.session\.runner\] as \[string, string\], \['Model', ask\.session\.model\] as \[string, string\]\]\)/)
   assert.match(source, /querySelector<HTMLElement>\('\[data-confirm="model"\]'\)/)
   assert.match(source, /setText\(modelLine, model\.confirm\.model\)/)
+  // the runner choice repaints the line and rebuilds nothing, so the chosen model is blanked from the signature while every runner's stays in it
+  assert.match(source, /\.\.\.model\.confirm, runner: '', command: '', model: '', commentsCheck/)
 })
 
 test('sweepdrawer.ts draws a Model fact in the sweep confirmation, and repaints it when the runner choice changes', async () => {
