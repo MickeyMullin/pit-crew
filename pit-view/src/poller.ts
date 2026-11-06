@@ -114,6 +114,8 @@ export type Poller = {
   sweepsChanged: (repo: string) => void
   // resolves once no cycle is running, including any follow-up cycle
   idle: () => Promise<void>
+  // how many cycles and one-PR refreshes hold an open record of what patches carried: one each while in flight, and none once they end or the poller stops
+  patchRecords: () => number
   // clears the timer and fails a running cycle; nothing starts afterward
   stop: () => void
   version: () => number
@@ -338,11 +340,26 @@ export const createPoller = (options: PollerOptions): Poller => {
 
   const syncNow = (): Sync => syncOf(cache.readView(config().repo), config())
 
+  // the numbers of the rows every patch carried, kept by each cycle and one-PR refresh for as long as it is in flight: it compares its end against what it knew before an await, and a row another path sent in between can read as that again while the page holds what was sent. Numbers only, so nothing remembers an answer, and each record ends with its owner
+  const records = new Set<Set<number>>()
+  const recordingPatches = async <T>(work: (carried: Set<number>) => Promise<T>): Promise<T> => {
+    const carried = new Set<number>()
+    records.add(carried)
+    try {
+      return await work(carried)
+    } finally {
+      records.delete(carried)
+    }
+  }
+
   // the one place versions are assigned: exactly one more per patch
   const patch = (body: PatchBody): void => {
     version += 1
     const full: Patch = { version, now: iso(clock.now()), rows: [], removed: [], closed: null, ...body }
     if (full.sync !== undefined) lastUi = JSON.stringify(full.sync.ui)
+    for (const carried of records) {
+      for (const row of full.rows) carried.add(row.number)
+    }
     emit(full)
   }
 
@@ -366,7 +383,7 @@ export const createPoller = (options: PollerOptions): Poller => {
   }
 
   // one patch per arrived open-PR page: its rows (or their removal when now hidden), tiles, counts, sync
-  const applyPage = (numbers: readonly number[], sent: Map<number, string>): void => {
+  const applyPage = (numbers: readonly number[], sent: Map<number, string>, carried: Set<number>): void => {
     const settings = config()
     const snap = snapshot(settings, reports)
     const rows: OpenRow[] = []
@@ -381,6 +398,8 @@ export const createPoller = (options: PollerOptions): Poller => {
       }
     }
     patch({ rows, removed, tiles: snap.view.tiles, counts: snap.view.counts, sync: syncOf(snap.cached, settings) })
+    // sent records these answers, so only a patch after this one makes them unknown again
+    for (const row of rows) carried.delete(row.number)
   }
 
   const applyClosed = (): void => {
@@ -390,15 +409,15 @@ export const createPoller = (options: PollerOptions): Poller => {
   }
 
   // the end of a cycle: removals, every row that changed since its page patch (based-on indications span
-  // pages) or that the cycle never reached (now stale), and the final sync
-  const applyFinish = (finished: FinishResult, sent: ReadonlyMap<number, string>): void => {
+  // pages), that another patch carried since then, or that the cycle never reached (now stale), and the final sync
+  const applyFinish = (finished: FinishResult, sent: ReadonlyMap<number, string>, carried: ReadonlySet<number>): void => {
     const settings = config()
     const snap = snapshot(settings, reports)
-    const rows = [...snap.rows.values()].filter((row) => sent.get(row.number) !== JSON.stringify(row))
+    const rows = [...snap.rows.values()].filter((row) => carried.has(row.number) || sent.get(row.number) !== JSON.stringify(row))
     patch({ rows, removed: finished.removed, tiles: snap.view.tiles, counts: snap.view.counts, sync: syncOf(snap.cached, settings) })
   }
 
-  const run = async (cycle: Cycle): Promise<void> => {
+  const run = async (cycle: Cycle, carried: Set<number>): Promise<void> => {
     const { repo } = cycle
     let failure: string | null = null
     let failureKind: CycleErrorKind | null = null
@@ -453,7 +472,7 @@ export const createPoller = (options: PollerOptions): Poller => {
           if (rowRefreshes.get(prKey(repo, row.number))?.state === 'failed') rowRefreshes.delete(prKey(repo, row.number))
         }
         pagesDone = page.page
-        if (shown()) applyPage(written.map((row) => row.number), sent)
+        if (shown()) applyPage(written.map((row) => row.number), sent, carried)
       }, { pageSize }).then(() => {}, (error: unknown) => {
         if (!(error instanceof CycleStopped)) fail('open-page', pagesDone + 1, error)
       })
@@ -468,7 +487,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     if (stopped) return
     const finished = cache.finishCycle(cycle.id, failure, failureKind)
     log(`cycle ${cycle.id} (${cycle.trigger}) ${failure === null ? `finished: ${finished.cycle.prsUpdated} PRs, ${finished.removed.length} removed` : `failed: ${failure}`}`)
-    if (shown()) applyFinish(finished, sent)
+    if (shown()) applyFinish(finished, sent, carried)
     // only a finished cycle compares; after a failed one the next success compares against the same baseline, so a transition is neither lost nor fired from stale rows, and a failed one the generation has left installs nothing, so the next cycle or refresh rebuilds from the cache
     if (failure === null && shown()) {
       const current = config()
@@ -509,7 +528,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     schedule()
     log(`cycle ${cycle.id} (${trigger}) started`)
     patch({ sync: syncNow() })
-    entry.done = run(cycle)
+    entry.done = recordingPatches((carried) => run(cycle, carried))
       .catch((error: unknown) => {
         log(`cycle ${cycle.id} crashed: ${messageOf(error)}`)
         if (cache.cycle(cycle.id)?.state === 'running') cache.finishCycle(cycle.id, `internal error: ${messageOf(error)}`, 'internal')
@@ -524,8 +543,8 @@ export const createPoller = (options: PollerOptions): Poller => {
     return { started: cycle !== null, cycle: cycle?.id ?? null }
   }
 
-  // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that row and any other its change moved (based-on indications), or its removal once closed; a failure stays on the row and never touches the cycles, so the board does not read offline. repo is the repository the caller meant (a write's), not whatever the configuration says now: while it is not the one in effect, the cache of that repository is still refreshed, but nothing of it reaches the board, the baseline, or a notification
-  const runPrRefresh = async (number: number, repo: string): Promise<PrRefreshResult> => {
+  // one PR on its own: a patch marking its row refreshing, the fetch, then one patch with that row, any other its change moved (based-on indications), and any another patch carried during the fetch, or its removal once closed; a failure stays on the row and never touches the cycles, so the board does not read offline. repo is the repository the caller meant (a write's), not whatever the configuration says now: while it is not the one in effect, the cache of that repository is still refreshed, but nothing of it reaches the board, the baseline, or a notification
+  const runPrRefresh = async (number: number, repo: string, carried: ReadonlySet<number>): Promise<PrRefreshResult> => {
     const settings = config()
     const key = prKey(repo, number)
     const startedGeneration = generation
@@ -558,11 +577,11 @@ export const createPoller = (options: PollerOptions): Poller => {
       rowRefreshes.set(key, failure)
       log(`PR #${number}: refresh failed: ${failure.error}`)
     }
-    // what happens now is decided by what is on show now: a refresh that began off the board has no earlier rows to tell a change by, so it sends them all, and its own is the only one it can have removed
+    // what happens now is decided by what is on show now: a refresh that began off the board has no earlier rows to tell a change by, so it sends them all, and the only ones it can have removed are its own and those another patch carried meanwhile
     if (shown()) {
       const next = snapshot(config(), reports)
-      const rows = [...next.rows.values()].filter((row) => row.number === number || !same(row, before?.rows.get(row.number)))
-      const removed = before === null ? [number].filter((known) => !next.rows.has(known)) : [...before.rows.keys()].filter((known) => !next.rows.has(known))
+      const rows = [...next.rows.values()].filter((row) => row.number === number || carried.has(row.number) || !same(row, before?.rows.get(row.number)))
+      const removed = [...new Set([...(before === null ? [number] : before.rows.keys()), ...carried])].filter((known) => !next.rows.has(known))
       patch({ rows, removed, tiles: next.view.tiles, counts: next.view.counts })
       if (failure === null) {
         if (startedGeneration !== generation) {
@@ -580,7 +599,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     const key = prKey(repo, number)
     const running = prJobs.get(key)
     if (running !== undefined) return running.then((result) => ({ ...result, joined: true }))
-    const job = runPrRefresh(number, repo).finally(() => prJobs.delete(key))
+    const job = recordingPatches((carried) => runPrRefresh(number, repo, carried)).finally(() => prJobs.delete(key))
     prJobs.set(key, job)
     return job
   }
@@ -718,6 +737,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     stopped = true
     if (timer !== null) timers.clear(timer)
     timer = null
+    records.clear()
     if (current !== null) {
       try {
         cache.finishCycle(current.cycle.id, 'stopped: Pit View shut down before the cycle finished', 'interrupted')
@@ -728,5 +748,5 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
-  return { view, refresh, refreshPr, refreshPrAfterWrite, setActive, identityChanged, configChanged, runWatched, runChanged, queueingChanged, sweepsChanged, idle, stop, version: () => version }
+  return { view, refresh, refreshPr, refreshPrAfterWrite, setActive, identityChanged, configChanged, runWatched, runChanged, queueingChanged, sweepsChanged, idle, patchRecords: () => records.size, stop, version: () => version }
 }

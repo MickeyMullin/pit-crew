@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import { actionOffers } from '../public/actionsview.ts'
 import { announceKey, announcements, cellModel, stopRequest } from '../public/agent.ts'
 import { drawerModel } from '../public/drawerview.ts'
-import { countRunning, hasRunningRun } from '../public/state.ts'
+import { applyPatch, countRunning, hasRunningRun } from '../public/state.ts'
 import { mineColumns, othersColumns } from '../public/tables.ts'
 import type { CellContext } from '../public/tables.ts'
 import { openCache } from '../src/cache.ts'
@@ -17,14 +17,14 @@ import type { Config } from '../src/config.ts'
 import * as derive from '../src/derive.ts'
 import type { OpenRow } from '../src/derive.ts'
 import { createGh } from '../src/github.ts'
-import type { RawOpenPr } from '../src/github.ts'
+import type { RawOpenPr, RawPrState } from '../src/github.ts'
 import { agentCell, createLauncher, createReviewLine } from '../src/launcher.ts'
 import type { RunResultJson, StartRequest } from '../src/launcher.ts'
 import { createPoller } from '../src/poller.ts'
 import type { Patch, View } from '../src/poller.ts'
 import type { ReportInfo } from '../src/reports.ts'
 import { scenario } from './fixtures/scenario.ts'
-import { fakeLaunch, fakeRunner, fakeTime, fixtureRunner, ok, reviewResult, tempDir, waitFor } from './helpers.ts'
+import { failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, ok, reviewResult, tempDir, waitFor } from './helpers.ts'
 
 // the column builds real nodes on a small stand-in for the document, as test/ui-basedon.test.ts does
 type Fake = { tag: string, attrs: Map<string, string>, children: Fake[], text?: string, setAttribute: (name: string, value: string) => void, appendChild: (child: Fake) => Fake, addEventListener: () => void }
@@ -80,9 +80,28 @@ const setup = async ({ config = {}, marks = {}, reports = new Map() }: SetupOpti
   const time = fakeTime()
   const cache = openCache({ path: ':memory:', clock: time.clock })
   const settings: { current: Config } = { current: { ...defaultConfig(), repo: scenario.repo, viewer: scenario.viewer, cloneDir: '~/dev/orbit', ...config } }
-  const answers = new Map<number, Partial<RawOpenPr>>(Object.entries(marks).map(([number, patch]) => [Number(number), patch]))
+  const answers = new Map<number, Partial<RawOpenPr> & { state?: RawPrState }>(Object.entries(marks).map(([number, patch]) => [Number(number), patch]))
   const fixtures = fixtureRunner()
+  // reads the test is holding open, each answered as GitHub stands when it is let go; refused PRs answer with an error
+  const holds = new Set<{ matches: (args: string[]) => boolean, gate: Promise<void> }>()
+  const refused = new Set<number | 'open'>()
+  const hold = (matches: (args: string[]) => boolean): (() => void) => {
+    let open = (): void => {}
+    const entry = { matches, gate: new Promise<void>((resume) => { open = resume }) }
+    holds.add(entry)
+    return () => {
+      holds.delete(entry)
+      open()
+    }
+  }
+  const singleRead = (args: string[]): number | null => (field(args, 'query') ?? '').includes('query SinglePullRequest') ? Number(field(args, 'number')) : null
+  const holdPr = (number: number): (() => void) => hold((args) => singleRead(args) === number)
+  const holdOpenPage = (position: 1 | 2): (() => void) => hold((args) => (field(args, 'query') ?? '').includes('query OpenPullRequests') && (field(args, 'after') === undefined) === (position === 1))
   const gh = fakeRunner(async (args) => {
+    await Promise.all([...holds].filter((entry) => entry.matches(args)).map((entry) => entry.gate))
+    const single = singleRead(args)
+    if (single !== null && refused.has(single)) return failed('GitHub refused the read')
+    if ((field(args, 'query') ?? '').includes('query OpenPullRequests') && refused.has('open')) return failed('GitHub refused the read')
     const answer = await fixtures.runner(args, undefined)
     if (args[1] !== 'graphql') return answer
     const body = JSON.parse(answer.stdout) as { data?: { repository?: { pullRequests?: { nodes: RawOpenPr[] }, pullRequest?: RawOpenPr | null } } }
@@ -165,7 +184,14 @@ const setup = async ({ config = {}, marks = {}, reports = new Map() }: SetupOpti
     cache.close()
     await temp.cleanup()
   }
-  return { home, time, cache, settings, answers, launch, patches, emits, writes, engine, poller, makeLauncher, rowOf, sent, flushed, cleanup }
+  // an open page from this moment on: the view as it loads now, with every later patch applied by the page's own code
+  const openPage = async (): Promise<() => Promise<void>> => {
+    const loaded = await poller.view()
+    const from = patches.length
+    const shows = (view: View): OpenRow[] => rowsOf(view).sort((a, b) => a.number - b.number)
+    return async () => assert.deepEqual(shows(patches.slice(from).reduce((view, patch) => applyPatch(view, patch), loaded)), shows(await poller.view()), 'the open page shows what a reload would')
+  }
+  return { home, time, cache, settings, answers, refused, holdPr, holdOpenPage, launch, patches, emits, writes, engine, poller, makeLauncher, rowOf, sent, flushed, openPage, cleanup }
 }
 
 // a run row written directly, in the shape the launcher writes it
@@ -902,6 +928,246 @@ test('the Agent runs tile and filter count one run once: a covered layer counts 
     assert.equal(hasRunningRun((await h.rowOf(111))!), true, 'its own run is running behind the newer stack run')
     h.cache.updateRun(own.id, { status: 'queued' })
     assert.equal(hasRunningRun((await h.rowOf(111))!), false)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+const numbersOf = (patch: Patch): number[] => patch.rows.map((row) => row.number).sort((a, b) => a - b)
+
+test('a stack run that starts while a one-PR refresh is pending: the refresh takes the layer back out, and its last patch carries the layer that went out as covered meanwhile', async () => {
+  const h = await setup()
+  try {
+    const page = await h.openPage()
+    assert.equal((await h.rowOf(112))!.agent?.state, 'idle')
+    const release = h.holdPr(111)
+    const refresh = h.poller.refreshPr(111)
+    const run = await h.engine.launcher.start(stackRequest())
+    await h.flushed()
+    assert.deepEqual([h.sent(112)?.agent?.state, h.sent(112)?.agent?.runId], ['running', run.id])
+    // the read lands with #111 out of the stack, so #112 is exactly what the refresh saw before it asked
+    h.answers.set(111, noMark)
+    release()
+    await refresh
+    const last = h.patches.at(-1)!
+    assert.deepEqual(last.rows.find((row) => row.number === 112)?.agent?.state, 'idle', 'the row a flush sent while the read was pending')
+    assert.equal(last.rows.find((row) => row.number === 112)?.agent?.runId, null)
+    assert.equal(h.sent(110)?.agent?.runId, run.id, 'the PR it started from keeps it')
+    await page()
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a stack run that ends while a one-PR refresh is pending: the layers go back with it, whatever the read says', async () => {
+  for (const answer of ['still marked', 'out of the stack']) {
+    const h = await setup()
+    try {
+      const run = await h.engine.launcher.start(stackRequest())
+      await h.flushed()
+      const page = await h.openPage()
+      assert.equal(h.sent(112)?.agent?.state, 'running')
+      const release = h.holdPr(111)
+      const refresh = h.poller.refreshPr(111)
+      h.engine.launcher.stop(run.id)
+      await h.engine.launcher.settled(run.id)
+      await h.flushed()
+      assert.equal(h.sent(112)?.agent?.state, 'idle', answer)
+      if (answer === 'out of the stack') h.answers.set(111, noMark)
+      release()
+      await refresh
+      assert.equal(h.patches.at(-1)!.rows.find((row) => row.number === 112)?.agent?.state, 'idle', answer)
+      await page()
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('two refreshes of different PRs overlap with a stack run starting between them: each keeps its own record, in whichever order they land', async () => {
+  for (const order of ['the other first', 'the layer first']) {
+    const h = await setup()
+    try {
+      const page = await h.openPage()
+      const releaseLayer = h.holdPr(111)
+      const releaseOther = h.holdPr(106)
+      const layer = h.poller.refreshPr(111)
+      const other = h.poller.refreshPr(106)
+      assert.equal(h.poller.patchRecords(), 2)
+      await h.engine.launcher.start(stackRequest())
+      await h.flushed()
+      assert.equal(h.sent(112)?.agent?.state, 'running')
+      h.answers.set(111, noMark)
+      if (order === 'the other first') {
+        releaseOther()
+        await other
+        assert.equal(h.poller.patchRecords(), 1, 'the one that ended closed only its own')
+        assert.equal(h.patches.at(-1)!.rows.find((row) => row.number === 112)?.agent?.state, 'running', order)
+        releaseLayer()
+        await layer
+        assert.equal(h.patches.at(-1)!.rows.find((row) => row.number === 112)?.agent?.state, 'idle', order)
+      } else {
+        releaseLayer()
+        await layer
+        assert.equal(h.patches.at(-1)!.rows.find((row) => row.number === 112)?.agent?.state, 'idle', order)
+        releaseOther()
+        await other
+        assert.equal(h.patches.at(-1)!.rows.find((row) => row.number === 112)?.agent?.state, 'idle', order)
+      }
+      assert.equal(h.poller.patchRecords(), 0)
+      await page()
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('a cycle that sends a layer while a one-PR refresh is pending: the refresh, the newer read, puts it back as it was, in both directions, and its last patch carries it', async () => {
+  // #111 is on page 1 and #110 on page 2, and the refresh starts between them: #111 reads as current to it, the cycle's end sends #111 once page 2 moves it, and the refresh's read is the newer of the two
+  for (const direction of [
+    { cached: noMark, cycle: {}, refresh: noMark, during: 'running', after: 'idle' },
+    { cached: {}, cycle: noMark, refresh: {}, during: 'idle', after: 'running' },
+  ]) {
+    const h = await setup({ marks: { 110: direction.cached } })
+    try {
+      await h.engine.launcher.start(stackRequest())
+      await h.flushed()
+      const page = await h.openPage()
+      assert.equal(h.sent(111)?.agent?.state, direction.after)
+      const releaseSecond = h.holdOpenPage(2)
+      const before = h.patches.length
+      h.poller.refresh('manual')
+      await waitFor(() => h.patches.slice(before).some((patch) => patch.rows.some((row) => row.number === 111)))
+      const releasePr = h.holdPr(110)
+      const refresh = h.poller.refreshPr(110)
+      h.answers.set(110, direction.cycle)
+      releaseSecond()
+      await h.poller.idle()
+      assert.equal(h.sent(111)?.agent?.state, direction.during, 'the cycle sent the layer')
+      assert.equal(h.poller.patchRecords(), 1, 'the cycle closed its record and left the refresh\'s')
+      h.answers.set(110, direction.refresh)
+      releasePr()
+      await refresh
+      assert.equal(h.patches.at(-1)!.rows.find((row) => row.number === 111)?.agent?.state, direction.after)
+      await page()
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('a PR the refresh never saw on the board, sent by a cycle while the read was pending and then found merged, is removed by the refresh', async () => {
+  // #119 is a draft of someone else's, so its row is hidden when the refresh starts
+  const h = await setup()
+  try {
+    const page = await h.openPage()
+    assert.equal(await h.rowOf(119), undefined)
+    const releasePage = h.holdOpenPage(1)
+    h.poller.refresh('manual')
+    const releasePr = h.holdPr(119)
+    const refresh = h.poller.refreshPr(119)
+    h.answers.set(119, { isDraft: false })
+    releasePage()
+    await h.poller.idle()
+    assert.ok(h.sent(119) !== undefined, 'the cycle put it on the board')
+    h.answers.set(119, { state: 'MERGED' })
+    releasePr()
+    assert.equal((await refresh).outcome, 'closed')
+    assert.deepEqual(h.patches.at(-1)!.removed, [119])
+    await page()
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the end of a cycle carries a row another patch sent after its page patch, even when the row reads as that page patch did again', async () => {
+  const h = await setup()
+  try {
+    const run = await h.engine.launcher.start(stackRequest())
+    await h.flushed()
+    const page = await h.openPage()
+    // a refresh of #110 whose read began before the cycle, which its write therefore lands under
+    const releasePr = h.holdPr(110)
+    const refresh = h.poller.refreshPr(110)
+    const releaseSecond = h.holdOpenPage(2)
+    h.poller.refresh('manual')
+    // page 1 sends #111 as covered, and #110 is on page 2
+    await waitFor(() => h.patches.some((patch) => patch.tiles !== undefined && patch.rows.some((row) => row.number === 111)))
+    assert.equal(h.sent(111)?.agent?.runId, run.id)
+    h.answers.set(110, noMark)
+    releasePr()
+    await refresh
+    assert.equal(h.sent(111)?.agent?.state, 'idle', 'the refresh took #110 out, so #111 is no longer joined to it')
+    // the newer read puts #110 back: page 2 carries #110 and #112, and #111 reads as it did at page 1
+    h.answers.delete(110)
+    releaseSecond()
+    await h.poller.idle()
+    const last = h.patches.at(-1)!
+    assert.equal(last.rows.find((row) => row.number === 111)?.agent?.runId, run.id)
+    // the refresh's patch carried page 1's rows, since page 1's patch fell in its window; page 2's patch came after it, and sent those rows last
+    for (const number of [108, 110, 112, 116]) assert.ok(!numbersOf(last).includes(number), `#${number} went out with page 2, and no patch carried it since`)
+    assert.equal(h.poller.patchRecords(), 0)
+    await page()
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a refresh that fails or throws, a cycle that fails or throws, and a poller that stops all close their records, and the next refresh carries only what its own window saw', async () => {
+  const h = await setup()
+  try {
+    const page = await h.openPage()
+    // a failure, with a flush during it
+    const release = h.holdPr(111)
+    h.refused.add(111)
+    const refresh = h.poller.refreshPr(111)
+    assert.equal(h.poller.patchRecords(), 1)
+    await h.engine.launcher.start(stackRequest())
+    await h.flushed()
+    release()
+    assert.equal((await refresh).outcome, 'failed')
+    assert.equal(h.poller.patchRecords(), 0, 'closed by the failure')
+    h.refused.delete(111)
+    // the next refresh's window saw nothing else
+    await h.poller.refreshPr(106)
+    assert.deepEqual(numbersOf(h.patches.at(-1)!), [106])
+    await page()
+    // a failed cycle
+    const releasePage = h.holdOpenPage(1)
+    h.poller.refresh('manual')
+    assert.equal(h.poller.patchRecords(), 1)
+    h.refused.add('open')
+    releasePage()
+    await h.poller.idle()
+    assert.equal(h.cache.latestCycle(scenario.repo)?.state, 'failed')
+    assert.equal(h.poller.patchRecords(), 0, 'closed by the cycle\'s end')
+    h.refused.delete('open')
+    // a refresh and a cycle that throw, since a feed that refuses a frame gets past what catches a failed read
+    const releaseThrowing = h.holdPr(106)
+    const throwing = h.poller.refreshPr(106)
+    h.emits.failing = 1
+    releaseThrowing()
+    await assert.rejects(throwing, /the feed refused the frame/)
+    assert.equal(h.poller.patchRecords(), 0, 'closed by the refresh\'s throw')
+    const releaseCrashing = h.holdOpenPage(1)
+    h.poller.refresh('manual')
+    assert.equal(h.poller.patchRecords(), 1)
+    h.emits.failing = Number.MAX_SAFE_INTEGER
+    releaseCrashing()
+    await h.poller.idle()
+    h.emits.failing = 0
+    assert.equal(h.poller.patchRecords(), 0, 'closed by the cycle\'s throw')
+    // a read that never answers before the shutdown
+    const releaseHeld = h.holdPr(106)
+    const held = h.poller.refreshPr(106)
+    assert.equal(h.poller.patchRecords(), 1)
+    h.poller.stop()
+    assert.equal(h.poller.patchRecords(), 0, 'closed by the shutdown, with the read still out')
+    const version = h.poller.version()
+    releaseHeld()
+    await held
+    assert.equal(h.poller.version(), version, 'nothing goes out after it')
+    assert.equal(h.poller.patchRecords(), 0)
   } finally {
     await h.cleanup()
   }
