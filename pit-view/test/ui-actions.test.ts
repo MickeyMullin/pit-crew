@@ -63,6 +63,17 @@ test('only the viewer\'s own open PRs offer actions: Merge when ready, Mark read
   assert.deepEqual(actionOffers(mine('draft'), false), [])
 })
 
+test('Squash and merge is offered for an approved row GitHub is still checking (the ready group), and for no other checking row', () => {
+  const offers = (row: OpenRow): string[] => actionOffers(row, true).map((offer) => offer.action)
+  assert.ok(offers(mine('checking', { group: 'readyToMerge' })).includes('merge'))
+  assert.ok(!offers(mine('checking', { group: 'awaitingReview' })).includes('merge'))
+  assert.ok(!offers(mine('checking', { group: 'readyToMerge', primaryBase: false, baseRef: 'release/2' })).includes('merge'))
+  assert.ok(!offers(mine('blocked', { group: 'readyToMerge' })).includes('merge'))
+  assert.ok(!offers(mine('draft', { group: 'drafts' })).includes('merge'))
+  // the confirmation opens for it exactly as for a ready row
+  assert.ok(actionConfirmModel(mine('checking', { group: 'readyToMerge' }), mergeAsk(), people) !== null)
+})
+
 test('nothing is asked or sent until a click opens the confirmation: the drawer starts with offers and no ask', () => {
   const model = drawerModel(input(mine('draft')))
   assert.equal(model.actions.length, 3)

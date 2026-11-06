@@ -109,9 +109,9 @@ const failureTip = (note: string | null): string | null => {
   return note
 }
 
-// the idle cell reads Merge instead of the row's default run on the viewer's own PR that is ready to merge into the primary branch: the same condition under which the drawer offers Squash and merge. The page derives it from the row it already has; the server sends no field for it, and the button starts nothing
-export const showsMerge = (row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase'>): boolean =>
-  row.section === 'mine' && row.merge.state === 'ready' && row.primaryBase
+// the idle cell reads Merge instead of the row's default run on the viewer's own PR that GitHub would let merge into the primary branch: the same condition under which the drawer offers Squash and merge. That is merge state ready, or checking while the row groups as Ready to merge (an approved PR whose mergeability GitHub has not computed yet; the server's live read decides at click time). The page derives it from the row it already has; the server sends no field for it, and the button starts nothing
+export const showsMerge = (row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'group'>): boolean =>
+  row.section === 'mine' && row.primaryBase && (row.merge.state === 'ready' || (row.merge.state === 'checking' && row.group === 'readyToMerge'))
 
 export const cellModel = (cell: AgentCell, number: number, nowMs: number, merge = false): CellModel => {
   if (cell.state === 'queued') {

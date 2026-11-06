@@ -367,7 +367,8 @@ export const deriveIssues = (pr: RawOpenPr): Issue[] => {
 
 export const deriveMerge = (pr: RawOpenPr, issues: readonly Issue[]): MergeState => {
   if (pr.isDraft) return { state: 'draft', label: '—' }
-  if (pr.mergeStateStatus === 'CLEAN') return { state: 'ready', label: 'Ready' }
+  // HAS_HOOKS is GitHub's mergeable-with-passing-status answer on a repository with pre-receive hooks, so it reads Ready like CLEAN
+  if (pr.mergeStateStatus === 'CLEAN' || (pr.mergeStateStatus === 'HAS_HOOKS' && pr.mergeable !== 'CONFLICTING')) return { state: 'ready', label: 'Ready' }
   const reviewed = countedReviews(pr).length > 0
   if (issues.length === 0 && (pr.reviewDecision === null || pr.reviewDecision === 'REVIEW_REQUIRED') && reviewed) {
     return { state: 'needsApproval', label: 'Needs approval' }
@@ -414,6 +415,10 @@ const changesRequestedBy = (pr: RawOpenPr, config: Config): ChangesRequestedBy |
 // state stays checking, so the row still says the merge is unconfirmed
 const groupsAsReady = (pr: RawOpenPr, merge: MergeState): boolean =>
   merge.state === 'ready' || (merge.state === 'checking' && pr.reviewDecision === 'APPROVED')
+
+// Squash and merge is offered when the PR is not a draft and no change is requested, with merge state ready or the unconfirmed state an approved PR groups as Ready to merge under (checking): GitHub itself then decides, and the server's live read before the write refuses unless it reports the PR mergeable. Unstable, behind, blocked, and conflicting PRs read Blocked and are never offered. The page applies the same rule to the row (showsMerge in public/agent.ts); the base must also be the primary branch, which the caller checks
+export const offersMerge = (pr: RawOpenPr, merge: MergeState): boolean =>
+  !pr.isDraft && pr.reviewDecision !== 'CHANGES_REQUESTED' && groupsAsReady(pr, merge)
 
 // Others' groups, in precedence order; null means hidden (others' drafts in v1)
 export const otherGroup = (pr: RawOpenPr, issues: readonly Issue[], merge: MergeState, config: Config): OtherGroup | null => {

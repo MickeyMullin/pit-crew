@@ -44,7 +44,7 @@ const selfReview = (patch: Partial<AgentCell> = {}): AgentCell => ({
   ...patch,
 } as unknown as AgentCell)
 
-const row = (section: string, state: string, primaryBase: boolean) => ({ section, merge: { state }, primaryBase }) as unknown as Parameters<typeof showsMerge>[0]
+const row = (section: string, state: string, primaryBase: boolean, group = 'readyToMerge') => ({ section, merge: { state }, primaryBase, group }) as unknown as Parameters<typeof showsMerge>[0]
 
 test('Merge shows only on a Mine row that is ready to merge into the primary branch', () => {
   assert.equal(showsMerge(row('mine', 'ready', true)), true)
@@ -52,6 +52,15 @@ test('Merge shows only on a Mine row that is ready to merge into the primary bra
   for (const state of ['draft', 'blocked', 'conflicts', 'pending', 'waiting']) assert.equal(showsMerge(row('mine', state, true)), false, state)
   assert.equal(showsMerge(row('others', 'ready', true)), false)
   assert.equal(showsMerge(row('bots', 'ready', true)), false)
+})
+
+test('Merge shows on an approved row GitHub is still checking, which groups as ready to merge, and on no other checking row', () => {
+  assert.equal(showsMerge(row('mine', 'checking', true, 'readyToMerge')), true)
+  assert.equal(showsMerge(row('mine', 'checking', false, 'readyToMerge')), false)
+  for (const group of ['awaitingReview', 'changesRequested', 'drafts']) assert.equal(showsMerge(row('mine', 'checking', true, group)), false, group)
+  assert.equal(showsMerge(row('others', 'checking', true, 'readyToMerge')), false)
+  // blocked (a failing or unstable check, behind, conflicts) never shows it, even in the ready group
+  assert.equal(showsMerge(row('mine', 'blocked', true, 'readyToMerge')), false)
 })
 
 test('the idle cell reads Merge with its own accessible name, and keeps the last-review line', () => {

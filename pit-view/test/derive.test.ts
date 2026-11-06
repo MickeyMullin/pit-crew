@@ -7,7 +7,7 @@ import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import {
   attentionOrder, deriveClosed, deriveCounts, deriveIssues, deriveBasedOn, deriveLastActivity, deriveMerge, deriveOpenRow, deriveOpenRows, deriveStacks,
-  deriveTickets, deriveTiles, deriveView, groupRows, latestReviewsOf, localAvatarUrl, personView, reviewerPips,
+  deriveTickets, deriveTiles, deriveView, groupRows, latestReviewsOf, localAvatarUrl, mineGroupAndStage, offersMerge, personView, reviewerPips,
 } from '../src/derive.ts'
 import type { DeriveContext, MineRow, OpenRow, OtherRow } from '../src/derive.ts'
 import type { RawCheckContext, RawClosedPr, RawOpenPr, RawTimelineItem } from '../src/github.ts'
@@ -289,6 +289,33 @@ test('an approved PR GitHub is still checking groups as ready to merge, in Mine 
     assert.notEqual(placed.group, 'readyToMerge', `#${number}`)
     assert.deepEqual(placed, place(variant(running, { mergeStateStatus: 'BLOCKED' })), `#${number}`)
   }
+})
+
+// an approved, conflict-free PR of the viewer's own (#102, CLEAN in the scenario) under each merge status GitHub can report: only those GitHub itself would let merge, or has not yet computed, are offered Merge
+test('a merge is offered for an approved, conflict-free PR when GitHub would allow it, and for no other status', async () => {
+  const base = find(await allOpen(), 102)
+  assert.equal(base.reviewDecision, 'APPROVED')
+  const offered = (patch: Partial<RawOpenPr>): boolean => {
+    const pr = variant(base, patch)
+    return offersMerge(pr, deriveMerge(pr, deriveIssues(pr)))
+  }
+  assert.equal(offered({}), true)
+  assert.equal(offered({ mergeStateStatus: 'HAS_HOOKS' }), true)
+  assert.equal(deriveMerge(variant(base, { mergeStateStatus: 'HAS_HOOKS' }), []).state, 'ready')
+  assert.equal(offered({ mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }), true)
+  // an approved PR that is waiting on GitHub still groups as Ready to merge, so the offer follows the group
+  const checking = variant(base, { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' })
+  assert.equal(mineGroupAndStage(checking, deriveMerge(checking, deriveIssues(checking))).group, 'readyToMerge')
+  for (const status of ['UNSTABLE', 'BEHIND', 'BLOCKED'] as const) assert.equal(offered({ mergeStateStatus: status }), false, status)
+  assert.equal(offered({ mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' }), false)
+  assert.equal(offered({ mergeable: 'CONFLICTING', mergeStateStatus: 'HAS_HOOKS' }), false)
+  assert.equal(offered({ isDraft: true }), false)
+  // not approved and still unknown: never offered
+  assert.equal(offered({ reviewDecision: 'REVIEW_REQUIRED', mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }), false)
+  assert.equal(offered({ reviewDecision: 'CHANGES_REQUESTED', mergeStateStatus: 'HAS_HOOKS' }), false)
+  // a failing check shows its chip and blocks the PR whatever else holds
+  const failing = withContexts(variant(base, { mergeStateStatus: 'UNKNOWN', mergeable: 'UNKNOWN' }), [checkRun('Unit tests', 'COMPLETED', 'FAILURE')])
+  assert.equal(offersMerge(failing, deriveMerge(failing, deriveIssues(failing))), false)
 })
 
 test('mine groups and stages', async () => {

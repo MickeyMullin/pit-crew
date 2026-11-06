@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Cache, Run } from './cache.ts'
 import type { Config } from './config.ts'
-import { deriveIssues, deriveMerge, isPrimaryBase } from './derive.ts'
+import { deriveIssues, deriveMerge, isPrimaryBase, offersMerge } from './derive.ts'
 import { GhError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr } from './github.ts'
 import { isHttpUrl, offersFix, postArgs, postOffer } from './launcher.ts'
@@ -108,7 +108,7 @@ const refuseIfMoved = (number: number, live: LivePr, base: string, headSha: stri
   if (live.base?.ref !== base) throw new ActionError('notAllowed', `#${number} now targets ${live.base?.ref ?? 'another branch'}, not ${base} as you saw; nothing was merged`)
   if (live.head?.sha !== headSha) throw new ActionError('notAllowed', `#${number} has new commits since you saw it; nothing was merged`)
   if (live.draft === true) throw new ActionError('notAllowed', `#${number} is a draft now; nothing was merged`)
-  if (live.mergeable !== true || live.mergeable_state !== 'clean') throw new ActionError('notAllowed', `#${number} is not mergeable right now (${live.mergeable_state ?? 'unknown'}); nothing was merged`)
+  if (live.mergeable !== true || (live.mergeable_state !== 'clean' && live.mergeable_state !== 'has_hooks')) throw new ActionError('notAllowed', `#${number} is not mergeable right now (${live.mergeable_state ?? 'unknown'}); nothing was merged`)
 }
 
 const sameLogin = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
@@ -244,7 +244,7 @@ export const createActions = (options: ActionsOptions): Actions => {
       // the state the row shows, derived again from the cached PR rather than taken from the page
       const merge = deriveMerge(row.pr, deriveIssues(row.pr))
       if (merge.state === 'draft') throw new ActionError('notAllowed', `#${number} is a draft; mark it ready for review before merging`)
-      if (merge.state !== 'ready') throw new ActionError('notAllowed', `#${number} is not ready to merge: its merge state is ${merge.label}`)
+      if (!offersMerge(row.pr, merge)) throw new ActionError('notAllowed', `#${number} is not ready to merge: its merge state is ${merge.label}`)
       const base = row.pr.baseRefName
       if (!isPrimaryBase(base, cached.defaultBranch)) {
         throw new ActionError('notAllowed', `#${number} targets ${base}, not the primary branch (${cached.defaultBranch ?? 'master or main'}); Pit View merges only into the primary branch`)

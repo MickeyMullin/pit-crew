@@ -39,6 +39,8 @@ type Behavior = {
   bases?: Record<number, string>
   // the mergeable value each listed PR has, by number, instead of the fixture's
   mergeable?: Record<number, string>
+  // the mergeStateStatus each listed PR has, by number, instead of the fixture's
+  mergeStates?: Record<number, string>
   // called when a write has been accepted
   onWrite?: () => void
   // what the live read of one PR (just before a merge) says, over the fixture's own state
@@ -106,11 +108,12 @@ const ghWorld = (behavior: Behavior = {}): FakeRunner => {
       return ok(JSON.stringify(await behavior.single(Number(field(args, 'number')))))
     }
     const answer = await base.runner(args)
-    if ((behavior.bases !== undefined || behavior.mergeable !== undefined) && args[0] === 'api' && args[1] === 'graphql' && (field(args, 'query') ?? '').includes('query OpenPullRequests')) {
+    if ((behavior.bases !== undefined || behavior.mergeable !== undefined || behavior.mergeStates !== undefined) && args[0] === 'api' && args[1] === 'graphql' && (field(args, 'query') ?? '').includes('query OpenPullRequests')) {
       const parsed = JSON.parse(answer.stdout) as RawOpenResponse
       for (const node of parsed.data.repository?.pullRequests.nodes ?? []) {
         node.baseRefName = behavior.bases?.[node.number] ?? node.baseRefName
         node.mergeable = (behavior.mergeable?.[node.number] ?? node.mergeable) as typeof node.mergeable
+        node.mergeStateStatus = (behavior.mergeStates?.[node.number] ?? node.mergeStateStatus) as typeof node.mergeStateStatus
       }
       return ok(JSON.stringify(parsed))
     }
@@ -357,6 +360,48 @@ test('merge is refused unless the cached merge state is ready, and gh is not ask
       assert.equal((await rowOf(h, number))?.merge.state, state)
       await refusedWithoutGh(h, number, await mergeBody(102), 422, /not ready to merge/)
     }
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// an approved, conflict-free PR of the viewer's own (102) under each merge status GitHub can report: the server derives the same offer as the page, and the live read before the write agrees
+test('merge is accepted for an approved PR GitHub reports as has_hooks or still checking, and the binding and live read are unchanged', async () => {
+  for (const [status, liveState] of [['HAS_HOOKS', 'has_hooks'], ['UNKNOWN', 'clean']] as const) {
+    const h = await setup({ runner: ghWorld({ mergeStates: { 102: status }, mergeable: status === 'UNKNOWN' ? { 102: 'UNKNOWN' } : {}, live: () => ({ mergeable_state: liveState }) }) })
+    try {
+      await filled(h)
+      assert.equal((await rowOf(h, 102))?.merge.state, status === 'UNKNOWN' ? 'checking' : 'ready', status)
+      const done = await act(h, 102, await mergeBody(102))
+      assert.equal(done.status, 200, status)
+      assert.deepEqual(writesOf(h.runner).map((call) => call.args), [['api', '--method', 'PUT', `repos/${scenario.repo}/pulls/102/merge`, '-f', 'merge_method=squash', '-f', `sha=${(await listed(102)).sha}`]], status)
+      assert.equal(liveReadsOf(h.runner).length, 1, status)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('merge is refused for an approved PR whose status GitHub reports as unstable, behind, or blocked, and gh is not asked anything', async () => {
+  for (const status of ['UNSTABLE', 'BEHIND', 'BLOCKED']) {
+    const h = await setup({ runner: ghWorld({ mergeStates: { 102: status } }) })
+    try {
+      await filled(h)
+      await refusedWithoutGh(h, 102, await mergeBody(102), 422, /not ready to merge/)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('merge for a PR still checking is refused with no write when the live read cannot confirm it', async () => {
+  const h = await setup({ runner: ghWorld({ mergeStates: { 102: 'UNKNOWN' }, mergeable: { 102: 'UNKNOWN' }, live: () => ({ mergeable: null, mergeable_state: 'unknown' }) }) })
+  try {
+    await filled(h)
+    const refused = await act(h, 102, await mergeBody(102))
+    assert.equal(refused.status, 422)
+    assert.match(String(refused.body.error), /not mergeable right now/)
+    assert.equal(writesOf(h.runner).length, 0)
   } finally {
     await h.cleanup()
   }
