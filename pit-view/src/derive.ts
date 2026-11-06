@@ -5,6 +5,7 @@ import type {
 } from './github.ts'
 import type { AgentCell } from './launcher.ts'
 import type { ReportInfo } from './reports.ts'
+import { hasWithholdingIssue, mergeOffered, unstableOffersMerge } from '../public/mergeoffer.ts'
 import { closedRanges, iso } from './time.ts'
 import type { Range } from './time.ts'
 
@@ -367,8 +368,9 @@ export const deriveIssues = (pr: RawOpenPr): Issue[] => {
 
 export const deriveMerge = (pr: RawOpenPr, issues: readonly Issue[]): MergeState => {
   if (pr.isDraft) return { state: 'draft', label: '—' }
-  // HAS_HOOKS is GitHub's mergeable-with-passing-status answer on a repository with pre-receive hooks, so it reads Ready like CLEAN
-  if (pr.mergeStateStatus === 'CLEAN' || (pr.mergeStateStatus === 'HAS_HOOKS' && pr.mergeable !== 'CONFLICTING')) return { state: 'ready', label: 'Ready' }
+  // CLEAN is GitHub's mergeable answer. HAS_HOOKS is the same on a repository with pre-receive hooks, but it is read Ready only when no issue chip withholds Merge (a change requested, conflicts, or a failing or running check), so it never skips what CLEAN's required checks cover. UNSTABLE is Ready only under the owner's rule in public/mergeoffer.ts
+  const status = pr.mergeStateStatus
+  if (status === 'CLEAN' || ((status === 'HAS_HOOKS' || (status === 'UNSTABLE' && unstableOffersMerge)) && !hasWithholdingIssue(issues))) return { state: 'ready', label: 'Ready' }
   const reviewed = countedReviews(pr).length > 0
   if (issues.length === 0 && (pr.reviewDecision === null || pr.reviewDecision === 'REVIEW_REQUIRED') && reviewed) {
     return { state: 'needsApproval', label: 'Needs approval' }
@@ -416,9 +418,9 @@ const changesRequestedBy = (pr: RawOpenPr, config: Config): ChangesRequestedBy |
 const groupsAsReady = (pr: RawOpenPr, merge: MergeState): boolean =>
   merge.state === 'ready' || (merge.state === 'checking' && pr.reviewDecision === 'APPROVED')
 
-// Squash and merge is offered when the PR is not a draft and no change is requested, with merge state ready or the unconfirmed state an approved PR groups as Ready to merge under (checking): GitHub itself then decides, and the server's live read before the write refuses unless it reports the PR mergeable. Unstable, behind, blocked, and conflicting PRs read Blocked and are never offered. The page applies the same rule to the row (showsMerge in public/agent.ts); the base must also be the primary branch, which the caller checks
-export const offersMerge = (pr: RawOpenPr, merge: MergeState): boolean =>
-  !pr.isDraft && pr.reviewDecision !== 'CHANGES_REQUESTED' && groupsAsReady(pr, merge)
+// the server's side of the Merge offer: the page's rule (mergeOffered in public/mergeoffer.ts) applied to the row this PR derives to, so the two cannot disagree. Unstable, behind, blocked, dirty, and draft PRs read Blocked or Draft and are never offered; a stack or release target is not the primary branch
+export const offersMerge = (pr: RawOpenPr, merge: MergeState, issues: readonly Issue[], primaryBase: boolean): boolean =>
+  mergeOffered({ merge, group: mineGroupAndStage(pr, merge).group, issues, primaryBase })
 
 // Others' groups, in precedence order; null means hidden (others' drafts in v1)
 export const otherGroup = (pr: RawOpenPr, issues: readonly Issue[], merge: MergeState, config: Config): OtherGroup | null => {

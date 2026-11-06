@@ -21,7 +21,7 @@ export const agentCellSig = (cell: AgentCell | null, number: number, nowMs: numb
 }
 
 // after each draw: every cell's moving line, and a running cell's step as its tooltip and hidden text
-export const updateAgentCells = (root: ParentNode, rows: readonly (Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'group'> & { number: number, agent: AgentCell | null })[], nowMs: number): void => {
+export const updateAgentCells = (root: ParentNode, rows: readonly (Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'group' | 'issues'> & { number: number, agent: AgentCell | null })[], nowMs: number): void => {
   for (const row of rows) {
     const cell = row.agent
     if (cell === null) continue

@@ -6,6 +6,13 @@ import { cellModel, showsMerge } from '../public/agent.ts'
 import type { AgentCell } from '../public/agent.ts'
 import { agentCellNodes, agentCellSig } from '../public/agentcell.ts'
 import { actionHolds } from '../public/actionsview.ts'
+import { defaultConfig } from '../src/config.ts'
+import type { Config } from '../src/config.ts'
+import { deriveOpenRows } from '../src/derive.ts'
+import type { OpenRow } from '../src/derive.ts'
+import type { RawCheckContext, RawOpenPr } from '../src/github.ts'
+import { scenario } from './fixtures/scenario.ts'
+import { openPage1 } from './helpers.ts'
 import { mineColumns, othersColumns } from '../public/tables.ts'
 import type { CellContext } from '../public/tables.ts'
 
@@ -31,6 +38,29 @@ Object.assign(globalThis, {
 
 const now = Date.parse('2026-10-28T15:00:00Z')
 
+// rows derived from a real fixture PR (#102, the viewer's own, approved), not hand-built, so the merge state, the group, and the issue chips come from the derivation: GitHub's HAS_HOOKS status through the same callers as any other
+const derivedRow = async (patch: Partial<RawOpenPr>, contexts?: RawCheckContext[]): Promise<OpenRow> => {
+  const base = (await openPage1()).data.repository?.pullRequests.nodes.find((pr) => pr.number === 102)
+  assert.ok(base)
+  const pr: RawOpenPr = { ...structuredClone(base), ...patch }
+  if (contexts !== undefined) pr.headCommit.nodes[0]!.commit.statusCheckRollup = { contexts: { totalCount: contexts.length, nodes: contexts } }
+  const config: Config = { ...defaultConfig(), repo: scenario.repo, viewer: scenario.viewer }
+  const found = deriveOpenRows([pr], scenario.defaultBranch, { config, clock: { now: () => Date.parse(scenario.now) }, timeZone: scenario.timeZone })[0]
+  assert.ok(found)
+  return found
+}
+const failingRun = [{ __typename: 'CheckRun', name: 'Unit tests', status: 'COMPLETED', conclusion: 'FAILURE', detailsUrl: 'https://example.test/job', checkSuite: null }] as unknown as RawCheckContext[]
+const pendingRun = [{ __typename: 'CheckRun', name: 'Unit tests', status: 'IN_PROGRESS', conclusion: null, detailsUrl: 'https://example.test/job', checkSuite: null }] as unknown as RawCheckContext[]
+const hasHooksCases: [string, Partial<RawOpenPr>, RawCheckContext[] | undefined, boolean][] = [
+  ['approved', {}, undefined, true],
+  ['changes requested', { reviewDecision: 'CHANGES_REQUESTED' }, undefined, false],
+  ['failing check', {}, failingRun, false],
+  ['pending check', {}, pendingRun, false],
+  ['draft', { isDraft: true }, undefined, false],
+  ['conflicting', { mergeable: 'CONFLICTING' }, undefined, false],
+  ['release target', { baseRefName: 'release/2' }, undefined, false],
+]
+
 const selfReview = (patch: Partial<AgentCell> = {}): AgentCell => ({
   state: 'idle',
   label: 'Self-review',
@@ -44,7 +74,7 @@ const selfReview = (patch: Partial<AgentCell> = {}): AgentCell => ({
   ...patch,
 } as unknown as AgentCell)
 
-const row = (section: string, state: string, primaryBase: boolean, group = 'readyToMerge') => ({ section, merge: { state }, primaryBase, group }) as unknown as Parameters<typeof showsMerge>[0]
+const row = (section: string, state: string, primaryBase: boolean, group = 'readyToMerge') => ({ section, merge: { state }, primaryBase, group, issues: [] }) as unknown as Parameters<typeof showsMerge>[0]
 
 test('Merge shows only on a Mine row that is ready to merge into the primary branch', () => {
   assert.equal(showsMerge(row('mine', 'ready', true)), true)
@@ -121,7 +151,7 @@ const columnCell = (kind: 'mine' | 'others') => {
     return { sig: JSON.stringify(cell.sig), name: button.attrs.get('aria-label'), ask: button.attrs.get('data-agent-ask'), text: button.children[0]?.text }
   }
 }
-const tableRow = (patch: object = {}) => ({ number: 101, headOid: 'a'.repeat(40), section: 'mine', merge: { state: 'ready' }, primaryBase: true, agent: selfReview(), ...patch })
+const tableRow = (patch: object = {}) => ({ number: 101, headOid: 'a'.repeat(40), section: 'mine', merge: { state: 'ready' }, primaryBase: true, group: 'readyToMerge', issues: [], agent: selfReview(), ...patch })
 
 test('the Mine table\'s Agent column flips between Self-review and Merge as the row becomes and stops being ready', () => {
   const cell = columnCell('mine')
@@ -147,4 +177,11 @@ test('the Others table\'s Agent column never shows Merge', () => {
   const stays = columnCell('others')(tableRow({ section: 'others' }))
   assert.equal(stays.name, 'Self-review #101: open agent')
   assert.equal(stays.ask, undefined)
+})
+
+test('the idle Agent button reads Merge on a HAS_HOOKS row only when nothing else withholds it, as it does for CLEAN', async () => {
+  for (const [name, patch, contexts, expected] of hasHooksCases) {
+    assert.equal(showsMerge(await derivedRow({ ...patch, mergeStateStatus: 'HAS_HOOKS' }, contexts)), expected, `HAS_HOOKS, ${name}`)
+    assert.equal(showsMerge(await derivedRow({ ...patch, mergeStateStatus: 'CLEAN' }, contexts)), expected, `CLEAN, ${name}`)
+  }
 })

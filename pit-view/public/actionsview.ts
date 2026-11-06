@@ -23,7 +23,7 @@ export type ActionOffer = { action: ActionKind, text: string }
 // the row fields an offer reads; agent is absent on a row that has no Agent cell
 type OfferRow = Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'issues' | 'group'> & { agent?: OpenRow['agent'] }
 
-// the actions this page offers: only the viewer's own PRs (Mine rows) have any, and a PR that has left the open tables has none. Merge is offered only while showsMerge holds (the merge state is ready, or checking on a row in the Ready to merge group) and its base is the cached primary branch. Update is offered on any of them whose base is the primary branch, drafts included, except while a run of the PR is in flight, since one run per PR runs at a time. Resolve conflicts is offered after it on the same terms, and only while the row carries the Conflicts chip. The server decides again whatever this says
+// the actions this page offers: only the viewer's own PRs (Mine rows) have any, and a PR that has left the open tables has none. Merge is offered only while showsMerge holds (the one rule in ./mergeoffer.ts, which the server's guard applies too: the merge state is ready, or checking on a row in the Ready to merge group, no issue chip withholds it, and the base is the cached primary branch). Update is offered on any of them whose base is the primary branch, drafts included, except while a run of the PR is in flight, since one run per PR runs at a time. Resolve conflicts is offered after it on the same terms, and only while the row carries the Conflicts chip. The server decides again whatever this says
 export const actionOffers = (row: OfferRow, open: boolean): ActionOffer[] => {
   if (!open || row.section !== 'mine') return []
   const draft = row.merge.state === 'draft'

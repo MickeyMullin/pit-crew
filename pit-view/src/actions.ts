@@ -48,6 +48,21 @@ export class ActionError extends Error {
   }
 }
 
+// why a merge of this cached PR is not allowed, or null when it is: the page's rule (mergeOffered in public/mergeoffer.ts) applied to the row the PR derives to, then the primary-branch check, so the page offers Merge exactly when this allows it
+export const mergeRefusal = (number: number, pr: RawOpenPr, defaultBranch: string | null): ActionError | null => {
+  const issues = deriveIssues(pr)
+  const merge = deriveMerge(pr, issues)
+  if (merge.state === 'draft') return new ActionError('notAllowed', `#${number} is a draft; mark it ready for review before merging`)
+  const primary = isPrimaryBase(pr.baseRefName, defaultBranch)
+  if (!offersMerge(pr, merge, issues, primary)) {
+    if (!primary && offersMerge(pr, merge, issues, true)) {
+      return new ActionError('notAllowed', `#${number} targets ${pr.baseRefName}, not the primary branch (${defaultBranch ?? 'master or main'}); Pit View merges only into the primary branch`)
+    }
+    return new ActionError('notAllowed', `#${number} is not ready to merge: its merge state is ${merge.label}${issues.length === 0 ? '' : ` (${issues.map((issue) => issue.label).join(', ')})`}`)
+  }
+  return null
+}
+
 const usage = 'send { "action": "merge", "repo": "<owner/name shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "update" | "resolveConflicts", "repo": "<owner/name shown>", "viewer": "<login shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "markReady" | "convertToDraft", "repo": "<owner/name shown>" }, or { "action": "requestReview", "repo": "<owner/name shown>", "reviewer": "<login from people>" }'
 
 // "a", "a or b", "a, b, or c": the words for a choice among the items
@@ -242,13 +257,9 @@ export const createActions = (options: ActionsOptions): Actions => {
     let merging: { base: string, headSha: string } | undefined
     if (request.action === 'merge') {
       // the state the row shows, derived again from the cached PR rather than taken from the page
-      const merge = deriveMerge(row.pr, deriveIssues(row.pr))
-      if (merge.state === 'draft') throw new ActionError('notAllowed', `#${number} is a draft; mark it ready for review before merging`)
-      if (!offersMerge(row.pr, merge)) throw new ActionError('notAllowed', `#${number} is not ready to merge: its merge state is ${merge.label}`)
+      const refusal = mergeRefusal(number, row.pr, cached.defaultBranch)
+      if (refusal !== null) throw refusal
       const base = row.pr.baseRefName
-      if (!isPrimaryBase(base, cached.defaultBranch)) {
-        throw new ActionError('notAllowed', `#${number} targets ${base}, not the primary branch (${cached.defaultBranch ?? 'master or main'}); Pit View merges only into the primary branch`)
-      }
       // the confirmation named a head and a base; the cache can have moved on before the page was patched, and then the viewer never saw what is cached: nothing is written
       if (request.base !== base || request.headSha !== row.pr.headRefOid.toLowerCase()) {
         refresh(repo, number)

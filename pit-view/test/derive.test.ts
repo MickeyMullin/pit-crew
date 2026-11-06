@@ -11,6 +11,9 @@ import {
 } from '../src/derive.ts'
 import type { DeriveContext, MineRow, OpenRow, OtherRow } from '../src/derive.ts'
 import type { RawCheckContext, RawClosedPr, RawOpenPr, RawTimelineItem } from '../src/github.ts'
+import { mergeRefusal } from '../src/actions.ts'
+import { actionOffers } from '../public/actionsview.ts'
+import { showsMerge } from '../public/agent.ts'
 import { scanReports } from '../src/reports.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { closedSearch, openPage1, openPage2, tempDir } from './helpers.ts'
@@ -297,7 +300,8 @@ test('a merge is offered for an approved, conflict-free PR when GitHub would all
   assert.equal(base.reviewDecision, 'APPROVED')
   const offered = (patch: Partial<RawOpenPr>): boolean => {
     const pr = variant(base, patch)
-    return offersMerge(pr, deriveMerge(pr, deriveIssues(pr)))
+    const issues = deriveIssues(pr)
+    return offersMerge(pr, deriveMerge(pr, issues), issues, true)
   }
   assert.equal(offered({}), true)
   assert.equal(offered({ mergeStateStatus: 'HAS_HOOKS' }), true)
@@ -315,7 +319,39 @@ test('a merge is offered for an approved, conflict-free PR when GitHub would all
   assert.equal(offered({ reviewDecision: 'CHANGES_REQUESTED', mergeStateStatus: 'HAS_HOOKS' }), false)
   // a failing check shows its chip and blocks the PR whatever else holds
   const failing = withContexts(variant(base, { mergeStateStatus: 'UNKNOWN', mergeable: 'UNKNOWN' }), [checkRun('Unit tests', 'COMPLETED', 'FAILURE')])
-  assert.equal(offersMerge(failing, deriveMerge(failing, deriveIssues(failing))), false)
+  assert.equal(offersMerge(failing, deriveMerge(failing, deriveIssues(failing)), deriveIssues(failing), true), false)
+})
+
+// every mergeStateStatus GitHub reports, crossed with each state of the PR that must withhold Merge: the page's offer (the idle Agent button and the drawer's action) and the server's guard are the same answer in every cell, and only an approved, clean PR into the primary branch whose status is CLEAN, HAS_HOOKS, or still UNKNOWN is offered
+test('the page offers Merge exactly when the server would allow it, for every merge status and every state of the PR', async () => {
+  const base = find(await allOpen(), 102)
+  assert.equal(base.reviewDecision, 'APPROVED')
+  const statuses = ['CLEAN', 'UNKNOWN', 'HAS_HOOKS', 'UNSTABLE', 'BEHIND', 'BLOCKED', 'DIRTY', 'DRAFT'] as const
+  const states: Record<string, (pr: RawOpenPr) => RawOpenPr> = {
+    approved: (pr) => pr,
+    changesRequested: (pr) => variant(pr, { reviewDecision: 'CHANGES_REQUESTED' }),
+    failingCheck: (pr) => withContexts(pr, [checkRun('Unit tests', 'COMPLETED', 'FAILURE')]),
+    pendingCheck: (pr) => withContexts(pr, [checkRun('Unit tests', 'IN_PROGRESS', null)]),
+    draft: (pr) => variant(pr, { isDraft: true }),
+    conflicting: (pr) => variant(pr, { mergeable: 'CONFLICTING' }),
+    releaseTarget: (pr) => variant(pr, { baseRefName: 'release/2' }),
+  }
+  const offeredStatuses = new Set(['CLEAN', 'HAS_HOOKS', 'UNKNOWN'])
+  for (const status of statuses) {
+    for (const [name, apply] of Object.entries(states)) {
+      const patched = apply(variant(base, { mergeStateStatus: status, mergeable: status === 'UNKNOWN' ? 'UNKNOWN' : status === 'DIRTY' ? 'CONFLICTING' : 'MERGEABLE' }))
+      const pr = name === 'conflicting' ? variant(patched, { mergeable: 'CONFLICTING' }) : patched
+      const found = find(deriveOpenRows([pr], scenario.defaultBranch, ctx()), 102)
+      assert.equal(found.section, 'mine')
+      const page = showsMerge(found)
+      const drawer = actionOffers(found, true).some((offer) => offer.action === 'merge')
+      const server = mergeRefusal(102, pr, scenario.defaultBranch) === null
+      const cell = `${status} / ${name}`
+      assert.equal(page, server, `page and server agree: ${cell}`)
+      assert.equal(drawer, server, `drawer and server agree: ${cell}`)
+      assert.equal(server, name === 'approved' && offeredStatuses.has(status), `expected offer: ${cell}`)
+    }
+  }
 })
 
 test('mine groups and stages', async () => {
