@@ -316,6 +316,7 @@ test('a stop signals the sweep\'s group and settles it stopped; stopping an unkn
     const child = h.launch.children[0]!
     const stopped = h.launcher.stop(sweep.id)
     assert.equal(stopped.status, 'running')
+    await waitFor(() => h.launch.kills.length === 1)
     assert.deepEqual(h.launch.kills, [{ pid: -child.pid, signal: 'SIGTERM' }])
     const final = await h.launcher.settled(sweep.id)
     assert.deepEqual([final.status, sweepView(final).text], ['stopped', 'Stopped'])
@@ -1104,6 +1105,7 @@ test('a Stop of a sweep that started from the queue signals it and hands its slo
     await h.runs.settled(running.id)
     await waitFor(() => h.cache.getSweep(sweep.id)?.pid != null)
     assert.equal(h.launcher.stop(sweep.id).status, 'running')
+    await waitFor(() => h.launch.kills.length === 1)
     assert.deepEqual(h.launch.kills.map((kill) => kill.signal), ['SIGTERM'])
     h.launch.children[1]!.exit(0, 'SIGTERM')
     assert.equal((await h.launcher.settled(sweep.id)).status, 'stopped')
@@ -1158,6 +1160,59 @@ test('after a restart a sweep whose process lives holds its slot again, whicheve
     assert.equal(h.launch.children.length, 1)
     next.runs.close()
     next.sweeps.close()
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a recovered sweep whose pid now has another start time settles at the next poll, unsignaled, and its slot goes to the next in line', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  try {
+    const sweep = await h.launcher.start(start())
+    await waitFor(() => h.cache.getSweep(sweep.id)?.pidStartedAt != null)
+    const pid = h.launch.children[0]!.pid
+    h.launcher.close()
+    h.runs.close()
+    const next = h.pair()
+    await next.sweeps.recover()
+    await next.runs.recover()
+    const queued = await next.runs.start(review(113))
+    assert.equal(queued.status, 'queued')
+    h.launch.startTimes.set(pid, 'a replacement')
+    const settled = next.sweeps.settled(sweep.id)
+    h.time.advance(10 * second)
+    assert.equal((await within(settled)).status, 'failed')
+    assert.deepEqual(h.launch.kills, [])
+    assert.ok(h.launch.alive.has(pid), 'the replacement is never signaled')
+    await waitFor(() => h.cache.getRun(queued.id)?.status === 'running')
+    next.runs.close()
+    next.sweeps.close()
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('Stop on a sweep whose pid gets another start time sends no signal before the SIGTERM or the SIGKILL, and settles it stopped', async () => {
+  const h = await harness()
+  try {
+    const first = await h.launcher.start(start())
+    const firstPid = h.launch.children[0]!.pid
+    h.launch.startTimes.set(firstPid, 'a replacement')
+    const firstSettled = h.launcher.settled(first.id)
+    assert.equal(h.launcher.stop(first.id).status, 'running')
+    assert.equal((await within(firstSettled)).status, 'stopped')
+    assert.deepEqual(h.launch.kills, [])
+
+    const later = await h.launcher.start(start())
+    const laterPid = h.launch.children[1]!.pid
+    h.launch.ignoreTerm.add(laterPid)
+    const laterSettled = h.launcher.settled(later.id)
+    h.launcher.stop(later.id)
+    await waitFor(() => h.launch.kills.length === 1)
+    h.launch.startTimes.set(laterPid, 'a replacement')
+    h.time.advance(10 * second)
+    assert.equal((await within(laterSettled)).status, 'stopped')
+    assert.deepEqual(h.launch.kills, [{ pid: -laterPid, signal: 'SIGTERM' }])
   } finally {
     await h.cleanup()
   }

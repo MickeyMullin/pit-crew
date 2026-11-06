@@ -230,6 +230,10 @@ export type FakeLaunch = {
   // what the fake ps lists, and which pids are alive
   processes: ProcessEntry[]
   alive: Set<number>
+  // a start time ps gives instead of the pid's own: the pid has been reused by another process
+  startTimes: Map<number, string>
+  // how ps fails when asked for a start time, when set: no answer for a live pid, or a rejection
+  startTimeFailure: 'empty' | 'rejects' | null
   // runners that ignore SIGTERM, so a stop has to escalate
   ignoreTerm: Set<number>
   gitCalls: string[][]
@@ -252,6 +256,8 @@ export const fakeLaunch = ({ remotes = fakeRemotes('octo-example/orbit'), fs = {
     kills: [],
     processes: [],
     alive: new Set(),
+    startTimes: new Map(),
+    startTimeFailure: null,
     ignoreTerm: new Set(),
     gitCalls: [],
     removed: [],
@@ -328,7 +334,11 @@ export const fakeLaunch = ({ remotes = fakeRemotes('octo-example/orbit'), fs = {
     },
     procs: {
       list: async () => fake.processes,
-      startTime: async (pid) => fake.alive.has(pid) ? `start-${pid}` : null,
+      startTime: async (pid) => {
+        if (fake.startTimeFailure === 'rejects') throw new Error('ps could not run')
+        if (fake.startTimeFailure === 'empty' || !fake.alive.has(pid)) return null
+        return fake.startTimes.get(pid) ?? `start-${pid}`
+      },
     },
     git: async (args) => {
       fake.gitCalls.push(args)

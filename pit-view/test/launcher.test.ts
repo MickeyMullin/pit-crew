@@ -14,7 +14,7 @@ import type { RawOpenPr } from '../src/github.ts'
 import {
   agentCell, childEnv, claudeInvocation, codexInvocation, codexNote, createLauncher, createReviewLine, defaultRun, descendantGroups, doneText, emptyStream, gitConfigEnv,
   emptySteps, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, remoteNamesRepo,
-  modelLabels, noteKind, requestText, reviewFits, runners, runView, shellPath, startOptions, stepsOf, updateRequest,
+  modelLabels, noteKind, requestText, reviewFits, runners, runView, shellPath, startOptions, stepsOf, systemFs, updateRequest,
 } from '../src/launcher.ts'
 import type { LaunchSpec, ReviewResult, RunResultJson, StartRequest, StepEvent } from '../src/launcher.ts'
 import { createPoller } from '../src/poller.ts'
@@ -1061,6 +1061,7 @@ test('stop sends SIGTERM to the group, then after 10 seconds SIGKILLs every desc
     for (const alive of [pid + 100, 5000, 5001, 6000]) h.launch.alive.add(alive)
     const stopping = h.launcher.stop(run.id)
     assert.equal(stopping.status, 'running')
+    await waitFor(() => h.launch.kills.length === 1)
     assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }])
     // a second click sends nothing more
     h.launcher.stop(run.id)
@@ -1141,6 +1142,390 @@ test('after a restart, a live run is watched again and the rest settle from resu
     // the old launcher, closed, never settles anything
     assert.equal(h.changes.filter((run) => run.status !== 'running').length, 0)
     again.close()
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// a reused pid: the rule that the recorded start time is compared at every decision and before every signal
+
+type Harness = Awaited<ReturnType<typeof harness>>
+
+// a run this server found again after a restart: watched with no child handle, from the pid and the start time on record
+const recoveredRun = async (h: Harness) => {
+  const run = await h.launcher.start(request())
+  const child = h.launch.children.at(-1)!
+  h.launcher.close()
+  const launcher = h.make()
+  await launcher.recover()
+  assert.equal(h.cache.getRun(run.id)?.status, 'running')
+  return { run, child, pid: child.pid, launcher }
+}
+
+// a run this server spawned and holds the child handle of
+const launchedRun = async (h: Harness) => {
+  const run = await h.launcher.start(request())
+  const child = h.launch.children.at(-1)!
+  return { run, child, pid: child.pid, launcher: h.launcher }
+}
+
+const watchedKinds = [['recovered', recoveredRun], ['launched', launchedRun]] as const
+
+test('a recovered run whose pid now has another start time reads as exited at the next poll: it settles as an observed exit does, unsignaled, and the queue moves', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  const { run, child, pid, launcher } = await recoveredRun(h)
+  try {
+    const queued = await launcher.start(request(113, { label: 'Review' }))
+    assert.equal(queued.status, 'queued')
+    await h.report(106)
+    await child.result(reviewResult())
+    h.launch.startTimes.set(pid, 'a replacement')
+    const settled = launcher.settled(run.id)
+    h.time.advance(10 * second)
+    assert.equal((await within(settled)).status, 'done')
+    assert.deepEqual(h.launch.kills, [])
+    assert.ok(h.launch.alive.has(pid), 'the replacement is never signaled')
+    await waitFor(() => h.cache.getRun(queued.id)?.status === 'running')
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a recovered run whose start time matches, or cannot be read for its live pid, stays watched: a failed lookup is not an exit', async () => {
+  const h = await harness({ config: { maxConcurrentReviews: 1 } })
+  const { run, pid, launcher } = await recoveredRun(h)
+  try {
+    const pollOnce = async (): Promise<void> => {
+      h.time.advance(10 * second)
+      await quiet()
+    }
+    await pollOnce()
+    for (const failure of ['rejects', 'empty'] as const) {
+      h.launch.startTimeFailure = failure
+      await pollOnce()
+      assert.equal(h.cache.getRun(run.id)?.status, 'running', failure)
+    }
+    h.launch.startTimeFailure = null
+    await pollOnce()
+    assert.equal(h.cache.getRun(run.id)?.status, 'running')
+    assert.deepEqual(h.launch.kills, [])
+    // its slot stayed held throughout
+    assert.equal((await launcher.start(request(113, { label: 'Review' }))).status, 'queued')
+    h.launch.alive.delete(pid)
+    const settled = launcher.settled(run.id)
+    h.time.advance(10 * second)
+    assert.deepEqual([(await within(settled)).status, noteKind(h.cache.getRun(run.id)?.note ?? null)], ['failed', 'noResult'])
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a poll whose lookup finds no process because the process has just gone reads it as exited, not as a failed lookup', async () => {
+  const h = await harness()
+  const { run, pid, launcher } = await recoveredRun(h)
+  try {
+    h.launch.deps.procs.startTime = async () => {
+      h.launch.alive.delete(pid)
+      return null
+    }
+    const settled = launcher.settled(run.id)
+    h.time.advance(10 * second)
+    assert.equal((await within(settled)).status, 'failed')
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+for (const [kind, watched] of watchedKinds) {
+  test(`Stop on a ${kind} run whose pid now has another start time sends no signal, settles it as stopped, and the queue moves`, async () => {
+    const h = await harness({ config: { maxConcurrentReviews: 1 } })
+    const { run, pid, launcher } = await watched(h)
+    try {
+      const queued = await launcher.start(request(113, { label: 'Review' }))
+      h.launch.startTimes.set(pid, 'a replacement')
+      const settled = launcher.settled(run.id)
+      assert.equal(launcher.stop(run.id).status, 'running')
+      assert.equal((await within(settled)).status, 'stopped')
+      assert.deepEqual(h.launch.kills, [])
+      assert.ok(h.launch.alive.has(pid), 'the replacement is never signaled')
+      await waitFor(() => h.cache.getRun(queued.id)?.status === 'running')
+    } finally {
+      launcher.close()
+      await h.cleanup()
+    }
+  })
+
+  test(`a ${kind} run whose pid gets another start time between Stop's SIGTERM and its escalation gets no SIGKILL, and settles as stopped`, async () => {
+    const h = await harness()
+    const { run, pid, launcher } = await watched(h)
+    try {
+      h.launch.ignoreTerm.add(pid)
+      const settled = launcher.settled(run.id)
+      launcher.stop(run.id)
+      await waitFor(() => h.launch.kills.length === 1)
+      assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }])
+      h.launch.startTimes.set(pid, 'a replacement')
+      h.time.advance(10 * second)
+      assert.equal((await within(settled)).status, 'stopped')
+      assert.deepEqual(h.launch.kills.map((sent) => sent.signal), ['SIGTERM'])
+      assert.ok(h.launch.alive.has(pid), 'the replacement is never signaled')
+    } finally {
+      launcher.close()
+      await h.cleanup()
+    }
+  })
+
+  test(`a ${kind} run whose pid gets another start time while its process tree is listed gets no SIGKILL at all`, async () => {
+    const h = await harness()
+    const { run, pid, launcher } = await watched(h)
+    try {
+      h.launch.ignoreTerm.add(pid)
+      h.launch.processes.push({ pid: 5000, ppid: pid, pgid: 5000 })
+      h.launch.alive.add(5000)
+      const list = h.launch.deps.procs.list
+      h.launch.deps.procs.list = async () => {
+        h.launch.startTimes.set(pid, 'a replacement')
+        return list()
+      }
+      const settled = launcher.settled(run.id)
+      launcher.stop(run.id)
+      await waitFor(() => h.launch.kills.length === 1)
+      h.time.advance(10 * second)
+      assert.equal((await within(settled)).status, 'stopped')
+      assert.deepEqual(h.launch.kills.map((sent) => sent.signal), ['SIGTERM'])
+    } finally {
+      launcher.close()
+      await h.cleanup()
+    }
+  })
+
+  test(`a ${kind} run whose start time still matches gets SIGTERM, then SIGKILL on every descendant's group, each after its comparison`, async () => {
+    const h = await harness()
+    const { run, pid, launcher } = await watched(h)
+    try {
+      h.launch.ignoreTerm.add(pid)
+      const asked: number[] = []
+      const startTime = h.launch.deps.procs.startTime
+      h.launch.deps.procs.startTime = async (asking) => {
+        asked.push(asking)
+        return startTime(asking)
+      }
+      h.launch.processes.push({ pid: 5000, ppid: pid, pgid: 5000 })
+      h.launch.alive.add(5000)
+      const settled = launcher.settled(run.id)
+      launcher.stop(run.id)
+      await waitFor(() => h.launch.kills.length === 1)
+      assert.deepEqual(asked, [pid])
+      h.time.advance(10 * second)
+      await waitFor(() => h.launch.kills.length === 3)
+      assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }, { pid: -5000, signal: 'SIGKILL' }, { pid: -pid, signal: 'SIGKILL' }])
+      assert.ok(asked.length >= 2 && asked.every((asking) => asking === pid))
+      await quiet()
+      // a recovered run has no exit to observe, so the poll finds its end
+      h.time.advance(10 * second)
+      assert.equal((await within(settled)).status, 'stopped')
+    } finally {
+      launcher.close()
+      await h.cleanup()
+    }
+  })
+}
+
+for (const failure of ['rejects', 'empty'] as const) {
+  test(`Stop on a recovered run whose start time lookup ${failure === 'rejects' ? 'rejects' : 'gives nothing for its live pid'} signals nothing until the comparison can be made, at the SIGTERM and at the SIGKILL`, async () => {
+    const h = await harness()
+    const { run, pid, launcher } = await recoveredRun(h)
+    try {
+      h.launch.ignoreTerm.add(pid)
+      h.launch.startTimeFailure = failure
+      const settled = launcher.settled(run.id)
+      assert.equal(launcher.stop(run.id).status, 'running')
+      await quiet()
+      assert.equal(h.launch.kills.length, 0)
+      h.time.advance(10 * second)
+      await quiet()
+      assert.equal(h.launch.kills.length, 0)
+      assert.equal(h.cache.getRun(run.id)?.status, 'running')
+      // the lookup answers again, and the SIGTERM goes then, with the whole grace period ahead of it
+      h.launch.startTimeFailure = null
+      h.time.advance(10 * second)
+      await waitFor(() => h.launch.kills.length === 1)
+      assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }])
+      await quiet()
+      h.launch.startTimeFailure = failure
+      h.time.advance(10 * second)
+      await quiet()
+      assert.deepEqual(h.launch.kills.map((sent) => sent.signal), ['SIGTERM'])
+      h.launch.startTimeFailure = null
+      h.time.advance(10 * second)
+      await waitFor(() => h.launch.kills.length === 2)
+      assert.deepEqual(h.launch.kills.at(-1), { pid: -pid, signal: 'SIGKILL' })
+      await quiet()
+      h.time.advance(10 * second)
+      assert.equal((await within(settled)).status, 'stopped')
+    } finally {
+      launcher.close()
+      await h.cleanup()
+    }
+  })
+
+  test(`Stop on a launched run whose start time lookup ${failure === 'rejects' ? 'rejects' : 'gives nothing for its live pid'} still signals it: a child whose exit has not been observed holds its pid`, async () => {
+    const h = await harness()
+    const { run, pid, launcher } = await launchedRun(h)
+    try {
+      h.launch.ignoreTerm.add(pid)
+      h.launch.startTimeFailure = failure
+      const settled = launcher.settled(run.id)
+      launcher.stop(run.id)
+      await waitFor(() => h.launch.kills.length === 1)
+      h.time.advance(10 * second)
+      assert.equal((await within(settled)).status, 'stopped')
+      assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }, { pid: -pid, signal: 'SIGKILL' }])
+    } finally {
+      launcher.close()
+      await h.cleanup()
+    }
+  })
+}
+
+test('with no start time on record for a launched run, Stop signals it from its child handle, as it always has', async () => {
+  const h = await harness()
+  h.launch.startTimeFailure = 'empty'
+  const { run, pid, launcher } = await launchedRun(h)
+  try {
+    assert.equal(h.cache.getRun(run.id)?.pidStartedAt, null)
+    h.launch.startTimeFailure = null
+    h.launch.ignoreTerm.add(pid)
+    const settled = launcher.settled(run.id)
+    launcher.stop(run.id)
+    await waitFor(() => h.launch.kills.length === 1)
+    h.time.advance(10 * second)
+    assert.equal((await within(settled)).status, 'stopped')
+    assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }, { pid: -pid, signal: 'SIGKILL' }])
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('Stop while a run settles after its observed exit sends no signal, even when ps cannot say who holds the pid now', async () => {
+  const reads = gate()
+  const launch = fakeLaunch({ fs: { readFile: async (path) => {
+    if (path.endsWith('result.json')) await reads.wait()
+    return systemFs.readFile(path)
+  } } })
+  const h = await harness({ launch })
+  const { run, child, pid, launcher } = await launchedRun(h)
+  try {
+    reads.arm()
+    child.exit(1)
+    await waitFor(() => reads.held() === 1)
+    h.launch.alive.add(pid)
+    h.launch.startTimeFailure = 'rejects'
+    const settled = launcher.settled(run.id)
+    launcher.stop(run.id)
+    await quiet()
+    reads.open(0)
+    assert.equal((await within(settled)).status, 'stopped')
+    assert.deepEqual(h.launch.kills, [])
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('Stop whose comparison is overtaken by the child\'s observed exit sends no signal', async () => {
+  const h = await harness()
+  const { run, child, pid, launcher } = await launchedRun(h)
+  const lookups = gate()
+  const startTime = h.launch.deps.procs.startTime
+  h.launch.deps.procs.startTime = async (asking) => {
+    await lookups.wait()
+    return startTime(asking)
+  }
+  try {
+    lookups.arm()
+    const settled = launcher.settled(run.id)
+    launcher.stop(run.id)
+    await waitFor(() => lookups.held() === 1)
+    child.exit(1)
+    // whatever the lookup answers now, the run's process has gone
+    h.launch.alive.add(pid)
+    await quiet()
+    lookups.open(0)
+    assert.equal((await within(settled)).status, 'stopped')
+    assert.deepEqual(h.launch.kills, [])
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a start time read while the child\'s exit was observed is discarded, so a restart never takes the process that reused its pid for the run', async () => {
+  const h = await harness()
+  // the run's ending cannot be written, so its row stays running for the restart to find
+  const launcher = failingWrites(h, (_id, changes) => changes.status !== undefined)
+  const lookups = gate()
+  const startTime = h.launch.deps.procs.startTime
+  h.launch.deps.procs.startTime = async (asking) => {
+    await lookups.wait()
+    return startTime(asking)
+  }
+  let restarted: ReturnType<typeof h.make> | null = null
+  try {
+    lookups.arm()
+    const starting = launcher.start(request())
+    await waitFor(() => lookups.held() === 1)
+    const child = h.launch.children[0]!
+    const id = h.watched[0]!
+    const settled = launcher.settled(id)
+    child.exit(1)
+    await within(settled)
+    // another process takes the pid before ps reads it
+    h.launch.alive.add(child.pid)
+    h.launch.startTimes.set(child.pid, 'a replacement')
+    lookups.open(0)
+    await within(starting)
+    assert.equal(h.cache.getRun(id)?.status, 'running')
+    assert.equal(h.cache.getRun(id)?.pidStartedAt, null)
+    assert.equal((await requestFile(h, id)).pidStartedAt, null)
+    restarted = await restart(h, launcher)
+    assert.deepEqual(h.watched, [])
+    assert.deepEqual([h.cache.getRun(id)?.status, noteKind(h.cache.getRun(id)?.note ?? null)], ['failed', 'serverRestarted'])
+    assert.deepEqual(h.launch.kills, [])
+  } finally {
+    launcher.close()
+    restarted?.close()
+    await h.cleanup()
+  }
+})
+
+test('a start time read after an exit observed by a server that was closing is discarded too, since that settle changes nothing', async () => {
+  const h = await harness()
+  const lookups = gate()
+  const startTime = h.launch.deps.procs.startTime
+  h.launch.deps.procs.startTime = async (asking) => {
+    await lookups.wait()
+    return startTime(asking)
+  }
+  try {
+    lookups.arm()
+    const starting = h.launcher.start(request())
+    await waitFor(() => lookups.held() === 1)
+    const child = h.launch.children[0]!
+    const id = h.watched[0]!
+    h.launcher.close()
+    child.exit(1)
+    await quiet()
+    h.launch.alive.add(child.pid)
+    h.launch.startTimes.set(child.pid, 'a replacement')
+    lookups.open(0)
+    await within(starting)
+    assert.equal(h.cache.getRun(id)?.pidStartedAt, null)
+    assert.equal((await requestFile(h, id)).pidStartedAt, null)
   } finally {
     await h.cleanup()
   }
@@ -2333,6 +2718,7 @@ test('a start whose pid cannot be written after its spawn is still watched, coun
     // Stop signals its process group from memory, and its end settles it for whoever awaits it
     const settled = launcher.settled(run.id)
     launcher.stop(run.id)
+    await waitFor(() => h.launch.kills.length === 1)
     assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }])
     assert.equal((await within(settled)).status, 'stopped')
     assert.equal(h.cache.getRun(run.id)?.status, 'stopped')
@@ -2793,6 +3179,7 @@ test('a restart that cannot record a queued review\'s failure still watches ever
       // the live run is watched again, so Stop signals it
       const settled = restarted.settled(running.id)
       restarted.stop(running.id)
+      await waitFor(() => h.launch.kills.length === 1)
       assert.deepEqual(h.launch.kills, [{ pid: -h.launch.children[0]!.pid, signal: 'SIGTERM' }])
       // a run watched again has no child handle, so its end is found on the timer
       h.time.advance(10 * second)

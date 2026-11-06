@@ -1287,7 +1287,7 @@ export const descendantGroups = (entries: readonly ProcessEntry[], pid: number):
 
 export type Procs = {
   list: () => Promise<ProcessEntry[]>
-  // the start time ps prints for a pid, or null when there is no such process
+  // the start time ps prints for a pid, or null when ps gives none: there is no such process, or ps failed
   startTime: (pid: number) => Promise<string | null>
 }
 
@@ -2046,6 +2046,10 @@ type Live = {
   spec: LaunchSpec | null
   child: SpawnedProcess | null
   pid: number | null
+  // the start time recorded for the pid, compared with the live one at every decision about it; null until a launched child's is read, and for good when that read fails or is discarded
+  pidStartedAt: string | null
+  // the child's exit has been observed, so its pid is free for another process to take
+  exited: boolean
   offsets: { events: number, stream: number }
   // the step slots folded from every events.jsonl line read so far
   steps: StepSlot[]
@@ -2059,6 +2063,9 @@ type Live = {
   stopping: boolean
   settling: boolean
 }
+
+// who holds a watched run's pid when asked: the run's process, no process of the run's, or a live process that cannot be told apart
+type PidHolder = 'ours' | 'gone' | 'unknown'
 
 // a git remote names the repo: https or ssh, with or without .git
 export const remoteNamesRepo = (remotes: string, repo: string): boolean => {
@@ -2179,6 +2186,30 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     } catch (error) {
       log(`cannot send ${signal} to process group ${pgid}: ${messageOf(error)}`)
     }
+  }
+
+  // who holds a watched run's pid at this moment (section 8, Launching runs, Is this pid the run's). 'gone' is the same as an observed exit: its exit was observed, nothing holds the pid, or the holder's start time differs from the recorded one. 'ours' is a matching start time, or a child whose exit has not been observed, since the system keeps a pid until its parent has reaped the child and the exit is reported in that same step. 'unknown' is a recovered run's live pid whose start time cannot be read, which proves neither
+  const pidHolder = async (entry: Live): Promise<PidHolder> => {
+    const pid = entry.pid
+    if (pid === null || entry.exited || entry.settling || !alive(pid)) return 'gone'
+    const child = entry.child !== null
+    if (entry.pidStartedAt === null) return child ? 'ours' : 'unknown'
+    let current: string | null = null
+    try {
+      current = await procs.startTime(pid)
+    } catch (error) {
+      log(`${noun} ${entry.id}: cannot read the start time of pid ${pid}: ${messageOf(error)}`)
+    }
+    // the exit or the settle may have come while ps ran, and this answer may then be another process's
+    if (entry.exited || entry.settling) return 'gone'
+    if (current === null) {
+      if (!alive(pid)) return 'gone'
+      log(`${noun} ${entry.id}: no start time for live pid ${pid}, so whether it is still this ${noun} is unknown`)
+      return child ? 'ours' : 'unknown'
+    }
+    if (current === entry.pidStartedAt) return 'ours'
+    log(`${noun} ${entry.id}: pid ${pid} started at ${current}, not at ${entry.pidStartedAt}, so another process holds it and the ${noun} has exited`)
+    return 'gone'
   }
 
   // the commands post as whichever account gh uses, and this machine may hold more than one
@@ -2396,17 +2427,21 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return run
   }
 
-  // a run is read on every change in its folder and on a timer; one without a child handle (a
-  // recovered run) is also checked for life on that timer
+  // a process that proved gone, with no exit seen, ends the run the way an observed exit does
+  const settleGone = (entry: Live): void => {
+    void settle(entry, null, false).catch((error: unknown) => log(`${noun} ${entry.id}: cannot settle: ${messageOf(error)}`))
+  }
+
+  // a run is read on every change in its folder and on a timer; one without a child handle (a recovered run) also has its pid's holder checked on that timer, and a lookup that fails only waits for the next tick. A child's own exit settles it, so its pid is not consulted here
   const poll = (entry: Live, ms: number): void => {
     entry.timer = timers.set(() => {
       entry.timer = null
       if (entry.settling || closed) return
-      void pumpOf(entry).then(() => {
+      void pumpOf(entry).then(async () => {
         if (entry.settling || closed) return
-        if (entry.child === null && (entry.pid === null || !alive(entry.pid))) {
-          void settle(entry, null, false)
-        } else {
+        if (entry.child === null && await pidHolder(entry) === 'gone') {
+          settleGone(entry)
+        } else if (!entry.settling && !closed) {
           poll(entry, ms)
         }
       })
@@ -2423,6 +2458,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       spec,
       child,
       pid: run.pid,
+      pidStartedAt: run.pidStartedAt,
+      exited: false,
       offsets: { events: 0, stream: 0 },
       steps: emptySteps(),
       stream: emptyStream(),
@@ -2437,7 +2474,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     // counted, within Stop's reach, and settled by its exit before anything else is set up
     live.set(run.id, entry)
     if (child !== null) {
-      void child.exited.then((exit) => settle(entry, exit, false)).catch((error: unknown) => log(`${noun} ${run.id}: cannot settle: ${messageOf(error)}`))
+      void child.exited.then((exit) => {
+        // marked whether or not the settle takes effect, since a server shutting down settles nothing and the pid is free all the same
+        entry.exited = true
+        return settle(entry, exit, false)
+      }).catch((error: unknown) => log(`${noun} ${run.id}: cannot settle: ${messageOf(error)}`))
     }
     try {
       entry.watcher = fs.watch(dir, () => {
@@ -2610,8 +2651,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     launching.delete(run.id)
     // carried out on the watched process itself, with no read of the row that could throw before the start time is recorded
     if (stopAsked) stopLive(entry)
-    // the start time, which a restart needs to tell this process from one that reused its pid, comes after the watch, since reading it is awaited
-    const pidStartedAt = pid === null ? null : await procs.startTime(pid).catch(() => null)
+    // the start time, which a restart and every later decision need to tell this process from one that reused its pid, comes after the watch, since reading it is awaited
+    const lookedUp = pid === null ? null : await procs.startTime(pid).catch(() => null)
+    // the system keeps the pid until the child is reaped, and its exit is reported in that same step, so only an answer that arrives after the exit was observed can be another process's, and it is discarded
+    const pidStartedAt = entry.exited || entry.settling ? null : lookedUp
+    entry.pidStartedAt = pidStartedAt
     try {
       // the second try at a pid and resume command the row refused at once after the spawn
       run = store.update(run.id, { ...(pidInRow ? {} : { pid, ...(resume === null ? {} : { resume }) }), pidStartedAt })
@@ -2711,17 +2755,38 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return run
   }
 
-  // after the grace period, every group under a runner that is still alive, its own last: Claude
-  // runs each background command in a group of its own, which a kill of the runner would orphan
+  // the holder of a stopping run's pid decides its next signal: a process that has gone settles the run with nothing sent, and an unknown holder is sent nothing and asked about again after the grace period. Only 'ours' answers true, with nothing awaited between the comparison and the signal
+  const maySignal = (entry: Live, holder: PidHolder, again: () => void): boolean => {
+    if (holder === 'ours') return true
+    if (holder === 'gone') settleGone(entry)
+    else if (!closed && !entry.settling) entry.killTimer = timers.set(again, stopGraceMs)
+    return false
+  }
+
+  // Stop's first signal, once the process proves to be the run's
+  const terminate = async (entry: Live): Promise<void> => {
+    entry.killTimer = null
+    if (!maySignal(entry, await pidHolder(entry), () => void terminate(entry)) || entry.pid === null) return
+    signalGroup(entry.pid, 'SIGTERM')
+    // a server shutting down arms nothing, as it clears what is armed
+    if (!closed) {
+      entry.killTimer = timers.set(() => {
+        void escalate(entry)
+      }, stopGraceMs)
+    }
+  }
+
+  // after the grace period, every group under a runner that is still alive, its own last: Claude runs each background command in a group of its own, which a kill of the runner would orphan. The comparison comes after the listing, so nothing is awaited between it and the last signal
   const escalate = async (entry: Live): Promise<void> => {
     entry.killTimer = null
-    if (entry.settling || entry.pid === null || !alive(entry.pid)) return
+    if (entry.settling || entry.pid === null) return
     let groups = [entry.pid]
     try {
       groups = descendantGroups(await procs.list(), entry.pid)
     } catch (error) {
       log(`${noun} ${entry.id}: cannot list its processes: ${messageOf(error)}`)
     }
+    if (!maySignal(entry, await pidHolder(entry), () => void escalate(entry))) return
     for (const group of groups) signalGroup(group, 'SIGKILL')
   }
 
@@ -2760,7 +2825,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return run
   }
 
-  // a watched run is signaled from the pid it holds in memory, so stopping it reads nothing that could throw; a spawn that failed has no process to signal, and its exit settles it as stopped
+  // a watched run is signaled from the pid and the start time it holds in memory, so stopping it reads no row that could throw, and the Stop is answered at once with the signal to follow its comparison; a spawn that failed has no process to signal, and its exit settles it as stopped
   const stopLive = (entry: Live): void => {
     if (entry.pid === null) {
       entry.stopping = true
@@ -2768,10 +2833,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
     if (entry.stopping) return
     entry.stopping = true
-    signalGroup(entry.pid, 'SIGTERM')
-    entry.killTimer = timers.set(() => {
-      void escalate(entry)
-    }, stopGraceMs)
+    void terminate(entry)
   }
 
   type RequestFile = { pid?: unknown, pidStartedAt?: unknown }
@@ -2813,7 +2875,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (same) {
         log(`${noun} ${run.id}: still running after the restart (pid ${pid}); watching it again`)
         watching(run)
-        watchRun({ ...run, pid }, dir, null, false, null, recoveredSlot(run))
+        // the start time just compared, from whichever record kept it
+        watchRun({ ...run, pid, pidStartedAt: startedAt }, dir, null, false, null, recoveredSlot(run))
       } else {
         const entry = watchRun({ ...run, pid: null }, dir, null, false, null, recoveredSlot(run))
         await settle(entry, null, true)

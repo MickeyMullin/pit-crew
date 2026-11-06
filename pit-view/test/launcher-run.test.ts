@@ -173,6 +173,26 @@ test('a Claude run end to end: stream-json request on stdin, steps, stdin closed
   }
 })
 
+test('Stop on a real process compares its real start time, and its SIGTERM ends the process', { timeout: 20_000 }, async () => {
+  const h = await setup()
+  await install(join(h.home, 'bin'), 'claude', 'setInterval(() => {}, 1000)\n')
+  let pid: number | null = null
+  try {
+    const run = await h.launcher.start(request)
+    pid = run.pid
+    assert.ok(pid !== null && run.pidStartedAt !== null)
+    const settled = h.launcher.settled(run.id)
+    assert.equal(h.launcher.stop(run.id).status, 'running')
+    assert.equal((await settled).status, 'stopped')
+    // a comparison that read its own start time as another process's would settle it with the process still running
+    assert.throws(() => process.kill(pid as number, 0), (error: NodeJS.ErrnoException) => error.code === 'ESRCH')
+    pid = null
+  } finally {
+    if (pid !== null) process.kill(pid, 'SIGKILL')
+    await h.cleanup()
+  }
+})
+
 test('a Claude run carries the configured model on its real command line, sonnet unless the config sets another', { timeout: 20_000 }, async () => {
   const modelOf = (argv: readonly string[]): string | undefined => argv[argv.indexOf('--model') + 1]
   const first = await setup()
