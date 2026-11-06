@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Clock } from '../src/config.ts'
-import { addDays, closedRanges, closedSearchWindow, formatAge, localDateOf, startOfDay, weekdayOf } from '../src/time.ts'
+import { addDays, closedRanges, closedSearchWindow, formatAge, instantAt, localDateOf, minutesOfDay, startOfDay, weekdayOf } from '../src/time.ts'
 import { scenario } from './fixtures/scenario.ts'
 
 const at = (time: string): Clock => ({ now: () => Date.parse(time) })
@@ -78,4 +78,18 @@ test('ranges that cross a DST change keep local midnights', () => {
 
 test('the closed search window runs from the start of Yesterday to now', () => {
   assert.deepEqual(closedSearchWindow(at(scenario.now), local), { from: scenario.yesterdayFrom, to: scenario.now })
+})
+
+test('minutes of the local day read the wall clock in the zone', () => {
+  // 10:05 in New York (EDT), 23:05 in Tokyo, and midnight reads 0 not 24
+  assert.equal(minutesOfDay(Date.parse(scenario.now), 'America/New_York'), 10 * 60 + 5)
+  assert.equal(minutesOfDay(Date.parse(scenario.now), 'Asia/Tokyo'), 23 * 60 + 5)
+  assert.equal(minutesOfDay(Date.parse('2026-10-26T04:00:00Z'), 'America/New_York'), 0)
+})
+
+test('a wall-clock time on a date is the right instant on either side of a DST change', () => {
+  // 09:00 is EST (UTC-5) before clocks went forward on Mar 8 2026 and EDT (UTC-4) after
+  assert.equal(iso(instantAt({ year: 2026, month: 3, day: 7 }, 9 * 60, 'America/New_York')), '2026-03-07T14:00:00.000Z')
+  assert.equal(iso(instantAt({ year: 2026, month: 3, day: 9 }, 9 * 60, 'America/New_York')), '2026-03-09T13:00:00.000Z')
+  assert.equal(iso(instantAt({ year: 2026, month: 10, day: 26 }, 18 * 60, 'UTC')), '2026-10-26T18:00:00.000Z')
 })

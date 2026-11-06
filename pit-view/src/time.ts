@@ -82,6 +82,19 @@ export const startOfDate = (date: LocalDate, timeZone: string): number => {
   return start
 }
 
+// minutes since local midnight at an instant, in timeZone
+export const minutesOfDay = (ms: number, timeZone: string): number => {
+  const wall = new Date(wallClock(ms, timeZone))
+  return wall.getUTCHours() * 60 + wall.getUTCMinutes()
+}
+
+// the instant a wall-clock time (minutes since midnight) on a date happens in timeZone, DST included
+export const instantAt = (date: LocalDate, minutes: number, timeZone: string): number => {
+  const wall = Date.UTC(date.year, date.month - 1, date.day) + minutes * minute
+  const guess = wall - offsetAt(wall, timeZone)
+  return wall - offsetAt(guess, timeZone)
+}
+
 export const startOfDay = (ms: number, timeZone: string): number => startOfDate(localDateOf(ms, timeZone), timeZone)
 
 export type Range = { label: string, isMondayRule: boolean, from: string, to: string }
