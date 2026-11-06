@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
+import { defaultAutoReview } from '../src/autoreview.ts'
 import { ConfigError, defaultConfig, idleRange, validateConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import { deriveOpenRows, groupRows, personView } from '../src/derive.ts'
@@ -447,4 +448,17 @@ test('the Agent card sits right after Behavior and before Notifications, and no 
   const order = ['repository', 'people', 'tickets', 'behavior', 'agent', 'notifications'].map((id) => html.indexOf(`<section id="${id}"`))
   assert.ok(order.every((at, index) => at !== -1 && (index === 0 || at > (order[index - 1] as number))), order.join(','))
   assert.doesNotMatch(html, /Reviews at once|Self-review over the limit/i)
+})
+
+test('a save carries the autoReview key over whole, and a config without one stays without one', () => {
+  const autoReview = { ...defaultAutoReview(), enabled: true, post: { others: true, dependabot: false } }
+  const config = { ...sample(), autoReview }
+  assert.deepEqual(toConfig(formOf(config), config).autoReview, autoReview)
+  assert.deepEqual(validateConfig(toConfig(formOf(config), config)).autoReview, autoReview)
+  assert.equal('autoReview' in toConfig(formOf(sample()), sample()), false)
+})
+
+test('the Settings page sends its token with the save, which PUT /api/config requires', async () => {
+  const source = await readFile(new URL('../public/settings.ts', import.meta.url), 'utf8')
+  assert.match(source, /method: 'PUT',\n\s+headers: \{ 'Content-Type': 'application\/json', \[tokenHeader\]: readToken\(document\) \}/)
 })

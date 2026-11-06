@@ -15,6 +15,7 @@ import {
   agentCell, childEnv, claudeInvocation, codexInvocation, codexNote, createLauncher, createReviewLine, defaultRun, descendantGroups, doneText, emptyStream, gitConfigEnv,
   emptySteps, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, procsFrom, remoteNamesRepo,
   modelLabels, noteKind, requestText, reviewFits, runners, runView, shellPath, startOptions, stepsOf, systemFs, updateRequest,
+  codexSandboxArgs,
 } from '../src/launcher.ts'
 import type { LaunchSpec, ReviewResult, RunResultJson, StartRequest, StepEvent } from '../src/launcher.ts'
 import { createPoller } from '../src/poller.ts'
@@ -45,7 +46,7 @@ const runRow = (patch: Partial<Run> = {}): Run => ({
   id: 7, repo: scenario.repo, number: 106, command: 'review-pr', args: ['106'], label: 'Re-review', runner: 'claude',
   cwd: '~/dev/orbit', dir: '~/.local/state/pit-view/runs/7', sessionId: 'sess-1', pid: 4001, pidStartedAt: 'start-4001',
   startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, steps: null, finishedAt: null, status: 'running',
-  result: null, note: null, costUsd: null, resume: 'cd ~/dev/orbit && claude --resume sess-1', resolvedByHand: false, firstNote: null, reportHash: null, postAttemptedAt: null, ...patch,
+  result: null, note: null, costUsd: null, resume: 'cd ~/dev/orbit && claude --resume sess-1', resolvedByHand: false, firstNote: null, reportHash: null, postAttemptedAt: null, origin: 'manual', tick: null, reason: null, queuedAt: null, posting: false, worktree: null, headOid: null, ...patch,
 })
 
 const spec = (patch: Partial<LaunchSpec> = {}): LaunchSpec => ({
@@ -5660,4 +5661,19 @@ test('a blocked run whose post was begun and never recorded reads as a post that
   const clean = await blockedRow()
   assert.equal(agentCell(clean.pr, config, clean.row, undefined).text, 'Clean · post not made')
   assert.equal((runView(clean.row).result as ReviewResult).notPostedReason, 'postBlocked')
+})
+
+test('a failure the scheduler has spoken about keeps its kind, and worktreeFailed has words of its own', () => {
+  assert.equal(noteKind('failedTwice: noResult: the runner exited'), 'noResult')
+  assert.equal(noteKind('postUnknown: spawnFailed: no such file'), 'spawnFailed')
+  assert.equal(noteKind('worktreeFailed: git fetch failed'), 'worktreeFailed')
+  assert.equal(doneText({ status: 'failed', result: null, note: 'worktreeFailed: git fetch failed' }, false), 'Failed · no worktree')
+  assert.equal(doneText({ status: 'skipped', result: null, note: 'closed' }, false), 'Skipped')
+})
+
+test('a Codex sandbox takes the git roots a worktree run names, in place of <cwd>/.git', () => {
+  const spec = { cwd: '/w/run-1', runDir: '/r/1', reportsDir: '/o', worktreesDir: '/t' }
+  const roots = (args: string[]): string[] => args.flatMap((arg, index) => args[index - 1] === '--add-dir' ? [arg] : [])
+  assert.deepEqual(roots(codexSandboxArgs(spec)), ['/w/run-1/.git', '/r/1', '/o', '/t'])
+  assert.deepEqual(roots(codexSandboxArgs({ ...spec, gitRoots: ['/c/.git', '/c/.git/worktrees/run-1'] })), ['/c/.git', '/c/.git/worktrees/run-1', '/r/1', '/o', '/t'])
 })

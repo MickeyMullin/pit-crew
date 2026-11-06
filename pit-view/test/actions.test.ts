@@ -924,7 +924,7 @@ test('a refresh after an action targets the repository the write used, even when
     const stored = await (await fetch(`${h.base}/api/config`)).json() as Config
     const changed = await fetch(`${h.base}/api/config`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Origin: h.server.url, 'x-pit-view-token': h.server.token },
       body: JSON.stringify({ ...stored, repo: other }),
     })
     assert.equal(changed.status, 200)
@@ -1048,7 +1048,7 @@ const stranger = async (h: Harness, repo: string): Promise<void> => {
   const stored = await (await fetch(`${h.base}/api/config`)).json() as Config
   const changed = await fetch(`${h.base}/api/config`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Origin: h.server.url, 'x-pit-view-token': h.server.token },
     body: JSON.stringify({ ...stored, repo }),
   })
   assert.equal(changed.status, 200)

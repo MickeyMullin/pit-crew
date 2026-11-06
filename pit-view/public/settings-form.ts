@@ -120,7 +120,7 @@ export const parseMaxReviews = (text: string): number => {
   return /^\d+$/.test(value) ? Number(value) : Number.NaN
 }
 
-// the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit (allowedHosts, cloneDir, agent) are carried over from the config it loaded
+// the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit (allowedHosts, cloneDir, agent, and autoReview) are carried over from the config it loaded
 export const toConfig = (form: Form, base: Config): Config => {
   const config: Config = {
     repo: form.repo.trim(),
@@ -157,6 +157,7 @@ export const toConfig = (form: Form, base: Config): Config => {
   const kinds = allKinds.filter((kind) => form.notifyKinds.includes(kind))
   const untouched = !form.notifyEnabled && kinds.length === allKinds.length
   if (base.notifications !== undefined || !untouched) config.notifications = { enabled: form.notifyEnabled, kinds }
+  if (base.autoReview !== undefined) config.autoReview = base.autoReview
   return config
 }
 

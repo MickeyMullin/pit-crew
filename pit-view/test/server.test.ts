@@ -77,6 +77,10 @@ const send = async (url: string, method: string, body?: unknown, headers: Record
   return { status: response.status, body: await response.json() as Record<string, unknown> }
 }
 
+// a save as the Settings page makes it, with its Origin and its token
+const saveConfigAs = (server: PitServer, body: unknown): Promise<{ status: number, body: Record<string, unknown> }> =>
+  send(`${server.url}/api/config`, 'PUT', body, { Origin: server.url, 'x-pit-view-token': server.token })
+
 // a raw request, for headers fetch will not let a test set (Host) or paths it would normalize
 const raw = (port: number, path: string, headers: Record<string, string> = {}, method = 'GET'): Promise<{ status: number, type: string, body: string }> =>
   new Promise((resolve, reject) => {
@@ -412,13 +416,13 @@ test('GET and PUT /api/config read, validate and save the config, and a change t
     assert.equal(stored.repo, scenario.repo)
     assert.equal(stored.refreshSeconds, 300)
 
-    const bad = await send(`${h.base}/api/config`, 'PUT', { ...stored, refreshSeconds: 10 })
+    const bad = await saveConfigAs(h.server, { ...stored, refreshSeconds: 10 })
     assert.equal(bad.status, 400)
     assert.match(String(bad.body.error), /refreshSeconds/)
-    assert.equal((await send(`${h.base}/api/config`, 'PUT', '{nope')).status, 400)
+    assert.equal((await saveConfigAs(h.server, '{nope')).status, 400)
 
     const next = { ...stored, refreshSeconds: 60, people: [{ login: 'alex-mendez', alias: 'Alex', initials: 'AM', color: '#0F766E', avatar: 'github' }] }
-    const saved = await send(`${h.base}/api/config`, 'PUT', next)
+    const saved = await saveConfigAs(h.server, next)
     assert.equal(saved.status, 200)
     assert.deepEqual(saved.body, next)
     assert.deepEqual(JSON.parse(await readFile(h.configPath, 'utf8')), next)
@@ -429,7 +433,7 @@ test('GET and PUT /api/config read, validate and save the config, and a change t
 
     // display-only settings start no cycle
     const cycles = h.server.cache.latestCycle(scenario.repo)?.id
-    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...next, density: 'compact' })).status, 200)
+    assert.equal((await saveConfigAs(h.server, { ...next, density: 'compact' })).status, 200)
     await h.server.poller.idle()
     assert.equal(h.server.cache.latestCycle(scenario.repo)?.id, cycles)
   } finally {
@@ -582,10 +586,10 @@ test('allowedHosts saved through PUT /api/config apply at once, and a malformed 
     assert.equal((await raw(h.server.port, '/api/view', { Host: 'pit.example.test' })).status, 403)
     const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
     assert.deepEqual(stored.allowedHosts, [])
-    const bad = await send(`${h.base}/api/config`, 'PUT', { ...stored, allowedHosts: ['https://pit.example.test'] })
+    const bad = await saveConfigAs(h.server, { ...stored, allowedHosts: ['https://pit.example.test'] })
     assert.equal(bad.status, 400)
     assert.match(String(bad.body.error), /allowedHosts/)
-    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, allowedHosts: ['Pit.Example.Test'] })).status, 200)
+    assert.equal((await saveConfigAs(h.server, { ...stored, allowedHosts: ['Pit.Example.Test'] })).status, 200)
     assert.deepEqual(JSON.parse(await readFile(h.configPath, 'utf8')).allowedHosts, ['pit.example.test'])
     assert.equal((await raw(h.server.port, '/api/view', { Host: 'pit.example.test' })).status, 200)
     await h.server.poller.idle()
@@ -708,7 +712,7 @@ test('a dev instance runs beside the app with its own config and cache, sharing 
     const { body } = await getJson<Record<string, unknown>>(`${server.url}/api/instance`)
     assert.deepEqual(body, { name: 'dev', configPath: '~/.config/pit-view-dev/config.json', pid: process.pid })
     const stored = (await getJson<Config>(`${server.url}/api/config`)).body
-    const saved = await send(`${server.url}/api/config`, 'PUT', { ...stored, repo: 'octo-org/dev-only' })
+    const saved = await saveConfigAs(server, { ...stored, repo: 'octo-org/dev-only' })
     assert.equal(saved.status, 200)
     assert.equal(JSON.parse(await readFile(dev.configPath, 'utf8')).repo, 'octo-org/dev-only')
     assert.equal(JSON.parse(await readFile(h.configPath, 'utf8')).repo, scenario.repo)
@@ -784,7 +788,7 @@ const identityRig = async ({ viewer = scenario.viewer as string, localLogin = sc
   const h = await setup({ runner, deliver, config: { viewer, notifications: { enabled: true, kinds: ['reviewRequested'] } } })
   const save = async (patch: Partial<Config>): Promise<{ status: number }> => {
     const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
-    return send(`${h.base}/api/config`, 'PUT', { ...stored, ...patch })
+    return saveConfigAs(h.server, { ...stored, ...patch })
   }
   // delivery is a turn behind the comparison
   const delivered = async (): Promise<Notice[]> => {
@@ -1390,11 +1394,11 @@ test('at the review cap a start answers with the run queued, its row reads queue
     assert.deepEqual([stopped.status, stopped.body.status], [200, 'stopped'])
     // raising the cap in Settings starts what still waits
     const stored = (await getJson<Config>(`${h.base}/api/config`)).body
-    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, maxConcurrentReviews: 2 })).status, 200)
+    assert.equal((await saveConfigAs(h.server, { ...stored, maxConcurrentReviews: 2 })).status, 200)
     await until(() => h.launch.children.length === 2)
     assert.equal(h.server.cache.getRun(Number(third.body.id))?.status, 'running')
     // a cap of zero is refused like any invalid setting
-    const refused = await send(`${h.base}/api/config`, 'PUT', { ...stored, maxConcurrentReviews: 0 })
+    const refused = await saveConfigAs(h.server, { ...stored, maxConcurrentReviews: 0 })
     assert.equal(refused.status, 400)
     assert.match(String(refused.body.error), /config\.maxConcurrentReviews must be a whole number of 1 or more/)
   } finally {
@@ -1871,7 +1875,7 @@ test('the report endpoints are reads with no token, but the Host check applies; 
     assert.deepEqual((await getJson<unknown[]>(`${h.base}/api/prs/101/reports`)).body, [])
     assert.equal((await getJson<unknown>(`${h.base}/api/reports/PR-101.md`)).status, 404)
     assert.equal((await raw(h.server.port, '/api/reports/PR-101.md', {}, 'POST')).status, 405)
-    await send(`${h.base}/api/config`, 'PUT', { ...(await getJson<Config>(`${h.base}/api/config`)).body, reportsDir: '~/agents/output' })
+    await saveConfigAs(h.server, { ...(await getJson<Config>(`${h.base}/api/config`)).body, reportsDir: '~/agents/output' })
     assert.equal((await getJson<unknown[]>(`${h.base}/api/prs/101/reports`)).body.length, 1)
     assert.equal((await getJson<unknown>(`${h.base}/api/reports/PR-101.md`)).status, 200)
   } finally {
@@ -1939,7 +1943,7 @@ test('a sweep start naming a repository that is no longer the one in effect is r
     assert.deepEqual((await getJson<unknown[]>(url)).body, [])
     // the repository changes under an open confirmation: the one it showed is stale now
     const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
-    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, repo: 'octo-example/other' })).status, 200)
+    assert.equal((await saveConfigAs(h.server, { ...stored, repo: 'octo-example/other' })).status, 200)
     const moved = await send(url, 'POST', { runner: 'claude', repo: scenario.repo }, token(h))
     assert.equal(moved.status, 409)
     assert.equal(h.launch.children.length, 0)
@@ -1968,7 +1972,7 @@ test('a run start naming a repository that is no longer the one in effect is ref
     assert.deepEqual((await getJson<unknown[]>(url)).body, [])
     // the repository changes under an open confirmation: the one it showed is stale now, though the PR number may exist in the new one
     const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
-    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, repo: 'octo-example/other' })).status, 200)
+    assert.equal((await saveConfigAs(h.server, { ...stored, repo: 'octo-example/other' })).status, 200)
     const moved = await send(url, 'POST', { kind: 'default', runner: 'claude', repo: scenario.repo, viewer: scenario.viewer }, token(h))
     assert.equal(moved.status, 409)
     assert.equal(h.launch.children.length, 0)
@@ -1986,7 +1990,7 @@ const switchedAccount = async (): Promise<{ h: Harness, switchTo: (login: string
   const switchTo = async (next: string): Promise<void> => {
     login = next
     const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
-    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, viewer: next })).status, 200)
+    assert.equal((await saveConfigAs(h.server, { ...stored, viewer: next })).status, 200)
   }
   return { h, switchTo }
 }
@@ -2213,11 +2217,11 @@ test('the queue answer goes out with the sweeps: a slot moving sends the rows an
 
     // with nothing queued, the saved config's own patch carries the new wording with the rows, since nothing in the launcher moved to announce it
     const stored = (await getJson<Config>(`${h.base}/api/config`)).body
-    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, maxConcurrentReviews: 3 })).status, 200)
+    assert.equal((await saveConfigAs(h.server, { ...stored, maxConcurrentReviews: 3 })).status, 200)
     const raised = await stream.until((patch) => patch.sync !== undefined && patch.sweeps !== undefined)
     assert.equal(raised.sweeps?.start.button, 'Run sweep')
     assert.ok(raised.rows.length > 0)
-    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, maxConcurrentReviews: 1 })).status, 200)
+    assert.equal((await saveConfigAs(h.server, { ...stored, maxConcurrentReviews: 1 })).status, 200)
     const lowered = await stream.until((patch) => patch.sync !== undefined && patch.sweeps !== undefined)
     assert.equal(lowered.sweeps?.start.button, 'Queue sweep')
 
@@ -2227,7 +2231,7 @@ test('the queue answer goes out with the sweeps: a slot moving sends the rows an
     assert.equal(queued.sweeps?.items[0]?.id, sweep.body.id)
 
     // a saved cap lets the queued sweep go: its own patch still says queue, as the sweep is ahead of any new start, and the wording follows once the sweep has its slot
-    assert.equal((await send(`${h.base}/api/config`, 'PUT', { ...stored, maxConcurrentReviews: 3 })).status, 200)
+    assert.equal((await saveConfigAs(h.server, { ...stored, maxConcurrentReviews: 3 })).status, 200)
     const saved = await stream.until((patch) => patch.sync !== undefined && patch.sweeps !== undefined)
     assert.equal(saved.sweeps?.start.button, 'Queue sweep')
     await stream.until((patch) => patch.sweeps?.start.button === 'Run sweep')

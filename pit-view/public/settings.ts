@@ -4,6 +4,7 @@
 import type { Config } from '../src/config.ts'
 import type { View } from '../src/poller.ts'
 import { avatar } from './cells.ts'
+import { tokenHeader } from './agent.ts'
 import { byId, h, setText, svg } from './dom.ts'
 import type { Shape } from './dom.ts'
 import { browserTimeZone, formatClock, parseTimeFormat, setTimeFormat } from './format.ts'
@@ -14,6 +15,7 @@ import {
   toConfig, todayChoices, toForm, validateForm,
 } from './settings-form.ts'
 import type { AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
+import { readToken } from './runapi.ts'
 import { mountStickyHeader, trackHeight } from './sticky.ts'
 import { mountThemeToggle } from './theme.ts'
 
@@ -501,7 +503,7 @@ const save = async (): Promise<void> => {
   try {
     const response = await fetch('/api/config', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', [tokenHeader]: readToken(document) },
       body: JSON.stringify(config),
     })
     const body = await response.json() as Config | { error?: string }

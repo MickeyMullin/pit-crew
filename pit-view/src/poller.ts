@@ -1,4 +1,5 @@
 // src/poller.ts
+import type { AutoReviewView } from './autoreview.ts'
 import type { Cache, CachedView, Cycle, CycleErrorKind, FinishResult, SectionFreshness, SnapshotKind, Trigger } from './cache.ts'
 import { expandHome } from './config.ts'
 import type { Clock, Config } from './config.ts'
@@ -46,8 +47,8 @@ export type View = {
   viewer: PersonView
   sync: Sync
   now: string
-  // phase 4
-  autoReview: null
+  // null until the config has the autoReview key
+  autoReview: AutoReviewView | null
   tiles: Tiles
   counts: Counts
   mine: MineSection
@@ -71,6 +72,8 @@ export type Patch = {
   sync?: Sync
   // the sweeps as they now stand, replacing the page's: sent whole whenever a sweep, the repository, or the start text's config changed
   sweeps?: SweepsView
+  // the scheduler as it now stands, replacing the page's: sent whole whenever it differs from what was last sent
+  autoReview?: AutoReviewView | null
   repo?: string
   viewer?: PersonView
 }
@@ -112,6 +115,10 @@ export type Poller = {
   queueingChanged: () => void
   // a sweep of this repo started, stepped, or settled: one patch carrying the sweeps whole
   sweepsChanged: (repo: string) => void
+  // the scheduler's state may have changed: one patch carrying it, when it differs from what was last sent
+  autoReviewChanged: () => void
+  // the open rows of the repository in effect, derived from the cache as it is now, every group included
+  openRows: () => OpenRow[]
   // resolves once no cycle is running, including any follow-up cycle
   idle: () => Promise<void>
   // how many cycles and one-PR refreshes hold an open record of what patches carried: one each while in flight, and none once they end or the poller stops
@@ -145,6 +152,8 @@ export type PollerOptions = {
   notify?: (events: NotifyEvent[]) => void
   // whether a new review of each kind would wait in the queue now, read from the launcher that decides it; the review buttons in the Agent cells say so. None when left out
   queueing?: () => Queueing
+  // the scheduler's state for the view and its patches; null when left out
+  autoReview?: () => AutoReviewView | null
   // reads the reports folder; the real scan when left out, and a test holds it open to pin the order of events around a config save
   scan?: typeof scanReports
 }
@@ -707,6 +716,21 @@ export const createPoller = (options: PollerOptions): Poller => {
     if (settings.repo === repo) patch({ sweeps: sweepsView(settings, sweeps, queueingNow()) })
   }
 
+  // what the pages last received; a server with no scheduler state has nothing to send
+  let sentAutoReview = JSON.stringify(null)
+  const autoReviewNow = (): AutoReviewView | null => options.autoReview?.() ?? null
+
+  const autoReviewChanged = (): void => {
+    if (stopped) return
+    const now = autoReviewNow()
+    const text = JSON.stringify(now)
+    if (text === sentAutoReview) return
+    sentAutoReview = text
+    patch({ autoReview: now })
+  }
+
+  const openRows = (): OpenRow[] => [...snapshot(config(), reports).rows.values()]
+
   const view = async (): Promise<View> => {
     if (scanned === null) await rescan(config())
     // read and derive in one synchronous step, so version matches what the view holds
@@ -718,7 +742,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       viewer: snap.view.viewer,
       sync: syncOf(snap.cached, settings),
       now: snap.view.now,
-      autoReview: null,
+      autoReview: autoReviewNow(),
       tiles: snap.view.tiles,
       counts: snap.view.counts,
       mine: snap.view.mine,
@@ -748,5 +772,5 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
-  return { view, refresh, refreshPr, refreshPrAfterWrite, setActive, identityChanged, configChanged, runWatched, runChanged, queueingChanged, sweepsChanged, idle, patchRecords: () => records.size, stop, version: () => version }
+  return { view, refresh, refreshPr, refreshPrAfterWrite, setActive, identityChanged, configChanged, runWatched, runChanged, queueingChanged, sweepsChanged, autoReviewChanged, openRows, idle, patchRecords: () => records.size, stop, version: () => version }
 }

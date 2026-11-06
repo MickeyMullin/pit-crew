@@ -1,9 +1,9 @@
 // src/launcher.ts
 import { spawn as spawnChild } from 'node:child_process'
 import { closeSync, openSync, watch as watchDir } from 'node:fs'
-import { mkdir, open, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
-import type { Cache, NewRun, NewSweep, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
+import type { Cache, NewRun, NewSweep, QueueReason, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
 import { expandHome, tildePath } from './config.ts'
 import type { AgentSettings, Clock, Config, RunnerName } from './config.ts'
 import { isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
@@ -443,6 +443,8 @@ export type LaunchSpec = {
   // Codex only: ~/agents/output and ~/agents/worktrees resolved through their symlinks
   reportsDir: string
   worktreesDir: string
+  // Codex only: the git folders a run in a linked worktree writes, in place of <cwd>/.git, whose .git is a file there
+  gitRoots?: readonly string[]
 }
 
 // what to run, and the one stdin line to write (null when stdin is closed from the start)
@@ -457,7 +459,7 @@ export const codexNote = (reportsDir: string): string =>
   `Note: ~/agents/output resolves to ${reportsDir}. Write report files at that resolved path; file patches through the symlink are refused.`
 
 // whether a run may post at all, from its own command and flags and nothing else: never from anything in its result, which an agent wrote after reading other people's PR text. A stack review stops to offer its post, a fix pushes, and an update pushes, so none of them posts by itself
-const mayPost = (command: string, args: readonly string[]): boolean =>
+export const mayPost = (command: string, args: readonly string[]): boolean =>
   ['review-pr', 'review-dependabot', 'review-dependabot-sweep'].includes(command) && !args.includes('--no-post')
 
 export const claudeInvocation = (spec: LaunchSpec): Invocation => ({
@@ -477,9 +479,9 @@ export const codexModelArgs = (spec: Pick<LaunchSpec, 'codexModel'>): string[] =
 // every folder a Codex run may write: the workspace itself, the checkout's .git, the run directory
 // the request's --emit-json names, and the resolved reports and worktrees folders. A folder left out
 // of this list is a folder the command cannot write, whatever the prompt it runs says to write there
-export const codexSandboxArgs = (spec: Pick<LaunchSpec, 'cwd' | 'runDir' | 'reportsDir' | 'worktreesDir'>): string[] => [
+export const codexSandboxArgs = (spec: Pick<LaunchSpec, 'cwd' | 'runDir' | 'reportsDir' | 'worktreesDir' | 'gitRoots'>): string[] => [
   '-s', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true',
-  '--add-dir', join(spec.cwd, '.git'), '--add-dir', spec.runDir, '--add-dir', spec.reportsDir, '--add-dir', spec.worktreesDir,
+  ...(spec.gitRoots ?? [join(spec.cwd, '.git')]).flatMap((root) => ['--add-dir', root]), '--add-dir', spec.runDir, '--add-dir', spec.reportsDir, '--add-dir', spec.worktreesDir,
 ]
 
 export const codexInvocation = (spec: LaunchSpec): Invocation => ({
@@ -786,7 +788,7 @@ export type AgentCell = {
   stackRun: { from: number, ownStatus: RunStatus | null } | null
 }
 
-export type FailureKind = 'noResult' | 'noReport' | 'badResult' | 'permissionDenied' | 'serverRestarted' | 'spawnFailed'
+export type FailureKind = 'noResult' | 'noReport' | 'badResult' | 'permissionDenied' | 'serverRestarted' | 'spawnFailed' | 'worktreeFailed'
 
 const failureTexts: Readonly<Record<FailureKind, string>> = {
   noResult: 'no result',
@@ -795,10 +797,12 @@ const failureTexts: Readonly<Record<FailureKind, string>> = {
   permissionDenied: 'permission denied',
   serverRestarted: 'server restarted',
   spawnFailed: 'could not start',
+  worktreeFailed: 'no worktree',
 }
 
 export const noteKind = (note: string | null): FailureKind | null => {
-  const kind = note?.split(':')[0] ?? ''
+  // the scheduler's word on what became of a failed run goes before the note that says how it failed
+  const kind = note?.replace(/^(?:failedTwice|postUnknown): /, '').split(':')[0] ?? ''
   return kind in failureTexts ? kind as FailureKind : null
 }
 
@@ -841,6 +845,7 @@ const postNotes: Partial<Readonly<Record<NotPostedReason, string>>> = { ghFailed
 // the cell's text for a finished run, from section 8's mappings: a review's verdict and posted, a fix's push, an update's method
 export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'> & { resolvedByHand?: boolean }, ownDraft: boolean): string => {
   if (run.status === 'stopped') return 'Stopped'
+  if (run.status === 'skipped') return 'Skipped'
   if (run.status === 'needsInput') return 'Needs your answer'
   if (run.status === 'failed') {
     const kind = noteKind(run.note)
@@ -1405,6 +1410,8 @@ export type LauncherFs = {
   readFrom: (path: string, offset: number) => Promise<Buffer>
   exists: (path: string) => Promise<boolean>
   realpath: (path: string) => Promise<string>
+  // the names in a folder; empty when it does not exist
+  list: (path: string) => Promise<string[]>
   rm: (path: string) => Promise<void>
   // calls onChange whenever something in the folder changes; may throw where watching is not supported
   watch: (dir: string, onChange: () => void) => { close: () => void }
@@ -1453,6 +1460,14 @@ export const systemFs: LauncherFs = {
     }
   },
   realpath: (path) => realpath(path),
+  list: async (path) => {
+    try {
+      return await readdir(path)
+    } catch (error) {
+      if (missing(error)) return []
+      throw error
+    }
+  },
   rm: (path) => rm(path, { recursive: true, force: true }),
   watch: (dir, onChange) => {
     const watcher = watchDir(dir, () => onChange())
@@ -1988,7 +2003,22 @@ export type Launcher<T extends Session = Run> = {
   flushed: () => Promise<void>
   // stops watching; runs keep going
   close: () => void
+  // scheduled starts (section 10 of DESIGN.md, One review cap): the row, queued in its own table and never in the line
+  queueScheduled: (request: StartRequest, cwd: string, fields: ScheduledFields) => T
+  // starts a queued scheduled row through the same checks, turn, slot, and launch as any start, or leaves it queued when a new review would wait or gh cannot confirm the viewer. The slot is held before prepare runs, which makes the worktree and answers with its path; a failure there fails the run as worktreeFailed and gives the slot back
+  startScheduled: (id: number, request: StartRequest, changes: RunChanges, prepare: (run: T) => Promise<string>) => Promise<T | null>
+  // drops a queued scheduled row that will not start
+  skipQueued: (id: number, note: string) => T
+  // writes what became of a row's worktree, or a note the scheduler adds to it, and announces the row
+  annotate: (id: number, changes: Pick<RunChanges, 'worktree' | 'note'>) => T
+  // records a resume command that names the clone in place of the worktree (section 10, Removal)
+  resumeInClone: (id: number) => Promise<T>
+  // whether a start of this target would be refused as busy, a start in progress included
+  busy: (target: { repo: string, number?: number }) => boolean
 }
+
+// what the scheduler records on a row it queues
+export type ScheduledFields = { tick: number, reason: QueueReason, headOid: string | null, posting: boolean }
 
 // a run directory Pit View cannot write is refused before the runner starts, so a folder the
 //  filesystem forbids names its own failure instead of settling later as an unreadable noResult:
@@ -2050,14 +2080,14 @@ export type SessionStore<T extends Session> = {
   // the folder under the state folder and the word the logs and messages use
   folder: 'runs' | 'sweeps'
   noun: 'run' | 'sweep'
-  create: (request: StartRequest, fields: NewSweep, dirOf: (id: number) => string) => T
+  create: (request: StartRequest, fields: NewSweep & { headOid?: string | null }, dirOf: (id: number) => string) => T
   get: (id: number) => T | null
   update: (id: number, changes: RunChanges) => T
   running: () => T[]
   prune: () => T[]
   // what holds a start to one in flight: the PR for a run and the repository for a sweep
   key: (target: { repo: string, number?: number }) => string
-  inFlight: (request: StartRequest) => boolean
+  inFlight: (request: { repo: string, number?: number }) => boolean
   busyText: (request: StartRequest) => string
   // the schema result.json must carry, when the kind of launch fixes it
   schema: SweepResult['schema'] | null
@@ -2065,7 +2095,7 @@ export type SessionStore<T extends Session> = {
   counted: (command: string) => boolean
   // the slot a launch takes under that cap, or null for one the cap does not cover
   slot: (target: { repo: string, number?: number, command: string }, config: Config) => ReviewSlot | null
-  // rows still waiting in the queue, which a restart fails
+  // rows the owner started that still wait in the line, which a restart fails; a scheduled row keeps waiting in its own table
   queued: () => T[]
 }
 
@@ -2124,7 +2154,7 @@ export const runStore = (cache: Cache): SessionStore<Run> => ({
   prune: cache.pruneRuns,
   key: (request) => `${request.repo}#${request.number}`,
   // a queued review holds its PR as a running one does
-  inFlight: (request) => ['running', 'queued'].includes(cache.runsFor(request.repo, request.number, 1)[0]?.status ?? ''),
+  inFlight: (request) => ['running', 'queued'].includes(cache.runsFor(request.repo, request.number ?? 0, 1)[0]?.status ?? ''),
   busyText: (request) => `a run for #${request.number} is already in flight`,
   schema: null,
   counted: (command) => reviewCommands.includes(command),
@@ -2134,7 +2164,7 @@ export const runStore = (cache: Cache): SessionStore<Run> => ({
     const pr = cache.readView(target.repo).open.find((entry) => entry.number === target.number)?.pr
     return pr !== undefined ? slotOf(pr, config) : 'review'
   },
-  queued: cache.queuedRuns,
+  queued: () => cache.queuedRuns().filter((run) => run.origin === 'manual'),
 })
 
 // the sweeps table's store: one sweep in flight per repository, queued or running, and a result.json that must carry the sweep result schema
@@ -2154,7 +2184,7 @@ export const sweepStore = (cache: Cache): SessionStore<Sweep> => ({
   // every sweep the owner starts counts as one review: never a self-review, so it fits only in a slot of the cap's own and the overage is never for it. Its serial reviewers run inside this one slot
   counted: () => true,
   slot: () => 'review',
-  queued: cache.queuedSweeps,
+  queued: () => cache.queuedSweeps().filter((sweep) => sweep.origin === 'manual'),
 })
 
 // the review runs' launcher and the sweeps' launcher are the one engine over two stores, on the one line the caller gives them both
@@ -2341,9 +2371,20 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return entry.pump
   }
 
-  const specFor = async (run: Pick<Session, 'command' | 'args' | 'cwd' | 'sessionId'>, dir: string): Promise<LaunchSpec> => {
+  // a Codex run in a linked worktree writes the clone's .git and the worktree's own metadata folder (section 10 of DESIGN.md, Codex in a worktree); no other run asks git anything here
+  const gitRootsOf = async (run: Pick<Session, 'runner' | 'worktree'>, config: Config): Promise<readonly string[] | undefined> => {
+    if (run.runner !== 'codex' || run.worktree === null || config.cloneDir === undefined) return undefined
+    const roots = [join(expandHome(config.cloneDir, home), '.git')]
+    const answer = await git(['-C', expandHome(run.worktree, home), 'rev-parse', '--absolute-git-dir']).catch(() => null)
+    const metadata = answer?.code === 0 ? answer.stdout.trim() : ''
+    return metadata === '' ? roots : [...roots, metadata]
+  }
+
+  const specFor = async (run: Pick<Session, 'command' | 'args' | 'cwd' | 'sessionId' | 'runner' | 'worktree'>, dir: string): Promise<LaunchSpec> => {
     const config = options.config()
+    const gitRoots = await gitRootsOf(run, config)
     return {
+      ...(gitRoots === undefined ? {} : { gitRoots }),
       command: run.command,
       args: run.args,
       cwd: expandHome(run.cwd, home),
@@ -2358,6 +2399,16 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   const resumeFor = (run: Pick<Session, 'runner' | 'cwd'>, sessionId: string, spec: LaunchSpec): string =>
     runners[run.runner].resume(run.cwd, sessionId, spec, home)
+
+  // the resume command of a run whose worktree is going or gone: it names the clone, and a Codex resume takes the clone's .git as its root. Nothing when it has no session, or no clone to name
+  const cloneResume = async (run: T): Promise<RunChanges> => {
+    const { cloneDir } = options.config()
+    if (run.origin !== 'auto' || run.sessionId === null || cloneDir === undefined) return {}
+    const clone = expandHome(cloneDir, home)
+    const cwd = tildePath(clone, home)
+    const spec = await specFor({ ...run, cwd, worktree: null }, expandHome(run.dir, home))
+    return { resume: resumeFor({ runner: run.runner, cwd }, run.sessionId, spec) }
+  }
 
   const clear = (entry: Live): void => {
     entry.watcher?.close()
@@ -2457,11 +2508,17 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       mayPost: started?.command !== undefined && started.args !== undefined && mayPost(started.command, started.args),
       lastEvent: entry.stream.lastEvent,
     })
+    // from when a scheduled run's outcome is recorded as done or stopped, its resume command names the clone, whether or not its worktree then goes
+    const leaving = (judgement.status === 'done' || judgement.status === 'stopped') && started?.origin === 'auto' && started.worktree !== null
+    const resume = leaving ? await cloneResume(started as unknown as T).catch((error: unknown): RunChanges => {
+      log(`${noun} ${entry.id}: cannot write a resume command for the clone: ${messageOf(error)}`)
+      return {}
+    }) : {}
     live.delete(entry.id)
     if (entry.stdinOpen && entry.child?.stdin != null) entry.child.stdin.end()
     entry.stdinOpen = false
     // the process has ended, so the run ends here even when the database refuses the write: whoever awaits it is woken and its slot is freed
-    const run = end((started ?? { id: entry.id }) as unknown as T, { ...judgement, ...finished, finishedAt: now() }, `settled as ${judgement.status}`)
+    const run = end((started ?? { id: entry.id }) as unknown as T, { ...judgement, ...finished, ...resume, finishedAt: now() }, `settled as ${judgement.status}`)
     log(`${noun} ${run.id} (${run.command} ${run.args.join(' ')}) ${run.status}${run.note === null ? '' : `: ${run.note}`}`)
     // a review or a sweep that ended, however it ended, frees its slot for the next in line
     if (entry.slot !== null) line.admit()
@@ -2554,7 +2611,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
-  const newRow = (request: StartRequest, config: Config, cwd: string, status: 'running' | 'queued'): T => {
+  const newRow = (request: StartRequest, config: Config, cwd: string, status: 'running' | 'queued', scheduled: ScheduledFields | null = null): T => {
     const runner = request.runner ?? config.agent.runner
     const sessionId = runner === 'claude' ? options.newSessionId() : null
     return store.create(request, {
@@ -2577,6 +2634,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       note: null,
       costUsd: null,
       resume: null,
+      posting: scheduled?.posting ?? mayPost(request.command, request.args),
+      ...(scheduled === null ? {} : {
+        origin: 'auto' as const,
+        tick: scheduled.tick,
+        reason: scheduled.reason,
+        queuedAt: now(),
+        ...(scheduled.headOid === null ? {} : { headOid: scheduled.headOid }),
+      }),
     }, (id) => tildePath(join(runsDir, String(id)), home))
   }
 
@@ -2599,8 +2664,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     launching.delete(run.id)
     if (stopAsked) return end(run, { status: 'stopped', finishedAt: now() }, 'stopped before it started')
     const back = store.update(run.id, { status: 'queued', startedAt: waitingSince })
-    line.putBack(lineEntry(back, request, admitted.viewer))
-    log(`${noun} ${run.id}: not started, the cap is now lower; it waits again at the head of the queue`)
+    // a scheduled row waits in its own table, never in the line
+    if (back.origin === 'manual') line.putBack(lineEntry(back, request, admitted.viewer))
+    log(`${noun} ${run.id}: not started, the cap is now lower; it waits again ${back.origin === 'manual' ? 'at the head of the queue' : 'in its own table'}`)
     changed(back)
     return back
   }
@@ -2883,6 +2949,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   // a run watched again after a restart holds the slot the cache gives it now, since the one it was admitted with went with the server
   const recoveredSlot = (run: T): ReviewSlot | null => {
+    // a scheduled run takes no place over the cap, whatever PR it reviews
+    if (run.origin === 'auto') return 'review'
     try {
       return store.slot(run as unknown as { repo: string, number?: number, command: string }, options.config())
     } catch (error) {
@@ -2997,6 +3065,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         return refuse('result.json has not changed since the run settled')
       }
       const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true, ...await finishedReport(value) }
+      // a re-read that turns a scheduled run done makes it a done run from then on, whose worktree goes
+      if (judgement.status === 'done' && run.worktree !== null) Object.assign(changes, await cloneResume(run))
       // the first time a failed re-read replaces the note, the note recorded at exit moves to its own field, so a later finish by hand can still tell why the run first stopped; an original with no note is kept as an empty string, so firstNote stays set and a later failure cannot be copied in as the original
       if (note !== run.note && (run as Partial<Run>).firstNote === null) changes.firstNote = run.note ?? ''
       // the later steps too: every line of events.jsonl, folded from the start
@@ -3058,5 +3128,113 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     for (const entry of live.values()) clear(entry)
   }
 
-  return { start, stop, reread, markPost, recordPost, recover, drain: line.admit, check: checkAll, settled, queueing: line.queueing, flushed: line.flushed, close }
+  const queueScheduled = (request: StartRequest, cwd: string, fields: ScheduledFields): T => {
+    const run = newRow(request, options.config(), cwd, 'queued', fields)
+    watching(run)
+    log(`${noun} ${run.id} queued by tick ${fields.tick}: ${run.command} ${run.args.join(' ')}`)
+    changed(run)
+    return run
+  }
+
+  const startScheduled = async (id: number, request: StartRequest, changes: RunChanges, prepare: (run: T) => Promise<string>): Promise<T | null> => {
+    const queued = store.get(id)
+    if (queued === null || queued.status !== 'queued') return queued
+    const key = store.key(request)
+    if (starting.has(key)) return queued
+    starting.add(key)
+    const turn = line.takeTurn()
+    try {
+      const config = options.config()
+      try {
+        await checkIdentity(config)
+      } catch (error) {
+        // it stays queued, and the next tick's first step says why
+        log(`${noun} ${id}: stays queued: ${messageOf(error)}`)
+        return store.get(id)
+      }
+      try {
+        await checkClone(config)
+      } catch (error) {
+        const note = `spawnFailed: ${messageOf(error)}`
+        log(`${noun} ${id}: cannot start: ${note}`)
+        return end(queued, { status: 'failed', finishedAt: now(), note }, 'failed to start')
+      }
+      // as for any start: a check made before a wait is stale after it, so one that waited stays queued for a later tick
+      const waited = turn.behind()
+      await turn.ahead
+      const current = options.config()
+      const fresh = store.get(id)
+      if (fresh === null || fresh.status !== 'queued' || closed) return fresh
+      line.admit()
+      if (waited || line.waits('review', current) || unbound(request.repo, config.viewer, current) !== null) return fresh
+      const attempt = line.reserve('review')
+      line.opened(1)
+      turn.decided()
+      launching.set(id, false)
+      try {
+        const marked = store.update(id, { ...changes, status: 'running', startedAt: now() })
+        watching(marked)
+        changed(marked)
+        const stopAsked = (): boolean => launching.get(id) === true
+        let path: string
+        try {
+          path = await prepare(marked)
+        } catch (error) {
+          const stopped = stopAsked()
+          launching.delete(id)
+          if (stopped) return end(marked, { status: 'stopped', finishedAt: now() }, 'stopped before it started')
+          const note = `worktreeFailed: ${messageOf(error)}`
+          log(`${noun} ${id}: cannot start: ${note}`)
+          return end(marked, { status: 'failed', finishedAt: now(), note }, 'failed to make its worktree')
+        }
+        // a server shutting down leaves the row running with no process, for recovery to settle
+        if (closed) return marked
+        const placed = store.update(id, { cwd: tildePath(path, home), worktree: tildePath(path, home) })
+        // nothing is awaited between this reading and the launch taking over the mark
+        if (stopAsked()) {
+          launching.delete(id)
+          return end(placed, { status: 'stopped', finishedAt: now() }, 'stopped before it started')
+        }
+        return await launch(request, current, path, placed, { slot: 'review', attempt, viewer: current.viewer }, fresh.startedAt)
+      } catch (error) {
+        launching.delete(id)
+        throw error
+      } finally {
+        line.opened(-1)
+        line.release(attempt)
+        line.admit()
+      }
+    } finally {
+      turn.decided()
+      starting.delete(key)
+    }
+  }
+
+  const mustGet = (id: number): T => {
+    const run = store.get(id)
+    if (run === null) throw new LaunchError('unknownRun', `${noun} ${id} does not exist`)
+    return run
+  }
+
+  const skipQueued = (id: number, note: string): T => end(mustGet(id), { status: 'skipped', finishedAt: now(), note }, 'skipped')
+
+  const annotate = (id: number, changes: Pick<RunChanges, 'worktree' | 'note'>): T => {
+    const run = store.update(id, changes)
+    changed(run)
+    return run
+  }
+
+  const resumeInClone = async (id: number): Promise<T> => {
+    const run = mustGet(id)
+    // a run that never reached its spawn has no session to name
+    const changes = run.resume === null ? {} : await cloneResume(run)
+    if (changes.resume === undefined) return run
+    const updated = store.update(id, changes)
+    changed(updated)
+    return updated
+  }
+
+  const busy = (target: { repo: string, number?: number }): boolean => starting.has(store.key(target)) || store.inFlight(target)
+
+  return { start, stop, reread, markPost, recordPost, recover, drain: line.admit, check: checkAll, settled, queueing: line.queueing, flushed: line.flushed, close, queueScheduled, startScheduled, skipQueued, annotate, resumeInClone, busy }
 }

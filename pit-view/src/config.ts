@@ -28,6 +28,25 @@ export type TicketSystem = {
 // absent means off; kinds lists the transitions to notify about (section 9 of DESIGN.md)
 export type Notifications = { enabled: boolean, kinds: NotificationKind[] }
 
+// the days auto-review's active hours name, Sunday first, as the time helpers number them
+export const weekdayNames = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const
+export type WeekdayName = typeof weekdayNames[number]
+
+export type ActiveHours = { days: WeekdayName[], from: string, to: string }
+
+// the autoReview key (section 10 of DESIGN.md, Configuration); absent means off
+export type AutoReviewSettings = {
+  enabled: boolean
+  intervalMinutes: number
+  activeHours: ActiveHours
+  others: boolean
+  own: boolean
+  dependabot: boolean
+  concurrency: number
+  dailyLimit: number
+  post: { others: boolean, dependabot: boolean }
+}
+
 // the agents Pit View can drive for a review session (section 8 of DESIGN.md, Launching runs)
 export type RunnerName = 'claude' | 'codex'
 export const runnerNames: readonly RunnerName[] = ['claude', 'codex']
@@ -71,6 +90,7 @@ export type Config = {
   cloneDir?: string
   agent: AgentSettings
   notifications?: Notifications
+  autoReview?: AutoReviewSettings
 }
 
 export class ConfigError extends Error {
@@ -183,7 +203,7 @@ const personKeys = ['login', 'alias', 'initials', 'color', 'avatar'] as const
 const ticketKeys = ['enabled', 'kind', 'name', 'source', 'pattern', 'baseUrl', 'linkTemplate'] as const
 const configKeys = [
   'repo', 'viewer', 'people', 'tickets', 'refreshSeconds', 'idleMinutes', 'todayStartsAt',
-  'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'allowedHosts', 'cloneDir', 'agent', 'notifications',
+  'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'allowedHosts', 'cloneDir', 'agent', 'notifications', 'autoReview',
 ] as const
 
 // a bare DNS name: dot-separated labels of letters, digits and inner hyphens, with no scheme,
@@ -292,6 +312,56 @@ const toAgent = (value: unknown): AgentSettings => {
   return agent
 }
 
+const autoReviewKeys = ['enabled', 'intervalMinutes', 'activeHours', 'others', 'own', 'dependabot', 'concurrency', 'dailyLimit', 'post'] as const
+
+const clockTime = (obj: Record<string, unknown>, key: string, where: string): string => {
+  const value = obj[key]
+  return typeof value === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : fail(`${where}.${key} must be a 24-hour time such as 09:00`)
+}
+
+const toActiveHours = (value: unknown): ActiveHours => {
+  const where = 'autoReview.activeHours'
+  if (!isObject(value)) return fail(`${where} must be an object`)
+  onlyKeys(value, ['days', 'from', 'to'], where)
+  const days = list(value, 'days', where)
+  if (days.length === 0) fail(`${where}.days must list at least one day`)
+  const known: WeekdayName[] = []
+  for (const day of days) {
+    if (!weekdayNames.includes(day as WeekdayName)) fail(`${where}.days must hold only ${weekdayNames.join(', ')}`)
+    if (known.includes(day as WeekdayName)) fail(`${where}.days must not repeat a day`)
+    known.push(day as WeekdayName)
+  }
+  const from = clockTime(value, 'from', where)
+  const to = clockTime(value, 'to', where)
+  // a window never crosses midnight
+  if (from >= to) fail(`${where}.from must be before to`)
+  return { days: known, from, to }
+}
+
+// a present key carries everything, as notifications does: nothing here falls back to a default that could turn something on
+const toAutoReview = (value: unknown): AutoReviewSettings => {
+  const where = 'autoReview'
+  if (!isObject(value)) return fail('config.autoReview must be an object')
+  onlyKeys(value, autoReviewKeys, where)
+  if (!isObject(value.post)) return fail(`${where}.post must be an object`)
+  onlyKeys(value.post, ['others', 'dependabot'], `${where}.post`)
+  const interval = value.intervalMinutes
+  if (!Number.isSafeInteger(interval) || (interval as number) < 5) fail(`${where}.intervalMinutes must be a whole number of 5 or more`)
+  if (!isReviewCap(value.concurrency)) fail(`${where}.concurrency must be a whole number of 1 or more`)
+  if (!isReviewCap(value.dailyLimit)) fail(`${where}.dailyLimit must be a whole number of 1 or more`)
+  return {
+    enabled: bool(value, 'enabled', where),
+    intervalMinutes: interval as number,
+    activeHours: toActiveHours(value.activeHours),
+    others: bool(value, 'others', where),
+    own: bool(value, 'own', where),
+    dependabot: bool(value, 'dependabot', where),
+    concurrency: value.concurrency as number,
+    dailyLimit: value.dailyLimit as number,
+    post: { others: bool(value.post, 'others', `${where}.post`), dependabot: bool(value.post, 'dependabot', `${where}.post`) },
+  }
+}
+
 // checks a whole config (as PUT /api/config sends it) and returns a clean copy
 export const validateConfig = (input: unknown): Config => {
   if (!isObject(input)) return fail('config must be a JSON object')
@@ -320,6 +390,7 @@ export const validateConfig = (input: unknown): Config => {
     agent: toAgent(input.agent),
   }
   if (input.notifications !== undefined) config.notifications = toNotifications(input.notifications)
+  if (input.autoReview !== undefined) config.autoReview = toAutoReview(input.autoReview)
   return config
 }
 

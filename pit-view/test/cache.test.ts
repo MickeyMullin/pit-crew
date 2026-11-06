@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
-import { CacheError, openCache, schemaVersion } from '../src/cache.ts'
+import { CacheError, githubTablesVersion, openCache, schemaVersion } from '../src/cache.ts'
 import type { Cache, CacheOptions, NewRun, NewSweep, Run } from '../src/cache.ts'
 import { createGh, fetchClosedPrs, fetchOpenPrs } from '../src/github.ts'
 import type { ClosedResult, OpenPage } from '../src/github.ts'
@@ -62,7 +62,7 @@ const count = (cache: Cache, table: string): number => Number(cache.db.prepare(`
 test('a new cache has the schema, its version, and nothing fetched', () => {
   const { cache } = memoryCache()
   const tables = cache.db.prepare('SELECT name FROM sqlite_master WHERE type = \'table\' AND name NOT LIKE \'sqlite_%\' ORDER BY name').all()
-  assert.deepEqual(tables.map((row) => row.name), ['cycles', 'meta', 'prs', 'runs', 'snapshots', 'sweeps'])
+  assert.deepEqual(tables.map((row) => row.name), ['cycles', 'meta', 'prs', 'runs', 'snapshots', 'sweeps', 'ticks'])
   assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
 
   const view = cache.readView(scenario.repo)
@@ -646,7 +646,7 @@ test('a version 12 cache lacks GitHub\'s stack marker, so its cached PRs are dro
     old.exec('INSERT INTO prs (repo, number, state, updated_at, head_oid, fetched_at, cycle, last_seen_at, data) VALUES (\'octo-example/orbit\', 106, \'open\', \'2026-10-26T12:00:00Z\', \'abc\', \'2026-10-26T12:00:00Z\', 1, \'2026-10-26T12:00:00Z\', \'{"number":106}\')')
     old.exec('UPDATE meta SET value = \'12\' WHERE key = \'schemaVersion\'')
     old.close()
-    assert.equal(schemaVersion, 13)
+    assert.ok(schemaVersion >= 13)
     const cache = openCache({ path, clock: handClock().clock })
     assert.equal(count(cache, 'prs'), 0)
     assert.equal(cache.getRun(created.id)?.id, created.id)
@@ -1201,6 +1201,103 @@ test('a version 8 cache gains runs.first_note in place: its runs stay with no fi
     const again = openCache({ path, clock: handClock().clock })
     assert.equal(again.getRun(created.id)?.firstNote, 'permissionDenied: Bash')
     again.close()
+  } finally {
+    await cleanup()
+  }
+})
+
+test('version 14 keeps the GitHub tables and adds the ticks table and the auto-review columns to the rows it keeps', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const created = first.createRun(newRun(106), (id) => `~/runs/${id}`)
+    const sweep = first.createSweep(newSweep(), (id) => `~/sweeps/${id}`)
+    first.close()
+    const old = new DatabaseSync(path)
+    old.exec('INSERT INTO prs (repo, number, state, updated_at, head_oid, fetched_at, cycle, last_seen_at, data) VALUES (\'octo-example/orbit\', 106, \'open\', \'2026-10-26T12:00:00Z\', \'abc\', \'2026-10-26T12:00:00Z\', 1, \'2026-10-26T12:00:00Z\', \'{"number":106}\')')
+    old.exec('DROP TABLE IF EXISTS ticks')
+    for (const column of ['origin', 'tick', 'head_oid', 'reason', 'queued_at', 'posting', 'worktree']) old.exec(`ALTER TABLE runs DROP COLUMN ${column}`)
+    for (const column of ['origin', 'tick', 'reason', 'queued_at', 'posting', 'worktree']) old.exec(`ALTER TABLE sweeps DROP COLUMN ${column}`)
+    old.exec('UPDATE meta SET value = \'13\' WHERE key = \'schemaVersion\'')
+    old.close()
+    assert.equal(schemaVersion, 14)
+    assert.equal(githubTablesVersion, 13)
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.equal(count(cache, 'prs'), 1)
+    const run = cache.getRun(created.id)
+    assert.equal(run?.origin, 'manual')
+    assert.equal(run?.tick, null)
+    assert.equal(run?.headOid, null)
+    assert.equal(run?.reason, null)
+    assert.equal(run?.queuedAt, null)
+    assert.equal(run?.posting, false)
+    assert.equal(run?.worktree, null)
+    const kept = cache.getSweep(sweep.id)
+    assert.equal(kept?.origin, 'manual')
+    assert.equal(kept?.worktree, null)
+    assert.deepEqual(cache.ticksFor(scenario.repo), [])
+    cache.close()
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a run and a sweep keep what auto-review writes on them, and skipped is a status like any other', () => {
+  const { cache } = memoryCache()
+  const run = cache.createRun({ ...newRun(106), origin: 'auto', tick: 7, headOid: 'abc1234', reason: 'pushed', queuedAt: '2026-10-26T12:00:00Z', posting: true, worktree: '~/w/run-1' }, (id) => `~/runs/${id}`)
+  assert.equal(run.origin, 'auto')
+  assert.equal(run.tick, 7)
+  assert.equal(run.headOid, 'abc1234')
+  assert.equal(run.reason, 'pushed')
+  assert.equal(run.queuedAt, '2026-10-26T12:00:00Z')
+  assert.equal(run.posting, true)
+  assert.equal(run.worktree, '~/w/run-1')
+  assert.equal(cache.updateRun(run.id, { posting: false, worktree: null, status: 'skipped', note: 'closed' }).posting, false)
+  assert.equal(cache.getRun(run.id)?.status, 'skipped')
+  const sweep = cache.createSweep({ ...newSweep(), origin: 'auto', tick: 7, reason: 'dependabot', queuedAt: '2026-10-26T12:00:00Z', posting: false, worktree: '~/w/sweep-1' }, (id) => `~/sweeps/${id}`)
+  assert.equal(sweep.origin, 'auto')
+  assert.equal(sweep.reason, 'dependabot')
+  assert.equal(cache.allSweeps()[0]?.id, sweep.id)
+  assert.equal(cache.allRuns()[0]?.id, run.id)
+  // nothing is written on an ordinary run but its defaults
+  const plain = cache.createRun(newRun(107), (id) => `~/runs/${id}`)
+  assert.equal(plain.origin, 'manual')
+  assert.equal(plain.posting, false)
+  cache.close()
+})
+
+test('ticks are recorded, read newest first, kept to the last 500, closed at the next open when a tick was cut short, and kept through a rebuild of the GitHub tables', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const clock = handClock().clock
+    const first = openCache({ path, clock, keepTicks: 3 })
+    const made = [1, 2, 3, 4].map(() => first.createTick(scenario.repo))
+    assert.deepEqual(first.ticksFor(scenario.repo).map((tick) => tick.id), [made[3]?.id, made[2]?.id, made[1]?.id])
+    const finished = first.updateTick(made[3]?.id ?? 0, { finishedAt: '2026-10-26T14:00:00Z', state: 'ran', cycle: 12, qualified: 3, alreadyCurrent: 1, queued: 2 })
+    assert.equal(finished.state, 'ran')
+    assert.equal(finished.cycle, 12)
+    assert.equal(finished.qualified, 3)
+    assert.equal(finished.alreadyCurrent, 1)
+    assert.equal(finished.queued, 2)
+    assert.equal(first.latestTick(scenario.repo)?.id, made[3]?.id)
+    first.close()
+    const second = openCache({ path, clock, keepTicks: 3 })
+    // made[2] was still open when the server stopped
+    const cut = second.ticksFor(scenario.repo).find((tick) => tick.id === made[2]?.id)
+    assert.equal(cut?.state, 'skipped')
+    assert.equal(cut?.skipReason, 'interrupted')
+    assert.notEqual(cut?.finishedAt, null)
+    assert.equal(second.createTick(scenario.repo).id, (made[3]?.id ?? 0) + 1)
+    second.close()
+    const old = new DatabaseSync(path)
+    old.exec('UPDATE meta SET value = \'12\' WHERE key = \'schemaVersion\'')
+    old.close()
+    const third = openCache({ path, clock, keepTicks: 3 })
+    assert.equal(third.ticksFor(scenario.repo).length, 3)
+    assert.deepEqual(third.ticksFor('octo-example/other'), [])
+    third.close()
   } finally {
     await cleanup()
   }

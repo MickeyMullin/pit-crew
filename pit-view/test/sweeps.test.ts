@@ -437,7 +437,7 @@ test('rows are read defensively: a row without a PR number is dropped, notPosted
 const baseSweep = (patch: Partial<Sweep> = {}): Sweep => ({
   id: 1, repo: scenario.repo, command: 'review-dependabot-sweep', args: [scenario.repo, '--parallel', '1'], label: 'Dependabot sweep', runner: 'claude',
   cwd: '~/dev/orbit', dir: '~/.local/state/pit-view/sweeps/1', sessionId: null, pid: null, pidStartedAt: null, startedAt: '2026-10-26T14:00:00Z',
-  lastStepAt: null, step: null, stepState: null, steps: null, finishedAt: null, status: 'running', result: null, note: null, costUsd: null, resume: null, ...patch,
+  lastStepAt: null, step: null, stepState: null, steps: null, finishedAt: null, status: 'running', result: null, note: null, costUsd: null, resume: null, origin: 'manual', tick: null, reason: null, queuedAt: null, posting: false, worktree: null, ...patch,
 })
 
 test('a running sweep reads as five pending slots with no text, and memory keeps the newest sweeps of a repo, loaded from the cache', () => {

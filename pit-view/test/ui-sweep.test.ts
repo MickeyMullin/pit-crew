@@ -29,7 +29,7 @@ const record = (patch: Partial<Sweep> = {}): Sweep => ({
   id: 1, repo: scenario.repo, command: 'review-dependabot-sweep', args: [scenario.repo, '--parallel', '1'], label: 'Dependabot sweep', runner: 'claude',
   cwd: '~/dev/orbit', dir: '~/.local/state/pit-view/sweeps/1', sessionId: 's-1', pid: 4001, pidStartedAt: 'start-4001', startedAt: '2026-10-26T17:40:00Z',
   lastStepAt: null, step: null, stepState: null, steps: null, finishedAt: null, status: 'running', result: null, note: null, costUsd: null,
-  resume: 'cd ~/dev/orbit && claude --resume s-1', ...patch,
+  resume: 'cd ~/dev/orbit && claude --resume s-1', origin: 'manual', tick: null, reason: null, queuedAt: null, posting: false, worktree: null, ...patch,
 })
 
 const settled = (value: Record<string, unknown>, patch: Partial<Sweep> = {}): SweepView => {

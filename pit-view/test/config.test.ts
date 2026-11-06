@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import {
   cacheFile, ConfigError, configFile, defaultConfig, expandHome, loadConfig, readConfig, saveConfig, validateConfig,
 } from '../src/config.ts'
+import { defaultAutoReview } from '../src/autoreview.ts'
 import { tempDir } from './helpers.ts'
 
 const home = '/home/tester'
@@ -321,4 +322,53 @@ test('notifications validate their kinds, drop repeats, and are optional', () =>
   assert.throws(() => validateConfig({ ...base, notifications: { kinds: [] } }), /notifications\.enabled/)
   assert.throws(() => validateConfig({ ...base, notifications: { enabled: true, kinds: [], sound: true } }), /notifications\.sound is not a known setting/)
   assert.throws(() => validateConfig({ ...base, notifications: true }), /config\.notifications must be an object/)
+})
+
+test('autoReview is optional: absent means off, and a present one carries every key and no other', () => {
+  const base = defaultConfig()
+  assert.equal('autoReview' in validateConfig(base), false)
+  const auto = defaultAutoReview()
+  assert.deepEqual(validateConfig({ ...base, autoReview: auto }).autoReview, auto)
+  // the saved file keeps the older keys in their documented order, with this one after them
+  assert.deepEqual(Object.keys(validateConfig({ ...base, cloneDir: '~/dev/orbit', autoReview: auto })).slice(-4), ['allowedHosts', 'cloneDir', 'agent', 'autoReview'])
+  const refused = (patch: Record<string, unknown>, message: RegExp): void => {
+    assert.throws(() => validateConfig({ ...base, autoReview: { ...auto, ...patch } }), message)
+  }
+  assert.throws(() => validateConfig({ ...base, autoReview: 'on' }), /config\.autoReview must be an object/)
+  refused({ extra: 1 }, /autoReview\.extra is not a known setting/)
+  for (const key of ['enabled', 'others', 'own', 'dependabot'] as const) {
+    refused({ [key]: 'yes' }, new RegExp(`autoReview\\.${key} must be true or false`))
+    const { [key]: _gone, ...missing } = auto
+    assert.throws(() => validateConfig({ ...base, autoReview: missing }), new RegExp(`autoReview\\.${key} must be true or false`))
+  }
+  for (const value of [4, 5.5, '15', undefined]) refused({ intervalMinutes: value }, /autoReview\.intervalMinutes must be a whole number of 5 or more/)
+  assert.equal(validateConfig({ ...base, autoReview: { ...auto, intervalMinutes: 5 } }).autoReview?.intervalMinutes, 5)
+  for (const key of ['concurrency', 'dailyLimit'] as const) {
+    for (const value of [0, 1.5, '1', 9007199254740992]) refused({ [key]: value }, new RegExp(`autoReview\\.${key} must be a whole number of 1 or more`))
+    assert.equal(validateConfig({ ...base, autoReview: { ...auto, [key]: 9007199254740991 } }).autoReview?.[key], 9007199254740991)
+  }
+  const hours = auto.activeHours
+  refused({ activeHours: 'always' }, /autoReview\.activeHours must be an object/)
+  refused({ activeHours: { ...hours, extra: 1 } }, /autoReview\.activeHours\.extra is not a known setting/)
+  refused({ activeHours: { ...hours, days: [] } }, /autoReview\.activeHours\.days must list at least one day/)
+  refused({ activeHours: { ...hours, days: ['mon', 'mon'] } }, /autoReview\.activeHours\.days must not repeat a day/)
+  refused({ activeHours: { ...hours, days: ['monday'] } }, /autoReview\.activeHours\.days must hold only sun, mon, tue, wed, thu, fri, sat/)
+  refused({ activeHours: { ...hours, from: '9:00' } }, /autoReview\.activeHours\.from must be a 24-hour time such as 09:00/)
+  refused({ activeHours: { ...hours, to: '24:00' } }, /autoReview\.activeHours\.to must be a 24-hour time such as 09:00/)
+  refused({ activeHours: { ...hours, from: '18:00', to: '09:00' } }, /autoReview\.activeHours\.from must be before to/)
+  refused({ activeHours: { ...hours, from: '09:00', to: '09:00' } }, /autoReview\.activeHours\.from must be before to/)
+  refused({ post: true }, /autoReview\.post must be an object/)
+  refused({ post: { others: false } }, /autoReview\.post\.dependabot must be true or false/)
+  refused({ post: { others: false, dependabot: false, own: true } }, /autoReview\.post\.own is not a known setting/)
+})
+
+test('readConfig keeps a stored autoReview key through a save', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const file = join(dir, 'config.json')
+    await saveConfig(file, { ...defaultConfig(), autoReview: { ...defaultAutoReview(), enabled: true } })
+    assert.equal((await readConfig(file)).autoReview?.enabled, true)
+  } finally {
+    await cleanup()
+  }
 })

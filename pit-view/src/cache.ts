@@ -7,8 +7,11 @@ import type { Clock, RunnerName } from './config.ts'
 import type { ClosedResult, GhErrorKind, OpenPage, RawOpenPr } from './github.ts'
 import type { RunResultJson, StepSlot } from './launcher.ts'
 
-// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table. Version 12 added the database id of the latest reviews to the open-PR query, which the Changes requested links read, so the GitHub tables are rebuilt again. Version 13 added GitHub's stack marker (stack and stackEntry) to the open-PR query, which the stack chip, the Review stack start, and the stack report lookup read in place of the base-branch guess, so the GitHub tables are rebuilt again
-export const schemaVersion = 13
+// why a run was queued (section 10 of DESIGN.md, What qualifies)
+export type QueueReason = 'requested' | 'new' | 'pushed' | 'selfReview' | 'dependabot'
+
+// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table. Version 12 added the database id of the latest reviews to the open-PR query, which the Changes requested links read, so the GitHub tables are rebuilt again. Version 13 added GitHub's stack marker (stack and stackEntry) to the open-PR query, which the stack chip, the Review stack start, and the stack report lookup read in place of the base-branch guess, so the GitHub tables are rebuilt again. Version 14 added the ticks table and auto-review's columns on runs and sweeps (origin, tick, reason, queued_at, posting, and worktree on both, and head_oid on runs), changing no GitHub table; a row from before it reads as a manual run
+export const schemaVersion = 14
 
 // the last version that changed what the GitHub tables hold; a cache at this version or later keeps them through a bump, since a bump after it only adds tables
 export const githubTablesVersion = 13
@@ -87,9 +90,12 @@ export type FinishResult = {
   stale: CachedPr[]
 }
 
-// a review session's state; queued waits for a slot under the cap on concurrent reviews, and phase 4 adds skipped
-export type RunStatus = 'queued' | 'running' | 'done' | 'failed' | 'needsInput' | 'stopped'
-export const runStatuses: readonly RunStatus[] = ['queued', 'running', 'done', 'failed', 'needsInput', 'stopped']
+// a review session's state; queued waits for a slot under the cap on concurrent reviews, and skipped is a scheduled run dropped before it started
+export type RunStatus = 'queued' | 'running' | 'done' | 'failed' | 'needsInput' | 'stopped' | 'skipped'
+export const runStatuses: readonly RunStatus[] = ['queued', 'running', 'done', 'failed', 'needsInput', 'stopped', 'skipped']
+
+// who started a session
+export type Origin = 'manual' | 'auto'
 
 // what a review session and a sweep share: Pit View's record of one launched process
 export type Session = {
@@ -127,17 +133,44 @@ export type Session = {
   costUsd: number | null
   // the command that resumes the session, once its id is known
   resume: string | null
+  // what section 10 of DESIGN.md records: who started it, the tick that queued it, why, when, whether it was allowed to post, and its worktree written with ~ while one remains
+  origin: Origin
+  tick: number | null
+  reason: QueueReason | null
+  queuedAt: string | null
+  posting: boolean
+  worktree: string | null
 }
 
-// one review session Pit View started (section 8 of DESIGN.md, Launching runs); resolvedByHand is set when the owner's re-read replaced the outcome recorded at exit, and firstNote keeps the note recorded at exit once a failed re-read replaced it (an empty string when that note was null); reportHash is the SHA-256 of the report a review finished with, null when it named none or the report could not be read, and postAttemptedAt is when Post it began a post, written before gh runs and cleared only when GitHub refused it
-export type Run = Session & { number: number, resolvedByHand: boolean, firstNote: string | null, reportHash: string | null, postAttemptedAt: string | null }
+// one review session Pit View started (section 8 of DESIGN.md, Launching runs); resolvedByHand is set when the owner's re-read replaced the outcome recorded at exit, and firstNote keeps the note recorded at exit once a failed re-read replaced it (an empty string when that note was null); reportHash is the SHA-256 of the report a review finished with, null when it named none or the report could not be read, and postAttemptedAt is when Post it began a post, written before gh runs and cleared only when GitHub refused it; headOid is the head a scheduled run was queued for, or last moved to
+export type Run = Session & { number: number, resolvedByHand: boolean, firstNote: string | null, reportHash: string | null, postAttemptedAt: string | null, headOid: string | null }
 
 // one Dependabot sweep Pit View started (section 8, Sweeps): a record of its own with no PR number
 export type Sweep = Session
 
-export type NewRun = Omit<Run, 'id' | 'dir' | 'steps' | 'resolvedByHand' | 'firstNote' | 'reportHash' | 'postAttemptedAt'>
-export type NewSweep = Omit<Sweep, 'id' | 'dir' | 'steps'>
-export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>> & { resolvedByHand?: boolean, firstNote?: string | null, reportHash?: string | null, postAttemptedAt?: string | null }
+type AutoFields = 'origin' | 'tick' | 'reason' | 'queuedAt' | 'posting' | 'worktree'
+export type NewRun = Omit<Run, 'id' | 'dir' | 'steps' | 'resolvedByHand' | 'firstNote' | 'reportHash' | 'postAttemptedAt' | 'headOid' | AutoFields> & Partial<Pick<Run, 'headOid' | AutoFields>>
+export type NewSweep = Omit<Sweep, 'id' | 'dir' | 'steps' | AutoFields> & Partial<Pick<Sweep, AutoFields>>
+export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>> & { resolvedByHand?: boolean, firstNote?: string | null, reportHash?: string | null, postAttemptedAt?: string | null, headOid?: string | null }
+
+// one scheduler tick (section 10 of DESIGN.md, Recording). state and finishedAt are null while it runs; interrupted is a tick the server stopped under or that failed on its own, and the rest are the spec's reasons to skip
+export type TickState = 'ran' | 'skipped'
+export type TickSkip = 'identityMismatch' | 'noClone' | 'fetchFailed' | 'dailyLimit' | 'interrupted'
+export type Tick = {
+  id: number
+  repo: string
+  startedAt: string
+  finishedAt: string | null
+  state: TickState | null
+  skipReason: TickSkip | null
+  // the cycle it joined or started, a plain number since cycles are pruned; null when it reused the cache or skipped before that step
+  cycle: number | null
+  // counts, null when it skipped before computing them
+  qualified: number | null
+  alreadyCurrent: number | null
+  queued: number | null
+}
+export type TickChanges = Partial<Omit<Tick, 'id' | 'repo' | 'startedAt'>>
 
 export type Cache = {
   // starts a cycle; only one may run at a time across all repos
@@ -187,6 +220,15 @@ export type Cache = {
   queuedSweeps: () => Sweep[]
   // deletes all but the newest keepSweeps finished sweeps and returns them, so their folders can go
   pruneSweeps: () => Sweep[]
+  // every recorded run and sweep in any repo, oldest first, for the scheduler's rules and its worktree sweep
+  allRuns: () => Run[]
+  allSweeps: () => Sweep[]
+  // ticks: the row is written first, so what it queues can name it; the oldest beyond keepTicks go
+  createTick: (repo: string) => Tick
+  updateTick: (id: number, changes: TickChanges) => Tick
+  // a repo's ticks, newest first
+  ticksFor: (repo: string, limit?: number) => Tick[]
+  latestTick: (repo: string) => Tick | null
   close: () => void
   // the open handle, for tests and diagnostics
   db: DatabaseSync
@@ -200,6 +242,7 @@ export type CacheOptions = {
   keepSnapshotCycles?: number
   keepRuns?: number
   keepSweeps?: number
+  keepTicks?: number
 }
 
 const schema = [
@@ -216,16 +259,32 @@ const schema = [
 
 // kept across rebuilds: no status CHECK, so phase 4's queued and skipped need no rebuild
 const runsSchema = [
-  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, resolved_by_hand INTEGER NOT NULL DEFAULT 0, first_note TEXT, report_hash TEXT, post_attempted_at TEXT)',
+  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, resolved_by_hand INTEGER NOT NULL DEFAULT 0, first_note TEXT, report_hash TEXT, post_attempted_at TEXT, origin TEXT NOT NULL DEFAULT \'manual\', tick INTEGER, head_oid TEXT, reason TEXT, queued_at TEXT, posting INTEGER NOT NULL DEFAULT 0, worktree TEXT)',
   'CREATE INDEX IF NOT EXISTS runs_by_pr ON runs (repo, number, id)',
   'CREATE INDEX IF NOT EXISTS runs_by_status ON runs (status)',
 ]
 
 // kept across rebuilds like runs: a sweep is a record of its own, with the columns of a run except the PR number. Created when missing (version 7), never altered by a bump that only rebuilds the GitHub tables
 const sweepsSchema = [
-  'CREATE TABLE IF NOT EXISTS sweeps (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT)',
+  'CREATE TABLE IF NOT EXISTS sweeps (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, origin TEXT NOT NULL DEFAULT \'manual\', tick INTEGER, reason TEXT, queued_at TEXT, posting INTEGER NOT NULL DEFAULT 0, worktree TEXT)',
   'CREATE INDEX IF NOT EXISTS sweeps_by_repo ON sweeps (repo, id)',
   'CREATE INDEX IF NOT EXISTS sweeps_by_status ON sweeps (status)',
+]
+
+// kept across rebuilds like runs (version 14); AUTOINCREMENT so a pruned id is never reused by the rows that name it
+const ticksSchema = [
+  'CREATE TABLE IF NOT EXISTS ticks (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, state TEXT, skip_reason TEXT, cycle INTEGER, qualified INTEGER, already_current INTEGER, queued INTEGER)',
+  'CREATE INDEX IF NOT EXISTS ticks_by_repo ON ticks (repo, id)',
+]
+
+// the columns version 14 added to a table made before it, each with what it reads as on an earlier row
+const autoColumns: readonly (readonly [string, string])[] = [
+  ['origin', 'TEXT NOT NULL DEFAULT \'manual\''],
+  ['tick', 'INTEGER'],
+  ['reason', 'TEXT'],
+  ['queued_at', 'TEXT'],
+  ['posting', 'INTEGER NOT NULL DEFAULT 0'],
+  ['worktree', 'TEXT'],
 ]
 
 const tables = ['meta', 'cycles', 'snapshots', 'prs']
@@ -268,10 +327,39 @@ const toSession = (row: Row): Session => {
     note: strOrNull(row, 'note'),
     costUsd: cost === null || cost === undefined ? null : Number(cost),
     resume: strOrNull(row, 'resume'),
+    origin: str(row, 'origin') === 'auto' ? 'auto' : 'manual',
+    tick: intOrNull(row, 'tick'),
+    reason: strOrNull(row, 'reason') as QueueReason | null,
+    queuedAt: strOrNull(row, 'queued_at'),
+    posting: int(row, 'posting') === 1,
+    worktree: strOrNull(row, 'worktree'),
   }
 }
 
-const toRun = (row: Row): Run => ({ ...toSession(row), number: int(row, 'number'), resolvedByHand: int(row, 'resolved_by_hand') === 1, firstNote: strOrNull(row, 'first_note'), reportHash: strOrNull(row, 'report_hash'), postAttemptedAt: strOrNull(row, 'post_attempted_at') })
+const toRun = (row: Row): Run => ({ ...toSession(row), number: int(row, 'number'), resolvedByHand: int(row, 'resolved_by_hand') === 1, firstNote: strOrNull(row, 'first_note'), reportHash: strOrNull(row, 'report_hash'), postAttemptedAt: strOrNull(row, 'post_attempted_at'), headOid: strOrNull(row, 'head_oid') })
+
+const toTick = (row: Row): Tick => ({
+  id: int(row, 'id'),
+  repo: str(row, 'repo'),
+  startedAt: str(row, 'started_at'),
+  finishedAt: strOrNull(row, 'finished_at'),
+  state: strOrNull(row, 'state') as TickState | null,
+  skipReason: strOrNull(row, 'skip_reason') as TickSkip | null,
+  cycle: intOrNull(row, 'cycle'),
+  qualified: intOrNull(row, 'qualified'),
+  alreadyCurrent: intOrNull(row, 'already_current'),
+  queued: intOrNull(row, 'queued'),
+})
+
+const tickColumns: Record<keyof TickChanges, string> = {
+  finishedAt: 'finished_at',
+  state: 'state',
+  skipReason: 'skip_reason',
+  cycle: 'cycle',
+  qualified: 'qualified',
+  alreadyCurrent: 'already_current',
+  queued: 'queued',
+}
 
 // a Run's fields to their columns; JSON columns are stored as text
 const runColumns: Record<keyof RunChanges, string> = {
@@ -299,11 +387,18 @@ const runColumns: Record<keyof RunChanges, string> = {
   firstNote: 'first_note',
   reportHash: 'report_hash',
   postAttemptedAt: 'post_attempted_at',
+  origin: 'origin',
+  tick: 'tick',
+  reason: 'reason',
+  queuedAt: 'queued_at',
+  posting: 'posting',
+  worktree: 'worktree',
+  headOid: 'head_oid',
 }
 
 const runValue = (key: keyof RunChanges, value: unknown): SQLInputValue => {
   if (key === 'args' || key === 'result' || key === 'steps') return value === null || value === undefined ? null : JSON.stringify(value)
-  if (key === 'resolvedByHand') return value === true ? 1 : 0
+  if (key === 'resolvedByHand' || key === 'posting') return value === true ? 1 : 0
   return (value ?? null) as SQLInputValue
 }
 
@@ -353,7 +448,7 @@ type LastSuccess = { cycle: number, startedAt: string, finishedAt: string }
 const metaKey = (name: string, repo: string): string => `${name}:${repo}`
 
 // the Pit View SQLite cache: open rows per PR, raw responses per cycle, and cycle history
-export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 50, keepRuns = 200, keepSweeps = 50 }: CacheOptions): Cache => {
+export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 50, keepRuns = 200, keepSweeps = 50, keepTicks = 500 }: CacheOptions): Cache => {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
   const db = new DatabaseSync(path, { timeout: 5000 })
   if (path !== ':memory:') {
@@ -414,6 +509,14 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       if (!columns.includes('post_attempted_at')) db.exec('ALTER TABLE runs ADD COLUMN post_attempted_at TEXT')
       // version 7 added sweeps
       for (const statement of sweepsSchema) db.exec(statement)
+      // version 14 added auto-review's columns and the ticks table
+      const sweepColumns = db.prepare('PRAGMA table_info(sweeps)').all().map((column) => String(column.name))
+      for (const [name, type] of autoColumns) {
+        if (!columns.includes(name)) db.exec(`ALTER TABLE runs ADD COLUMN ${name} ${type}`)
+        if (!sweepColumns.includes(name)) db.exec(`ALTER TABLE sweeps ADD COLUMN ${name} ${type}`)
+      }
+      if (!columns.includes('head_oid')) db.exec('ALTER TABLE runs ADD COLUMN head_oid TEXT')
+      for (const statement of ticksSchema) db.exec(statement)
       setMeta('schemaVersion', schemaVersion)
     })
   }
@@ -487,6 +590,8 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       at: now(),
       error: 'interrupted: Pit View stopped before the cycle finished',
     })
+    // a tick the server stopped under never finished either
+    run('UPDATE ticks SET finished_at = $at, state = \'skipped\', skip_reason = \'interrupted\' WHERE finished_at IS NULL', { at: now() })
   }
 
   const startCycle = (repo: string, trigger: Trigger): Cycle => {
@@ -790,6 +895,40 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     return doomed
   })
 
+  const allRuns = (): Run[] => all('SELECT * FROM runs ORDER BY id').map(toRun)
+
+  const allSweeps = (): Sweep[] => all('SELECT * FROM sweeps ORDER BY id').map(toSession)
+
+  const mustTick = (id: number): Tick => {
+    const row = get('SELECT * FROM ticks WHERE id = $id', { id })
+    if (row === undefined) throw new CacheError(`tick ${id} does not exist`)
+    return toTick(row)
+  }
+
+  const createTick = (repo: string): Tick => transaction(() => {
+    const id = Number(db.prepare('INSERT INTO ticks (repo, started_at) VALUES ($repo, $at)').run({ repo, at: now() }).lastInsertRowid)
+    run('DELETE FROM ticks WHERE id NOT IN (SELECT id FROM ticks ORDER BY id DESC LIMIT $keep)', { keep: keepTicks })
+    return mustTick(id)
+  })
+
+  const updateTick = (id: number, changes: TickChanges): Tick => {
+    const keys = (Object.keys(changes) as (keyof TickChanges)[]).filter((key) => key in tickColumns)
+    if (keys.length > 0) {
+      const params: Params = { id }
+      const sets = keys.map((key) => {
+        params[key] = changes[key] ?? null
+        return `${tickColumns[key]} = $${key}`
+      })
+      run(`UPDATE ticks SET ${sets.join(', ')} WHERE id = $id`, params)
+    }
+    return mustTick(id)
+  }
+
+  const ticksFor = (repo: string, limit = keepTicks): Tick[] =>
+    all('SELECT * FROM ticks WHERE repo = $repo ORDER BY id DESC LIMIT $limit', { repo, limit }).map(toTick)
+
+  const latestTick = (repo: string): Tick | null => ticksFor(repo, 1)[0] ?? null
+
   migrate()
   closeInterrupted()
 
@@ -822,6 +961,12 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     runningSweeps,
     queuedSweeps,
     pruneSweeps,
+    allRuns,
+    allSweeps,
+    createTick,
+    updateTick,
+    ticksFor,
+    latestTick,
     close: () => db.close(),
     db,
   }
