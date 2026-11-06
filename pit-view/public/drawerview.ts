@@ -7,7 +7,7 @@ import type { ReportListing } from '../src/reports.ts'
 import { actionConfirmModel, actionOffers } from './actionsview.ts'
 import type { ActionConfirm, ActionConfirmModel, ActionOffer, PersonChoice } from './actionsview.ts'
 import { commandLine, doneTone, runnerLabels, sentence, stepTitle } from './agent.ts'
-import type { AgentCell, AgentResult, DoneTone, PostForm, RunnerName, RunView, StartKind, StartOption, StepSlot } from './agent.ts'
+import type { AgentCell, AgentResult, DoneTone, PostForm, RunnerModels, RunnerName, RunView, StartKind, StartOption, StepSlot } from './agent.ts'
 import { shortSha } from './format.ts'
 import { safeHref } from './safeurl.ts'
 
@@ -93,6 +93,9 @@ export type StartConfirmModel = {
   runners: { name: RunnerName, label: string }[]
   runner: RunnerName
   runnerLabel: string
+  // the model the chosen runner will start with, and every runner's, which the launcher named from the configuration the command is built from
+  model: string
+  models: RunnerModels
   // the Self-review's box; null for a start that does not offer it
   commentsCheck: { label: string, detail: string, checked: boolean } | null
   effect: string
@@ -120,6 +123,8 @@ export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headR
     runners: option.runners.map((name) => ({ name, label: runnerLabels[name] })),
     runner: chosen,
     runnerLabel: runnerLabels[chosen],
+    model: cell.models[chosen],
+    models: cell.models,
     commentsCheck: option.checkCommentsArgs === undefined ? null : {
       label: 'Also check the latest comments',
       detail: 'Reads the PR\'s latest comments from anyone and reports which points the branch has not addressed. It changes nothing.',

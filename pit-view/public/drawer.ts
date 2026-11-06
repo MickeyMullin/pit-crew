@@ -186,7 +186,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           })
           return h('label', { class: 'confirm-runner' }, input, choice.label)
         }))
-    const list = facts([['Command', command], ['Runner', runner], ...(ask.commentsCheck === null ? [] : [['Comments', commentsBox(ask.commentsCheck)] as [string, Node]]), ['On GitHub', ask.effect]])
+    const list = facts([['Command', command], ['Runner', runner], ['Model', h('span', { 'data-confirm': 'model' }, ask.model)], ...(ask.commentsCheck === null ? [] : [['Comments', commentsBox(ask.commentsCheck)] as [string, Node]]), ['On GitHub', ask.effect]])
     list.querySelector('dt:nth-of-type(2)')?.setAttribute('id', 'drawer-runner-term')
     // a start that pushes is told apart from a review's by its caution treatment, a plain line
     // about the push, and a Start that names the session
@@ -232,6 +232,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     })
     const list = facts([
       ...(picker === null ? [] : [['Reviewer', picker] as [string, Node]]),
+      ...(ask.session === null ? [] : [['Runner', ask.session.runner] as [string, string], ['Model', ask.session.model] as [string, string]]),
       ['On GitHub', h('span', { 'data-confirm': 'effect' }, ask.effect)],
     ])
     if (picker !== null) list.querySelector('dt')?.setAttribute('id', 'drawer-reviewer-term')
@@ -260,6 +261,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     const model = current()
     const command = root.querySelector<HTMLElement>('[data-confirm="command"]')
     if (command !== null && model?.confirm != null) setText(command, model.confirm.command)
+    const modelLine = root.querySelector<HTMLElement>('[data-confirm="model"]')
+    if (modelLine !== null && model?.confirm != null) setText(modelLine, model.confirm.model)
     const effect = root.querySelector<HTMLElement>('[data-confirm="effect"]')
     if (effect !== null && model?.actionAsk != null) setText(effect, model.actionAsk.effect)
     const picker = root.querySelector<HTMLSelectElement>('#drawer-reviewer')
@@ -543,7 +546,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
 
   const startPart = (model: DrawerModel): Part => ({
     key: 'start',
-    sig: JSON.stringify([model.starts, model.confirm === null ? null : { ...model.confirm, runner: '', command: '', commentsCheck: model.confirm.commentsCheck === null ? null : '' }]),
+    sig: JSON.stringify([model.starts, model.confirm === null ? null : { ...model.confirm, runner: '', command: '', model: '', commentsCheck: model.confirm.commentsCheck === null ? null : '' }]),
     build: () => {
       if (model.confirm !== null) return section('start', 'Start', startConfirmBlock(model.confirm))
       return section('start', 'Start',
