@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Clock } from '../src/config.ts'
-import { addDays, closedRanges, closedSearchWindow, formatAge, instantAt, localDateOf, minutesOfDay, startOfDay, weekdayOf } from '../src/time.ts'
+import { addDays, clockChangeOn, closedRanges, closedSearchWindow, formatAge, instantAt, localDateOf, minutesOfDay, startOfDay, weekdayOf } from '../src/time.ts'
 import { scenario } from './fixtures/scenario.ts'
 
 const at = (time: string): Clock => ({ now: () => Date.parse(time) })
@@ -92,4 +92,37 @@ test('a wall-clock time on a date is the right instant on either side of a DST c
   assert.equal(iso(instantAt({ year: 2026, month: 3, day: 7 }, 9 * 60, 'America/New_York')), '2026-03-07T14:00:00.000Z')
   assert.equal(iso(instantAt({ year: 2026, month: 3, day: 9 }, 9 * 60, 'America/New_York')), '2026-03-09T13:00:00.000Z')
   assert.equal(iso(instantAt({ year: 2026, month: 10, day: 26 }, 18 * 60, 'UTC')), '2026-10-26T18:00:00.000Z')
+})
+
+test('a wall-clock time the clocks skip is the first instant after the gap', () => {
+  const ny = { year: 2026, month: 3, day: 8 }
+  // New York goes from 02:00 EST to 03:00 EDT, at 07:00Z
+  assert.equal(iso(instantAt(ny, 2 * 60 - 1, 'America/New_York')), '2026-03-08T06:59:00.000Z')
+  assert.equal(iso(instantAt(ny, 2 * 60, 'America/New_York')), '2026-03-08T07:00:00.000Z')
+  assert.equal(iso(instantAt(ny, 2 * 60 + 30, 'America/New_York')), '2026-03-08T07:00:00.000Z')
+  assert.equal(iso(instantAt(ny, 3 * 60, 'America/New_York')), '2026-03-08T07:00:00.000Z')
+  assert.equal(iso(instantAt(ny, 3 * 60 + 1, 'America/New_York')), '2026-03-08T07:01:00.000Z')
+  // east of UTC, in a half-hour change (Lord Howe, 02:00 to 02:30 at 15:30Z the day before), and over midnight (Havana)
+  assert.equal(iso(instantAt({ year: 2026, month: 3, day: 29 }, 2 * 60 + 30, 'Europe/Paris')), '2026-03-29T01:00:00.000Z')
+  assert.equal(iso(instantAt({ year: 2026, month: 10, day: 4 }, 2 * 60 + 15, 'Australia/Lord_Howe')), '2026-10-03T15:30:00.000Z')
+  assert.equal(iso(instantAt(ny, 30, 'America/Havana')), '2026-03-08T05:00:00.000Z')
+})
+
+test('a wall-clock time the clocks repeat is its first occurrence', () => {
+  // New York: 01:30 EDT is 05:30Z, and 01:30 EST an hour later
+  assert.equal(iso(instantAt({ year: 2026, month: 11, day: 1 }, 90, 'America/New_York')), '2026-11-01T05:30:00.000Z')
+  // Paris: 02:30 CEST is 00:30Z, and 02:30 CET an hour later
+  assert.equal(iso(instantAt({ year: 2026, month: 10, day: 25 }, 2 * 60 + 30, 'Europe/Paris')), '2026-10-25T00:30:00.000Z')
+  // Lord Howe's half hour: 01:45 at UTC+11 is 14:45Z the day before, and 01:45 at UTC+10:30 half an hour later
+  assert.equal(iso(instantAt({ year: 2026, month: 4, day: 5 }, 105, 'Australia/Lord_Howe')), '2026-04-04T14:45:00.000Z')
+})
+
+test('the clock change on a date is where the offset moves and how much it repeats', () => {
+  const hourMs = 3_600_000
+  assert.deepEqual(clockChangeOn({ year: 2026, month: 3, day: 8 }, 'America/New_York'), { at: Date.parse('2026-03-08T07:00:00Z'), repeats: -hourMs })
+  assert.deepEqual(clockChangeOn({ year: 2026, month: 11, day: 1 }, 'America/New_York'), { at: Date.parse('2026-11-01T06:00:00Z'), repeats: hourMs })
+  assert.deepEqual(clockChangeOn({ year: 2026, month: 4, day: 5 }, 'Australia/Lord_Howe'), { at: Date.parse('2026-04-04T15:00:00Z'), repeats: hourMs / 2 })
+  assert.equal(clockChangeOn({ year: 2026, month: 10, day: 26 }, 'America/New_York'), null)
+  assert.equal(clockChangeOn({ year: 2026, month: 3, day: 8 }, 'Asia/Kolkata'), null)
+  assert.equal(clockChangeOn({ year: 2026, month: 3, day: 8 }, 'UTC'), null)
 })

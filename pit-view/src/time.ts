@@ -88,11 +88,35 @@ export const minutesOfDay = (ms: number, timeZone: string): number => {
   return wall.getUTCHours() * 60 + wall.getUTCMinutes()
 }
 
-// the instant a wall-clock time (minutes since midnight) on a date happens in timeZone, DST included
+// the instant a wall-clock time (minutes since midnight) on a date happens in timeZone: its first occurrence when the clocks go back and it happens twice, and the first instant after the gap when they go forward over it
 export const instantAt = (date: LocalDate, minutes: number, timeZone: string): number => {
   const wall = Date.UTC(date.year, date.month - 1, date.day) + minutes * minute
-  const guess = wall - offsetAt(wall, timeZone)
-  return wall - offsetAt(guess, timeZone)
+  // a day either side of this wall clock, the offsets are those on each side of any change near it
+  const one = wall - offsetAt(wall - day, timeZone)
+  const other = wall - offsetAt(wall + day, timeZone)
+  const first = Math.min(one, other)
+  const last = Math.max(one, other)
+  if (wallClock(first, timeZone) === wall) return first
+  if (wallClock(last, timeZone) === wall) return last
+  // neither reads this wall clock, so it is in a gap, and first still reads the clock before the gap
+  let at = first
+  while (at < last && wallClock(at, timeZone) < wall) at += minute
+  return at
+}
+
+// the instant the clocks change on a date in timeZone and how much wall clock it repeats, negative when they go forward over a gap; null on a date with no change
+export const clockChangeOn = (date: LocalDate, timeZone: string): { at: number, repeats: number } | null => {
+  let before = startOfDate(date, timeZone)
+  let after = startOfDate(addDays(date, 1), timeZone)
+  const offsetBefore = offsetAt(before, timeZone)
+  const offsetAfter = offsetAt(after, timeZone)
+  if (offsetBefore === offsetAfter) return null
+  while (after - before > minute) {
+    const middle = before + Math.floor((after - before) / 2 / minute) * minute
+    if (offsetAt(middle, timeZone) === offsetBefore) before = middle
+    else after = middle
+  }
+  return { at: after, repeats: offsetBefore - offsetAfter }
 }
 
 export const startOfDay = (ms: number, timeZone: string): number => startOfDate(localDateOf(ms, timeZone), timeZone)

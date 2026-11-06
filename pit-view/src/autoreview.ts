@@ -3,8 +3,11 @@ import { basename, dirname } from 'node:path'
 import type { RunStatus } from './cache.ts'
 import { attentionOrder, selfReviewOf } from './derive.ts'
 import type { OpenRow, OtherRow } from './derive.ts'
+import type { RawOpenPr } from './github.ts'
+import { isDependabot } from './launcher.ts'
 import type { ReportInfo } from './reports.ts'
-import { addDays, instantAt, localDateOf, minutesOfDay, startOfDate, startOfDay, weekdayOf } from './time.ts'
+import { addDays, clockChangeOn, instantAt, localDateOf, minute, minutesOfDay, startOfDate, startOfDay, weekdayOf } from './time.ts'
+import type { LocalDate } from './time.ts'
 
 // the pure half of auto-review (section 10 of DESIGN.md): qualification, the queue, the retry rule, the daily limit, and the worktree sweep's selection. Every function takes its inputs explicitly (rows, settings, run records, the clock as a number, and report lookups) and does no I/O, starts no timer, spawns nothing, and makes no GitHub call; the scheduler runtime calls them
 
@@ -45,22 +48,31 @@ const minutesOf = (hhmm: string): number => {
   return Number(hours) * 60 + Number(minutes)
 }
 
-// the chosen local days, from inclusive to exclusive, in the machine's zone; a window never crosses midnight
+// the chosen local days, from inclusive to exclusive, in the machine's zone, read off the wall clock; a window never crosses midnight, so one with from not before to is never active
 export const isActiveAt = (hours: ActiveHours, ms: number, timeZone: string): boolean => {
-  const day = weekdayNames[weekdayOf(localDateOf(ms, timeZone))]
+  const weekday = weekdayNames[weekdayOf(localDateOf(ms, timeZone))]
   const minutes = minutesOfDay(ms, timeZone)
-  return day !== undefined && hours.days.includes(day) && minutes >= minutesOf(hours.from) && minutes < minutesOf(hours.to)
+  return weekday !== undefined && hours.days.includes(weekday) && minutes >= minutesOf(hours.from) && minutes < minutesOf(hours.to)
 }
 
-// the first window start after ms, for the one timer held outside active hours; null when no day is chosen
+// the instants a date's window opens at, in order: usually one, at from, and none when the clocks go forward over all of it. When the clocks go back over part of it, it may open again where they land or at the repeat of from
+const opensOn = (hours: ActiveHours, date: LocalDate, timeZone: string): number[] => {
+  const first = instantAt(date, minutesOf(hours.from), timeZone)
+  const change = clockChangeOn(date, timeZone)
+  const candidates = change === null ? [first] : [first, change.at, first + change.repeats]
+  const opens = candidates.filter((at) => isActiveAt(hours, at, timeZone) && !isActiveAt(hours, at - minute, timeZone))
+  return [...new Set(opens)].sort((a, b) => a - b)
+}
+
+// the first instant after ms where the window opens, for the one timer held outside active hours; null when none ever will, because no day is chosen or from is not before to. Two weeks, since the clocks can leave the only chosen day with no active instant
 export const nextActiveStart = (hours: ActiveHours, ms: number, timeZone: string): number | null => {
   const today = localDateOf(ms, timeZone)
-  for (let offset = 0; offset <= 7; offset += 1) {
+  for (let offset = 0; offset <= 14; offset += 1) {
     const date = addDays(today, offset)
-    const day = weekdayNames[weekdayOf(date)]
-    if (day === undefined || !hours.days.includes(day)) continue
-    const start = instantAt(date, minutesOf(hours.from), timeZone)
-    if (start > ms) return start
+    const weekday = weekdayNames[weekdayOf(date)]
+    if (weekday === undefined || !hours.days.includes(weekday)) continue
+    const start = opensOn(hours, date, timeZone).find((at) => at > ms)
+    if (start !== undefined) return start
   }
   return null
 }
@@ -76,7 +88,7 @@ export type AutoRun = {
   // the head the run reviewed, full or short; null before it is known
   headOid: string | null
   status: AutoRunStatus
-  // when it started; null while it is only queued
+  // when it really started; null while it is only queued, and for a run stopped or skipped before it started. A launcher row's started_at holds the time it was queued until then, so the scheduler's mapping does not copy it for those
   startedAt: string | null
   // whether the run was allowed to post (false for a --no-post run)
   posting: boolean
@@ -84,7 +96,7 @@ export type AutoRun = {
   postStarted: boolean
   posted: boolean
   ghFailed: boolean
-  // set by a caller that knows the run is settled for a reason the rows do not show, such as its session having ended
+  // set by a caller that knows the run is settled for a reason these records and the open list do not show, such as its session having ended
   settled?: boolean
 }
 
@@ -95,6 +107,10 @@ export type AutoSweep = {
   startedAt: string | null
   settled?: boolean
 }
+
+// a queued run has not started, and neither has one stopped or skipped on its way there
+const hasStarted = (entry: { status: AutoRunStatus, startedAt: string | null }): boolean =>
+  entry.startedAt !== null && entry.status !== 'queued' && entry.status !== 'skipped'
 
 // the rows of the last sweep the scheduler ran, from its result.json: each PR and the head it was swept at
 export type SweepMemoryRow = { number: number, head: string }
@@ -134,8 +150,10 @@ export type QueueItem =
   | { kind: 'dependabot', reason: 'dependabot', prs: number[], number?: never, retry?: never, headSha?: never }
 
 export type QueueInput = {
-  // every open row of the repo, derived from the cache the tick just brought up to date
+  // the open rows the tick derived from the cache it just brought up to date, which qualify others' and own PRs; a PR missing here may still be open, since others' drafts are hidden
   rows: readonly OpenRow[]
+  // every open PR in that cache, whatever the rows hide or however they group it; the sweep reads this
+  openPrs: readonly RawOpenPr[]
   settings: AutoReviewSettings
   // report lookup by PR number (scanReports or findReport), for others' PRs
   reports: ReadonlyMap<number, ReportInfo>
@@ -162,8 +180,6 @@ const isOthersCandidate = (row: OpenRow): row is OtherRow => row.section === 'ot
 const isOwnCandidate = (row: OpenRow): boolean =>
   row.section === 'mine' && row.stage !== 'draft' && (row.selfReview.state === 'none' || row.selfReview.state === 'stale')
 
-const isDependabot = (row: OpenRow): boolean => row.section === 'others' && row.group === 'bots' && row.author.login.toLowerCase().includes('dependabot')
-
 // others' PRs are queued flags first and then most recent activity, which is section 5's rule for every group but Your move; the group is overridden so the shared comparator applies it
 const queueOrder = (a: OtherRow, b: OtherRow): number => attentionOrder({ ...a, group: 'bots' }, { ...b, group: 'bots' })
 
@@ -172,13 +188,16 @@ const othersReason = (row: OtherRow): Exclude<QueueReason, 'dependabot'> => {
   return row.flags.some((flag) => flag.kind === 'reReview') ? 'pushed' : 'new'
 }
 
-const sweepIsDue = (rows: readonly OpenRow[], last: readonly SweepMemoryRow[] | null): number[] => {
-  const bots = rows.filter(isDependabot)
-  const due = last === null || bots.some((row) => !last.some((seen) => seen.number === row.number && sameHead(seen.head, row.headSha)))
-  return due ? bots.map((row) => row.number) : []
+// whichever open Dependabot PRs there are, when one is new or at a new head since the last sweep
+const sweepIsDue = (dependabot: readonly RawOpenPr[], last: readonly SweepMemoryRow[] | null): number[] => {
+  const due = last === null || dependabot.some((pr) => !last.some((seen) => seen.number === pr.number && sameHead(seen.head, pr.headRefOid)))
+  return due ? dependabot.map((pr) => pr.number) : []
 }
 
-export const buildQueue = ({ rows, settings, reports, runs, sweeps, lastSweepRows }: QueueInput): QueueResult => {
+export const buildQueue = ({ rows, openPrs, settings, reports, runs, sweeps, lastSweepRows }: QueueInput): QueueResult => {
+  // Dependabot is told by its author, not by the bots list, and only ever goes through the sweep
+  const dependabot = openPrs.filter(isDependabot)
+  const reviewable = rows.filter((row) => !dependabot.some((pr) => pr.number === row.number))
   const items: QueueItem[] = []
   const leftForOwner: LeftForOwner[] = []
   let qualified = 0
@@ -198,14 +217,14 @@ export const buildQueue = ({ rows, settings, reports, runs, sweeps, lastSweepRow
     items.push({ kind, number: row.number, reason, retry: failures.length > 0, headSha: row.headSha })
   }
   if (settings.others) {
-    for (const row of rows.filter(isOthersCandidate).sort(queueOrder)) consider(row, 'others', othersReason(row))
+    for (const row of reviewable.filter(isOthersCandidate).sort(queueOrder)) consider(row, 'others', othersReason(row))
   }
   if (settings.own) {
-    for (const row of rows.filter(isOwnCandidate).sort(attentionOrder)) consider(row, 'own', 'selfReview')
+    for (const row of reviewable.filter(isOwnCandidate).sort(attentionOrder)) consider(row, 'own', 'selfReview')
   }
   // a sweep reviews the whole set, and at most one is queued or running
   if (settings.dependabot && !sweeps.some((entry) => entry.status === 'queued' || entry.status === 'running')) {
-    const prs = sweepIsDue(rows, lastSweepRows)
+    const prs = sweepIsDue(dependabot, lastSweepRows)
     if (prs.length > 0) {
       qualified += 1
       items.push({ kind: 'dependabot', reason: 'dependabot', prs })
@@ -214,13 +233,13 @@ export const buildQueue = ({ rows, settings, reports, runs, sweeps, lastSweepRow
   return { items, qualified, alreadyCurrent, leftForOwner }
 }
 
-// the check before a queued run starts: a PR that closed is dropped, and one whose head moved still runs and records the new head
+// the check before a queued run starts: a PR that left the open list closed and is dropped, and one still there, a draft included, runs and records the head it is at now, which may have moved
 export type Recheck = { action: 'start', headSha: string | null } | { action: 'drop', note: 'closed' }
 
-export const recheckQueued = (item: QueueItem, rows: readonly OpenRow[]): Recheck => {
+export const recheckQueued = (item: QueueItem, openPrs: readonly RawOpenPr[]): Recheck => {
   if (item.kind === 'dependabot') return { action: 'start', headSha: null }
-  const row = rows.find((candidate) => candidate.number === item.number)
-  return row === undefined ? { action: 'drop', note: 'closed' } : { action: 'start', headSha: row.headSha }
+  const pr = openPrs.find((candidate) => candidate.number === item.number)
+  return pr === undefined ? { action: 'drop', note: 'closed' } : { action: 'start', headSha: pr.headRefOid }
 }
 
 // the daily limit and the slots a tick may fill
@@ -230,8 +249,8 @@ export const startedToday = (runs: readonly AutoRun[], sweeps: readonly AutoSwee
   const from = startOfDay(ms, timeZone)
   const to = startOfDate(addDays(localDateOf(ms, timeZone), 1), timeZone)
   return [...runs, ...sweeps].filter((entry) => {
-    if (entry.origin !== 'auto' || entry.status === 'queued' || entry.status === 'skipped' || entry.startedAt === null) return false
-    const at = Date.parse(entry.startedAt)
+    if (entry.origin !== 'auto' || !hasStarted(entry)) return false
+    const at = Date.parse(entry.startedAt ?? '')
     return at >= from && at < to
   }).length
 }
@@ -275,24 +294,25 @@ export type OrphanInput = {
   dir: string
   runs: readonly AutoRun[]
   sweeps: readonly AutoSweep[]
-  // the open rows, which show whether a PR closed or moved on
-  rows: readonly OpenRow[]
+  // every open PR in the cache, which shows whether a PR closed or moved on; null until a listing has completed (the cache was just built, or rebuilt, and its runs were kept), when neither can be told
+  openPrs: readonly RawOpenPr[] | null
 }
 
-// a needsInput or failed run waits for the owner until it is settled: a newer run exists for the PR, the PR closed or got a new head, or the caller knows its session ended
-const runSettled = (record: AutoRun, runs: readonly AutoRun[], rows: readonly OpenRow[]): boolean => {
-  if (record.settled === true || runs.some((other) => other.number === record.number && other.id > record.id)) return true
-  const row = rows.find((candidate) => candidate.number === record.number)
-  return row === undefined || (record.headOid !== null && !sameHead(row.headSha, record.headOid))
+// a needsInput or failed run waits for the owner until it is settled: a newer run has started for the PR, the PR closed or got a new head, or the caller knows its session ended
+const runSettled = (record: AutoRun, runs: readonly AutoRun[], openPrs: readonly RawOpenPr[] | null): boolean => {
+  if (record.settled === true || runs.some((other) => other.number === record.number && other.id > record.id && hasStarted(other))) return true
+  if (openPrs === null) return false
+  const pr = openPrs.find((candidate) => candidate.number === record.number)
+  return pr === undefined || (record.headOid !== null && !sameHead(pr.headRefOid, record.headOid))
 }
 
-const worktreeKept = (entry: WorktreeEntry, { runs, sweeps, rows }: OrphanInput): boolean => {
+const worktreeKept = (entry: WorktreeEntry, { runs, sweeps, openPrs }: OrphanInput): boolean => {
   const record = entry.kind === 'run' ? runs.find((candidate) => candidate.id === entry.id) : sweeps.find((candidate) => candidate.id === entry.id)
   if (record === undefined) return false
   if (record.status === 'queued' || record.status === 'running') return true
   if (record.status !== 'needsInput' && record.status !== 'failed') return false
-  if (entry.kind === 'sweep') return record.settled !== true && !sweeps.some((other) => other.id > record.id)
-  return !runSettled(record as AutoRun, runs, rows)
+  if (entry.kind === 'sweep') return record.settled !== true && !sweeps.some((other) => other.id > record.id && hasStarted(other))
+  return !runSettled(record as AutoRun, runs, openPrs)
 }
 
 // which of git's listed worktrees the sweep removes and which it leaves. Only entries directly inside the folder and named run-<digits> or sweep-<digits> exactly are looked at; anything else is not in either list, and the caller never removes it

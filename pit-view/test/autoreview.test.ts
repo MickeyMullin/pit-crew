@@ -3,13 +3,16 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   buildQueue, defaultAutoReview, isActiveAt, isReviewedAtHead, nextActiveStart, parseWorktreeList, recheckQueued, retryDecision, sameHead,
-  selectOrphanWorktrees, startBudget, startedToday, unlistedDirectories, worktreePath,
+  selectOrphanWorktrees, startBudget, startedToday, unlistedDirectories, weekdayNames, worktreePath,
 } from '../src/autoreview.ts'
-import type { AutoRun, AutoSweep, AutoReviewSettings, QueueInput } from '../src/autoreview.ts'
+import type { ActiveHours, AutoRun, AutoSweep, AutoReviewSettings, QueueInput } from '../src/autoreview.ts'
 import { defaultConfig } from '../src/config.ts'
+import type { Config } from '../src/config.ts'
 import { deriveOpenRows } from '../src/derive.ts'
 import type { MineRow, OpenRow, OtherRow } from '../src/derive.ts'
+import type { RawOpenPr } from '../src/github.ts'
 import type { ReportInfo } from '../src/reports.ts'
+import { minute as minuteMs } from '../src/time.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { openPage1, openPage2 } from './helpers.ts'
 
@@ -17,10 +20,14 @@ const tz = scenario.timeZone
 const config = { ...defaultConfig(), repo: scenario.repo, viewer: scenario.viewer }
 const now = Date.parse(scenario.now)
 
-const fixtureRows = async (): Promise<OpenRow[]> => {
-  const prs = [...(await openPage1()).data.repository!.pullRequests.nodes, ...(await openPage2()).data.repository!.pullRequests.nodes]
-  return deriveOpenRows(prs, scenario.defaultBranch, { config, clock: { now: () => now }, timeZone: tz })
-}
+const fixturePrs: readonly RawOpenPr[] = [...(await openPage1()).data.repository!.pullRequests.nodes, ...(await openPage2()).data.repository!.pullRequests.nodes]
+
+const rowsOf = (prs: readonly RawOpenPr[], rowConfig: Config = config): OpenRow[] =>
+  deriveOpenRows(prs, scenario.defaultBranch, { config: rowConfig, clock: { now: () => now }, timeZone: tz })
+
+const fixtureRows = async (): Promise<OpenRow[]> => rowsOf(fixturePrs)
+
+const patchPr = (number: number, patch: Partial<RawOpenPr>): RawOpenPr[] => fixturePrs.map((pr) => pr.number === number ? { ...pr, ...patch } : pr)
 
 const settings = (patch: Partial<AutoReviewSettings> = {}): AutoReviewSettings => ({ ...defaultAutoReview(), enabled: true, ...patch })
 
@@ -31,7 +38,7 @@ const run = (patch: Partial<AutoRun> & Pick<AutoRun, 'id' | 'number'>): AutoRun 
 const sweep = (patch: Partial<AutoSweep> & Pick<AutoSweep, 'id'>): AutoSweep => ({ origin: 'auto', status: 'done', startedAt: null, ...patch })
 
 const queueInput = (rows: readonly OpenRow[], patch: Partial<QueueInput> = {}): QueueInput => ({
-  rows, settings: settings(), reports: new Map(), runs: [], sweeps: [], lastSweepRows: null, ...patch,
+  rows, openPrs: fixturePrs, settings: settings(), reports: new Map(), runs: [], sweeps: [], lastSweepRows: null, ...patch,
 })
 
 const numbers = (items: readonly { kind: string, number?: number }[]): (number | string)[] => items.map((item) => item.number ?? item.kind)
@@ -87,6 +94,119 @@ test('the next active start is the next chosen day at from, in the local zone', 
   assert.equal(next('2026-03-07T23:00:00Z'), '2026-03-09T13:00:00.000Z')
   // the start itself is not "next": inside the window the following day answers
   assert.equal(next('2026-10-26T13:00:00Z'), '2026-10-27T13:00:00.000Z')
+})
+
+const at = (time: string): number => Date.parse(time)
+
+test('a from inside the spring-forward gap opens at the first instant after the gap', () => {
+  // Sunday Mar 8 2026 in New York goes from 02:00 EST straight to 03:00 EDT, which is 07:00Z
+  const hours: ActiveHours = { days: ['sun'], from: '02:30', to: '04:00' }
+  const opens = at('2026-03-08T07:00:00Z')
+  assert.equal(nextActiveStart(hours, at('2026-03-08T05:00:00Z'), tz), opens)
+  assert.equal(isActiveAt(hours, opens, tz), true)
+  // called again from the last instant before the gap, it does not skip to the next Sunday
+  assert.equal(nextActiveStart(hours, at('2026-03-08T06:30:00Z'), tz), opens)
+  assert.equal(nextActiveStart(hours, opens - 1, tz), opens)
+  // from there on, the next Sunday answers
+  assert.equal(nextActiveStart(hours, opens, tz), at('2026-03-15T06:30:00Z'))
+})
+
+test('a window wholly inside the gap has no active instant that day, and the next chosen day answers', () => {
+  for (const [from, to] of [['02:10', '02:50'], ['02:30', '03:00']] as const) {
+    const hours: ActiveHours = { days: ['sun'], from, to }
+    const after = at(`2026-03-15T06:${from.slice(3)}:00Z`)
+    assert.equal(nextActiveStart(hours, at('2026-03-08T05:00:00Z'), tz), after, `${from} the same day`)
+    // the Sunday before it looks past the empty one
+    assert.equal(nextActiveStart(hours, at('2026-03-01T17:00:00Z'), tz), after, `${from} a week before`)
+    assert.equal(isActiveAt(hours, after, tz), true)
+  }
+})
+
+test('a window straddling the gap opens at the gap\'s end or at from, whichever the clock reaches', () => {
+  // from before the gap: it opens at from, and the gap sits inside it
+  const before: ActiveHours = { days: ['sun'], from: '01:30', to: '03:30' }
+  assert.equal(nextActiveStart(before, at('2026-03-08T05:00:00Z'), tz), at('2026-03-08T06:30:00Z'))
+  assert.equal(isActiveAt(before, at('2026-03-08T06:59:00Z'), tz), true)
+  assert.equal(isActiveAt(before, at('2026-03-08T07:00:00Z'), tz), true)
+  // from exactly at the gap's start
+  assert.equal(nextActiveStart({ days: ['sun'], from: '02:00', to: '03:30' }, at('2026-03-08T05:00:00Z'), tz), at('2026-03-08T07:00:00Z'))
+})
+
+test('a from the clocks repeat opens first at its first occurrence, and again on the second pass', () => {
+  // Sunday Nov 1 2026 in New York: 01:30 EDT is 05:30Z, then 02:00 EDT falls back to 01:00 EST at 06:00Z, and 01:30 EST is 06:30Z
+  const hours: ActiveHours = { days: ['sun'], from: '01:30', to: '01:45' }
+  assert.equal(nextActiveStart(hours, at('2026-11-01T04:00:00Z'), tz), at('2026-11-01T05:30:00Z'))
+  // between the two passes the window is closed, and the timer must not skip the second
+  assert.equal(isActiveAt(hours, at('2026-11-01T05:50:00Z'), tz), false)
+  assert.equal(isActiveAt(hours, at('2026-11-01T06:35:00Z'), tz), true)
+  assert.equal(nextActiveStart(hours, at('2026-11-01T05:50:00Z'), tz), at('2026-11-01T06:30:00Z'))
+  // after both, the next Sunday
+  assert.equal(nextActiveStart(hours, at('2026-11-01T06:50:00Z'), tz), at('2026-11-08T06:30:00Z'))
+})
+
+test('a window that ends inside the repeated hour reopens when the clocks fall back into it', () => {
+  const hours: ActiveHours = { days: ['sun'], from: '00:30', to: '01:30' }
+  assert.equal(nextActiveStart(hours, at('2026-11-01T04:00:00Z'), tz), at('2026-11-01T04:30:00Z'))
+  // 01:30 EDT closed it at 05:30Z, and 01:00 EST at 06:00Z is inside it again
+  assert.equal(nextActiveStart(hours, at('2026-11-01T05:40:00Z'), tz), at('2026-11-01T06:00:00Z'))
+})
+
+test('an overnight window is invalid: never active, and no next start', () => {
+  // section 10's validation requires from before to, so a window never crosses midnight; one that reaches these functions anyway opens never, rather than answering an instant that is not active
+  const days: ActiveHours['days'] = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+  for (const [from, to] of [['22:00', '06:00'], ['09:00', '09:00']] as const) {
+    const hours: ActiveHours = { days, from, to }
+    for (const time of ['2026-10-27T03:00:00Z', '2026-10-27T10:00:00Z', '2026-10-27T13:00:00Z']) assert.equal(isActiveAt(hours, at(time), tz), false, `${from} ${time}`)
+    assert.equal(nextActiveStart(hours, at('2026-10-26T12:00:00Z'), tz), null, from)
+  }
+  assert.equal(nextActiveStart({ days: [], from: '09:00', to: '18:00' }, at('2026-10-26T12:00:00Z'), tz), null)
+})
+
+// every minute of the days around each clock change, read through isActiveAt: where it turns true is what nextActiveStart must answer
+const risingEdges = (hours: ActiveHours, from: number, to: number, timeZone: string): number[] => {
+  const edges: number[] = []
+  let was = isActiveAt(hours, from - minuteMs, timeZone)
+  for (let time = from; time < to; time += minuteMs) {
+    const active = isActiveAt(hours, time, timeZone)
+    if (active && !was) edges.push(time)
+    was = active
+  }
+  return edges
+}
+
+const allDays: ActiveHours['days'] = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+
+// the local dates of 2026's two clock changes, with a half-hour zone (St. John's) and a half-hour change (Lord Howe) beside New York
+const clockChanges: { timeZone: string, spring: string, fall: string, windows: [string, string][] }[] = [
+  { timeZone: 'America/New_York', spring: '2026-03-08', fall: '2026-11-01', windows: [['02:30', '04:00'], ['02:10', '02:50'], ['01:30', '03:30'], ['02:00', '03:00'], ['01:30', '01:45'], ['00:30', '01:30'], ['01:15', '02:15'], ['09:00', '18:00'], ['00:00', '23:59']] },
+  { timeZone: 'America/St_Johns', spring: '2026-03-08', fall: '2026-11-01', windows: [['02:30', '04:00'], ['02:10', '02:50'], ['01:30', '03:30'], ['01:30', '01:45'], ['00:30', '01:30'], ['09:00', '18:00']] },
+  { timeZone: 'Australia/Lord_Howe', spring: '2026-10-04', fall: '2026-04-05', windows: [['02:15', '04:00'], ['02:05', '02:25'], ['01:45', '02:15'], ['01:40', '01:50'], ['01:00', '01:40'], ['09:00', '18:00']] },
+]
+
+test('across both clock changes, every next start is active and is the first place the window opens', () => {
+  for (const { timeZone, spring, fall, windows } of clockChanges) {
+    for (const date of [spring, fall]) {
+      const noon = at(`${date}T12:00:00Z`)
+      const from = noon - 36 * 3_600_000
+      const to = noon + 36 * 3_600_000
+      for (const days of [allDays, [weekdayNames[new Date(noon).getUTCDay()]!]]) {
+        for (const [start, end] of windows) {
+          const hours: ActiveHours = { days, from: start, to: end }
+          const edges = risingEdges(hours, from, to, timeZone)
+          const hourly = Array.from({ length: 48 }, (_, index) => from + index * 3_600_000)
+          for (const time of [...hourly, ...edges.flatMap((edge) => [edge - 1, edge, edge + minuteMs])]) {
+            const label = `${timeZone} ${date} ${days.length} ${start}-${end} from ${new Date(time).toISOString()}`
+            const next = nextActiveStart(hours, time, timeZone)
+            assert.notEqual(next, null, label)
+            assert.equal(isActiveAt(hours, next!, timeZone), true, label)
+            assert.equal(isActiveAt(hours, next! - minuteMs, timeZone), false, `${label}: the minute before`)
+            const expected = edges.find((edge) => edge > time)
+            if (expected !== undefined) assert.equal(next, expected, label)
+          }
+        }
+      }
+    }
+  }
 })
 
 // qualification
@@ -252,7 +372,7 @@ test('the sweep qualifies when a Dependabot PR is new or has a new head, and ign
   assert.deepEqual(kinds({ lastSweepRows: [{ number: 99, head: dependabot.headSha }] }), ['dependabot'])
   // renovate (115) alone never qualifies
   const withoutDependabot = rows.filter((row) => row.number !== 114)
-  assert.deepEqual(buildQueue(queueInput(withoutDependabot, { settings: only })).items, [])
+  assert.deepEqual(buildQueue(queueInput(withoutDependabot, { settings: only, openPrs: fixturePrs.filter((pr) => pr.number !== 114) })).items, [])
 })
 
 test('the sweep item names the Dependabot PRs it covers', async () => {
@@ -270,6 +390,56 @@ test('at most one sweep is queued or running', async () => {
   // finished and failed sweeps do not hold the slot; a manual sweep in flight does
   assert.equal(buildQueue(queueInput(rows, { settings: only, sweeps: [sweep({ id: 1, status: 'failed' })] })).items.length, 1)
   assert.equal(buildQueue(queueInput(rows, { settings: only, sweeps: [sweep({ id: 1, status: 'running', origin: 'manual' })] })).items.length, 0)
+})
+
+// Dependabot is told by its author, not by the owner's bots grouping
+
+const noDependabotBots = { ...config, bots: ['renovate'] }
+
+test('with Dependabot off the bots list, its open PR still sweeps and is never queued singly', () => {
+  const rows = rowsOf(fixturePrs, noDependabotBots)
+  // it really is in Your move now, so only the author test keeps it out
+  assert.deepEqual([byNumber(rows, 114).section, (byNumber(rows, 114) as OtherRow).group], ['others', 'yourMove'])
+  const queue = buildQueue(queueInput(rows, { settings: settings({ dependabot: true }) }))
+  assert.ok(!numbers(queue.items).includes(114))
+  assert.deepEqual(queue.items.filter((item) => item.kind === 'dependabot'), [{ kind: 'dependabot', reason: 'dependabot', prs: [114] }])
+})
+
+test('with the Dependabot opt-in off, its PR is not queued at all, even from Your move', () => {
+  const rows = rowsOf(fixturePrs, noDependabotBots)
+  const queue = buildQueue(queueInput(rows))
+  assert.ok(!numbers(queue.items).includes(114))
+  assert.ok(!queue.items.some((item) => item.kind === 'dependabot'))
+  // nor does it count as a qualifying PR of the others' kind
+  assert.equal(queue.qualified, buildQueue(queueInput(rowsOf(fixturePrs))).qualified)
+})
+
+test('an open Dependabot PR the rows hide or put in another group still sweeps', () => {
+  const only = settings({ others: false, dependabot: true })
+  // off the bots list a draft is hidden from the rows altogether
+  const draft = patchPr(114, { isDraft: true })
+  assert.equal(rowsOf(draft, noDependabotBots).some((row) => row.number === 114), false)
+  assert.deepEqual(buildQueue(queueInput(rowsOf(draft, noDependabotBots), { settings: only, openPrs: draft })).items, [{ kind: 'dependabot', reason: 'dependabot', prs: [114] }])
+  // Ready to merge, for an approved clean PR
+  const ready = patchPr(114, { mergeStateStatus: 'CLEAN', reviewDecision: 'APPROVED' })
+  assert.equal((byNumber(rowsOf(ready, noDependabotBots), 114) as OtherRow).group, 'readyToMerge')
+  assert.deepEqual(buildQueue(queueInput(rowsOf(ready, noDependabotBots), { settings: only, openPrs: ready })).items, [{ kind: 'dependabot', reason: 'dependabot', prs: [114] }])
+  // a new head on one the rows hide is due again, and the head the last sweep saw is not
+  const seen = [{ number: 114, head: fixturePrs.find((pr) => pr.number === 114)!.headRefOid }]
+  assert.deepEqual(buildQueue(queueInput(rowsOf(draft, noDependabotBots), { settings: only, openPrs: draft, lastSweepRows: seen })).items, [])
+  const moved = patchPr(114, { isDraft: true, headRefOid: 'd'.repeat(40) })
+  assert.equal(buildQueue(queueInput(rowsOf(moved, noDependabotBots), { settings: only, openPrs: moved, lastSweepRows: seen })).items.length, 1)
+})
+
+test('a Dependabot PR is never queued as an own PR either, and other bots stay out of the sweep', () => {
+  const viewerIsBot = { ...config, viewer: 'dependabot' }
+  const rows = rowsOf(fixturePrs, viewerIsBot)
+  assert.equal(byNumber(rows, 114).section, 'mine')
+  const queue = buildQueue(queueInput(rows, { settings: settings({ others: false, own: true }) }))
+  assert.ok(!numbers(queue.items).includes(114))
+  // renovate's 115 is not swept, whatever the bots list holds
+  const sweepItem = buildQueue(queueInput(rowsOf(fixturePrs, { ...config, bots: [] }), { settings: settings({ others: false, dependabot: true }) })).items[0]
+  assert.deepEqual(sweepItem, { kind: 'dependabot', reason: 'dependabot', prs: [114] })
 })
 
 // counts for the tick's record
@@ -316,15 +486,21 @@ test('the start budget is the smallest of concurrency room, the limit left, and 
 
 // the check before a queued run starts
 
-test('before it starts, a closed PR is dropped and a moved head is recorded', async () => {
-  const rows = await fixtureRows()
-  const row = byNumber(rows, 113)
-  const item = { kind: 'others' as const, number: 113, reason: 'new' as const, retry: false, headSha: row.headSha }
-  assert.deepEqual(recheckQueued(item, rows), { action: 'start', headSha: row.headSha })
-  assert.deepEqual(recheckQueued(item, rows.filter((candidate) => candidate.number !== 113)), { action: 'drop', note: 'closed' })
-  const moved = rows.map((candidate) => candidate.number === 113 ? { ...candidate, headSha: 'f'.repeat(40) } as OpenRow : candidate)
-  assert.deepEqual(recheckQueued(item, moved), { action: 'start', headSha: 'f'.repeat(40) })
+test('before it starts, a closed PR is dropped and a moved head is recorded', () => {
+  const head = fixturePrs.find((pr) => pr.number === 113)!.headRefOid
+  const item = { kind: 'others' as const, number: 113, reason: 'new' as const, retry: false, headSha: head }
+  assert.deepEqual(recheckQueued(item, fixturePrs), { action: 'start', headSha: head })
+  assert.deepEqual(recheckQueued(item, fixturePrs.filter((pr) => pr.number !== 113)), { action: 'drop', note: 'closed' })
+  assert.deepEqual(recheckQueued(item, patchPr(113, { headRefOid: 'f'.repeat(40) })), { action: 'start', headSha: 'f'.repeat(40) })
   assert.deepEqual(recheckQueued({ kind: 'dependabot', reason: 'dependabot', prs: [114] }, []), { action: 'start', headSha: null })
+})
+
+test('a queued run whose PR became a draft is not closed: it starts, at the head the open list holds', () => {
+  const prs = patchPr(113, { isDraft: true, headRefOid: 'e'.repeat(40) })
+  // others' drafts are hidden from the rows, so the row is really gone
+  assert.equal(rowsOf(prs).some((row) => row.number === 113), false)
+  const item = { kind: 'others' as const, number: 113, reason: 'new' as const, retry: false, headSha: 'abc1234' }
+  assert.deepEqual(recheckQueued(item, prs), { action: 'start', headSha: 'e'.repeat(40) })
 })
 
 // the worktree sweep
@@ -371,7 +547,7 @@ test('the sweep removes only direct run-<digits> and sweep-<digits> entries whos
     run({ id: 52, number: 6, status: 'done' }),
   ]
   const sweeps = [sweep({ id: 3, status: 'done' }), sweep({ id: 4, status: 'running' })]
-  const { remove, keep } = selectOrphanWorktrees({ listed, dir, runs, sweeps, rows: [] })
+  const { remove, keep } = selectOrphanWorktrees({ listed, dir, runs, sweeps, openPrs: [] })
   assert.deepEqual(remove.map((entry) => entry.path), [`${dir}/run-42`, `${dir}/run-47`, `${dir}/sweep-3`])
   assert.deepEqual(keep.map((entry) => entry.path), [`${dir}/run-43`, `${dir}/run-44`, `${dir}/sweep-4`])
 })
@@ -384,35 +560,105 @@ test('a stopped, done, or rowless run goes; a waiting or failed one stays until 
     run({ id: 1, number: 113, headOid: head, status: 'needsInput' }),
     run({ id: 2, number: 111, headOid: byNumber(rows, 111).headSha, status: 'failed' }),
     run({ id: 3, number: 112, headOid: byNumber(rows, 112).headSha, status: 'stopped' }),
-    // settled: a newer run exists for the PR (a retry)
+    // settled: a newer run started for the PR (a retry)
     run({ id: 4, number: 106, headOid: byNumber(rows, 106).headSha, status: 'failed' }),
-    run({ id: 8, number: 106, headOid: byNumber(rows, 106).headSha, status: 'running' }),
-    // settled: the PR closed (no open row), or its head moved
+    run({ id: 8, number: 106, headOid: byNumber(rows, 106).headSha, status: 'running', startedAt: '2026-10-26T13:00:00Z' }),
+    // settled: the PR closed (not in the open list), or its head moved
     run({ id: 5, number: 999, headOid: head, status: 'needsInput' }),
     run({ id: 6, number: 107, headOid: 'aaaaaaa1', status: 'failed' }),
   ]
-  const result = selectOrphanWorktrees({ listed, dir, runs, sweeps: [], rows })
+  const result = selectOrphanWorktrees({ listed, dir, runs, sweeps: [], openPrs: fixturePrs })
   assert.deepEqual(result.keep.map((entry) => entry.id), [1, 2])
   assert.deepEqual(result.remove.map((entry) => entry.id), [3, 4, 5, 6, 7])
   // a caller that knows the session ended says so
-  const settled = selectOrphanWorktrees({ listed, dir, runs: runs.map((entry) => entry.id === 1 ? { ...entry, settled: true } : entry), sweeps: [], rows })
+  const settled = selectOrphanWorktrees({ listed, dir, runs: runs.map((entry) => entry.id === 1 ? { ...entry, settled: true } : entry), sweeps: [], openPrs: fixturePrs })
   assert.deepEqual(settled.keep.map((entry) => entry.id), [2])
 })
 
-test('a failed or waiting sweep stays until a newer sweep exists', () => {
+test('a failed or waiting sweep stays until a newer sweep has started', () => {
   const listed = [`${dir}/sweep-1`, `${dir}/sweep-2`]
-  const alone = selectOrphanWorktrees({ listed, dir, runs: [], sweeps: [sweep({ id: 1, status: 'failed' })], rows: [] })
+  const select = (newer: AutoSweep) => selectOrphanWorktrees({ listed: [`${dir}/sweep-1`], dir, runs: [], sweeps: [sweep({ id: 1, status: 'failed' }), newer], openPrs: fixturePrs })
+  const alone = selectOrphanWorktrees({ listed, dir, runs: [], sweeps: [sweep({ id: 1, status: 'failed' })], openPrs: [] })
   assert.deepEqual(alone.keep.map((entry) => entry.id), [1])
-  const newer = selectOrphanWorktrees({ listed, dir, runs: [], sweeps: [sweep({ id: 1, status: 'failed' }), sweep({ id: 2, status: 'done' })], rows: [] })
-  assert.deepEqual(newer.remove.map((entry) => entry.id), [1, 2])
+  assert.deepEqual(select(sweep({ id: 2, status: 'queued' })).keep.map((entry) => entry.id), [1], 'queued')
+  assert.deepEqual(select(sweep({ id: 2, status: 'stopped' })).keep.map((entry) => entry.id), [1], 'stopped before it started')
+  assert.deepEqual(select(sweep({ id: 2, status: 'skipped' })).keep.map((entry) => entry.id), [1], 'skipped')
+  assert.deepEqual(select(sweep({ id: 2, status: 'running', startedAt: '2026-10-26T13:00:00Z' })).remove.map((entry) => entry.id), [1], 'running')
+  assert.deepEqual(select(sweep({ id: 2, status: 'stopped', startedAt: '2026-10-26T13:00:00Z' })).remove.map((entry) => entry.id), [1], 'stopped after it started')
+})
+
+test('a waiting or failed run is settled by a newer run that started, not one that only exists', () => {
+  const started = '2026-10-26T13:00:00Z'
+  const head = fixturePrs.find((pr) => pr.number === 113)!.headRefOid
+  const select = (newer: AutoRun, status: AutoRun['status'] = 'needsInput') => selectOrphanWorktrees({
+    listed: [`${dir}/run-1`],
+    dir,
+    runs: [run({ id: 1, number: 113, headOid: head, status }), newer],
+    sweeps: [],
+    openPrs: fixturePrs,
+  })
+  for (const status of ['needsInput', 'failed'] as const) {
+    assert.deepEqual(select(run({ id: 2, number: 113, headOid: head, status: 'queued' }), status).keep.map((entry) => entry.id), [1], `${status}, newer queued`)
+    assert.deepEqual(select(run({ id: 2, number: 113, headOid: head, status: 'stopped' }), status).keep.map((entry) => entry.id), [1], `${status}, newer stopped before it started`)
+    assert.deepEqual(select(run({ id: 2, number: 113, headOid: head, status: 'skipped' }), status).keep.map((entry) => entry.id), [1], `${status}, newer skipped`)
+    // a queued row may carry a time from the queue; it has still not started
+    assert.deepEqual(select(run({ id: 2, number: 113, headOid: head, status: 'queued', startedAt: started }), status).keep.map((entry) => entry.id), [1], `${status}, newer queued with a time`)
+    assert.deepEqual(select(run({ id: 2, number: 113, headOid: head, status: 'running', startedAt: started }), status).remove.map((entry) => entry.id), [1], `${status}, newer running`)
+    assert.deepEqual(select(run({ id: 2, number: 113, headOid: head, status: 'done', startedAt: started }), status).remove.map((entry) => entry.id), [1], `${status}, newer done`)
+    assert.deepEqual(select(run({ id: 2, number: 113, headOid: head, status: 'stopped', startedAt: started }), status).remove.map((entry) => entry.id), [1], `${status}, newer stopped after it started`)
+    // whoever started it
+    assert.deepEqual(select(run({ id: 2, number: 113, headOid: head, status: 'running', startedAt: started, origin: 'manual' }), status).remove.map((entry) => entry.id), [1], `${status}, newer manual`)
+    // an older run or another PR's run settles nothing
+    assert.deepEqual(select(run({ id: 0, number: 113, headOid: head, status: 'done', startedAt: started }), status).keep.map((entry) => entry.id), [1], `${status}, older`)
+    assert.deepEqual(select(run({ id: 2, number: 111, headOid: head, status: 'running', startedAt: started }), status).keep.map((entry) => entry.id), [1], `${status}, another PR`)
+  }
+})
+
+test('a PR converted to a draft has not closed: its waiting and failed worktrees stay', () => {
+  const head = fixturePrs.find((pr) => pr.number === 113)!.headRefOid
+  const prs = patchPr(113, { isDraft: true })
+  assert.equal(rowsOf(prs).some((row) => row.number === 113), false)
+  const runs = [run({ id: 1, number: 113, headOid: head, status: 'needsInput' }), run({ id: 2, number: 113, headOid: head, status: 'failed' })]
+  const kept = selectOrphanWorktrees({ listed: [`${dir}/run-1`, `${dir}/run-2`], dir, runs, sweeps: [], openPrs: prs })
+  assert.deepEqual(kept.keep.map((entry) => entry.id), [1, 2])
+  // the draft's head is read from the open list too, so a push to it is still noticed
+  const moved = selectOrphanWorktrees({ listed: [`${dir}/run-1`], dir, runs, sweeps: [], openPrs: patchPr(113, { isDraft: true, headRefOid: 'c'.repeat(40) }) })
+  assert.deepEqual(moved.remove.map((entry) => entry.id), [1])
+})
+
+test('a PR that left the open list has closed, and one at a new head has moved on', () => {
+  const head = fixturePrs.find((pr) => pr.number === 113)!.headRefOid
+  const runs = [run({ id: 1, number: 113, headOid: head, status: 'needsInput' })]
+  const select = (openPrs: readonly RawOpenPr[]) => selectOrphanWorktrees({ listed: [`${dir}/run-1`], dir, runs, sweeps: [], openPrs })
+  assert.deepEqual(select(fixturePrs).keep.map((entry) => entry.id), [1])
+  assert.deepEqual(select(fixturePrs.filter((pr) => pr.number !== 113)).remove.map((entry) => entry.id), [1])
+  assert.deepEqual(select(patchPr(113, { headRefOid: 'c'.repeat(40) })).remove.map((entry) => entry.id), [1])
+})
+
+test('with no open list yet nothing reads as closed, so an unsettled worktree stays and a finished one still goes', () => {
+  // a rebuilt cache keeps its runs and has no PRs until a listing completes; startup's sweep may read it then
+  const runs = [
+    run({ id: 1, number: 113, headOid: 'abc1234', status: 'needsInput' }),
+    run({ id: 2, number: 111, headOid: 'abc1234', status: 'failed' }),
+    run({ id: 3, number: 112, headOid: 'abc1234', status: 'done' }),
+    run({ id: 4, number: 113, headOid: 'abc1234', status: 'needsInput', settled: true }),
+    run({ id: 6, number: 111, headOid: 'abc1234', status: 'failed' }),
+    run({ id: 7, number: 111, headOid: 'abc1234', status: 'running', startedAt: '2026-10-26T13:00:00Z' }),
+  ]
+  const result = selectOrphanWorktrees({ listed: [1, 2, 3, 4, 5, 6].map((id) => `${dir}/run-${id}`), dir, runs: runs.slice(0, 5), sweeps: [], openPrs: null })
+  assert.deepEqual(result.keep.map((entry) => entry.id), [1, 2, 6])
+  assert.deepEqual(result.remove.map((entry) => entry.id), [3, 4, 5])
+  // what the records alone can settle is still settled
+  const started = selectOrphanWorktrees({ listed: [`${dir}/run-6`], dir, runs, sweeps: [], openPrs: null })
+  assert.deepEqual(started.remove.map((entry) => entry.id), [6])
 })
 
 test('the listed paths are compared as given, so a caller passes git\'s resolved folder', () => {
   // git lists resolved paths; a dir that is only a symlink spelling matches nothing
-  const result = selectOrphanWorktrees({ listed: [`${dir}/run-1`], dir: '/fixture/link/worktrees', runs: [], sweeps: [], rows: [] })
+  const result = selectOrphanWorktrees({ listed: [`${dir}/run-1`], dir: '/fixture/link/worktrees', runs: [], sweeps: [], openPrs: [] })
   assert.deepEqual([result.remove, result.keep], [[], []])
   // a trailing slash on the folder is the same folder
-  assert.equal(selectOrphanWorktrees({ listed: [`${dir}/run-1`], dir: `${dir}/`, runs: [], sweeps: [], rows: [] }).remove.length, 1)
+  assert.equal(selectOrphanWorktrees({ listed: [`${dir}/run-1`], dir: `${dir}/`, runs: [], sweeps: [], openPrs: [] }).remove.length, 1)
 })
 
 test('directories in the folder that git no longer lists are reported, never selected for removal', () => {
