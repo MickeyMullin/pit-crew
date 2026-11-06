@@ -578,9 +578,9 @@ test('a sweep behind a full cap waits in the one queue, with no process or folde
     await waitFor(() => h.cache.getSweep(sweep.id)?.pid != null)
     const started = h.cache.getSweep(sweep.id)
     assert.equal(started?.status, 'running')
-    // its start time is when it started, not when it was queued, and it starts with the same second checks as a queued review
+    // its start time is when it started, not when it was queued, and it starts on checks made in the queue, as a queued review does: one more set, or two when the first passed while the launch ahead of it was still returning
     assert.notEqual(started?.startedAt, sweep.startedAt)
-    assert.equal(h.gh.calls.filter((call) => call.args[0] === 'api').length, 6)
+    assert.ok([6, 7].includes(h.gh.calls.filter((call) => call.args[0] === 'api').length))
     assert.equal(h.cache.getRun(later.id)?.status, 'queued')
     assert.equal(h.launch.children[2]!.request.cwd, join(h.home, 'dev', 'orbit'))
     await waitFor(() => h.changes.at(-1)?.status === 'running')
@@ -589,6 +589,28 @@ test('a sweep behind a full cap waits in the one queue, with no process or folde
     await h.launcher.settled(sweep.id)
     await waitFor(() => h.launch.children.length === 4)
     assert.deepEqual(startOrder(h), [113, 118, 'sweep', 106])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a sweep never spawns on checks made before it waited: gh switches accounts while it waits behind an earlier review, which is then refused', async () => {
+  const accounts = armedGate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 3 } })
+  try {
+    accounts.arm()
+    const earlier = h.runs.start(review(106))
+    await waitFor(() => accounts.held() === 1)
+    const sweep = h.launcher.start(start())
+    await quiet()
+    login.current = 'someone-else'
+    accounts.open(0)
+    await assert.rejects(earlier, (error: unknown) => error instanceof LaunchError && error.code === 'identityMismatch')
+    const answer = await within(sweep)
+    await quiet()
+    assert.equal(h.launch.children.length, 0, 'the sweep spawned under an account nobody confirmed')
+    assert.equal(h.cache.getSweep(answer.id)?.status, 'failed')
   } finally {
     await h.cleanup()
   }

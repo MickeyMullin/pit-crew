@@ -73,7 +73,8 @@ export const fixtureRunner = (): FakeRunner =>
 // a fresh directory under the OS temp dir, removed by the returned cleanup
 export const tempDir = async (): Promise<{ dir: string, cleanup: () => Promise<void> }> => {
   const dir = await mkdtemp(join(tmpdir(), 'pit-view-test-'))
-  return { dir, cleanup: () => rm(dir, { recursive: true, force: true }) }
+  // retried, since a launch the queue let go in the background may still be writing to its folder when a test ends
+  return { dir, cleanup: () => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }) }
 }
 
 export type FakeTime = {
@@ -350,6 +351,19 @@ export const fakeLaunch = ({ remotes = fakeRemotes('octo-example/orbit'), fs = {
   }
   fake.deps = deps
   return fake
+}
+
+// a fake launch whose next clone checks fail as the test asks, with gh's account unchanged
+export const refusableClone = () => {
+  const launch = fakeLaunch()
+  const clone = { refuse: 0 }
+  const git = launch.deps.git
+  launch.deps.git = async (args) => {
+    if (clone.refuse === 0) return git(args)
+    clone.refuse -= 1
+    return failed('fatal: not a git repository (or any of the parent directories): .git')
+  }
+  return { launch, clone }
 }
 
 // a review-result@1 as the commands write it, changed by patch

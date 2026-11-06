@@ -22,7 +22,7 @@ import { scanReports } from '../src/reports.ts'
 import type { Patch } from '../src/poller.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { sweepRequest } from '../src/sweeps.ts'
-import { fakeLaunch, fakeRemotes, fakeRunner, fakeTime, fixCommits, armedGate as gate, gatedGh, quiet, waitFor, within, fixHead, fixPushedHead, fixRequest, fixResult, fixtureRunner, ok, openPage1, openPage2, reviewResult, tempDir, updateHead, updateResult } from './helpers.ts'
+import { fakeLaunch, fakeRemotes, fakeRunner, fakeTime, fixCommits, armedGate as gate, gatedGh, githubCalls, quiet, refusableClone, waitFor, within, fixHead, fixPushedHead, fixRequest, fixResult, fixtureRunner, ok, openPage1, openPage2, reviewResult, tempDir, updateHead, updateResult } from './helpers.ts'
 import type { FakeLaunch, FakeRunner } from './helpers.ts'
 
 const second = 1000
@@ -2701,10 +2701,11 @@ test('starts decide in the order they arrived, however their checks race: a late
   }
 })
 
-test('a start refused in its checks is refused at once, whatever is ahead of it, and one behind a start that is refused then starts at once', async () => {
+test('a start refused in its checks is refused at once, whatever is ahead of it, and one behind a start that is refused then starts once its checks pass again', async () => {
   const accounts = gate()
   const login = { current: scenario.viewer as string }
-  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 3 } })
+  const { launch, clone } = refusableClone()
+  const h = await harness({ launch, gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 3 } })
   try {
     accounts.arm()
     const earlier = h.launcher.start(request(106))
@@ -2717,12 +2718,254 @@ test('a start refused in its checks is refused at once, whatever is ahead of it,
     const later = h.launcher.start(request(113, { label: 'Review' }))
     await quiet()
     assert.equal(h.launch.children.length, 0)
-    // the earlier one is refused too: the later one is then the sole start, which goes at once rather than queued
+    // the earlier one is refused too, on its clone with the account unchanged: the later one waited, so it makes its checks again, and then starts
+    clone.refuse = 1
+    accounts.open(0)
+    await assert.rejects(earlier, (error: unknown) => error instanceof LaunchError && error.code === 'notAClone')
+    const answer = await within(later)
+    await waitFor(() => h.launch.children.length === 1)
+    assert.deepEqual(startOrder(h), [113])
+    assert.equal(h.cache.getRun(answer.id)?.status, 'running')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// a check made before a wait is stale after it: a start that waited for its turn is let go only on checks made when nothing is ahead of it (section 8 of DESIGN.md, Review cap, Queueing and Leaving the queue)
+
+test('a later start never spawns on checks made before it waited: gh switches accounts while it waits behind an earlier start, which is then refused', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 3 } })
+  try {
+    accounts.arm()
+    const earlier = h.launcher.start(request(106))
+    await waitFor(() => accounts.held() === 1)
+    // the later start's own checks pass, and it waits for the earlier one to be decided
+    const later = h.launcher.start(request(113, { label: 'Review' }))
+    await quiet()
+    assert.equal(h.launch.children.length, 0)
     login.current = 'someone-else'
     accounts.open(0)
     await assert.rejects(earlier, (error: unknown) => error instanceof LaunchError && error.code === 'identityMismatch')
-    assert.equal((await within(later)).status, 'running')
+    const answer = await within(later)
+    await quiet()
+    assert.equal(h.launch.children.length, 0, 'the later start spawned under an account nobody confirmed')
+    const row = h.cache.getRun(answer.id)
+    assert.equal(row?.status, 'failed')
+    assert.equal(noteKind(row?.note ?? null), 'spawnFailed')
+    assert.match(row?.note ?? '', /someone-else/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the same wait with the account unchanged still starts the later start, on one more account check made after the wait', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const { launch, clone } = refusableClone()
+  const h = await harness({ launch, gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 3 } })
+  try {
+    accounts.arm()
+    const earlier = h.launcher.start(request(106))
+    await waitFor(() => accounts.held() === 1)
+    const later = h.launcher.start(request(113, { label: 'Review' }))
+    await quiet()
+    assert.equal(githubCalls(h.gh).length, 2)
+    clone.refuse = 1
+    accounts.open(0)
+    await assert.rejects(earlier, (error: unknown) => error instanceof LaunchError && error.code === 'notAClone')
+    const answer = await within(later)
+    await waitFor(() => h.launch.children.length === 1)
     assert.deepEqual(startOrder(h), [113])
+    assert.equal(h.cache.getRun(answer.id)?.status, 'running')
+    assert.equal(githubCalls(h.gh).length, 3)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a start that never waited makes one account check and goes at once: alone, and when the start ahead of it was refused before its own checks ended', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const { launch, clone } = refusableClone()
+  const h = await harness({ launch, gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 3 } })
+  try {
+    const alone = await h.launcher.start(request(109))
+    assert.equal(alone.status, 'running')
+    assert.equal(githubCalls(h.gh).length, 1)
+    accounts.arm(2)
+    const earlier = h.launcher.start(request(106))
+    await waitFor(() => accounts.held() === 1)
+    const later = h.launcher.start(request(113, { label: 'Review' }))
+    await waitFor(() => accounts.held() === 2)
+    clone.refuse = 1
+    accounts.open(0)
+    await assert.rejects(earlier, (error: unknown) => error instanceof LaunchError && error.code === 'notAClone')
+    // its own checks end with nothing left ahead of it, so it had nothing to wait for
+    accounts.open(1)
+    assert.equal((await within(later)).status, 'running')
+    assert.equal(githubCalls(h.gh).length, 3)
+    assert.ok(!h.changes.some((run) => run.status === 'queued'))
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a self-review the overage would let in never goes over the cap on checks made before it waited behind an earlier start', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1, selfReviewOverCap: true } })
+  try {
+    h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+    await h.launcher.start(request(106))
+    accounts.arm()
+    const earlier = h.launcher.start(request(113, { label: 'Review' }))
+    await waitFor(() => accounts.held() === 1)
+    const self = h.launcher.start(selfRequest(101))
+    await quiet()
+    login.current = 'someone-else'
+    accounts.open(0)
+    await assert.rejects(earlier, (error: unknown) => error instanceof LaunchError && error.code === 'identityMismatch')
+    const answer = await within(self)
+    await quiet()
+    assert.deepEqual(startOrder(h), [106], 'the self-review spawned under an account nobody confirmed')
+    assert.equal(h.cache.getRun(answer.id)?.status, 'failed')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the same wait with the account unchanged lets the self-review go over the cap, once, on one more account check made after the wait', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const { launch, clone } = refusableClone()
+  const h = await harness({ launch, gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1, selfReviewOverCap: true } })
+  try {
+    h.cache.writePr(scenario.repo, await prOf(101), scenario.defaultBranch)
+    await h.launcher.start(request(106))
+    accounts.arm()
+    const earlier = h.launcher.start(request(113, { label: 'Review' }))
+    await waitFor(() => accounts.held() === 1)
+    const self = h.launcher.start(selfRequest(101))
+    await quiet()
+    const before = githubCalls(h.gh).length
+    clone.refuse = 1
+    accounts.open(0)
+    await assert.rejects(earlier, (error: unknown) => error instanceof LaunchError && error.code === 'notAClone')
+    const answer = await within(self)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.deepEqual(startOrder(h), [106, 101])
+    assert.equal(h.cache.getRun(answer.id)?.status, 'running')
+    assert.equal(githubCalls(h.gh).length, before + 1)
+    // the one place over the cap is taken, so the next review waits
+    assert.equal((await h.launcher.start(request(118, { label: 'Review' }))).status, 'queued')
+    await quiet()
+    assert.equal(h.launch.children.length, 2)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a new start behind a queued review still in its checks never spawns on checks made before that review was refused', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+  try {
+    await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    accounts.arm()
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 3 }
+    h.launcher.drain()
+    await waitFor(() => accounts.held() === 1)
+    // the new start queues behind it, and every check it has made so far passes
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    assert.equal(later.status, 'queued')
+    await quiet()
+    login.current = 'someone-else'
+    accounts.open(0)
+    await waitFor(() => h.cache.getRun(earlier.id)?.status === 'failed')
+    await quiet()
+    assert.deepEqual(startOrder(h), [106], 'the new start spawned under an account nobody confirmed')
+    assert.equal(h.cache.getRun(later.id)?.status, 'failed')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a queued review whose checks passed behind an earlier one in its checks makes them again when that one is refused, and fails on the account gh uses by then', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const h = await harness({ gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+  try {
+    await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    accounts.arm(2)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 3 }
+    h.launcher.drain()
+    await waitFor(() => accounts.held() === 2)
+    accounts.open(1)
+    await quiet()
+    login.current = 'someone-else'
+    accounts.open(0)
+    await waitFor(() => h.cache.getRun(earlier.id)?.status === 'failed')
+    await quiet()
+    assert.deepEqual(startOrder(h), [106], 'the later review spawned under an account nobody confirmed')
+    assert.equal(h.cache.getRun(later.id)?.status, 'failed')
+    assert.equal(noteKind(h.cache.getRun(later.id)?.note ?? null), 'spawnFailed')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the same queued wait with the account unchanged still starts the later review, on one more account check made after the wait', async () => {
+  const accounts = gate()
+  const login = { current: scenario.viewer as string }
+  const { launch, clone } = refusableClone()
+  const h = await harness({ launch, gh: gatedGh(accounts, login), config: { maxConcurrentReviews: 1 } })
+  try {
+    await h.launcher.start(request(106))
+    const earlier = await h.launcher.start(request(113, { label: 'Review' }))
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    const before = githubCalls(h.gh).length
+    accounts.arm(2)
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 3 }
+    h.launcher.drain()
+    await waitFor(() => accounts.held() === 2)
+    accounts.open(1)
+    await quiet()
+    clone.refuse = 1
+    accounts.open(0)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.deepEqual(startOrder(h), [106, 118])
+    assert.equal(h.cache.getRun(earlier.id)?.status, 'failed')
+    assert.equal(h.cache.getRun(later.id)?.status, 'running')
+    assert.equal(githubCalls(h.gh).length, before + 3)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a queued review whose checks passed behind one still being launched makes them again when that launch returns', async () => {
+  const login = { current: scenario.viewer as string }
+  const { launch, folders } = observedLaunch()
+  const h = await harness({ launch, gh: gatedGh(gate(), login), config: { maxConcurrentReviews: 1 } })
+  try {
+    await h.launcher.start(request(106))
+    await h.launcher.start(request(113, { label: 'Review' }))
+    const later = await h.launcher.start(request(118, { label: 'Review' }))
+    folders.arm()
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 3 }
+    h.launcher.drain()
+    await waitFor(() => folders.held() === 1)
+    await quiet()
+    login.current = 'someone-else'
+    folders.open(0)
+    await waitFor(() => h.launch.children.length >= 2)
+    await quiet()
+    assert.deepEqual(startOrder(h), [106, 113], 'the later review spawned under an account nobody confirmed')
+    assert.equal(h.cache.getRun(later.id)?.status, 'failed')
   } finally {
     await h.cleanup()
   }
