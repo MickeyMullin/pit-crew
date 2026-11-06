@@ -1287,9 +1287,12 @@ export const descendantGroups = (entries: readonly ProcessEntry[], pid: number):
 
 export type Procs = {
   list: () => Promise<ProcessEntry[]>
-  // the start time ps prints for a pid, or null when ps gives none: there is no such process, or ps failed
+  // the start time ps prints for a pid, in UTC and the C locale, or null when ps gives none: there is no such process, or ps failed
   startTime: (pid: number) => Promise<string | null>
 }
+
+// the text ps prints for a start time follows the time zone and the locale of its environment, so every lookup pins both, and a change of the machine's settings during a run never reads as a different process
+const startTimeEnv = { TZ: 'UTC', LC_ALL: 'C' }
 
 export const procsFrom = (ps: Runner): Procs => ({
   list: async () => {
@@ -1298,7 +1301,7 @@ export const procsFrom = (ps: Runner): Procs => ({
     return parsePs(result.stdout)
   },
   startTime: async (pid) => {
-    const result = await ps(['-o', 'lstart=', '-p', String(pid)])
+    const result = await ps(['-o', 'lstart=', '-p', String(pid)], { env: startTimeEnv })
     const text = result.stdout.trim()
     return result.code === 0 && text !== '' ? text : null
   },
@@ -2180,12 +2183,18 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
-  const signalGroup = (pgid: number, signal: NodeJS.Signals): void => {
+  // the one place a signal is sent. An answer that was awaited is stale once its continuation resumes, so the state is read here, with nothing awaited between this reading and the kill: a run whose exit was observed, or that has begun to settle, is no longer ours to signal, and a server that has closed has handed its runs on to the next one. Answers whether the signal went
+  const signalGroup = (entry: Live, pgid: number, signal: NodeJS.Signals): boolean => {
+    if (closed || entry.exited || entry.settling) {
+      log(`${noun} ${entry.id}: no ${signal} sent to process group ${pgid}, since ${closed ? 'the server has closed' : `the ${noun} has ended`}`)
+      return false
+    }
     try {
       kill(-pgid, signal)
     } catch (error) {
       log(`cannot send ${signal} to process group ${pgid}: ${messageOf(error)}`)
     }
+    return true
   }
 
   // who holds a watched run's pid at this moment (section 8, Launching runs, Is this pid the run's). 'gone' is the same as an observed exit: its exit was observed, nothing holds the pid, or the holder's start time differs from the recorded one. 'ours' is a matching start time, or a child whose exit has not been observed, since the system keeps a pid until its parent has reaped the child and the exit is reported in that same step. 'unknown' is a recovered run's live pid whose start time cannot be read, which proves neither
@@ -2755,7 +2764,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return run
   }
 
-  // the holder of a stopping run's pid decides its next signal: a process that has gone settles the run with nothing sent, and an unknown holder is sent nothing and asked about again after the grace period. Only 'ours' answers true, with nothing awaited between the comparison and the signal
+  // the holder of a stopping run's pid decides its next signal: a process that has gone settles the run with nothing sent, and an unknown holder is sent nothing and asked about again after the grace period. Only 'ours' answers true, and signalGroup has the last word on it
   const maySignal = (entry: Live, holder: PidHolder, again: () => void): boolean => {
     if (holder === 'ours') return true
     if (holder === 'gone') settleGone(entry)
@@ -2767,16 +2776,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const terminate = async (entry: Live): Promise<void> => {
     entry.killTimer = null
     if (!maySignal(entry, await pidHolder(entry), () => void terminate(entry)) || entry.pid === null) return
-    signalGroup(entry.pid, 'SIGTERM')
-    // a server shutting down arms nothing, as it clears what is armed
-    if (!closed) {
-      entry.killTimer = timers.set(() => {
-        void escalate(entry)
-      }, stopGraceMs)
-    }
+    // a signal refused arms nothing: the run's ending has it, or a closed server has handed it on
+    if (!signalGroup(entry, entry.pid, 'SIGTERM')) return
+    entry.killTimer = timers.set(() => {
+      void escalate(entry)
+    }, stopGraceMs)
   }
 
-  // after the grace period, every group under a runner that is still alive, its own last: Claude runs each background command in a group of its own, which a kill of the runner would orphan. The comparison comes after the listing, so nothing is awaited between it and the last signal
+  // after the grace period, every group under a runner that is still alive, its own last: Claude runs each background command in a group of its own, which a kill of the runner would orphan. The comparison comes after the listing, so a reuse during the listing is caught, and a server that closed during the listing asks nothing more
   const escalate = async (entry: Live): Promise<void> => {
     entry.killTimer = null
     if (entry.settling || entry.pid === null) return
@@ -2786,8 +2793,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     } catch (error) {
       log(`${noun} ${entry.id}: cannot list its processes: ${messageOf(error)}`)
     }
+    if (closed) return
     if (!maySignal(entry, await pidHolder(entry), () => void escalate(entry))) return
-    for (const group of groups) signalGroup(group, 'SIGKILL')
+    for (const group of groups) signalGroup(entry, group, 'SIGKILL')
   }
 
   const stop = (id: number): T => {

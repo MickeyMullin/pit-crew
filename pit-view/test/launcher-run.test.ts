@@ -193,6 +193,26 @@ test('Stop on a real process compares its real start time, and its SIGTERM ends 
   }
 })
 
+test('the real ps gives the same start time text whatever time zone and locale the server runs under', { timeout: 20_000 }, async () => {
+  const procs = procsFrom(commandRunner('ps'))
+  const saved = { TZ: process.env.TZ, LC_ALL: process.env.LC_ALL }
+  const under = async (zone: string, locale: string): Promise<string | null> => {
+    process.env.TZ = zone
+    process.env.LC_ALL = locale
+    return procs.startTime(process.pid)
+  }
+  try {
+    const first = await under('Asia/Tokyo', 'fr_FR.UTF-8')
+    assert.ok(first !== null)
+    assert.equal(await under('America/Chicago', 'en_US.UTF-8'), first)
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
 test('a Claude run carries the configured model on its real command line, sonnet unless the config sets another', { timeout: 20_000 }, async () => {
   const modelOf = (argv: readonly string[]): string | undefined => argv[argv.indexOf('--model') + 1]
   const first = await setup()

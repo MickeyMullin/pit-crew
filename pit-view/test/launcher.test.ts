@@ -10,10 +10,10 @@ import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import type { OpenRow } from '../src/derive.ts'
 import { createGh } from '../src/github.ts'
-import type { RawOpenPr } from '../src/github.ts'
+import type { RawOpenPr, Runner } from '../src/github.ts'
 import {
   agentCell, childEnv, claudeInvocation, codexInvocation, codexNote, createLauncher, createReviewLine, defaultRun, descendantGroups, doneText, emptyStream, gitConfigEnv,
-  emptySteps, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, remoteNamesRepo,
+  emptySteps, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, procsFrom, remoteNamesRepo,
   modelLabels, noteKind, requestText, reviewFits, runners, runView, shellPath, startOptions, stepsOf, systemFs, updateRequest,
 } from '../src/launcher.ts'
 import type { LaunchSpec, ReviewResult, RunResultJson, StartRequest, StepEvent } from '../src/launcher.ts'
@@ -1461,6 +1461,262 @@ test('Stop whose comparison is overtaken by the child\'s observed exit sends no 
     assert.deepEqual(h.launch.kills, [])
   } finally {
     launcher.close()
+    await h.cleanup()
+  }
+})
+
+// holds every start time lookup until the test answers it, with no step between the answer and pidHolder reading it: what the test queues right after an answer runs once pidHolder has returned and before its caller resumes
+const heldLookups = (h: Harness): ((text: string | null) => void)[] => {
+  const answers: ((text: string | null) => void)[] = []
+  h.launch.deps.procs.startTime = () => new Promise((resolveLookup) => {
+    answers.push(resolveLookup)
+  })
+  return answers
+}
+
+// a run past its SIGTERM with a descendant in a group of its own, so its escalation would send two SIGKILLs
+const pastSigterm = async (h: Harness, launcher: Harness['launcher'], id: number, pid: number): Promise<void> => {
+  h.launch.ignoreTerm.add(pid)
+  h.launch.processes.push({ pid: 5000, ppid: pid, pgid: 5000 })
+  h.launch.alive.add(5000)
+  launcher.stop(id)
+  await waitFor(() => h.launch.kills.length === 1)
+  await quiet()
+}
+
+test('Stop whose lookup answers that the pid is the run\'s sends no SIGTERM when the child\'s exit runs before Stop resumes, and arms nothing', async () => {
+  const h = await harness()
+  const { run, child, pid, launcher } = await launchedRun(h)
+  const answers = heldLookups(h)
+  try {
+    const settled = launcher.settled(run.id)
+    launcher.stop(run.id)
+    await waitFor(() => answers.length === 1)
+    answers[0]!(`start-${pid}`)
+    child.exit(1)
+    assert.equal((await within(settled)).status, 'stopped')
+    await quiet()
+    assert.deepEqual(h.launch.kills, [])
+    assert.equal(h.time.pending(), 0)
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('an escalation whose lookup answers that the pid is the run\'s sends neither SIGKILL when the child\'s exit runs before it resumes', async () => {
+  const h = await harness()
+  const { run, child, pid, launcher } = await launchedRun(h)
+  try {
+    const settled = launcher.settled(run.id)
+    await pastSigterm(h, launcher, run.id, pid)
+    const answers = heldLookups(h)
+    h.time.advance(10 * second)
+    await waitFor(() => answers.length === 1)
+    answers[0]!(`start-${pid}`)
+    child.exit(1)
+    assert.equal((await within(settled)).status, 'stopped')
+    await quiet()
+    assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }])
+    assert.equal(h.time.pending(), 0)
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('Stop whose lookup answers that the pid is the run\'s sends no SIGTERM when a poll\'s settle runs before Stop resumes', async () => {
+  const h = await harness()
+  const { run, pid, launcher } = await recoveredRun(h)
+  const answers = heldLookups(h)
+  try {
+    const settled = launcher.settled(run.id)
+    launcher.stop(run.id)
+    await waitFor(() => answers.length === 1)
+    h.time.advance(10 * second)
+    await waitFor(() => answers.length === 2)
+    // the poll's newer lookup sees the replacement, and its settle runs between Stop's reading of its own older answer and Stop resuming
+    answers[1]!('a replacement')
+    answers[0]!(`start-${pid}`)
+    assert.equal((await within(settled)).status, 'stopped')
+    await quiet()
+    assert.deepEqual(h.launch.kills, [])
+    assert.equal(h.time.pending(), 0)
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('an escalation whose lookup answers that the pid is the run\'s sends neither SIGKILL when a poll\'s settle runs before it resumes', async () => {
+  const h = await harness()
+  const { run, pid, launcher } = await recoveredRun(h)
+  try {
+    const settled = launcher.settled(run.id)
+    // the poll falls due before the escalation, so each holds a lookup of its own in a known order
+    h.time.advance(5 * second)
+    await pastSigterm(h, launcher, run.id, pid)
+    const answers = heldLookups(h)
+    h.time.advance(5 * second)
+    await waitFor(() => answers.length === 1)
+    h.time.advance(5 * second)
+    await waitFor(() => answers.length === 2)
+    answers[0]!('a replacement')
+    answers[1]!(`start-${pid}`)
+    assert.equal((await within(settled)).status, 'stopped')
+    await quiet()
+    assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }])
+    assert.equal(h.time.pending(), 0)
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+for (const [kind, watched] of watchedKinds) {
+  test(`a server that closes while Stop's lookup on a ${kind} run is held sends no SIGTERM and arms nothing, and the next server finds the run still running with the Stop not carried over`, async () => {
+    const h = await harness()
+    const { run, pid, launcher } = await watched(h)
+    const answers = heldLookups(h)
+    let again: ReturnType<typeof h.make> | null = null
+    try {
+      launcher.stop(run.id)
+      await waitFor(() => answers.length === 1)
+      launcher.close()
+      answers[0]!(`start-${pid}`)
+      await quiet()
+      assert.deepEqual(h.launch.kills, [])
+      assert.equal(h.time.pending(), 0)
+      assert.equal(h.cache.getRun(run.id)?.status, 'running')
+      h.launch.deps.procs.startTime = async () => `start-${pid}`
+      again = h.make()
+      await again.recover()
+      assert.equal(h.watched.at(-1), run.id)
+      assert.equal(h.cache.getRun(run.id)?.status, 'running')
+      assert.deepEqual(h.launch.kills, [])
+    } finally {
+      again?.close()
+      await h.cleanup()
+    }
+  })
+
+  test(`a server that closes while the escalation's lookup on a ${kind} run is held sends no SIGKILL and arms nothing`, async () => {
+    const h = await harness()
+    const { run, pid, launcher } = await watched(h)
+    try {
+      await pastSigterm(h, launcher, run.id, pid)
+      const answers = heldLookups(h)
+      h.time.advance(10 * second)
+      // a recovered run's poll asks too
+      await waitFor(() => answers.length === (kind === 'recovered' ? 2 : 1))
+      launcher.close()
+      for (const answer of answers) answer(`start-${pid}`)
+      await quiet()
+      assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }])
+      assert.equal(h.time.pending(), 0)
+      assert.equal(h.cache.getRun(run.id)?.status, 'running')
+    } finally {
+      await h.cleanup()
+    }
+  })
+
+  test(`a server that closes while the escalation's process tree listing on a ${kind} run is held sends no SIGKILL, asks nothing more, and arms nothing`, async () => {
+    const h = await harness()
+    const { run, pid, launcher } = await watched(h)
+    try {
+      await pastSigterm(h, launcher, run.id, pid)
+      const listing = Promise.withResolvers<typeof h.launch.processes>()
+      let listAsked = false
+      h.launch.deps.procs.list = () => {
+        listAsked = true
+        return listing.promise
+      }
+      h.time.advance(10 * second)
+      await waitFor(() => listAsked)
+      await quiet()
+      launcher.close()
+      // answered at once, so only the close keeps the SIGKILLs from following the listing
+      let asked = 0
+      h.launch.deps.procs.startTime = async () => {
+        asked += 1
+        return `start-${pid}`
+      }
+      listing.resolve(h.launch.processes)
+      await quiet()
+      assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }])
+      assert.equal(asked, 0)
+      assert.equal(h.time.pending(), 0)
+      assert.equal(h.cache.getRun(run.id)?.status, 'running')
+    } finally {
+      await h.cleanup()
+    }
+  })
+}
+
+// the start time text ps prints, which follows the time zone in the environment it is given or else the machine's, and every environment it was given
+const zonedPs = (h: Harness) => {
+  const machine = { zone: 'America/Chicago' }
+  const environments: (Record<string, string> | undefined)[] = []
+  const runner: Runner = async (args, options) => {
+    environments.push(options?.env)
+    return ok(`the start of pid ${args.at(-1)} in ${options?.env?.TZ ?? machine.zone}\n`)
+  }
+  return { machine, environments, pin: () => {
+    h.launch.deps.procs.startTime = procsFrom(runner).startTime
+  } }
+}
+
+test('every start time lookup pins the time zone and the locale: the launch\'s, a restart\'s, and Stop\'s', async () => {
+  const h = await harness()
+  const ps = zonedPs(h)
+  ps.pin()
+  const { run, pid, launcher } = await recoveredRun(h)
+  try {
+    assert.equal(h.cache.getRun(run.id)?.pidStartedAt, `the start of pid ${pid} in UTC`)
+    launcher.stop(run.id)
+    await waitFor(() => h.launch.kills.length === 1)
+    assert.equal(ps.environments.length, 3)
+    for (const env of ps.environments) assert.deepEqual([env?.TZ, env?.LC_ALL], ['UTC', 'C'])
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a change of the machine\'s time zone during a run is no mismatch: Stop still signals it', async () => {
+  const h = await harness()
+  const ps = zonedPs(h)
+  ps.pin()
+  const { run, pid, launcher } = await launchedRun(h)
+  try {
+    ps.machine.zone = 'Asia/Tokyo'
+    launcher.stop(run.id)
+    await waitFor(() => h.launch.kills.length === 1)
+    assert.deepEqual(h.launch.kills, [{ pid: -pid, signal: 'SIGTERM' }])
+  } finally {
+    launcher.close()
+    await h.cleanup()
+  }
+})
+
+test('a start time recorded before the lookup was pinned reads as a mismatch at the next restart: the run settles, its live process is sent nothing and goes on', async () => {
+  const h = await harness()
+  const ps = zonedPs(h)
+  // what the earlier code recorded: the machine's own time zone
+  h.launch.deps.procs.startTime = async (pid) => `the start of pid ${pid} in ${ps.machine.zone}`
+  const { run, pid } = await launchedRun(h)
+  h.launcher.close()
+  ps.pin()
+  const again = h.make()
+  try {
+    h.watched.length = 0
+    await again.recover()
+    assert.deepEqual(h.watched, [])
+    assert.deepEqual([h.cache.getRun(run.id)?.status, noteKind(h.cache.getRun(run.id)?.note ?? null)], ['failed', 'serverRestarted'])
+    assert.deepEqual(h.launch.kills, [])
+    assert.ok(h.launch.alive.has(pid), 'the process is left running')
+  } finally {
+    again.close()
     await h.cleanup()
   }
 })
