@@ -73,7 +73,8 @@ export const fixtureRunner = (): FakeRunner =>
 // a fresh directory under the OS temp dir, removed by the returned cleanup
 export const tempDir = async (): Promise<{ dir: string, cleanup: () => Promise<void> }> => {
   const dir = await mkdtemp(join(tmpdir(), 'pit-view-test-'))
-  return { dir, cleanup: () => rm(dir, { recursive: true, force: true }) }
+  // retried, since a launch the queue let go in the background may still be writing to its folder when a test ends
+  return { dir, cleanup: () => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }) }
 }
 
 export type FakeTime = {
@@ -230,6 +231,10 @@ export type FakeLaunch = {
   // what the fake ps lists, and which pids are alive
   processes: ProcessEntry[]
   alive: Set<number>
+  // a start time ps gives instead of the pid's own: the pid has been reused by another process
+  startTimes: Map<number, string>
+  // how ps fails when asked for a start time, when set: no answer for a live pid, or a rejection
+  startTimeFailure: 'empty' | 'rejects' | null
   // runners that ignore SIGTERM, so a stop has to escalate
   ignoreTerm: Set<number>
   gitCalls: string[][]
@@ -252,6 +257,8 @@ export const fakeLaunch = ({ remotes = fakeRemotes('octo-example/orbit'), fs = {
     kills: [],
     processes: [],
     alive: new Set(),
+    startTimes: new Map(),
+    startTimeFailure: null,
     ignoreTerm: new Set(),
     gitCalls: [],
     removed: [],
@@ -328,7 +335,11 @@ export const fakeLaunch = ({ remotes = fakeRemotes('octo-example/orbit'), fs = {
     },
     procs: {
       list: async () => fake.processes,
-      startTime: async (pid) => fake.alive.has(pid) ? `start-${pid}` : null,
+      startTime: async (pid) => {
+        if (fake.startTimeFailure === 'rejects') throw new Error('ps could not run')
+        if (fake.startTimeFailure === 'empty' || !fake.alive.has(pid)) return null
+        return fake.startTimes.get(pid) ?? `start-${pid}`
+      },
     },
     git: async (args) => {
       fake.gitCalls.push(args)
@@ -340,6 +351,19 @@ export const fakeLaunch = ({ remotes = fakeRemotes('octo-example/orbit'), fs = {
   }
   fake.deps = deps
   return fake
+}
+
+// a fake launch whose next clone checks fail as the test asks, with gh's account unchanged
+export const refusableClone = () => {
+  const launch = fakeLaunch()
+  const clone = { refuse: 0 }
+  const git = launch.deps.git
+  launch.deps.git = async (args) => {
+    if (clone.refuse === 0) return git(args)
+    clone.refuse -= 1
+    return failed('fatal: not a git repository (or any of the parent directories): .git')
+  }
+  return { launch, clone }
 }
 
 // a review-result@1 as the commands write it, changed by patch

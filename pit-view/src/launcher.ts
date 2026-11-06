@@ -1287,9 +1287,12 @@ export const descendantGroups = (entries: readonly ProcessEntry[], pid: number):
 
 export type Procs = {
   list: () => Promise<ProcessEntry[]>
-  // the start time ps prints for a pid, or null when there is no such process
+  // the start time ps prints for a pid, in UTC and the C locale, or null when ps gives none: there is no such process, or ps failed
   startTime: (pid: number) => Promise<string | null>
 }
+
+// the text ps prints for a start time follows the time zone and the locale of its environment, so every lookup pins both, and a change of the machine's settings during a run never reads as a different process
+const startTimeEnv = { TZ: 'UTC', LC_ALL: 'C' }
 
 export const procsFrom = (ps: Runner): Procs => ({
   list: async () => {
@@ -1298,7 +1301,7 @@ export const procsFrom = (ps: Runner): Procs => ({
     return parsePs(result.stdout)
   },
   startTime: async (pid) => {
-    const result = await ps(['-o', 'lstart=', '-p', String(pid)])
+    const result = await ps(['-o', 'lstart=', '-p', String(pid)], { env: startTimeEnv })
     const text = result.stdout.trim()
     return result.code === 0 && text !== '' ? text : null
   },
@@ -1503,8 +1506,9 @@ export type LineEntry = {
   request: StartRequest
   // the viewer its start was confirmed for
   viewer: string
-  // the attempt that holds a slot for it while its checks run, and the clone folder those checks confirmed once they pass
+  // the attempt that holds a slot for it, whether its checks are running now, and the clone folder those checks confirmed, kept only while nothing ahead of it holds it back
   attempt: number | null
+  checking: boolean
   checked: string | null
   rowGone: () => boolean
   // whether it is a self-review is read from the cache each time, as it is about to start
@@ -1517,7 +1521,14 @@ export type LineEntry = {
   markRunning: (cwd: string) => (config: Config, admitted: Admitted) => Promise<unknown>
 }
 
-export type LineTurn = { ahead: Promise<unknown>, decided: () => void }
+export type LineTurn = {
+  // the wait for every start ahead of it to have its fit decided or be refused
+  ahead: Promise<unknown>
+  // whether any start ahead of it is still undecided now
+  behind: () => boolean
+  // the end of its own turn, which the next waits for
+  decided: () => void
+}
 
 // the one slot count and the one queue under the cap, shared by the review engine and the sweep engine: what counts, who is next, and the announcement that the answer may have changed all live here, so neither engine holds an account of its own
 export type ReviewLine = {
@@ -1625,6 +1636,8 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
   let opening = 0
   // the turn of the start that arrived last, ended once it and every start ahead of it have had their fit decided or been refused
   let arrivals: Promise<unknown> = Promise.resolve()
+  // the turns not yet decided, earliest first
+  const undecided = new Set<LineTurn>()
 
   // the queue and the count of launches in progress change only through these, so each marks
   const lineAdd = (item: LineEntry): void => {
@@ -1649,7 +1662,7 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
 
   const fits = (slot: ReviewSlot, config: Config): boolean => reviewFits(inFlight(), slot, config.maxConcurrentReviews, config.selfReviewOverCap)
 
-  // whether a new review of this kind waits: with an entry ahead of it in the queue or still being launched, or without room under the cap. A start acts on this and nothing else, and the page's buttons say it
+  // whether a new review of this kind waits: with an entry ahead of it in the queue or still being launched, or without room under the cap. The page's buttons say it, and a start acts on it once every start ahead of it is decided; one that had to wait for that queues whatever this says, so its checks are made again
   const waits = (slot: ReviewSlot, config: Config): boolean => queue.length > 0 || opening > 0 || !fits(slot, config)
 
   const queueing = (): Queueing => {
@@ -1683,6 +1696,7 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
   const giveBack = (item: LineEntry): void => {
     if (item.attempt !== null) admitting.delete(item.attempt)
     item.attempt = null
+    item.checking = false
     item.checked = null
   }
 
@@ -1702,7 +1716,7 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
     dequeue(item)
   }
 
-  // reads the queue earliest first: gives a slot to each entry that fits now, which then makes its checks in the background, still in the queue, and launches each whose checks have passed once no entry ahead of it is still making its checks or being launched. The first that does not fit ends the reading and holds the line, the over-cap allowance included, so reviews and sweeps start in the order they arrived
+  // reads the queue earliest first: gives a slot to each entry that fits now, which then makes its checks in the background, still in the queue, and launches one whose checks have just passed when no entry ahead of it is still making its checks or being launched. Checks that pass while something ahead holds an entry back are stale by the time it is let go, so they are dropped and it makes them again then: an entry spawns only on checks that passed with nothing ahead of it. The first that does not fit ends the reading and holds the line, the over-cap allowance included, so reviews and sweeps start in the order they arrived
   const admit = (): void => {
     if (closed) return
     const config = options.config()
@@ -1715,18 +1729,22 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
       // one taken out of the queue since this pass began is skipped
       if (!queue.includes(item)) continue
       if (item.attempt !== null) {
-        // one whose checks are running holds its slot, and holds back every one behind it
-        if (item.checked === null || heldBack) {
-          heldBack = true
+        if (heldBack) {
+          item.checked = null
+        } else if (item.checked !== null) {
+          proceed(item, item.attempt, item.checked)
+          // one that gave its slot back no longer fits, and still holds its place ahead of every one behind it
+          if (queue.includes(item)) {
+            holdLine(item)
+            return
+          }
+          heldBack = opening > 0
           continue
+        } else if (!item.checking) {
+          startChecks(item, item.attempt)
         }
-        proceed(item, item.attempt, item.checked)
-        // one that gave its slot back no longer fits, and still holds its place ahead of every one behind it
-        if (queue.includes(item)) {
-          holdLine(item)
-          return
-        }
-        heldBack ||= opening > 0
+        // one that holds a slot and has not started holds back every one behind it
+        heldBack = true
         continue
       }
       let slot: ReviewSlot | null
@@ -1744,17 +1762,25 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
       const attempt = reserve(slot)
       item.attempt = attempt
       heldBack = true
-      void begin(item, attempt).catch((error: unknown) => log(`${item.name}: cannot start from the queue: ${messageOf(error)}`))
+      startChecks(item, attempt)
     }
   }
 
-  // a queued entry's checks, the ones every start makes, while it stays in the queue; once they pass it keeps its slot and waits for the entries ahead of it, which the queue's next reading launches it after
+  const startChecks = (item: LineEntry, attempt: number): void => {
+    void begin(item, attempt).catch((error: unknown) => log(`${item.name}: cannot start from the queue: ${messageOf(error)}`))
+  }
+
+  // a queued entry's checks, the ones every start makes, while it stays in the queue and keeps its slot; the queue's reading right after they pass launches it or, with something ahead of it still holding it back, drops them
   const begin = async (item: LineEntry, attempt: number): Promise<void> => {
     // false once a Stop or a failure ended this attempt
     const ours = (): boolean => !closed && item.attempt === attempt && queue.includes(item)
+    item.checking = true
     try {
       const cloneDir = await item.check(options.config())
-      if (ours()) item.checked = cloneDir
+      if (ours()) {
+        item.checking = false
+        item.checked = cloneDir
+      }
     } catch (error) {
       if (ours()) failInQueue(item, `spawnFailed: ${messageOf(error)}`)
     }
@@ -1813,16 +1839,25 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
     }
   }
 
-  // a start's place in line, taken as it arrives: the wait for every start ahead of it to have its fit decided or be refused, and the end of its own turn, which the next waits for
+  // a start's place in line, taken as it arrives
   const takeTurn = (): LineTurn => {
     const ahead = arrivals
-    let decided = (): void => {}
+    let resolveOwn = (): void => {}
     const own = new Promise<void>((resolveTurn) => {
-      decided = resolveTurn
+      resolveOwn = resolveTurn
     })
     // a start refused ahead of an earlier one that still makes its checks moves nothing behind it forward
     arrivals = Promise.all([ahead, own])
-    return { ahead, decided }
+    const turn: LineTurn = {
+      ahead,
+      behind: () => undecided.values().next().value !== turn,
+      decided: () => {
+        undecided.delete(turn)
+        resolveOwn()
+      },
+    }
+    undecided.add(turn)
+    return turn
   }
 
   const join = (held: () => ReviewSlot[]): LineMember => {
@@ -2046,6 +2081,10 @@ type Live = {
   spec: LaunchSpec | null
   child: SpawnedProcess | null
   pid: number | null
+  // the start time recorded for the pid, compared with the live one at every decision about it; null until a launched child's is read, and for good when that read fails or is discarded
+  pidStartedAt: string | null
+  // the child's exit has been observed, so its pid is free for another process to take
+  exited: boolean
   offsets: { events: number, stream: number }
   // the step slots folded from every events.jsonl line read so far
   steps: StepSlot[]
@@ -2059,6 +2098,9 @@ type Live = {
   stopping: boolean
   settling: boolean
 }
+
+// who holds a watched run's pid when asked: the run's process, no process of the run's, or a live process that cannot be told apart
+type PidHolder = 'ours' | 'gone' | 'unknown'
 
 // a git remote names the repo: https or ssh, with or without .git
 export const remoteNamesRepo = (remotes: string, repo: string): boolean => {
@@ -2173,12 +2215,42 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
-  const signalGroup = (pgid: number, signal: NodeJS.Signals): void => {
+  // the one place a signal is sent. An answer that was awaited is stale once its continuation resumes, so the state is read here, with nothing awaited between this reading and the kill: a run whose exit was observed, or that has begun to settle, is no longer ours to signal, and a server that has closed has handed its runs on to the next one. Answers whether the signal went
+  const signalGroup = (entry: Live, pgid: number, signal: NodeJS.Signals): boolean => {
+    if (closed || entry.exited || entry.settling) {
+      log(`${noun} ${entry.id}: no ${signal} sent to process group ${pgid}, since ${closed ? 'the server has closed' : `the ${noun} has ended`}`)
+      return false
+    }
     try {
       kill(-pgid, signal)
     } catch (error) {
       log(`cannot send ${signal} to process group ${pgid}: ${messageOf(error)}`)
     }
+    return true
+  }
+
+  // who holds a watched run's pid at this moment (section 8, Launching runs, Is this pid the run's). 'gone' is the same as an observed exit: its exit was observed, nothing holds the pid, or the holder's start time differs from the recorded one. 'ours' is a matching start time, or a child whose exit has not been observed, since the system keeps a pid until its parent has reaped the child and the exit is reported in that same step. 'unknown' is a recovered run's live pid whose start time cannot be read, which proves neither
+  const pidHolder = async (entry: Live): Promise<PidHolder> => {
+    const pid = entry.pid
+    if (pid === null || entry.exited || entry.settling || !alive(pid)) return 'gone'
+    const child = entry.child !== null
+    if (entry.pidStartedAt === null) return child ? 'ours' : 'unknown'
+    let current: string | null = null
+    try {
+      current = await procs.startTime(pid)
+    } catch (error) {
+      log(`${noun} ${entry.id}: cannot read the start time of pid ${pid}: ${messageOf(error)}`)
+    }
+    // the exit or the settle may have come while ps ran, and this answer may then be another process's
+    if (entry.exited || entry.settling) return 'gone'
+    if (current === null) {
+      if (!alive(pid)) return 'gone'
+      log(`${noun} ${entry.id}: no start time for live pid ${pid}, so whether it is still this ${noun} is unknown`)
+      return child ? 'ours' : 'unknown'
+    }
+    if (current === entry.pidStartedAt) return 'ours'
+    log(`${noun} ${entry.id}: pid ${pid} started at ${current}, not at ${entry.pidStartedAt}, so another process holds it and the ${noun} has exited`)
+    return 'gone'
   }
 
   // the commands post as whichever account gh uses, and this machine may hold more than one
@@ -2396,17 +2468,21 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return run
   }
 
-  // a run is read on every change in its folder and on a timer; one without a child handle (a
-  // recovered run) is also checked for life on that timer
+  // a process that proved gone, with no exit seen, ends the run the way an observed exit does
+  const settleGone = (entry: Live): void => {
+    void settle(entry, null, false).catch((error: unknown) => log(`${noun} ${entry.id}: cannot settle: ${messageOf(error)}`))
+  }
+
+  // a run is read on every change in its folder and on a timer; one without a child handle (a recovered run) also has its pid's holder checked on that timer, and a lookup that fails only waits for the next tick. A child's own exit settles it, so its pid is not consulted here
   const poll = (entry: Live, ms: number): void => {
     entry.timer = timers.set(() => {
       entry.timer = null
       if (entry.settling || closed) return
-      void pumpOf(entry).then(() => {
+      void pumpOf(entry).then(async () => {
         if (entry.settling || closed) return
-        if (entry.child === null && (entry.pid === null || !alive(entry.pid))) {
-          void settle(entry, null, false)
-        } else {
+        if (entry.child === null && await pidHolder(entry) === 'gone') {
+          settleGone(entry)
+        } else if (!entry.settling && !closed) {
           poll(entry, ms)
         }
       })
@@ -2423,6 +2499,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       spec,
       child,
       pid: run.pid,
+      pidStartedAt: run.pidStartedAt,
+      exited: false,
       offsets: { events: 0, stream: 0 },
       steps: emptySteps(),
       stream: emptyStream(),
@@ -2437,7 +2515,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     // counted, within Stop's reach, and settled by its exit before anything else is set up
     live.set(run.id, entry)
     if (child !== null) {
-      void child.exited.then((exit) => settle(entry, exit, false)).catch((error: unknown) => log(`${noun} ${run.id}: cannot settle: ${messageOf(error)}`))
+      void child.exited.then((exit) => {
+        // marked whether or not the settle takes effect, since a server shutting down settles nothing and the pid is free all the same
+        entry.exited = true
+        return settle(entry, exit, false)
+      }).catch((error: unknown) => log(`${noun} ${run.id}: cannot settle: ${messageOf(error)}`))
     }
     try {
       entry.watcher = fs.watch(dir, () => {
@@ -2610,8 +2692,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     launching.delete(run.id)
     // carried out on the watched process itself, with no read of the row that could throw before the start time is recorded
     if (stopAsked) stopLive(entry)
-    // the start time, which a restart needs to tell this process from one that reused its pid, comes after the watch, since reading it is awaited
-    const pidStartedAt = pid === null ? null : await procs.startTime(pid).catch(() => null)
+    // the start time, which a restart and every later decision need to tell this process from one that reused its pid, comes after the watch, since reading it is awaited
+    const lookedUp = pid === null ? null : await procs.startTime(pid).catch(() => null)
+    // the system keeps the pid until the child is reaped, and its exit is reported in that same step, so only an answer that arrives after the exit was observed can be another process's, and it is discarded
+    const pidStartedAt = entry.exited || entry.settling ? null : lookedUp
+    entry.pidStartedAt = pidStartedAt
     try {
       // the second try at a pid and resume command the row refused at once after the spawn
       run = store.update(run.id, { ...(pidInRow ? {} : { pid, ...(resume === null ? {} : { resume }) }), pidStartedAt })
@@ -2647,6 +2732,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     try {
       await checkIdentity(config)
       const cloneDir = await checkClone(config)
+      // a check made before a wait is stale after it: a start with an earlier one still undecided as its checks end has to wait, so it goes to the queue, which makes its checks again when its turn comes. One with nothing ahead of it waits for nothing here, and spawns on these checks
+      const waited = turn?.behind() ?? false
       // the checks may race, and a refusal above never waits, but a fit is decided in the order they arrived, whichever engine took the start
       await turn?.ahead
       // a config saved during the checks is the one admission reads, and whether it is a self-review is read from the cache now, with nothing awaited before the slot is held
@@ -2655,8 +2742,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (slot === null) return await launch(request, config, request.cwd ?? cloneDir)
       // whatever already waits and fits goes first
       line.admit()
-      // a new review or sweep starts at once only as the sole eligible start: with room, and with nothing ahead of it waiting in the queue or still being launched
-      if (line.waits(slot, current)) {
+      // a new review or sweep starts at once only as the sole eligible start: it did not wait, it has room, and nothing ahead of it waits in the queue or is still being launched
+      if (waited || line.waits(slot, current)) {
         const queued = enqueue(request, config, request.cwd ?? cloneDir)
         // a save during the checks may have left it confirmed for a repository or a viewer no longer in effect
         line.admit()
@@ -2687,6 +2774,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     request,
     viewer,
     attempt: null,
+    checking: false,
     checked: null,
     rowGone: () => store.get(run.id) === null,
     slot: (current) => store.slot(request, current),
@@ -2711,18 +2799,38 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return run
   }
 
-  // after the grace period, every group under a runner that is still alive, its own last: Claude
-  // runs each background command in a group of its own, which a kill of the runner would orphan
+  // the holder of a stopping run's pid decides its next signal: a process that has gone settles the run with nothing sent, and an unknown holder is sent nothing and asked about again after the grace period. Only 'ours' answers true, and signalGroup has the last word on it
+  const maySignal = (entry: Live, holder: PidHolder, again: () => void): boolean => {
+    if (holder === 'ours') return true
+    if (holder === 'gone') settleGone(entry)
+    else if (!closed && !entry.settling) entry.killTimer = timers.set(again, stopGraceMs)
+    return false
+  }
+
+  // Stop's first signal, once the process proves to be the run's
+  const terminate = async (entry: Live): Promise<void> => {
+    entry.killTimer = null
+    if (!maySignal(entry, await pidHolder(entry), () => void terminate(entry)) || entry.pid === null) return
+    // a signal refused arms nothing: the run's ending has it, or a closed server has handed it on
+    if (!signalGroup(entry, entry.pid, 'SIGTERM')) return
+    entry.killTimer = timers.set(() => {
+      void escalate(entry)
+    }, stopGraceMs)
+  }
+
+  // after the grace period, every group under a runner that is still alive, its own last: Claude runs each background command in a group of its own, which a kill of the runner would orphan. The comparison comes after the listing, so a reuse during the listing is caught, and a server that closed during the listing asks nothing more
   const escalate = async (entry: Live): Promise<void> => {
     entry.killTimer = null
-    if (entry.settling || entry.pid === null || !alive(entry.pid)) return
+    if (entry.settling || entry.pid === null) return
     let groups = [entry.pid]
     try {
       groups = descendantGroups(await procs.list(), entry.pid)
     } catch (error) {
       log(`${noun} ${entry.id}: cannot list its processes: ${messageOf(error)}`)
     }
-    for (const group of groups) signalGroup(group, 'SIGKILL')
+    if (closed) return
+    if (!maySignal(entry, await pidHolder(entry), () => void escalate(entry))) return
+    for (const group of groups) signalGroup(entry, group, 'SIGKILL')
   }
 
   const stop = (id: number): T => {
@@ -2760,7 +2868,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return run
   }
 
-  // a watched run is signaled from the pid it holds in memory, so stopping it reads nothing that could throw; a spawn that failed has no process to signal, and its exit settles it as stopped
+  // a watched run is signaled from the pid and the start time it holds in memory, so stopping it reads no row that could throw, and the Stop is answered at once with the signal to follow its comparison; a spawn that failed has no process to signal, and its exit settles it as stopped
   const stopLive = (entry: Live): void => {
     if (entry.pid === null) {
       entry.stopping = true
@@ -2768,10 +2876,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
     if (entry.stopping) return
     entry.stopping = true
-    signalGroup(entry.pid, 'SIGTERM')
-    entry.killTimer = timers.set(() => {
-      void escalate(entry)
-    }, stopGraceMs)
+    void terminate(entry)
   }
 
   type RequestFile = { pid?: unknown, pidStartedAt?: unknown }
@@ -2813,7 +2918,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (same) {
         log(`${noun} ${run.id}: still running after the restart (pid ${pid}); watching it again`)
         watching(run)
-        watchRun({ ...run, pid }, dir, null, false, null, recoveredSlot(run))
+        // the start time just compared, from whichever record kept it
+        watchRun({ ...run, pid, pidStartedAt: startedAt }, dir, null, false, null, recoveredSlot(run))
       } else {
         const entry = watchRun({ ...run, pid: null }, dir, null, false, null, recoveredSlot(run))
         await settle(entry, null, true)
