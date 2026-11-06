@@ -4,7 +4,7 @@ import type { RunStatus } from './cache.ts'
 import { attentionOrder, selfReviewOf } from './derive.ts'
 import type { OpenRow, OtherRow } from './derive.ts'
 import type { RawOpenPr } from './github.ts'
-import { isDependabot, reviewCommands } from './launcher.ts'
+import { isDependabot } from './launcher.ts'
 import type { ReportInfo } from './reports.ts'
 import { addDays, clockChangeOn, instantAt, localDateOf, minute, minutesOfDay, startOfDate, startOfDay, weekdayOf } from './time.ts'
 import type { LocalDate } from './time.ts'
@@ -84,7 +84,7 @@ export type AutoRunStatus = RunStatus | 'skipped'
 export type AutoRun = {
   id: number
   origin: 'manual' | 'auto'
-  // the pit-crew command, which tells a manual review from a manual fix or update session
+  // the pit-crew command, which tells a manual review-pr from a stack review or a fix or update session
   command: string
   number: number
   // the head the run reviewed, full or short; null before it is known. An auto run's is known from when it is queued; a manual review's comes from its result
@@ -137,10 +137,10 @@ export const isReviewedAtHead = (row: { number: number, headSha: string }, repor
 const hasLiveAutoRun = (number: number, runs: readonly AutoRun[]): boolean =>
   runs.some((entry) => entry.origin === 'auto' && entry.number === number && (entry.status === 'queued' || entry.status === 'running'))
 
-// the owner stopped an auto run at this head, so the PR is left alone at it, unless a manual review of this PR and head finished after that stop. A manual review still in flight has not run yet, and one that failed, waits for input, or was stopped did not get the PR past the stop
+// the owner stopped an auto run at this head, so the PR is left alone at it, unless a review-pr run of this PR and head, started by hand, finished after that stop. One still in flight has not run yet, and one that failed, waits for input, or was stopped did not get the PR past the stop. A stack review does not count: its report is not this PR's, so the guard would not see it and an auto run would start at the head the owner stopped. Dependabot PRs never reach this rule
 const stoppedAtHead = (row: { number: number, headSha: string }, runs: readonly AutoRun[]): boolean =>
   autoRunsFor(runs, row).some((stopped) => stopped.status === 'stopped' && !runs.some((other) =>
-    other.origin === 'manual' && other.status === 'done' && other.number === row.number && other.id > stopped.id && reviewCommands.includes(other.command) && sameHead(other.headOid, row.headSha)))
+    other.origin === 'manual' && other.status === 'done' && other.number === row.number && other.id > stopped.id && other.command === 'review-pr' && sameHead(other.headOid, row.headSha)))
 
 export type RetryDecision = 'retry' | 'failedTwice' | 'postUnknown'
 

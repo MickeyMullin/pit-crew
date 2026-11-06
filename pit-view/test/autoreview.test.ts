@@ -390,14 +390,14 @@ test('only a finished manual review, newer than the stop, of that PR and head, s
     ['of another PR', manual({ number: 111 })],
     ['a fix session', manual({ command: 'fix-pr' })],
     ['an update session', manual({ command: 'update-pr' })],
+    // its report is not the PR's, so the guard would not see it, and an auto run would start at the head the owner stopped
+    ['a stack review', manual({ command: 'review-stack' })],
   ]
   for (const [label, other] of cases) {
     const queue = buildQueue(queueInput(rows, { runs: [stopped, other] }))
     assert.ok(!numbers(queue.items).includes(113), label)
     assert.deepEqual(queue.leftForOwner.filter((entry) => entry.number === 113), [{ number: 113, outcome: 'stopped' }], label)
   }
-  // a stack review started from this PR is a review of it, as the launcher's review commands say
-  assert.ok(numbers(buildQueue(queueInput(rows, { runs: [stopped, manual({ command: 'review-stack' })] })).items).includes(113))
 })
 
 // one live auto run per PR, at whatever head
