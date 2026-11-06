@@ -1,7 +1,7 @@
 // public/actionsview.ts
 // the drawer's direct actions (section 9 of DESIGN.md) as pure functions of the open row and the people the config lists: which actions a row offers, the confirmation each one asks, the request it sends, and the words for a refusal. drawer.ts makes the elements. Nothing here reads the DOM or the clock
 import type { OpenRow } from '../src/derive.ts'
-import { runnerLabels, sentence, tokenHeader } from './agent.ts'
+import { runnerLabels, sentence, showsMerge, tokenHeader } from './agent.ts'
 import type { RunRequest } from './agent.ts'
 
 // the actions this page offers; merge is always a squash into the PR's base branch, update starts an agent session that brings the PR's branch up to date with it, and resolveConflicts starts that same session on a conflicting PR
@@ -21,9 +21,9 @@ export type ActionConfirm = { type: 'action', action: ActionKind, repo: string, 
 export type ActionOffer = { action: ActionKind, text: string }
 
 // the row fields an offer reads; agent is absent on a row that has no Agent cell
-type OfferRow = Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'issues'> & { agent?: OpenRow['agent'] }
+type OfferRow = Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'issues' | 'group'> & { agent?: OpenRow['agent'] }
 
-// the actions this page offers: only the viewer's own PRs (Mine rows) have any, and a PR that has left the open tables has none. Merge is offered only while the merge state is ready and its base is the cached primary branch. Update is offered on any of them whose base is the primary branch, drafts included, except while a run of the PR is in flight, since one run per PR runs at a time. Resolve conflicts is offered after it on the same terms, and only while the row carries the Conflicts chip. The server decides again whatever this says
+// the actions this page offers: only the viewer's own PRs (Mine rows) have any, and a PR that has left the open tables has none. Merge is offered only while showsMerge holds (the one rule in ./mergeoffer.ts, which the server's guard applies too: the merge state is ready, or checking on a row in the Ready to merge group, no issue chip withholds it, and the base is the cached primary branch). Update is offered on any of them whose base is the primary branch, drafts included, except while a run of the PR is in flight, since one run per PR runs at a time. Resolve conflicts is offered after it on the same terms, and only while the row carries the Conflicts chip. The server decides again whatever this says
 export const actionOffers = (row: OfferRow, open: boolean): ActionOffer[] => {
   if (!open || row.section !== 'mine') return []
   const draft = row.merge.state === 'draft'
@@ -32,7 +32,7 @@ export const actionOffers = (row: OfferRow, open: boolean): ActionOffer[] => {
   const status = covered == null ? row.agent?.state : covered.ownStatus
   const updates = row.primaryBase && status !== 'running' && status !== 'queued'
   return [
-    ...row.merge.state === 'ready' && row.primaryBase ? [{ action: 'merge', text: 'Squash and merge' } as const] : [],
+    ...showsMerge(row) ? [{ action: 'merge', text: 'Squash and merge' } as const] : [],
     draft ? { action: 'markReady', text: 'Mark ready for review' } : { action: 'convertToDraft', text: 'Convert to draft' },
     { action: 'requestReview', text: 'Request review' },
     ...updates ? [{ action: 'update', text: 'Update branch' } as const] : [],
@@ -69,7 +69,7 @@ const aliasOf = (people: readonly PersonChoice[], login: string): string =>
 
 // null when the row no longer offers that action. The chosen reviewer is kept when still listed, otherwise the first choice
 export const actionConfirmModel = (
-  row: Pick<OpenRow, 'number' | 'title' | 'author' | 'section' | 'merge' | 'issues' | 'headRef' | 'baseRef' | 'primaryBase' | 'headOid' | 'headSha'> & { agent?: OpenRow['agent'] },
+  row: Pick<OpenRow, 'number' | 'title' | 'author' | 'section' | 'merge' | 'group' | 'issues' | 'headRef' | 'baseRef' | 'primaryBase' | 'headOid' | 'headSha'> & { agent?: OpenRow['agent'] },
   ask: ActionConfirm,
   people: readonly PersonChoice[],
 ): ActionConfirmModel | null => {

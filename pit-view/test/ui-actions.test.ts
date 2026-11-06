@@ -5,6 +5,12 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import type { OpenRow } from '../src/derive.ts'
+import { defaultConfig } from '../src/config.ts'
+import type { Config } from '../src/config.ts'
+import { deriveOpenRows } from '../src/derive.ts'
+import type { RawCheckContext, RawOpenPr } from '../src/github.ts'
+import { scenario } from './fixtures/scenario.ts'
+import { openPage1 } from './helpers.ts'
 import {
   actionBound, actionConfirmModel, actionDoneText, actionHolds, actionOffers, actionRefusalText, actionRequest, reviewerChoices,
 } from '../public/actionsview.ts'
@@ -37,6 +43,29 @@ const shown = 'octo-example/orbit'
 const fullSha = '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7'
 
 // a merge confirmation as the drawer opens it: bound to the head and base the row showed
+// rows derived from a real fixture PR (#102, the viewer's own, approved), not hand-built, so the merge state, the group, and the issue chips come from the derivation: GitHub's HAS_HOOKS status through the same callers as any other
+const derivedRow = async (patch: Partial<RawOpenPr>, contexts?: RawCheckContext[]): Promise<OpenRow> => {
+  const base = (await openPage1()).data.repository?.pullRequests.nodes.find((pr) => pr.number === 102)
+  assert.ok(base)
+  const pr: RawOpenPr = { ...structuredClone(base), ...patch }
+  if (contexts !== undefined) pr.headCommit.nodes[0]!.commit.statusCheckRollup = { contexts: { totalCount: contexts.length, nodes: contexts } }
+  const config: Config = { ...defaultConfig(), repo: scenario.repo, viewer: scenario.viewer }
+  const found = deriveOpenRows([pr], scenario.defaultBranch, { config, clock: { now: () => Date.parse(scenario.now) }, timeZone: scenario.timeZone })[0]
+  assert.ok(found)
+  return found
+}
+const failingRun = [{ __typename: 'CheckRun', name: 'Unit tests', status: 'COMPLETED', conclusion: 'FAILURE', detailsUrl: 'https://example.test/job', checkSuite: null }] as unknown as RawCheckContext[]
+const pendingRun = [{ __typename: 'CheckRun', name: 'Unit tests', status: 'IN_PROGRESS', conclusion: null, detailsUrl: 'https://example.test/job', checkSuite: null }] as unknown as RawCheckContext[]
+const hasHooksCases: [string, Partial<RawOpenPr>, RawCheckContext[] | undefined, boolean][] = [
+  ['approved', {}, undefined, true],
+  ['changes requested', { reviewDecision: 'CHANGES_REQUESTED' }, undefined, false],
+  ['failing check', {}, failingRun, false],
+  ['pending check', {}, pendingRun, false],
+  ['draft', { isDraft: true }, undefined, false],
+  ['conflicting', { mergeable: 'CONFLICTING' }, undefined, false],
+  ['release target', { baseRefName: 'release/2' }, undefined, false],
+]
+
 const mergeAsk = (headSha = fullSha, baseRef = 'main'): ActionConfirm => ({ type: 'action', action: 'merge', repo: shown, viewer: 'vera-quill', reviewer: '', headSha, baseRef })
 
 const others = (): OpenRow => mine('ready', { section: 'others', author: { login: 'alex-mendez', alias: 'Alex' } })
@@ -61,6 +90,17 @@ test('only the viewer\'s own open PRs offer actions: Merge when ready, Mark read
   assert.deepEqual(actionOffers(others(), true), [])
   assert.deepEqual(actionOffers(mine('ready'), false), [])
   assert.deepEqual(actionOffers(mine('draft'), false), [])
+})
+
+test('Squash and merge is offered for an approved row GitHub is still checking (the ready group), and for no other checking row', () => {
+  const offers = (row: OpenRow): string[] => actionOffers(row, true).map((offer) => offer.action)
+  assert.ok(offers(mine('checking', { group: 'readyToMerge' })).includes('merge'))
+  assert.ok(!offers(mine('checking', { group: 'awaitingReview' })).includes('merge'))
+  assert.ok(!offers(mine('checking', { group: 'readyToMerge', primaryBase: false, baseRef: 'release/2' })).includes('merge'))
+  assert.ok(!offers(mine('blocked', { group: 'readyToMerge' })).includes('merge'))
+  assert.ok(!offers(mine('draft', { group: 'drafts' })).includes('merge'))
+  // the confirmation opens for it exactly as for a ready row
+  assert.ok(actionConfirmModel(mine('checking', { group: 'readyToMerge' }), mergeAsk(), people) !== null)
 })
 
 test('nothing is asked or sent until a click opens the confirmation: the drawer starts with offers and no ask', () => {
@@ -331,4 +371,14 @@ test('a Resolve conflicts request carries everything its confirmation displayed,
 
 test('the Resolve conflicts done line says the session started and the row is refreshed when it ends', () => {
   assert.equal(actionDoneText(101, resolveAsk(), people), '#101: session to resolve conflicts started. The row is refreshed when it ends.')
+})
+
+test('the drawer offers Squash and merge on a HAS_HOOKS row only when nothing else withholds it, as it does for CLEAN', async () => {
+  for (const [name, patch, contexts, expected] of hasHooksCases) {
+    const hooks = await derivedRow({ ...patch, mergeStateStatus: 'HAS_HOOKS' }, contexts)
+    const clean = await derivedRow({ ...patch, mergeStateStatus: 'CLEAN' }, contexts)
+    const offered = (row: OpenRow): boolean => actionOffers(row, true).some((offer) => offer.action === 'merge')
+    assert.equal(offered(hooks), expected, `HAS_HOOKS, ${name}`)
+    assert.equal(offered(clean), expected, `CLEAN, ${name}`)
+  }
 })

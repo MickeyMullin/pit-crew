@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Cache, Run } from './cache.ts'
 import type { Config } from './config.ts'
-import { deriveIssues, deriveMerge, isPrimaryBase } from './derive.ts'
+import { deriveIssues, deriveMerge, isPrimaryBase, offersMerge } from './derive.ts'
 import { GhError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr } from './github.ts'
 import { isHttpUrl, offersFix, postArgs, postOffer } from './launcher.ts'
@@ -46,6 +46,21 @@ export class ActionError extends Error {
     this.code = code
     this.errorKind = errorKind
   }
+}
+
+// why a merge of this cached PR is not allowed, or null when it is: the page's rule (mergeOffered in public/mergeoffer.ts) applied to the row the PR derives to, then the primary-branch check, so the page offers Merge exactly when this allows it
+export const mergeRefusal = (number: number, pr: RawOpenPr, defaultBranch: string | null): ActionError | null => {
+  const issues = deriveIssues(pr)
+  const merge = deriveMerge(pr, issues)
+  if (merge.state === 'draft') return new ActionError('notAllowed', `#${number} is a draft; mark it ready for review before merging`)
+  const primary = isPrimaryBase(pr.baseRefName, defaultBranch)
+  if (!offersMerge(pr, merge, issues, primary)) {
+    if (!primary && offersMerge(pr, merge, issues, true)) {
+      return new ActionError('notAllowed', `#${number} targets ${pr.baseRefName}, not the primary branch (${defaultBranch ?? 'master or main'}); Pit View merges only into the primary branch`)
+    }
+    return new ActionError('notAllowed', `#${number} is not ready to merge: its merge state is ${merge.label}${issues.length === 0 ? '' : ` (${issues.map((issue) => issue.label).join(', ')})`}`)
+  }
+  return null
 }
 
 const usage = 'send { "action": "merge", "repo": "<owner/name shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "update" | "resolveConflicts", "repo": "<owner/name shown>", "viewer": "<login shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "markReady" | "convertToDraft", "repo": "<owner/name shown>" }, or { "action": "requestReview", "repo": "<owner/name shown>", "reviewer": "<login from people>" }'
@@ -103,12 +118,15 @@ export const ghArgs = (repo: string, number: number, request: Exclude<ActionRequ
 // the one PR read live just before a merge, read-only, through the token the write then uses
 type LivePr = { state?: string, draft?: boolean, merged?: boolean, mergeable?: boolean | null, mergeable_state?: string, base?: { ref?: string }, head?: { sha?: string } }
 
+// the live states a merge may proceed from: GitHub's mergeable answers, never unknown or unstable
+const liveMergeableStates: readonly string[] = ['clean', 'has_hooks']
+
 const refuseIfMoved = (number: number, live: LivePr, base: string, headSha: string): void => {
   if (live.state !== 'open' || live.merged === true) throw new ActionError('notAllowed', `#${number} is no longer open; nothing was merged`)
   if (live.base?.ref !== base) throw new ActionError('notAllowed', `#${number} now targets ${live.base?.ref ?? 'another branch'}, not ${base} as you saw; nothing was merged`)
   if (live.head?.sha !== headSha) throw new ActionError('notAllowed', `#${number} has new commits since you saw it; nothing was merged`)
   if (live.draft === true) throw new ActionError('notAllowed', `#${number} is a draft now; nothing was merged`)
-  if (live.mergeable !== true || live.mergeable_state !== 'clean') throw new ActionError('notAllowed', `#${number} is not mergeable right now (${live.mergeable_state ?? 'unknown'}); nothing was merged`)
+  if (live.mergeable !== true || !liveMergeableStates.includes(live.mergeable_state ?? '')) throw new ActionError('notAllowed', `#${number} is not mergeable right now (${live.mergeable_state ?? 'unknown'}); nothing was merged`)
 }
 
 const sameLogin = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
@@ -242,13 +260,9 @@ export const createActions = (options: ActionsOptions): Actions => {
     let merging: { base: string, headSha: string } | undefined
     if (request.action === 'merge') {
       // the state the row shows, derived again from the cached PR rather than taken from the page
-      const merge = deriveMerge(row.pr, deriveIssues(row.pr))
-      if (merge.state === 'draft') throw new ActionError('notAllowed', `#${number} is a draft; mark it ready for review before merging`)
-      if (merge.state !== 'ready') throw new ActionError('notAllowed', `#${number} is not ready to merge: its merge state is ${merge.label}`)
+      const refusal = mergeRefusal(number, row.pr, cached.defaultBranch)
+      if (refusal !== null) throw refusal
       const base = row.pr.baseRefName
-      if (!isPrimaryBase(base, cached.defaultBranch)) {
-        throw new ActionError('notAllowed', `#${number} targets ${base}, not the primary branch (${cached.defaultBranch ?? 'master or main'}); Pit View merges only into the primary branch`)
-      }
       // the confirmation named a head and a base; the cache can have moved on before the page was patched, and then the viewer never saw what is cached: nothing is written
       if (request.base !== base || request.headSha !== row.pr.headRefOid.toLowerCase()) {
         refresh(repo, number)

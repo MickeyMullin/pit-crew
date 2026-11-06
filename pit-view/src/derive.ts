@@ -5,6 +5,7 @@ import type {
 } from './github.ts'
 import type { AgentCell } from './launcher.ts'
 import type { ReportInfo } from './reports.ts'
+import { mergeOffered, offerableMergeState } from '../public/mergeoffer.ts'
 import { closedRanges, iso } from './time.ts'
 import type { Range } from './time.ts'
 
@@ -367,14 +368,17 @@ export const deriveIssues = (pr: RawOpenPr): Issue[] => {
 
 export const deriveMerge = (pr: RawOpenPr, issues: readonly Issue[]): MergeState => {
   if (pr.isDraft) return { state: 'draft', label: '—' }
-  if (pr.mergeStateStatus === 'CLEAN') return { state: 'ready', label: 'Ready' }
+  // the rule in public/mergeoffer.ts comes first: an approved PR with no chip that withholds Merge reads Ready on CLEAN or HAS_HOOKS, and Checking on UNKNOWN, since GitHub computes mergeability lazily, often only once asked, and the next cycle reads it
+  const offerable = offerableMergeState(pr, issues)
+  if (offerable === 'ready') return { state: 'ready', label: 'Ready' }
+  if (offerable === 'checking') return { state: 'checking', label: 'Checking' }
+  // UNSTABLE reads Blocked whatever the reviews, so it never reaches the no-chip labels below
+  if (pr.mergeStateStatus === 'UNSTABLE') return { state: 'blocked', label: 'Blocked' }
   const reviewed = countedReviews(pr).length > 0
   if (issues.length === 0 && (pr.reviewDecision === null || pr.reviewDecision === 'REVIEW_REQUIRED') && reviewed) {
     return { state: 'needsApproval', label: 'Needs approval' }
   }
   if (issues.length === 0 && !reviewed) return { state: 'needsReview', label: 'Needs review' }
-  // GitHub computes mergeability lazily, often only once asked; the next cycle reads it
-  if (issues.length === 0 && pr.mergeStateStatus === 'UNKNOWN') return { state: 'checking', label: 'Checking' }
   return { state: 'blocked', label: 'Blocked' }
 }
 
@@ -409,11 +413,13 @@ const changesRequestedBy = (pr: RawOpenPr, config: Config): ChangesRequestedBy |
   return { login, alias: aliasOf(login, config), at: review.submittedAt, anchor: databaseAnchor('review', review.databaseId) }
 }
 
-// ready to merge: merge state ready, or approved with no issue chips while GitHub is still checking
-// mergeability (after a restart or a base branch move), so it is not dropped for a cycle; its merge
-// state stays checking, so the row still says the merge is unconfirmed
+// ready to merge: merge state ready, or approved with no chip that withholds Merge while GitHub is still checking mergeability (after a restart or a base branch move), so it is not dropped for a cycle; its merge state stays checking, so the row still says the merge is unconfirmed
 const groupsAsReady = (pr: RawOpenPr, merge: MergeState): boolean =>
   merge.state === 'ready' || (merge.state === 'checking' && pr.reviewDecision === 'APPROVED')
+
+// the server's side of the Merge offer: the page's rule (mergeOffered in public/mergeoffer.ts) applied to the row this PR derives to, so the two cannot disagree. A PR that is not approved, and an unstable, behind, blocked, dirty, or draft one, never reads Ready or Checking, so it is never offered; a stack or release target is not the primary branch
+export const offersMerge = (pr: RawOpenPr, merge: MergeState, issues: readonly Issue[], primaryBase: boolean): boolean =>
+  mergeOffered({ merge, group: mineGroupAndStage(pr, merge).group, issues, primaryBase })
 
 // Others' groups, in precedence order; null means hidden (others' drafts in v1)
 export const otherGroup = (pr: RawOpenPr, issues: readonly Issue[], merge: MergeState, config: Config): OtherGroup | null => {

@@ -5,6 +5,7 @@
 import type { RunnerName } from '../src/config.ts'
 import type { AgentCell, AgentResult, PostForm, RunnerModels, RunView, StartKind, StartOption, StepSlot } from '../src/launcher.ts'
 import type { OpenRow } from '../src/derive.ts'
+import { mergeOffered } from './mergeoffer.ts'
 import { formatDuration, formatSince } from './format.ts'
 
 export type { AgentCell, AgentResult, PostForm, RunnerModels, RunnerName, RunView, StartKind, StartOption, StepSlot }
@@ -109,9 +110,9 @@ const failureTip = (note: string | null): string | null => {
   return note
 }
 
-// the idle cell reads Merge instead of the row's default run on the viewer's own PR that is ready to merge into the primary branch: the same condition under which the drawer offers Squash and merge. The page derives it from the row it already has; the server sends no field for it, and the button starts nothing
-export const showsMerge = (row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase'>): boolean =>
-  row.section === 'mine' && row.merge.state === 'ready' && row.primaryBase
+// the idle cell reads Merge instead of the row's default run on the viewer's own PR that the offer rule admits (approved, with the primary branch as its base, no chip that withholds it, and a merge status of CLEAN, HAS_HOOKS, or UNKNOWN): the same condition under which the drawer offers Squash and merge, and the one the server's guard applies (mergeOffered in ./mergeoffer.ts, the single rule). The page derives it from the row it already has; the server sends no field for it, and the button starts nothing
+export const showsMerge = (row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'group' | 'issues'>): boolean =>
+  row.section === 'mine' && mergeOffered(row)
 
 export const cellModel = (cell: AgentCell, number: number, nowMs: number, merge = false): CellModel => {
   if (cell.state === 'queued') {
