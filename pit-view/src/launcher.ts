@@ -1738,7 +1738,7 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
           heldBack = opening > 0
           continue
         } else if (!item.checking) {
-          check(item, item.attempt)
+          startChecks(item, item.attempt)
         }
         // one that holds a slot and has not started holds back every one behind it
         heldBack = true
@@ -1759,11 +1759,11 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
       const attempt = reserve(slot)
       item.attempt = attempt
       heldBack = true
-      check(item, attempt)
+      startChecks(item, attempt)
     }
   }
 
-  const check = (item: LineEntry, attempt: number): void => {
+  const startChecks = (item: LineEntry, attempt: number): void => {
     void begin(item, attempt).catch((error: unknown) => log(`${item.name}: cannot start from the queue: ${messageOf(error)}`))
   }
 
