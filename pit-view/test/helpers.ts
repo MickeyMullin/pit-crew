@@ -73,7 +73,8 @@ export const fixtureRunner = (): FakeRunner =>
 // a fresh directory under the OS temp dir, removed by the returned cleanup
 export const tempDir = async (): Promise<{ dir: string, cleanup: () => Promise<void> }> => {
   const dir = await mkdtemp(join(tmpdir(), 'pit-view-test-'))
-  return { dir, cleanup: () => rm(dir, { recursive: true, force: true }) }
+  // retried, since a launch the queue let go in the background may still be writing to its folder when a test ends
+  return { dir, cleanup: () => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }) }
 }
 
 export type FakeTime = {

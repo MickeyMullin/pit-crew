@@ -577,9 +577,9 @@ test('a sweep behind a full cap waits in the one queue, with no process or folde
     await waitFor(() => h.cache.getSweep(sweep.id)?.pid != null)
     const started = h.cache.getSweep(sweep.id)
     assert.equal(started?.status, 'running')
-    // its start time is when it started, not when it was queued, and it starts with the same second checks as a queued review
+    // its start time is when it started, not when it was queued, and it starts on checks made in the queue, as a queued review does: one more set, or two when the first passed while the launch ahead of it was still returning
     assert.notEqual(started?.startedAt, sweep.startedAt)
-    assert.equal(h.gh.calls.filter((call) => call.args[0] === 'api').length, 6)
+    assert.ok([6, 7].includes(h.gh.calls.filter((call) => call.args[0] === 'api').length))
     assert.equal(h.cache.getRun(later.id)?.status, 'queued')
     assert.equal(h.launch.children[2]!.request.cwd, join(h.home, 'dev', 'orbit'))
     await waitFor(() => h.changes.at(-1)?.status === 'running')
