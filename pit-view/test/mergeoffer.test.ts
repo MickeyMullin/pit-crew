@@ -41,7 +41,7 @@ const expectedCells = statuses.length * mergeables.length * decisions.length * d
 
 const nameOf = (cell: Cell): string => Object.values(cell).map(String).join(' / ')
 
-// THE RULE, independent of the code under test. Approved means reviewDecision APPROVED, and REVIEW_REQUIRED and null are not approved. A CONFLICTING mergeable, a change request, and a failing or running check each withhold it; no checks at all (the CI not run chip) and a canceled check do not. UNSTABLE is the owner's open question and is not offered
+// THE RULE, independent of the code under test. Approved means reviewDecision APPROVED, and REVIEW_REQUIRED and null are not approved. A CONFLICTING mergeable, a change request, and a failing or running check each withhold it; no checks at all (the CI not run chip) and a canceled check do not. UNSTABLE reads Blocked and offers no Merge
 const clearsTheRule = (cell: Cell): boolean =>
   !cell.draft
   && cell.decision === 'APPROVED'
@@ -52,10 +52,14 @@ const clearsTheRule = (cell: Cell): boolean =>
 // Merge is offered only on the viewer's own PR into the primary branch that clears the rule
 const expectedOffer = (cell: Cell): boolean => cell.owner === 'mine' && cell.base === 'primary' && clearsTheRule(cell)
 
-// the group and the merge state say the same as the rule whoever owns the PR and whatever its base, so a row never reads Ready to merge on one screen and is refused on another
-const expectedMergeState = (cell: Cell): 'ready' | 'checking' | 'other' => {
-  if (!clearsTheRule(cell)) return 'other'
-  return cell.status === 'UNKNOWN' ? 'checking' : 'ready'
+// the merge state and its label, written out from the table in DESIGN.md section 5, whoever owns the PR and whatever its base, so a row never reads Ready to merge on one screen and is refused on another. A draft reads the draft state whatever its status, then the rule's Ready and Checking. On a PR the rule did not take, UNSTABLE reads Blocked whatever the reviews, and so does any chip, CI not run and CI canceled included. With no chip, a PR with no counted review reads Needs review, an unapproved one with a counted review reads Needs approval, and an approved one with a counted review reads Blocked
+const expectedMerge = (cell: Cell): { state: string, label: string } => {
+  if (cell.draft) return { state: 'draft', label: '—' }
+  if (clearsTheRule(cell)) return cell.status === 'UNKNOWN' ? { state: 'checking', label: 'Checking' } : { state: 'ready', label: 'Ready' }
+  const hasChip = cell.decision === 'CHANGES_REQUESTED' || cell.mergeable === 'CONFLICTING' || cell.ci !== 'passing'
+  if (cell.status === 'UNSTABLE' || hasChip) return { state: 'blocked', label: 'Blocked' }
+  if (cell.reviews === 'noReviews') return { state: 'needsReview', label: 'Needs review' }
+  return cell.decision === 'APPROVED' ? { state: 'blocked', label: 'Blocked' } : { state: 'needsApproval', label: 'Needs approval' }
 }
 
 // invented people and branches; #102 is the viewer's own in the scenario
@@ -198,7 +202,7 @@ test('the cached server guard, which ownership does not reach, equals the rule i
   assertNoMismatches(mismatches)
 })
 
-test('the merge state and the Ready to merge group equal the rule in every cell, in Mine and in Others\'', async () => {
+test('the merge state, its label, and the Ready to merge group equal the rule in every cell, in Mine and in Others\'', async () => {
   const base = await base102()
   const mismatches: string[] = []
   for (const cell of cells) {
@@ -207,9 +211,8 @@ test('the merge state and the Ready to merge group equal the rule in every cell,
       if (cell.owner === 'mine' || !cell.draft) mismatches.push(`${nameOf(cell)}: no row`)
       continue
     }
-    const state = row.merge.state
-    const answer = { state: state === 'ready' || state === 'checking' ? state : 'other', ready: row.group === 'readyToMerge', draft: state === 'draft' }
-    const wanted = { state: expectedMergeState(cell), ready: clearsTheRule(cell), draft: cell.draft }
+    const answer = { state: row.merge.state, label: row.merge.label, ready: row.group === 'readyToMerge' }
+    const wanted = { ...expectedMerge(cell), ready: clearsTheRule(cell) }
     if (JSON.stringify(answer) !== JSON.stringify(wanted)) mismatches.push(`${nameOf(cell)}: ${JSON.stringify(answer)}, wanted ${JSON.stringify(wanted)}`)
   }
   assertNoMismatches(mismatches)
@@ -245,12 +248,32 @@ test('a PR that is not approved never reads Ready or Checking, whatever GitHub s
   }
 })
 
-test('UNSTABLE reads Blocked and offers no Merge on an otherwise clear approved PR, whatever its checks say', async () => {
+test('UNSTABLE reads Blocked and offers no Merge, whatever its checks, its review decision, or its counted reviews', async () => {
   const base = await base102()
+  const clear: Cell = { status: 'UNSTABLE', mergeable: 'MERGEABLE', decision: 'APPROVED', draft: false, base: 'primary', ci: 'passing', owner: 'mine', reviews: 'noReviews' }
+  // an approved PR with a passing check and no counted review, the case that has no chip to read Blocked by
+  assert.deepEqual(rowOf(base, clear)?.merge, { state: 'blocked', label: 'Blocked' })
   for (const ci of cis) {
-    const row = rowOf(base, { status: 'UNSTABLE', mergeable: 'MERGEABLE', decision: 'APPROVED', draft: false, base: 'primary', ci, owner: 'mine', reviews: 'reviewed' })
-    assert.ok(row)
-    assert.deepEqual(row.merge, { state: 'blocked', label: 'Blocked' }, ci)
-    assert.equal(showsMerge(row), false, ci)
+    for (const decision of decisions) {
+      for (const review of reviews) {
+        const name = `${ci}, ${decision}, ${review}`
+        const row = rowOf(base, { ...clear, ci, decision, reviews: review })
+        assert.ok(row, name)
+        assert.deepEqual(row.merge, { state: 'blocked', label: 'Blocked' }, name)
+        assert.equal(showsMerge(row), false, name)
+      }
+    }
+  }
+})
+
+test('a draft reads the draft state whatever GitHub reports, UNSTABLE included, so it keeps Mark ready and is not offered Merge', async () => {
+  const base = await base102()
+  for (const status of statuses) {
+    const row = rowOf(base, { status, mergeable: 'MERGEABLE', decision: 'APPROVED', draft: true, base: 'primary', ci: 'passing', owner: 'mine', reviews: 'reviewed' })
+    assert.ok(row, String(status))
+    assert.deepEqual(row.merge, { state: 'draft', label: '—' }, String(status))
+    const offers = actionOffers(row, true).map((offer) => offer.action)
+    assert.ok(offers.includes('markReady'), String(status))
+    assert.ok(!offers.includes('merge'), String(status))
   }
 })

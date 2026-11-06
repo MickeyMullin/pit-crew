@@ -372,6 +372,8 @@ export const deriveMerge = (pr: RawOpenPr, issues: readonly Issue[]): MergeState
   const offerable = offerableMergeState(pr, issues)
   if (offerable === 'ready') return { state: 'ready', label: 'Ready' }
   if (offerable === 'checking') return { state: 'checking', label: 'Checking' }
+  // UNSTABLE reads Blocked whatever the reviews, so it never reaches the no-chip labels below
+  if (pr.mergeStateStatus === 'UNSTABLE') return { state: 'blocked', label: 'Blocked' }
   const reviewed = countedReviews(pr).length > 0
   if (issues.length === 0 && (pr.reviewDecision === null || pr.reviewDecision === 'REVIEW_REQUIRED') && reviewed) {
     return { state: 'needsApproval', label: 'Needs approval' }

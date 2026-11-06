@@ -3,7 +3,6 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Cache, Run } from './cache.ts'
 import type { Config } from './config.ts'
-import { unstableOffersMerge } from '../public/mergeoffer.ts'
 import { deriveIssues, deriveMerge, isPrimaryBase, offersMerge } from './derive.ts'
 import { GhError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr } from './github.ts'
@@ -119,8 +118,8 @@ export const ghArgs = (repo: string, number: number, request: Exclude<ActionRequ
 // the one PR read live just before a merge, read-only, through the token the write then uses
 type LivePr = { state?: string, draft?: boolean, merged?: boolean, mergeable?: boolean | null, mergeable_state?: string, base?: { ref?: string }, head?: { sha?: string } }
 
-// the live states a merge may proceed from: GitHub's mergeable answers, never unknown, and unstable only under the owner's rule in public/mergeoffer.ts
-const liveMergeableStates: readonly string[] = unstableOffersMerge ? ['clean', 'has_hooks', 'unstable'] : ['clean', 'has_hooks']
+// the live states a merge may proceed from: GitHub's mergeable answers, never unknown or unstable
+const liveMergeableStates: readonly string[] = ['clean', 'has_hooks']
 
 const refuseIfMoved = (number: number, live: LivePr, base: string, headSha: string): void => {
   if (live.state !== 'open' || live.merged === true) throw new ActionError('notAllowed', `#${number} is no longer open; nothing was merged`)
