@@ -5,7 +5,7 @@ import type {
 } from './github.ts'
 import type { AgentCell } from './launcher.ts'
 import type { ReportInfo } from './reports.ts'
-import { hasWithholdingIssue, mergeOffered, unstableOffersMerge } from '../public/mergeoffer.ts'
+import { mergeOffered, offerableMergeState } from '../public/mergeoffer.ts'
 import { closedRanges, iso } from './time.ts'
 import type { Range } from './time.ts'
 
@@ -368,16 +368,15 @@ export const deriveIssues = (pr: RawOpenPr): Issue[] => {
 
 export const deriveMerge = (pr: RawOpenPr, issues: readonly Issue[]): MergeState => {
   if (pr.isDraft) return { state: 'draft', label: '—' }
-  // CLEAN is GitHub's mergeable answer. HAS_HOOKS is the same on a repository with pre-receive hooks, but it is read Ready only when no issue chip withholds Merge (a change requested, conflicts, or a failing or running check), so it never skips what CLEAN's required checks cover. UNSTABLE is Ready only under the owner's rule in public/mergeoffer.ts
-  const status = pr.mergeStateStatus
-  if (status === 'CLEAN' || ((status === 'HAS_HOOKS' || (status === 'UNSTABLE' && unstableOffersMerge)) && !hasWithholdingIssue(issues))) return { state: 'ready', label: 'Ready' }
+  // the rule in public/mergeoffer.ts comes first: an approved PR with no chip that withholds Merge reads Ready on CLEAN or HAS_HOOKS, and Checking on UNKNOWN, since GitHub computes mergeability lazily, often only once asked, and the next cycle reads it
+  const offerable = offerableMergeState(pr, issues)
+  if (offerable === 'ready') return { state: 'ready', label: 'Ready' }
+  if (offerable === 'checking') return { state: 'checking', label: 'Checking' }
   const reviewed = countedReviews(pr).length > 0
   if (issues.length === 0 && (pr.reviewDecision === null || pr.reviewDecision === 'REVIEW_REQUIRED') && reviewed) {
     return { state: 'needsApproval', label: 'Needs approval' }
   }
   if (issues.length === 0 && !reviewed) return { state: 'needsReview', label: 'Needs review' }
-  // GitHub computes mergeability lazily, often only once asked; the next cycle reads it
-  if (issues.length === 0 && pr.mergeStateStatus === 'UNKNOWN') return { state: 'checking', label: 'Checking' }
   return { state: 'blocked', label: 'Blocked' }
 }
 
@@ -412,13 +411,11 @@ const changesRequestedBy = (pr: RawOpenPr, config: Config): ChangesRequestedBy |
   return { login, alias: aliasOf(login, config), at: review.submittedAt, anchor: databaseAnchor('review', review.databaseId) }
 }
 
-// ready to merge: merge state ready, or approved with no issue chips while GitHub is still checking
-// mergeability (after a restart or a base branch move), so it is not dropped for a cycle; its merge
-// state stays checking, so the row still says the merge is unconfirmed
+// ready to merge: merge state ready, or approved with no chip that withholds Merge while GitHub is still checking mergeability (after a restart or a base branch move), so it is not dropped for a cycle; its merge state stays checking, so the row still says the merge is unconfirmed
 const groupsAsReady = (pr: RawOpenPr, merge: MergeState): boolean =>
   merge.state === 'ready' || (merge.state === 'checking' && pr.reviewDecision === 'APPROVED')
 
-// the server's side of the Merge offer: the page's rule (mergeOffered in public/mergeoffer.ts) applied to the row this PR derives to, so the two cannot disagree. Unstable, behind, blocked, dirty, and draft PRs read Blocked or Draft and are never offered; a stack or release target is not the primary branch
+// the server's side of the Merge offer: the page's rule (mergeOffered in public/mergeoffer.ts) applied to the row this PR derives to, so the two cannot disagree. A PR that is not approved, and an unstable, behind, blocked, dirty, or draft one, never reads Ready or Checking, so it is never offered; a stack or release target is not the primary branch
 export const offersMerge = (pr: RawOpenPr, merge: MergeState, issues: readonly Issue[], primaryBase: boolean): boolean =>
   mergeOffered({ merge, group: mineGroupAndStage(pr, merge).group, issues, primaryBase })
 

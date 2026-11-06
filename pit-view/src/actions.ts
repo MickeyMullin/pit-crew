@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Cache, Run } from './cache.ts'
 import type { Config } from './config.ts'
+import { unstableOffersMerge } from '../public/mergeoffer.ts'
 import { deriveIssues, deriveMerge, isPrimaryBase, offersMerge } from './derive.ts'
 import { GhError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr } from './github.ts'
@@ -118,12 +119,15 @@ export const ghArgs = (repo: string, number: number, request: Exclude<ActionRequ
 // the one PR read live just before a merge, read-only, through the token the write then uses
 type LivePr = { state?: string, draft?: boolean, merged?: boolean, mergeable?: boolean | null, mergeable_state?: string, base?: { ref?: string }, head?: { sha?: string } }
 
+// the live states a merge may proceed from: GitHub's mergeable answers, never unknown, and unstable only under the owner's rule in public/mergeoffer.ts
+const liveMergeableStates: readonly string[] = unstableOffersMerge ? ['clean', 'has_hooks', 'unstable'] : ['clean', 'has_hooks']
+
 const refuseIfMoved = (number: number, live: LivePr, base: string, headSha: string): void => {
   if (live.state !== 'open' || live.merged === true) throw new ActionError('notAllowed', `#${number} is no longer open; nothing was merged`)
   if (live.base?.ref !== base) throw new ActionError('notAllowed', `#${number} now targets ${live.base?.ref ?? 'another branch'}, not ${base} as you saw; nothing was merged`)
   if (live.head?.sha !== headSha) throw new ActionError('notAllowed', `#${number} has new commits since you saw it; nothing was merged`)
   if (live.draft === true) throw new ActionError('notAllowed', `#${number} is a draft now; nothing was merged`)
-  if (live.mergeable !== true || (live.mergeable_state !== 'clean' && live.mergeable_state !== 'has_hooks')) throw new ActionError('notAllowed', `#${number} is not mergeable right now (${live.mergeable_state ?? 'unknown'}); nothing was merged`)
+  if (live.mergeable !== true || !liveMergeableStates.includes(live.mergeable_state ?? '')) throw new ActionError('notAllowed', `#${number} is not mergeable right now (${live.mergeable_state ?? 'unknown'}); nothing was merged`)
 }
 
 const sameLogin = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()

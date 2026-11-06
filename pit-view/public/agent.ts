@@ -110,7 +110,7 @@ const failureTip = (note: string | null): string | null => {
   return note
 }
 
-// the idle cell reads Merge instead of the row's default run on the viewer's own PR that the offer rule admits (the primary branch as its base, and a state that is not yet known to be unmergeable): the same condition under which the drawer offers Squash and merge, and the one the server's guard applies (mergeOffered in ./mergeoffer.ts, the single rule). The page derives it from the row it already has; the server sends no field for it, and the button starts nothing
+// the idle cell reads Merge instead of the row's default run on the viewer's own PR that the offer rule admits (approved, with the primary branch as its base, no chip that withholds it, and a merge status of CLEAN, HAS_HOOKS, or UNKNOWN): the same condition under which the drawer offers Squash and merge, and the one the server's guard applies (mergeOffered in ./mergeoffer.ts, the single rule). The page derives it from the row it already has; the server sends no field for it, and the button starts nothing
 export const showsMerge = (row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'group' | 'issues'>): boolean =>
   row.section === 'mine' && mergeOffered(row)
 

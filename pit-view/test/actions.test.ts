@@ -925,6 +925,10 @@ test('a merge is refused with no write when the base was retargeted, or the PR i
     [{ draft: true }, /draft/],
     [{ mergeable: null }, /not mergeable/],
     [{ mergeable_state: 'dirty', mergeable: false }, /not mergeable/],
+    // GitHub says mergeable, but the state is not one Merge is offered for: the live read holds to the rule, too
+    [{ mergeable_state: 'unstable' }, /not mergeable/],
+    [{ mergeable_state: 'behind' }, /not mergeable/],
+    [{ mergeable_state: 'blocked' }, /not mergeable/],
   ] as const) {
     const h = await setup({ runner: ghWorld({ live: () => live }) })
     try {

@@ -89,7 +89,7 @@ test('Merge shows on an approved row GitHub is still checking, which groups as r
   assert.equal(showsMerge(row('mine', 'checking', false, 'readyToMerge')), false)
   for (const group of ['awaitingReview', 'changesRequested', 'drafts']) assert.equal(showsMerge(row('mine', 'checking', true, group)), false, group)
   assert.equal(showsMerge(row('others', 'checking', true, 'readyToMerge')), false)
-  // blocked (a failing or unstable check, behind, conflicts) never shows it, even in the ready group
+  // blocked (a failing or unstable check, behind, or conflicts) never shows it, even in the ready group
   assert.equal(showsMerge(row('mine', 'blocked', true, 'readyToMerge')), false)
 })
 
