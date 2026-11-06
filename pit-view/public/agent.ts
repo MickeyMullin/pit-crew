@@ -221,13 +221,17 @@ export const refusalText = (kind: 'start' | 'stop' | 'reread' | 'post', status: 
 }
 
 // one key per row's run state; a change of key is announced once, never a timer tick
+// marks a key read while a stack run started from another PR was on show, so its end is not told as the end of whatever the cell goes back to
+const coveredKey = ':stack'
+
 export const announceKey = (cell: AgentCell | null): string =>
-  cell === null ? 'none' : `${cell.runId ?? 'none'}:${cell.state}:${cell.status ?? 'none'}`
+  cell === null ? 'none' : `${cell.runId ?? 'none'}:${cell.state}:${cell.status ?? 'none'}${cell.stackRun == null ? '' : coveredKey}`
 
 export const announcement = (number: number, cell: AgentCell): string | null => {
   if (cell.state === 'queued') return `#${number}: ${cell.label} queued`
   if (cell.state === 'running') return `#${number}: ${cell.label} started`
-  if (cell.state === 'done') return `#${number}: ${cell.label} finished: ${cell.text ?? 'Done'}`
+  // a stack run's text already says whose run it is
+  if (cell.state === 'done') return cell.stackRun == null ? `#${number}: ${cell.label} finished: ${cell.text ?? 'Done'}` : `#${number}: ${cell.text ?? 'Done'}`
   return null
 }
 
@@ -244,6 +248,8 @@ export const announcements = (
     if (previous === null || row.agent === null) continue
     const before = previous.get(row.number)
     if (before === undefined || before === key) continue
+    // the cell went back to an older run the stack run had covered, which did not just start or finish; each key starts with its run id
+    if (before.endsWith(coveredKey) && Number.parseInt(key, 10) < Number.parseInt(before, 10)) continue
     const message = announcement(row.number, row.agent)
     if (message !== null) messages.push(message)
   }

@@ -6,7 +6,7 @@ import { deriveView, isMine } from './derive.ts'
 import type { ClosedView, Counts, DerivedView, Freshness, MineSection, OpenRow, OthersSection, PersonView, RowRefresh, Tiles } from './derive.ts'
 import { fetchClosedPrs, fetchOpenPrs, fetchPr, GhError } from './github.ts'
 import type { Gh, RawOpenPr } from './github.ts'
-import { agentCell } from './launcher.ts'
+import { agentCell, stackRunCover } from './launcher.ts'
 import type { Queueing } from './launcher.ts'
 import { baselineOf, compareRows, runEvent } from './notify.ts'
 import type { NotifyEvent, RowBaseline } from './notify.ts'
@@ -108,7 +108,7 @@ export type Poller = {
   runWatched: (run: { id: number, repo: string, number: number }) => void
   // a run of this PR started, stepped or settled: one patch upserting its row
   runChanged: (repo: string, number: number) => void
-  // the launcher's answer to whether a new review would wait changed: every open row's buttons are re-derived and sent if it differs from what pages last received
+  // something that can change a row's Agent cell or the launcher's answer to whether a new review would wait happened: every open row is derived again and sent, whether or not it differs from any earlier one
   queueingChanged: () => void
   // a sweep of this repo started, stepped, or settled: one patch carrying the sweeps whole
   sweepsChanged: (repo: string) => void
@@ -265,6 +265,8 @@ export const createPoller = (options: PollerOptions): Poller => {
   const snapshot = (settings: Config, reportMap: ReadonlyMap<number, ReportInfo>, queueing: Queueing = queueingNow()): Snapshot => {
     const cached = cache.readView(settings.repo)
     const runs = cache.latestRuns(settings.repo)
+    // derived on every read from the runs and the PRs as they are now, so nothing remembers which layers a stack run covered
+    const cover = stackRunCover(runs.values(), cached.open.map((row) => row.pr))
     const freshness = new Map<number, Freshness>(cached.open.map((row) => [row.number, { state: row.freshness.state, fetchedAt: row.freshness.fetchedAt }]))
     const view = deriveView({
       open: cached.open.map((row) => row.pr),
@@ -277,7 +279,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       reports: reportMap,
       freshness: (number) => freshness.get(number) ?? { state: 'current', fetchedAt: iso(clock.now()) },
       refresh: (number) => rowRefreshes.get(prKey(settings.repo, number)) ?? null,
-      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack, queueing),
+      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack, queueing, cover.get(pr.number)),
     })
     const rows = new Map<number, OpenRow>()
     for (const group of [...view.mine.groups, ...view.others.groups]) {

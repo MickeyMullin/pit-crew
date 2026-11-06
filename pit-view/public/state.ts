@@ -12,10 +12,15 @@ export const openRows = (view: Pick<View, 'mine' | 'others'>): OpenRow[] => [
   ...view.others.groups.flatMap((group) => group.rows),
 ]
 
-// whether the row's latest run is running: the Agent runs tile's filter predicate, and what its count counts
-export const hasRunningRun = (row: { agent: { state: string } | null }): boolean => row.agent?.state === 'running'
+type RunningCell = { state: string, stackRun?: { ownStatus: string | null } | null }
 
-export const countRunning = (rows: readonly { agent: { state: string } | null }[]): number => rows.filter(hasRunningRun).length
+// whether the row's latest run is running: the Agent runs tile's filter predicate, and what its count counts. A stack run started from another PR is that PR's run, so a layer that shows one counts by its own
+export const hasRunningRun = (row: { agent: RunningCell | null }): boolean => {
+  const covered = row.agent?.stackRun
+  return (covered == null ? row.agent?.state : covered.ownStatus) === 'running'
+}
+
+export const countRunning = (rows: readonly { agent: RunningCell | null }[]): number => rows.filter(hasRunningRun).length
 
 // attention order, as the server sorts. Others' Your move: Re-review first, then the rest of the group (Requested of you included), each oldest activity first, so the PR that has waited longest is on top. Every other group keeps Re-review, then Requested of you, then most recent activity first. Across groups, which only the flat list shows, tiers keep this a total order: Re-review in Your move, Re-review elsewhere, the rest of Your move, Requested of you elsewhere, everything else. Ties go to the higher number
 const attentionTier = (row: OpenRow): number => {

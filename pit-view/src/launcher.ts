@@ -6,7 +6,7 @@ import { join, resolve, sep } from 'node:path'
 import type { Cache, NewRun, NewSweep, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
 import { expandHome, tildePath } from './config.ts'
 import type { Clock, Config, RunnerName } from './config.ts'
-import { isBotLogin, isMine, viewerReview } from './derive.ts'
+import { isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
 import type { Stack } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
 import type { Gh, RawOpenPr, Runner } from './github.ts'
@@ -764,6 +764,8 @@ export type AgentCell = {
   costUsd: number | null
   // the post a blocked run's report may still get from the drawer's Post it; null for anything else
   postOffer: PostOffer | null
+  // set while the run on show is a stack review started from another PR: that PR's number, and the status of this PR's own latest run behind it, null with none. Null on the PR it started from, and on every other cell
+  stackRun: { from: number, ownStatus: RunStatus | null } | null
 }
 
 export type FailureKind = 'noResult' | 'noReport' | 'badResult' | 'permissionDenied' | 'serverRestarted' | 'spawnFailed'
@@ -966,18 +968,45 @@ const withPostFate = (run: Run): Run => {
   return run.postAttemptedAt !== null && result?.schema === 'pit-crew/review-result@1' && result.notPostedReason === 'postBlocked' ? { ...run, result: { ...result, notPostedReason: 'ghFailed' } } : run
 }
 
-export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null): AgentCell => {
+// the layers a review-stack run covers: the run's own target stack once a result names one, otherwise the stack GitHub marks for the PR it started from. A number GitHub does not mark is left out either way, since a PR only based on another PR's branch gets nothing from a stack run
+const stackRunMembers = (run: Run, prs: readonly RawOpenPr[]): number[] => {
+  const target = run.result?.schema === 'pit-crew/review-result@1' ? run.result.target : null
+  if (target === null || !('stack' in target)) return [...markedStackMembers(prs, run.number)]
+  return target.stack.filter((number) => {
+    const pr = prs.find((entry) => entry.number === number)
+    return pr !== undefined && markedStack(pr) !== null
+  })
+}
+
+// each PR's newest review-stack run that covers it, while that run is queued, running, or waiting for an answer. runs holds each PR's latest run, so a stack run its own PR has moved on from covers nothing; prs holds every open PR, hidden ones included, since a hidden layer still joins the layers around it. The PR a run started from is covered by that run too, which changes nothing there: agentCell takes a cover only when it is newer than the PR's own latest run
+export const stackRunCover = (runs: Iterable<Run>, prs: readonly RawOpenPr[]): Map<number, Run> => {
+  const cover = new Map<number, Run>()
+  for (const run of runs) {
+    if (run.command !== 'review-stack' || !['queued', 'running', 'needsInput'].includes(run.status)) continue
+    for (const number of stackRunMembers(run, prs)) {
+      if (run.id > (cover.get(number)?.id ?? 0)) cover.set(number, run)
+    }
+  }
+  return cover
+}
+
+export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null, cover: Run | undefined = undefined): AgentCell => {
   const mine = isMine(pr, config)
   const plan = defaultRun(pr, config)
   // the button's text; the run's own label is unchanged
   const action: AgentAction = { ...plan, label: queueing !== null && reviewCommands.includes(plan.command) && queueing[slotOf(pr, config)] ? queueText(plan.label) : plan.label, runner: config.agent.runner }
   const lastReviewAt = mine ? report?.at ?? null : viewerReview(pr, config)?.submittedAt ?? null
+  // the PR's own run decides what can start here, whatever the cell shows
+  const ownInFlight = ownRun?.status === 'running' || ownRun?.status === 'queued'
   const idle: AgentCell = {
-    state: 'idle', label: plan.label, action, starts: startOptions(pr, config, stack, run?.status === 'running' || run?.status === 'queued', queueing), lastReviewAt,
+    state: 'idle', label: plan.label, action, starts: startOptions(pr, config, stack, ownInFlight, queueing), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
-    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, postOffer: null,
+    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, postOffer: null, stackRun: null,
   }
+  // the newer of the PR's own latest run and the stack run that covers it
+  const covered = cover !== undefined && cover.id > (ownRun?.id ?? 0)
+  const run = covered ? cover : ownRun
   if (run === undefined) return idle
   const shas = standingShas(run)
   const head = pr.headRefOid.toLowerCase()
@@ -985,10 +1014,13 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
   if (run.status === 'running' || run.status === 'queued') state = run.status
   // a stack review reads the top layer, whose commit is not this PR's head
   else if (run.command !== 'review-stack' && shas.length > 0 && !shas.some((sha) => head.startsWith(sha.toLowerCase()))) state = 'idle'
+  const from = `Stack review from #${run.number}`
+  const ended = run.status === 'running' || run.status === 'queued' ? null : doneText(withPostFate(run), mine && pr.isDraft)
   return {
     ...idle,
     state,
-    label: state === 'idle' ? plan.label : run.label,
+    stackRun: covered ? { from: run.number, ownStatus: ownRun?.status ?? null } : null,
+    label: state === 'idle' ? plan.label : covered ? from : run.label,
     runId: run.id,
     runner: run.runner,
     command: run.command,
@@ -1001,7 +1033,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, run: Run | undefined, r
     tandem: isTandemRun(run.args),
     commit: recordedCommit(run),
     finishedAt: run.finishedAt,
-    text: run.status === 'running' || run.status === 'queued' ? null : doneText(withPostFate(run), mine && pr.isDraft),
+    text: covered && ended !== null ? `${from} · ${ended}` : ended,
     result: agentResult(withPostFate(run).result),
     question: run.status === 'needsInput' ? run.result?.question ?? null : null,
     note: run.note,

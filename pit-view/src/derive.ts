@@ -609,6 +609,27 @@ export const deriveStacks = (prs: readonly StackMark[]): Map<number, Stack> => {
 
 type BasePr = { number: number, headRefName: string, baseRefName: string }
 
+// the open PRs of the stack GitHub marks this PR as part of, itself included; empty when it marks none. GitHub's marker holds a size and a position and names no stack, so two PRs it marks count as one stack only when they report the same size, sit at adjacent positions, and one's base ref is the other's head ref. A branch link alone never adds a PR, since a PR GitHub does not mark is in no stack
+export const markedStackMembers = (prs: readonly (StackMark & Omit<BasePr, 'number'>)[], number: number): Set<number> => {
+  const marked = prs.flatMap((pr) => {
+    const place = markedStack(pr)
+    return place === null ? [] : [{ pr, place }]
+  })
+  const start = marked.find(({ pr }) => pr.number === number)
+  if (start === undefined) return new Set()
+  const members = new Set([number])
+  const reached = [start]
+  for (const layer of reached) {
+    for (const other of marked) {
+      if (members.has(other.pr.number) || other.place.size !== layer.place.size || Math.abs(other.place.position - layer.place.position) !== 1) continue
+      if (other.pr.baseRefName !== layer.pr.headRefName && layer.pr.baseRefName !== other.pr.headRefName) continue
+      members.add(other.pr.number)
+      reached.push(other)
+    }
+  }
+  return members
+}
+
 // the indication for a PR whose base ref is another open PR's head ref and that GitHub does not mark (`marked` holds the ones it does). Recomputed over every open PR, since a PR's base may live on another page; a PR whose head is the default branch (a fork's main) never counts as a base. Walk base links down to a PR whose base is not an open PR's branch: that PR is position 1, and the chain's size is the number of PRs that reach it
 export const deriveBasedOn = (prs: readonly BasePr[], defaultBranch: string | null, marked: ReadonlyMap<number, unknown>): Map<number, BasedOn> => {
   const byHead = new Map<string, BasePr>()

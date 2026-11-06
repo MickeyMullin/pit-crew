@@ -27,7 +27,10 @@ type OfferRow = Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'issues'> & 
 export const actionOffers = (row: OfferRow, open: boolean): ActionOffer[] => {
   if (!open || row.section !== 'mine') return []
   const draft = row.merge.state === 'draft'
-  const updates = row.primaryBase && row.agent?.state !== 'running' && row.agent?.state !== 'queued'
+  // a stack run started from another PR shows in the cell but is not a run of this PR, so what counts then is the PR's own
+  const covered = row.agent?.stackRun
+  const status = covered == null ? row.agent?.state : covered.ownStatus
+  const updates = row.primaryBase && status !== 'running' && status !== 'queued'
   return [
     ...row.merge.state === 'ready' && row.primaryBase ? [{ action: 'merge', text: 'Squash and merge' } as const] : [],
     draft ? { action: 'markReady', text: 'Mark ready for review' } : { action: 'convertToDraft', text: 'Convert to draft' },
