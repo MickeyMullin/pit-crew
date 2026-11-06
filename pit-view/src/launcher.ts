@@ -5,7 +5,7 @@ import { mkdir, open, readFile, realpath, rm, stat, writeFile } from 'node:fs/pr
 import { join, resolve, sep } from 'node:path'
 import type { Cache, NewRun, NewSweep, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
 import { expandHome, tildePath } from './config.ts'
-import type { Clock, Config, RunnerName } from './config.ts'
+import type { AgentSettings, Clock, Config, RunnerName } from './config.ts'
 import { isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
 import type { Stack } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
@@ -412,6 +412,22 @@ export const reportPath = (result: RunResultJson): string | null => {
 
 // command lines, one table entry per runner
 
+// the models a run starts with, read from the configuration in one place: specFor puts them on every command line, and modelLabels names them for the dialogs that ask before a click starts a run, so a label cannot disagree with the run. A later model registry changes this function and nothing else
+export const runModels = (agent: Pick<AgentSettings, 'claudeModel' | 'codexModel'>): Pick<LaunchSpec, 'claudeModel' | 'codexModel'> => ({
+  claudeModel: agent.claudeModel,
+  ...(agent.codexModel === undefined ? {} : { codexModel: agent.codexModel }),
+})
+
+// a readable name for each runner's model: Claude's aliases capitalized (Opus, Sonnet, Haiku), any other name as configured, and Codex's own default when no model is set
+export type RunnerModels = Record<RunnerName, string>
+
+const claudeAliases: Readonly<Record<string, string>> = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' }
+
+export const modelLabels = (agent: Pick<AgentSettings, 'claudeModel' | 'codexModel'>): RunnerModels => {
+  const { claudeModel, codexModel } = runModels(agent)
+  return { claude: claudeAliases[claudeModel] ?? claudeModel, codex: codexModel ?? 'Codex default' }
+}
+
 export type LaunchSpec = {
   command: string
   args: readonly string[]
@@ -732,6 +748,8 @@ export type AgentCell = {
   action: AgentAction
   // what the drawer's Start buttons can start now; the default is the first
   starts: StartOption[]
+  // the model each runner will start with, named for the confirmations that ask before a click starts a run; the same configuration the command line is built from
+  models: RunnerModels
   // own PRs: the self-review report's time; others': the viewer's latest review
   lastReviewAt: string | null
   // the latest run, null fields when there is none
@@ -999,7 +1017,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
   // the PR's own run decides what can start here, whatever the cell shows
   const ownInFlight = ownRun?.status === 'running' || ownRun?.status === 'queued'
   const idle: AgentCell = {
-    state: 'idle', label: plan.label, action, starts: startOptions(pr, config, stack, ownInFlight, queueing), lastReviewAt,
+    state: 'idle', label: plan.label, action, models: modelLabels(config.agent), starts: startOptions(pr, config, stack, ownInFlight, queueing), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
     finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, postOffer: null, stackRun: null,
@@ -2260,8 +2278,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       runDir: dir,
       home,
       sessionId: run.sessionId,
-      claudeModel: config.agent.claudeModel,
-      ...(config.agent.codexModel === undefined ? {} : { codexModel: config.agent.codexModel }),
+      ...runModels(config.agent),
       reportsDir: await resolved(join(home, 'agents', 'output')),
       worktreesDir: await resolved(join(home, 'agents', 'worktrees')),
     }

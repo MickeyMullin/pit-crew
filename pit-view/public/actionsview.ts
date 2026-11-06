@@ -1,7 +1,7 @@
 // public/actionsview.ts
 // the drawer's direct actions (section 9 of DESIGN.md) as pure functions of the open row and the people the config lists: which actions a row offers, the confirmation each one asks, the request it sends, and the words for a refusal. drawer.ts makes the elements. Nothing here reads the DOM or the clock
 import type { OpenRow } from '../src/derive.ts'
-import { sentence, tokenHeader } from './agent.ts'
+import { runnerLabels, sentence, tokenHeader } from './agent.ts'
 import type { RunRequest } from './agent.ts'
 
 // the actions this page offers; merge is always a squash into the PR's base branch, update starts an agent session that brings the PR's branch up to date with it, and resolveConflicts starts that same session on a conflicting PR
@@ -54,6 +54,8 @@ export type ActionConfirmModel = {
   // the choice of reviewer for a review request; null for the others
   reviewers: { login: string, label: string }[] | null
   reviewer: string
+  // the runner and model of the agent session an action starts (Update branch and Resolve conflicts, always Claude); null for an action that starts no agent, and for a row without an Agent cell, which has no model to name
+  session: { runner: string, model: string } | null
   // false when no eligible reviewer exists, so the confirmation control must be disabled
   canConfirm: boolean
   // a plain line for an action that rewrites the branch, which gives the confirmation its caution treatment; null for the others
@@ -76,6 +78,8 @@ export const actionConfirmModel = (
   const fallback = (branch: string, base: string): string => `If a rebase is not workable (someone else has commits on the branch, another PR is based on it, or it already holds a merge), it merges ${base} into ${branch} instead and pushes without force.`
   const rewrite = (branch: string, base: string): string => `A rebase rewrites the PR's own commits and replaces ${branch} on GitHub. Nothing on ${base} is rewritten.`
   // the Update session asked for on a conflicting PR: the same session, method, and push, in the words of the conflicts
+  // an update session always runs in Claude, as updateRequest names it
+  const started = row.agent == null ? null : { runner: runnerLabels.claude, model: row.agent.models.claude }
   if (ask.action === 'resolveConflicts') {
     const branch = row.headRef
     const base = ask.baseRef
@@ -86,6 +90,7 @@ export const actionConfirmModel = (
       effect: `Starts an agent session that resolves the conflicts between ${branch} and ${base} by rebasing ${branch} onto ${base}, and force-pushes ${branch} with --force-with-lease under your account, so the push is refused if ${branch} has moved on from head ${row.headOid}. ${fallback(branch, base)} It changes nothing but what the update and its conflicts need, and stops to ask when a conflict needs your judgment.`,
       reviewers: null,
       reviewer: '',
+      session: started,
       canConfirm: true,
       caution: rewrite(branch, base),
       confirm: 'Start resolving conflicts',
@@ -102,6 +107,7 @@ export const actionConfirmModel = (
       effect: `Starts an agent session that rebases ${branch} onto ${base}, resolving any conflicts, and force-pushes ${branch} with --force-with-lease under your account, so the push is refused if ${branch} has moved on from head ${row.headOid}. ${fallback(branch, base)} It stops to ask when a conflict needs your judgment.`,
       reviewers: null,
       reviewer: '',
+      session: started,
       canConfirm: true,
       caution: rewrite(branch, base),
       confirm: 'Start update',
@@ -116,6 +122,7 @@ export const actionConfirmModel = (
       effect: `Squashes the PR at head ${row.headOid} into one commit on ${ask.baseRef} under your account. The head branch is not deleted. The merge cannot be undone from Pit View.`,
       reviewers: null,
       reviewer: '',
+      session: null,
       canConfirm: true,
       caution: null,
       confirm: 'Squash and merge',
@@ -130,6 +137,7 @@ export const actionConfirmModel = (
       effect: 'Takes the PR out of draft under your account. Its requested reviewers and watchers are notified.',
       reviewers: null,
       reviewer: '',
+      session: null,
       canConfirm: true,
       caution: null,
       confirm: 'Mark ready',
@@ -144,6 +152,7 @@ export const actionConfirmModel = (
       effect: 'Turns the PR back into a draft under your account. It cannot be merged until it is marked ready again.',
       reviewers: null,
       reviewer: '',
+      session: null,
       canConfirm: true,
       caution: null,
       confirm: 'Convert to draft',
@@ -159,6 +168,7 @@ export const actionConfirmModel = (
     effect: reviewer === ''
       ? 'No one else is listed in people. Add reviewers in Settings first.'
       : `Asks GitHub to request a review from ${aliasOf(people, reviewer)} (@${reviewer}) under your account. They are notified.`,
+    session: null,
     reviewers: choices.map((person) => ({ login: person.login, label: `${person.alias} (@${person.login})` })),
     reviewer,
     canConfirm: reviewer !== '',

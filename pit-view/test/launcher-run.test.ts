@@ -11,7 +11,7 @@ import type { Run } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import { commandRunner, createGh } from '../src/github.ts'
-import { claudeInvocation, codexInvocation, createLauncher, createReviewLine, procsFrom, systemFs, systemSpawn } from '../src/launcher.ts'
+import { claudeInvocation, codexInvocation, createLauncher, createReviewLine, modelLabels, procsFrom, systemFs, systemSpawn } from '../src/launcher.ts'
 import { systemTimers } from '../src/poller.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { fakeRemotes, fixtureRunner, ok, tempDir } from './helpers.ts'
@@ -194,6 +194,29 @@ test('a Claude run carries the configured model on its real command line, sonnet
     assert.equal(modelOf(call.argv), 'opus')
   } finally {
     await second.cleanup()
+  }
+})
+
+test('the model a cell shows is the model on the real command line, for Claude and for Codex', { timeout: 20_000 }, async () => {
+  const claude = await setup({ agent: { runner: 'claude', claudeModel: 'opus' } })
+  try {
+    const run = await claude.launcher.start(request)
+    await claude.launcher.settled(run.id)
+    const call = await callOf(join(claude.home, '.local', 'state', 'pit-view', 'runs', String(run.id)))
+    assert.equal(call.argv[call.argv.indexOf('--model') + 1], 'opus')
+    assert.equal(modelLabels({ claudeModel: 'opus' }).claude, 'Opus')
+  } finally {
+    await claude.cleanup()
+  }
+  const agent = { runner: 'codex' as const, claudeModel: 'sonnet', codexModel: 'gpt-6.1-terra' }
+  const codex = await setup({ agent })
+  try {
+    const run = await codex.launcher.start(request)
+    await codex.launcher.settled(run.id)
+    const call = await callOf(join(codex.home, '.local', 'state', 'pit-view', 'runs', String(run.id)))
+    assert.equal(call.argv[call.argv.indexOf('-m') + 1], modelLabels(agent).codex)
+  } finally {
+    await codex.cleanup()
   }
 })
 

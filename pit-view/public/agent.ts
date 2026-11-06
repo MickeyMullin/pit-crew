@@ -3,11 +3,11 @@
 // the per-start token, how a refusal reads, and what changes are announced; pure, with every
 // clock reading passed in. The drawer's own words are in drawerview.ts
 import type { RunnerName } from '../src/config.ts'
-import type { AgentCell, AgentResult, PostForm, RunView, StartKind, StartOption, StepSlot } from '../src/launcher.ts'
+import type { AgentCell, AgentResult, PostForm, RunnerModels, RunView, StartKind, StartOption, StepSlot } from '../src/launcher.ts'
 import type { OpenRow } from '../src/derive.ts'
 import { formatDuration, formatSince } from './format.ts'
 
-export type { AgentCell, AgentResult, PostForm, RunnerName, RunView, StartKind, StartOption, StepSlot }
+export type { AgentCell, AgentResult, PostForm, RunnerModels, RunnerName, RunView, StartKind, StartOption, StepSlot }
 
 export const runnerNames: readonly RunnerName[] = ['claude', 'codex']
 

@@ -1,8 +1,8 @@
 // src/sweeps.ts
 import type { Cache, Sweep } from './cache.ts'
 import type { Config, RunnerName } from './config.ts'
-import { doneText, stepsOf } from './launcher.ts'
-import type { CiState, PostForm, Priority, Queueing, Recommendation, StartRequest, StepSlot, SweepResult } from './launcher.ts'
+import { doneText, modelLabels, stepsOf } from './launcher.ts'
+import type { CiState, PostForm, Priority, Queueing, Recommendation, RunnerModels, StartRequest, StepSlot, SweepResult } from './launcher.ts'
 
 // the Dependabot sweep as a concept of its own (section 8 of DESIGN.md, Sweeps): the command line it launches, what the confirmation says, the view the page draws from a sweep record, and the sweeps held in memory beside the runs. The launcher launches it (createSweepLauncher in launcher.ts).
 
@@ -33,6 +33,8 @@ export type SweepStart = {
   serial: string
   posts: string
   runners: RunnerName[]
+  // the model each runner will start with, named from the same configuration as the command line
+  models: RunnerModels
   // the configured default, which the confirmation offers first
   runner: RunnerName
   // why it cannot start right now; null otherwise
@@ -51,6 +53,7 @@ export const sweepStartOf = (config: Config, busy: boolean, waits = false): Swee
   serial: 'It reviews one PR at a time (--parallel 1), then writes one summary with a merge order.',
   posts: `Its reviewers post on GitHub as @${config.viewer}: each may approve a clean bump, request changes, or comment, one post per PR. It never merges or pushes.`,
   runners: ['claude', 'codex'],
+  models: modelLabels(config.agent),
   runner: config.agent.runner,
   unavailable: busy
     ? `a sweep for ${config.repo} is already in flight`

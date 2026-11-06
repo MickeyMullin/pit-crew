@@ -14,7 +14,7 @@ import type { RawOpenPr } from '../src/github.ts'
 import {
   agentCell, childEnv, claudeInvocation, codexInvocation, codexNote, createLauncher, createReviewLine, defaultRun, descendantGroups, doneText, emptyStream, gitConfigEnv,
   emptySteps, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, remoteNamesRepo,
-  noteKind, requestText, reviewFits, runners, runView, shellPath, startOptions, stepsOf, updateRequest,
+  modelLabels, noteKind, requestText, reviewFits, runners, runView, shellPath, startOptions, stepsOf, updateRequest,
 } from '../src/launcher.ts'
 import type { LaunchSpec, ReviewResult, RunResultJson, StartRequest, StepEvent } from '../src/launcher.ts'
 import { createPoller } from '../src/poller.ts'
@@ -209,6 +209,28 @@ test('an idle cell offers the default run with the configured runner and says wh
   assert.equal(agentCell(await prOf(104), config, undefined, report).lastReviewAt, '2026-10-20T10:00:00.000Z')
   assert.equal(agentCell(await prOf(104), config, undefined, undefined).lastReviewAt, null)
   assert.equal(agentCell(await prOf(113), config, undefined, undefined).lastReviewAt, null)
+})
+
+// the model each runner will start with, as a readable name (#826)
+
+test('modelLabels names the model each runner starts with: Claude\'s alias readably, Codex\'s own default when none is set', () => {
+  const agent = { runner: 'claude' as const, claudeModel: 'sonnet' }
+  assert.deepEqual(modelLabels(agent), { claude: 'Sonnet', codex: 'Codex default' })
+  assert.equal(modelLabels({ ...agent, claudeModel: 'opus' }).claude, 'Opus')
+  assert.equal(modelLabels({ ...agent, claudeModel: 'haiku' }).claude, 'Haiku')
+  // a full model name is shown as configured, never guessed at
+  assert.equal(modelLabels({ ...agent, claudeModel: 'claude-opus-5-5' }).claude, 'claude-opus-5-5')
+  assert.equal(modelLabels({ ...agent, codexModel: 'gpt-6.1-terra' }).codex, 'gpt-6.1-terra')
+})
+
+test('every cell and start carries the labels of the configured models, and they change when the configured model changes', async () => {
+  const pr = await prOf(104)
+  const sonnet = agentCell(pr, baseConfig(), undefined, undefined)
+  assert.deepEqual(sonnet.models, { claude: 'Sonnet', codex: 'Codex default' })
+  const config = { ...baseConfig(), agent: { runner: 'codex' as const, claudeModel: 'opus', codexModel: 'gpt-6.1-terra' } }
+  assert.deepEqual(agentCell(pr, config, undefined, undefined).models, { claude: 'Opus', codex: 'gpt-6.1-terra' })
+  // a run in flight keeps the cell's labels too, since the update and conflict dialogs read them from it
+  assert.deepEqual(agentCell(pr, config, runRow({ number: 104 }), undefined).models, { claude: 'Opus', codex: 'gpt-6.1-terra' })
 })
 
 test('a running cell carries the run, its last step and the resume command', async () => {

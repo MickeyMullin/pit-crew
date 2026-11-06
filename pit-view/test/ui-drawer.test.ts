@@ -57,6 +57,7 @@ const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
   label: 'Re-review',
   action: { kind: 'reReview', label: 'Re-review', command: 'review-pr', args: ['101'], runner: 'claude' },
   starts: options(),
+  models: { claude: 'Sonnet', codex: 'Codex default' },
   lastReviewAt: null,
   runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
   steps: slots(), tandem: false, commit: null,

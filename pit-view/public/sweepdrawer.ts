@@ -147,7 +147,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     const list = facts([
       ['Repository', model.repo],
       ['Command', h('code', { class: 'confirm-command mono', 'data-confirm': 'command' }, model.command)],
-      ['Runner', runner],
+      ['Runner', runner], ['Model', h('span', { 'data-confirm': 'model' }, model.model)],
       ['Runs', model.serial],
       ['On GitHub', model.effect],
     ])
@@ -176,6 +176,8 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     const view = sweeps()
     const command = root.querySelector<HTMLElement>('[data-confirm="command"]')
     if (command !== null && view !== null && confirm?.type === 'start') setText(command, sweepConfirmModel(view.start, confirm.runner).command)
+    const modelLine = root.querySelector<HTMLElement>('[data-confirm="model"]')
+    if (modelLine !== null && view !== null && confirm?.type === 'start') setText(modelLine, sweepConfirmModel(view.start, confirm.runner).model)
     for (const input of root.querySelectorAll<HTMLInputElement>('input[name="sweep-runner"]')) {
       const wanted = confirm?.type === 'start' && confirm.runner === input.value
       if (input.checked !== wanted) input.checked = wanted

@@ -112,6 +112,8 @@ export type SweepConfirmModel = {
   runners: { name: RunnerName, label: string }[]
   runner: RunnerName
   runnerLabel: string
+  // the model the chosen runner will start with
+  model: string
   confirm: string
   busy: string
 }
@@ -130,6 +132,7 @@ export const sweepConfirmModel = (start: SweepStart, runner: RunnerName): SweepC
   runners: start.runners.map((name) => ({ name, label: runnerLabels[name] })),
   runner,
   runnerLabel: runnerLabels[runner],
+  model: start.models[runner],
   confirm: 'Start sweep',
   busy: 'Starting sweep…',
 })
@@ -137,7 +140,7 @@ export const sweepConfirmModel = (start: SweepStart, runner: RunnerName): SweepC
 // everything the confirmation displays, as one string: the confirmation is rebuilt whenever it changes, so a change of repository, viewer, effect text, command, or availability never leaves the old text on screen
 export const sweepConfirmSignature = (start: SweepStart, runner: RunnerName): string => {
   const model = sweepConfirmModel(start, runner)
-  return JSON.stringify([model.heading, model.repo, model.viewer, model.command, model.serial, model.effect, model.runners.map((choice) => choice.name), start.unavailable])
+  return JSON.stringify([model.heading, model.repo, model.viewer, model.command, model.serial, model.effect, model.runners.map((choice) => choice.name), start.models, start.unavailable])
 }
 
 // a queued sweep leaves the queue instead of stopping: nothing has run, so nothing stays behind
