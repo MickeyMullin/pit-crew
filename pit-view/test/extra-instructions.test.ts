@@ -570,7 +570,7 @@ const childOf = (h: Harness, id: number): FakeChild => {
 const autoRunning = (h: Harness): Run[] => h.server.cache.allRuns().filter((run) => run.origin === 'auto' && run.status === 'running')
 
 // every record of what a run was spawned under, each against the one text expected: its arguments in the row, the process, and request.json, the file's bytes, and the column
-const assertSpawnedUnder = async (h: Harness, run: Run | undefined, text: string | null, before: readonly string[] = [String(run?.number), '--no-post']): Promise<void> => {
+const assertSpawnedUnder = async (h: Harness, run: Run | undefined, text: string | null, before: readonly string[] = [String(run?.number), '--no-post'], runner: 'claude' | 'codex' = 'claude'): Promise<void> => {
   assert.ok(run)
   const stored = h.server.cache.getRun(run.id)
   assert.equal(stored?.status, 'running')
@@ -579,11 +579,13 @@ const assertSpawnedUnder = async (h: Harness, run: Run | undefined, text: string
   assert.deepEqual(stored?.extraInstructions, text === null ? null : { text, source: 'default' })
   const child = childOf(h, run.id)
   const line = `review-pr ${args.join(' ')} --emit-json=${runDir(h, run.id)}`
-  assert.equal(child.request.command === 'codex' ? codexRequest(child) : claudeRequest(child), child.request.command === 'codex' ? `$${line}` : `/${line}`)
+  assert.equal(child.request.command, runner)
+  assert.equal(runner === 'codex' ? codexRequest(child) : claudeRequest(child), runner === 'codex' ? `$${line}` : `/${line}`)
   if (text === null) assert.equal(await exists(fileOf(h, run.id)), false)
   else assert.equal(await readFile(fileOf(h, run.id), 'utf8'), `${text}\n`)
   const record = await requestOf(h, run.id)
   assert.deepEqual(record.args, args)
+  assert.equal(record.argv[0], runner)
   assert.deepEqual(record.argv, [child.request.command, ...child.request.args])
   if (text === null) assert.equal(Object.hasOwn(record, 'extraInstructions'), false)
   else assert.deepEqual(record.extraInstructions, { text, source: 'default' })
@@ -629,7 +631,7 @@ test('a default changed during the launch\'s own last git step reaches a Codex c
   const h = await schedulerSetup(onePerTick, { extraReviewInstructions: 'old text', agent: { runner: 'codex', claudeModel: 'sonnet' } })
   try {
     await startWhileHeld(h, 'rev-parse', () => saveDefault(h, 'new text'))
-    await assertSpawnedUnder(h, autoRunning(h)[0], 'new text')
+    await assertSpawnedUnder(h, autoRunning(h)[0], 'new text', undefined, 'codex')
   } finally {
     await h.cleanup()
   }
@@ -639,7 +641,7 @@ test('a default cleared during the launch\'s own last git step takes the flag of
   const h = await schedulerSetup(onePerTick, { extraReviewInstructions: 'old text', agent: { runner: 'codex', claudeModel: 'sonnet' } })
   try {
     await startWhileHeld(h, 'rev-parse', () => saveDefault(h, ''))
-    await assertSpawnedUnder(h, autoRunning(h)[0], null)
+    await assertSpawnedUnder(h, autoRunning(h)[0], null, undefined, 'codex')
   } finally {
     await h.cleanup()
   }
