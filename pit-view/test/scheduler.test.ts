@@ -543,7 +543,7 @@ test('a scheduled sweep carries --parallel 1, and --no-post unless post.dependab
   }
 })
 
-// the posting switch at the spawn: a run built to post has awaits ahead of it (the identity check, the fetch, the add, the run directory), and a switch turned off during any of them must reach the process it starts
+// the posting switch at the spawn: a run built to post has awaits ahead of it (the identity check, the fetch, the add, and the run directory), and a switch turned off during any of them must reach the process it starts
 
 const savePost = async (world: World, post: AutoReviewSettings['post']): Promise<void> => {
   const stored = await (await fetch(`${world.server.url}/api/config`)).json() as Config
