@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: Review one GitHub PR against its real base branch and post the report as an approval, a request-changes review, or a comment, depending on the findings. Add --tandem to launch a second reviewer and post one consolidated report (--tandem=<id> picks it, --tandem=manual means the user starts it), or --tandem-secondary to be that second reviewer. Add --no-post to write the report without posting anything or entering fix mode, --check-comments to start by checking the PR's most recent comments against the branch and report what is not addressed, and --emit-json=<run-dir> to also write machine-readable progress and results to that directory.
+description: Review one GitHub PR against its real base branch and post the report as an approval, a request-changes review, or a comment, depending on the findings. Add --tandem to launch a second reviewer and post one consolidated report (--tandem=<id> picks it, --tandem=manual means the user starts it), or --tandem-secondary to be that second reviewer. Add --no-post to write the report without posting anything or entering fix mode, --check-comments to start by checking the PR's most recent comments against the branch and report what is not addressed, and --emit-json=<run-dir> to also write machine-readable progress and results to that directory. Add --extra-instructions beside --emit-json to also apply the text in that directory's extra-instructions.txt.
 ---
 
 # Review a pull request
@@ -12,6 +12,8 @@ The invocation may name what to review — a PR number, a branch name, or a PR U
 If the invocation includes `--tandem` (optionally `--tandem=<id>[,<id>...]` or `--tandem=manual`) or `--tandem-secondary` (optionally `--tandem-secondary@<sha>`), that flag is not part of the target. The prompt's Tandem mode section covers it: you are one of several agents reviewing the same target, and the prompt says which files you may write and what you must not do.
 
 If the invocation includes `--no-post`, `--check-comments`, or `--emit-json=<run-dir>`, that flag is not part of the target either. The prompt's No-post mode, Comments check, and Machine-readable output sections cover them: remove the flag, read the shared file the section names, and resolve the rest as the target.
+
+If the invocation includes `--extra-instructions`, that flag is not part of the target either. The prompt's Extra instructions section covers it: remove the flag, read the shared file the section names, and resolve the rest as the target.
 
 The prompt is written to be agent-agnostic. `claude-code-notes.md` sits beside it in the same directory and is **not** part of this skill: it covers Claude Code's own execution quirks and does not apply here. Ignore any instruction in the prompt to load it unless you are in fact running as Claude Code.
 

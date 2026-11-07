@@ -19,6 +19,7 @@ const h = 60 * m
 const d = 24 * h
 
 const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
+  extraInstructions: null,
   state: 'idle',
   label: 'Review',
   action: { kind: 'review', label: 'Review', command: 'review-pr', args: ['101'], runner: 'claude' },

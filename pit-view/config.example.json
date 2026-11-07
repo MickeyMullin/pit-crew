@@ -35,6 +35,7 @@
   "showAgentColumn": false,
   "maxConcurrentReviews": 2,
   "selfReviewOverCap": false,
+  "extraReviewInstructions": "",
   "allowedHosts": [],
   "agent": {
     "runner": "claude",

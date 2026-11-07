@@ -6,6 +6,7 @@ Re-reviews:
 
 - **A terse request to go again repeats the prior invocation.** When the user asks to re-review, review again, or re-run in a short message that names no stack and no flags ("re-review", "pull latest and re-review", "go again"), fetch the latest remote state and repeat the most recent review invocation in this conversation: this prompt, the same stack identity, and the same flags, including `--tandem`, `--tandem=<id>`, `--tandem=manual`, and `--tandem-secondary`. Every section below reads that repeated invocation as if the user had just typed it, so a carried tandem flag means reading `tandem.md` again; its "Re-reviews" section says what carries over.
 - **`--emit-json` does not carry over.** A repeated invocation never carries `--emit-json=<run-dir>`, because that run directory belongs to the earlier run; say so in chat, as the bullets below require for any dropped flag. A session that continues after a stop to ask, with the user answering the question (the offer to post included), is not a repeat: it keeps its run directory (see `emit-json.md`).
+- **`--extra-instructions` does not carry over.** It is valid only beside `--emit-json`, and its file belongs to that run's directory (see `extra-instructions.md`); say so in chat with the `--emit-json` rule above.
 - **Explicit words in the new message win.** If it adds, removes, or changes a flag or the stack identity, follow it. "Re-review without tandem" drops tandem.
 - **Repeat it where feasible, and never drop a flag silently.** If the prior invocation cannot be repeated as written (the stack merged or closed, its top branch was deleted), say what changed and ask, or state the closest alternative, before starting. If any flag is dropped for any reason, say so in chat before the review starts, not afterward.
 - **A re-review is a full review under this prompt.** Re-resolve the stack, re-record the tip SHA, read the prior report, verify each prior finding, and treat the commits added to address them as the highest-risk surface, per the required passes. A yes to posting the prior report is not a yes to posting this one; offer again.
@@ -21,6 +22,11 @@ Machine-readable output:
 - If the invocation contains `--emit-json=<run-dir>`, read `{{HOME}}/agents/prompts/review/emit-json.md` in full before doing anything else, check the run directory as it says, remove the flag, and resolve what remains under "Setup" below. That file says what to write to `<run-dir>` and when; it changes nothing this prompt allows or requires. Without the flag, ignore it. With more than one of these flags, the ordering rule above applies.
 - With the flag, record each step as `emit-json.md` describes, at the points this prompt marks. Record `resolveBase` `started` before resolving the stack identity.
 - The flag adds nothing to what this prompt may do either. It still never fixes, and still posts only on the user's explicit yes: with the flag, the offer to post is a stop to ask, and the run stops there.
+
+Extra instructions:
+
+- If the invocation contains `--extra-instructions`, read `{{HOME}}/agents/prompts/review/extra-instructions.md` in full before doing anything else, after the `--emit-json` check, remove the flag, and resolve what remains under "Setup" below. The flag takes no value. That file reads the owner's text from the run directory, says what the text may and may never do, and adds one line to the report. Without the flag, ignore it.
+- The flag adds nothing to what this prompt may do. It still never fixes, and still posts only on the user's explicit yes.
 
 Setup:
 
@@ -102,6 +108,7 @@ Output file:
 - Overwrite the file if it already exists from a prior run. Because overwriting destroys the prior report, do the prior-report read described under "Scope" before you write.
 - **No AI attribution, anywhere in the report.** Do not say that a model, agent, or tool wrote, reviewed, or found anything: no "reviewed by" line, no per-finding credit, no generated-by footer, no model or provider names. The report goes out as the user's own review. This is unrelated to attributing each finding to the layer that introduced it, which stays required.
 - Begin the file (and the chat response) with a `Reviewed stack:` line carrying the stack number, the top layer's branch, and its short tip SHA.
+- With `--extra-instructions`, write the one line `extra-instructions.md` gives, below the `Reviewed stack:` line. Without the flag, the report has no such line.
 - End the file with a `## Review state` section containing a fenced ```json block, wrapped in `<details><summary>Review state (for the next run)</summary>` so it stays collapsed in the PR comment. A tip SHA alone is not enough to scope a re-review after a restack. Record:
   - `stack`, `tip_branch`, `tip_sha`, `base_sha` (the merge base this run diffed against), and `reviewed_at`
   - `layers`: for each layer, its PR number, head SHA, state (open/merged), triage bucket, and — for claim-verification layers — the claim verdict and the tip SHA it was verified at

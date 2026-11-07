@@ -14,10 +14,10 @@ import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import {
-  commentsCheckOn, confirmHolds, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
+  commentsCheckOn, confirmHolds, extraBoxText, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
   rereadBound, resumeReadyText, returnSelector,
 } from './drawerview.ts'
-import type { Confirm, DrawerModel, Loadable, Opener, StartConfirmModel, StopModel } from './drawerview.ts'
+import type { Confirm, DrawerModel, ExtraLine, Loadable, Opener, StartConfirmModel, StopModel } from './drawerview.ts'
 import { formatSince } from './format.ts'
 import type { ReportPanel } from './reportpanel.ts'
 import { getJson, sendRun } from './runapi.ts'
@@ -172,6 +172,25 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       h('span', { id: 'drawer-comments-detail', class: 'muted confirm-detail' }, check.detail))
   }
 
+  // a review's Extra instructions box: what is typed stays in the confirmation, and each keystroke only repaints the command
+  const extraBox = (box: NonNullable<StartConfirmModel['extraBox']>): HTMLElement => {
+    const input = h('textarea', { id: 'drawer-extra', name: 'drawer-extra', class: 'input confirm-extra', rows: '3', spellcheck: 'false', 'data-focus-key': 'confirm-extra', 'aria-label': box.label, 'aria-describedby': 'drawer-extra-detail' })
+    input.value = box.text
+    input.addEventListener('input', () => {
+      if (confirm?.type !== 'start') return
+      confirm = { ...confirm, extraText: input.value }
+      paintConfirm()
+    })
+    return h('span', {}, input, h('span', { id: 'drawer-extra-detail', class: 'muted confirm-detail' }, box.detail))
+  }
+
+  // the text a run used, kept as written with its line breaks
+  const extraDetail = (extra: ExtraLine | null): HTMLElement | null =>
+    extra === null ? null : h('p', { class: 'drawer-extra', 'data-extra-instructions': '' }, h('span', { class: 'drawer-label' }, `${extra.term}, ${extra.from}: `), extra.text)
+
+  const extraParts = (extra: ExtraLine | null): Part[] =>
+    extra === null ? [] : [{ key: 'extra', sig: JSON.stringify(extra), build: () => extraDetail(extra) as HTMLElement }]
+
   const startConfirmBlock = (ask: StartConfirmModel): HTMLElement => {
     const command = h('code', { class: 'confirm-command mono', 'data-confirm': 'command' }, ask.command)
     const runner: Node | string = ask.runners.length === 1
@@ -186,7 +205,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           })
           return h('label', { class: 'confirm-runner' }, input, choice.label)
         }))
-    const list = facts([['Command', command], ['Runner', runner], ['Model', h('span', { 'data-confirm': 'model' }, ask.model)], ...(ask.commentsCheck === null ? [] : [['Comments', commentsBox(ask.commentsCheck)] as [string, Node]]), ['On GitHub', ask.effect]])
+    const list = facts([['Command', command], ['Runner', runner], ['Model', h('span', { 'data-confirm': 'model' }, ask.model)], ...(ask.commentsCheck === null ? [] : [['Comments', commentsBox(ask.commentsCheck)] as [string, Node]]), ...(ask.extraBox === null ? [] : [[ask.extraBox.label, extraBox(ask.extraBox)] as [string, Node]]), ['On GitHub', ask.effect]])
     list.querySelector('dt:nth-of-type(2)')?.setAttribute('id', 'drawer-runner-term')
     // a start that pushes is told apart from a review's by its caution treatment, a plain line
     // about the push, and a Start that names the session
@@ -276,6 +295,13 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       const wanted = model?.confirm?.commentsCheck?.checked === true
       if (comments.checked !== wanted) comments.checked = wanted
       comments.disabled = busy
+    }
+    // the text follows the state only when the two differ, which typing never makes them, so the caret stays where it is
+    const extra = root.querySelector<HTMLTextAreaElement>('textarea[name="drawer-extra"]')
+    if (extra !== null) {
+      const wanted = model?.confirm?.extraBox?.text ?? ''
+      if (extra.value !== wanted) extra.value = wanted
+      extra.disabled = busy
     }
     const line = root.querySelector<HTMLElement>('#drawer-error')
     if (line !== null) setText(line, error)
@@ -419,7 +445,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     busy = true
     error = ''
     paintConfirm()
-    const answer = await sendRun(startRequest(n, asked.kind, asked.runner, option.repo, option.viewer, options.token, commentsCheckOn(asked, option)))
+    const answer = await sendRun(startRequest(n, asked.kind, asked.runner, option.repo, option.viewer, options.token, commentsCheckOn(asked, option), extraBoxText(asked, option)))
     busy = false
     if (n !== number) return
     if (answer.ok) {
@@ -546,7 +572,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
 
   const startPart = (model: DrawerModel): Part => ({
     key: 'start',
-    sig: JSON.stringify([model.starts, model.confirm === null ? null : { ...model.confirm, runner: '', command: '', model: '', commentsCheck: model.confirm.commentsCheck === null ? null : '' }]),
+    sig: JSON.stringify([model.starts, model.confirm === null ? null : { ...model.confirm, runner: '', command: '', model: '', commentsCheck: model.confirm.commentsCheck === null ? null : '', extraBox: model.confirm.extraBox === null ? null : '' }]),
     build: () => {
       if (model.confirm !== null) return section('start', 'Start', startConfirmBlock(model.confirm))
       return section('start', 'Start',
@@ -633,6 +659,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           build: () => h('p', { class: 'drawer-run-note' }, h('span', { class: 'drawer-label' }, `${note.label}: `), note.note),
         })
       }
+      parts.push(...extraParts(running.extra))
       parts.push({
         key: 'actions',
         sig: JSON.stringify([stopConfirmAsk ? ['confirm', model.stop] : settling ? 'settling' : 'buttons', cell.runId, model.stopsEnabled]),
@@ -683,6 +710,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
             h('p', { class: 'drawer-run-line' }, cell.startedAt === null ? 'queued' : ageSpan(cell.startedAt, 'queued ', options.nowMs()), ` · ${queued.runnerLabel}`)),
         },
         { key: 'note', sig: JSON.stringify(queued.note), build: () => h('p', { class: 'drawer-run-note' }, queued.note) },
+        ...extraParts(queued.extra),
         {
           key: 'actions',
           sig: JSON.stringify([asking ? ['confirm', model.stop] : 'button', cell.runId, model.stopsEnabled]),
@@ -741,6 +769,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       return h('section', { class: 'drawer-section drawer-card drawer-waiting', 'aria-labelledby': 'drawer-waiting-title' },
         h('h3', { id: 'drawer-waiting-title', class: 'drawer-section-title' }, 'Waiting for your answer'),
         h('p', { class: 'drawer-question' }, waiting?.question ?? ''),
+        waiting === null ? null : extraDetail(waiting.extra),
         waiting === null ? null : resumeBlock(waiting.resume, waiting.copyName, n),
         rereadBlock(model))
     },
@@ -777,6 +806,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           h('span', { class: 'drawer-meta' }, ` · ${result.runnerLabel}`),
           result.cost === null ? null : h('span', { class: 'drawer-meta' }, ` · ${result.cost}`)),
         result.note === null ? null : h('p', { class: 'drawer-note' }, result.note),
+        extraDetail(result.extra),
         result.notPosted === null ? null : h('p', { class: 'drawer-notice', 'data-post-not-made': '' }, result.notPosted),
         result.byHand === null ? null : h('p', { class: 'drawer-note', 'data-by-hand': '' }, result.byHand),
         result.stale === null ? null : h('p', { class: 'drawer-note' }, result.stale),
@@ -838,7 +868,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
             h('span', { class: 'drawer-item-name' }, row.label),
             tag(row.text, row.tone)),
           h('span', { class: 'drawer-item-meta' },
-            `${row.runner} · `, ageSpan(row.startedAt, 'started ', options.nowMs()), row.cost === null ? '' : ` · ${row.cost}`))))),
+            `${row.runner} · `, ageSpan(row.startedAt, 'started ', options.nowMs()), row.cost === null ? '' : ` · ${row.cost}`),
+          extraDetail(row.extra))))),
   })
 
   const reportsPart = (model: DrawerModel): Part => ({
@@ -885,6 +916,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     const active = document.activeElement
     const focusedKey = active instanceof HTMLElement && root.contains(active) ? active.dataset.focusKey ?? 'heading' : null
     const scroll = body.scrollTop
+    // a patch may rebuild the confirmation while the box is being typed in, which must not move the caret
+    const caret = active instanceof HTMLTextAreaElement && root.contains(active) ? [active.selectionStart, active.selectionEnd] as const : null
 
     setText(headingLink, `#${model.header.number}`)
     const href = safeHref(model.header.url)
@@ -915,6 +948,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     // never dropped on the page behind
     if (focusedKey !== null && (document.activeElement === null || document.activeElement === document.body)) {
       focusKey(focusedKey === 'heading' ? null : focusedKey)
+      if (caret !== null && document.activeElement instanceof HTMLTextAreaElement) document.activeElement.setSelectionRange(caret[0], caret[1])
     }
   }
 

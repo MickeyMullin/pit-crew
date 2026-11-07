@@ -7,7 +7,7 @@ import { attentionOrder, isMine, selfReviewOf } from './derive.ts'
 import type { OpenRow, OtherRow } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
 import type { Gh, RawOpenPr, Runner } from './github.ts'
-import { defaultRun, gitConfigEnv, isDependabot, mayPost, parseResult, remoteNamesRepo, stepsOf } from './launcher.ts'
+import { chooseExtraInstructions, defaultRun, gitConfigEnv, isDependabot, mayPost, parseResult, remoteNamesRepo, stepsOf, withExtraInstructions } from './launcher.ts'
 import type { Launcher, LauncherFs, StartRequest } from './launcher.ts'
 import type { Poller, Timers } from './poller.ts'
 import { scanReports } from './reports.ts'
@@ -682,6 +682,10 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     return othersArgs(number, own || settings.autoReview?.post.others !== true)
   }
 
+  // an unattended review of a PR runs under the standing extra instructions in effect, read again when it starts, so a change while it waits applies; a sweep's arguments never come through here
+  const underStandingText = (request: StartRequest, settings: Config): StartRequest =>
+    withExtraInstructions(request, chooseExtraInstructions(undefined, settings.extraReviewInstructions))
+
   const queueItems = (items: readonly QueueItem[], tick: number, settings: Config, auto: AutoReviewSettings, clone: string, open: readonly RawOpenPr[]): number => {
     for (const item of items) {
       if (item.kind === 'dependabot') {
@@ -692,7 +696,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       const pr = open.find((candidate) => candidate.number === item.number)
       if (pr === undefined) continue
       const args = runArgs(pr, item.number, item.reason, settings)
-      const request: StartRequest = { repo: settings.repo, number: item.number, command: 'review-pr', args, label: defaultRun(pr, settings).label }
+      const request = underStandingText({ repo: settings.repo, number: item.number, command: 'review-pr', args, label: defaultRun(pr, settings).label }, settings)
       launcher.queueScheduled(request, clone, { tick, reason: item.reason, headOid: item.headSha, posting: mayPost('review-pr', args) })
     }
     return items.length
@@ -722,8 +726,8 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     }
     const pr = open.find((candidate) => candidate.number === run.number)
     const args = runArgs(pr, run.number, run.reason, settings)
-    const request: StartRequest = { repo: run.repo, number: run.number, command: run.command, args, label: run.label, runner: run.runner }
-    const started = await launcher.startScheduled(run.id, request, { args, posting: mayPost(run.command, args), headOid: recheck.headSha }, prepare('run', run.repo))
+    const request = underStandingText({ repo: run.repo, number: run.number, command: run.command, args, label: run.label, runner: run.runner }, settings)
+    const started = await launcher.startScheduled(run.id, request, { args: request.args, extraInstructions: request.extraInstructions ?? null, posting: mayPost(run.command, args), headOid: recheck.headSha }, prepare('run', run.repo))
     return await afterStart('run', started)
   }
 

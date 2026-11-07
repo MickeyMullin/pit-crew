@@ -45,6 +45,7 @@ export type Form = {
   // the cap as typed: a whole number of 1 or more
   maxConcurrentReviews: string
   selfReviewOverCap: boolean
+  extraReviewInstructions: string
   notifyEnabled: boolean
   notifyKinds: NotificationKind[]
 }
@@ -79,6 +80,7 @@ export const toForm = (config: Config, makeId: MakeId): Form => ({
   showAgentColumn: config.showAgentColumn,
   maxConcurrentReviews: String(config.maxConcurrentReviews),
   selfReviewOverCap: config.selfReviewOverCap,
+  extraReviewInstructions: config.extraReviewInstructions,
   notifyEnabled: config.notifications?.enabled ?? false,
   notifyKinds: config.notifications?.kinds ?? allKinds,
 })
@@ -120,6 +122,19 @@ export const parseMaxReviews = (text: string): number => {
   return /^\d+$/.test(value) ? Number(value) : Number.NaN
 }
 
+// the same rule and the same words as normalizeExtraInstructions and extraInstructionsProblem in src/config.ts, which a test keeps in step (the page cannot import that module's code)
+const extraBreaks = /\r\n?|[\u2028\u2029]/g
+
+export const normalizeExtra = (text: string): string => text.replace(extraBreaks, '\n').trim()
+
+const extraProblem = (text: string): string | null => {
+  const characters = [...text.replace(extraBreaks, '\n')]
+  const at = characters.findIndex((character) => /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(character))
+  if (at >= 0) return `Must be plain text: character ${at + 1} is the control character U+${(characters[at] as string).charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}, and only line breaks and tabs are allowed.`
+  const length = [...normalizeExtra(text)].length
+  return length > 2000 ? `Must be at most 2,000 characters; it has ${length.toLocaleString('en-US')}.` : null
+}
+
 // the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit (allowedHosts, cloneDir, agent, and autoReview) are carried over from the config it loaded
 export const toConfig = (form: Form, base: Config): Config => {
   const config: Config = {
@@ -149,6 +164,7 @@ export const toConfig = (form: Form, base: Config): Config => {
     showAgentColumn: form.showAgentColumn,
     maxConcurrentReviews: parseMaxReviews(form.maxConcurrentReviews),
     selfReviewOverCap: form.selfReviewOverCap,
+    extraReviewInstructions: normalizeExtra(form.extraReviewInstructions),
     allowedHosts: base.allowedHosts,
     ...(base.cloneDir === undefined ? {} : { cloneDir: base.cloneDir }),
     agent: base.agent,
@@ -249,10 +265,12 @@ export const validateForm = (form: Form): FieldError[] => {
   // the same rule as isReviewCap in src/config.ts, which a test keeps in step
   const cap = parseMaxReviews(form.maxConcurrentReviews)
   if (!(Number.isSafeInteger(cap) && cap >= 1)) errors.push({ field: 'maxConcurrentReviews', message: 'Use a whole number of 1 or more.' })
+  const extra = extraProblem(form.extraReviewInstructions)
+  if (extra !== null) errors.push({ field: 'extraReviewInstructions', message: extra })
   return errors
 }
 
-const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'notifyEnabled'])
+const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'extraReviewInstructions', 'notifyEnabled'])
 
 const capitalize = (text: string): string => text === '' ? text : `${text[0]!.toUpperCase()}${text.slice(1)}`
 

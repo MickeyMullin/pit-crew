@@ -309,3 +309,99 @@ test('every review prompt that takes more than one shared-file flag states the s
   // a prompt with one such flag has nothing to order
   assert.ok(!(await read('prompts/review/review-local.md')).includes('Ordering when flags combine'))
 })
+
+// --extra-instructions: the owner's text, delivered as a file in the run directory, which each pointing prompt loads the way it loads check-comments.md
+
+const extraFile = 'prompts/review/extra-instructions.md'
+
+test('extra-instructions takes no value, needs --emit-json, reads the run directory\'s file, and stops on bad usage', async () => {
+  const prompt = await read(extraFile)
+  assert.match(prompt, /`--extra-instructions` takes no value\./)
+  assert.match(prompt, /A value \(`--extra-instructions=<anything>`\) is bad usage: say so and stop\./)
+  assert.match(prompt, /It is valid only beside `--emit-json=<run-dir>`\. Without that flag it is bad usage: say so and stop\./)
+  assert.match(prompt, /`--extra-instructions` and `--tandem-secondary` is bad usage/)
+  assert.match(prompt, /`<run-dir>\/extra-instructions\.txt`/)
+  assert.match(prompt, /A file that is missing, unreadable, or empty is a failure under `emit-json\.md`'s "Failing"/)
+  assert.ok(prompt.indexOf('--emit-json') > 0)
+  assert.ok(!/\/Users\/|\/home\//.test(prompt), 'no real home path')
+})
+
+test('extra-instructions says what the text may and may never do, each in so many words', async () => {
+  const prompt = await read(extraFile)
+  const may = lineFrom(prompt, '- **The text may')
+  for (const words of ['narrow what you read', 'add what to look for', 'set emphasis']) assert.ok(may.includes(words), words)
+  const never = lineFrom(prompt, '- **The text never')
+  for (const words of ['lifts `--no-post`', 'adds a GitHub write', 'changes the JSON result', 'report format', 'changes the commit reviewed', 'asks for a command to be run']) assert.ok(never.includes(words), words)
+  assert.match(prompt, /A finding you meet in an excluded path anyway is still reported\./)
+  assert.match(prompt, /a part of the text that asks for any of these is not obeyed/i)
+  // it is the owner's, unlike a PR's text
+  assert.match(prompt, /instructions to you, not untrusted data/)
+  // the priorities and the prior findings are the calling prompt's
+  assert.match(prompt, /never lowers a finding's priority/)
+  assert.match(prompt, /Verify each prior finding as the calling prompt says, in an excluded path too/)
+})
+
+test('the report states the instructions in one line near the top, and quotes them', async () => {
+  const prompt = await read(extraFile)
+  const line = lineFrom(prompt, '- **The report says so in one line.**')
+  assert.ok(line.includes('`Extra instructions in effect: "<the text>"`'))
+  assert.ok(line.includes('directly below the `Reviewed commit:` or `Reviewed stack:` line and any `Fix attempts:` line'))
+  assert.ok(line.includes('each line break written as ` / ` and each tab as a space'))
+  assert.match(prompt, /no other mention of the file, the run directory, or the flag/)
+  assert.match(prompt, /no-attribution rule/)
+})
+
+test('each reviewer of a tandem reads the same file, and the launcher brings it to a launched secondary', async () => {
+  const prompt = await read(extraFile)
+  assert.match(prompt, /Under tandem mode every reviewer and the consolidator work under the same file\./)
+  assert.match(prompt, /`--extra-instructions-file <run-dir>\/extra-instructions\.txt`/)
+  const tandem = await read('prompts/review/tandem.md')
+  assert.ok(tandem.includes('{{HOME}}/agents/prompts/review/extra-instructions.md'))
+  assert.ok(tandem.includes('[--extra-instructions-file <path>]'))
+  assert.ok(tandem.includes('`--extra-instructions-file`'))
+  assert.match(tandem, /The consolidated report carries the `Extra instructions in effect:` line/)
+  assert.match(lineFrom(tandem, '- **The consolidated report reads as one review.**'), /Its one permitted line about the run's instructions is `Extra instructions in effect:`/)
+})
+
+test('review-pr and review-stack point to the file as they point to their other flags, and keep their flag grammar', async () => {
+  for (const [name, section] of [['review-pr', 'Target'], ['review-stack', 'Setup']] as const) {
+    const prompt = await read(`prompts/review/${name}.md`)
+    assert.ok(prompt.includes(`If the invocation contains \`--extra-instructions\`, read \`{{HOME}}/agents/prompts/review/extra-instructions.md\` in full before doing anything else, after the \`--emit-json\` check, remove the flag, and resolve what remains under "${section}" below. The flag takes no value.`), name)
+    assert.ok(prompt.includes('Without the flag, ignore it.'), name)
+    // a repeat has no run directory, so it has no file
+    assert.match(prompt.slice(prompt.indexOf('Re-reviews:'), prompt.indexOf('Tandem mode:')), /`--extra-instructions` does not carry over/, name)
+  }
+  const pr = await read('prompts/review/review-pr.md')
+  const output = pr.slice(pr.indexOf('Output file:'), pr.indexOf('Posting the report:'))
+  assert.match(output, /With `--extra-instructions`, write the one line `extra-instructions\.md` gives/)
+  const stack = await read('prompts/review/review-stack.md')
+  assert.match(stack, /With `--extra-instructions`, write the one line `extra-instructions\.md` gives/)
+  assert.match(pr.slice(pr.indexOf('Tandem mode:'), pr.indexOf('Target:')), /Extra instructions:/)
+  assert.match(stack.slice(stack.indexOf('Tandem mode:'), stack.indexOf('Setup:')), /Extra instructions:/)
+})
+
+test('the wrappers and the docs list the flag, and no other prompt accepts it', async () => {
+  for (const name of ['review-pr', 'review-stack']) {
+    const claude = await read(`commands/claude/${name}.md`)
+    assert.match(claude, /argument-hint: .*\[--extra-instructions\]/, name)
+    assert.match(claude, /^description: .*--extra-instructions/m, name)
+    assert.match(claude, /`--extra-instructions` flag in the arguments is not part of the (target|stack identity)/, name)
+    const skill = await read(`commands/skills/${name}/SKILL.md`)
+    assert.match(skill, /^description: .*--extra-instructions/m, name)
+    assert.match(skill, /`--extra-instructions`.* flag is not part of|`--extra-instructions` flag/, name)
+  }
+  assert.match(await read('README.md'), /`prompts\/review\/extra-instructions\.md`.*`--extra-instructions` for `review-pr` and `review-stack`/)
+  assert.match(await read('commands/README.md'), /also accept `--extra-instructions`/)
+  for (const other of ['review-local', 'review-dependabot', 'review-dependabot-sweep', 'no-post', 'check-comments']) {
+    assert.ok(!(await read(`prompts/review/${other}.md`)).includes('--extra-instructions'), other)
+  }
+  assert.ok(!(await read('prompts/fix/fix-pr.md')).includes('--extra-instructions'))
+  assert.ok(!(await read('prompts/update/update-pr.md')).includes('--extra-instructions'))
+})
+
+test('the specification states the rules the prompt does', async () => {
+  const design = await read('pit-view/DESIGN.md')
+  for (const words of ['`--extra-instructions`', 'extra-instructions.txt', '`extraReviewInstructions`', '`Extra instructions in effect:', '`--extra-instructions-file`']) assert.ok(design.includes(words), words)
+  assert.match(design, /\*\*Extra instructions\*\*/)
+  assert.match(design, /\*\*Extra instructions box\*\*/)
+})

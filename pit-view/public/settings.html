@@ -179,6 +179,12 @@
           <p id="f-selfReviewOverCap-hint" class="hint">A review of your own PR may start while the limit is reached, once every review queued before it has started or left the queue. Never more than one at a time.</p>
           <p id="f-selfReviewOverCap-error" class="field-error" hidden></p>
         </div>
+        <div class="field">
+          <label for="f-extraReviewInstructions">Extra review instructions</label>
+          <textarea id="f-extraReviewInstructions" class="input" rows="4" spellcheck="false" autocomplete="off" aria-describedby="f-extraReviewInstructions-hint"></textarea>
+          <p id="f-extraReviewInstructions-hint" class="hint">Added to every review, re-review, self-review, tandem review, and stack review, unattended auto-reviews included, and a start's confirmation can change them for that run. Never a Dependabot review or sweep, a Fix session, or an Update session. They can narrow what the reviewer reads, add what to look for, and set emphasis; they never lift <code>--no-post</code>, add a GitHub write, change the report's format or the commit reviewed, or ask for a command to be run. Each report quotes them, so a posted report shows them on GitHub. At most 2,000 characters.</p>
+          <p id="f-extraReviewInstructions-error" class="field-error" hidden></p>
+        </div>
       </div>
     </section>
 

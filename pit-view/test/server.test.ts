@@ -1578,6 +1578,7 @@ test('the view\'s Agent cell lists the starts a row offers, and the run list car
       repo: scenario.repo,
       viewer: 'vera-quill',
       unavailable: null,
+      extraInstructions: { standing: '', flag: '--extra-instructions' },
     })
     assert.equal(rowIn(view, 113)?.agent?.tandem, false)
     assert.equal(rowIn(view, 113)?.agent?.steps.length, 5)

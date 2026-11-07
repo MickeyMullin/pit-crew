@@ -10,7 +10,7 @@
 #
 # Usage:
 #   tandem-secondary --mode pr|local|stack --target <t> --sha <s> --worktree <dir> --draft <path>
-#                    [--entry <id>] [--timeout <seconds>]
+#                    [--entry <id>] [--timeout <seconds>] [--extra-instructions-file <path>]
 #   tandem-secondary --list
 #
 #   --mode      which review prompt the secondary follows: review-pr, review-local, review-stack
@@ -22,6 +22,7 @@
 #   --draft     where the validated draft goes; its name must end in -<entry>.md
 #   --entry     which registry entry to run (default: $TANDEM_SECONDARY, else the first entry)
 #   --timeout   seconds before the secondary is killed (default 2700)
+#   --extra-instructions-file  the owner's text for this review (pr, stack), which the secondary reads under prompts/review/extra-instructions.md; never copied into its brief
 #
 # Exit codes: 0 draft validated and installed; 1 the secondary failed, timed out, or
 # produced a draft that did not validate; 2 bad usage.
@@ -41,14 +42,14 @@ log_dir="$agents_root/logs/tandem"
 entries="\
 codex|codex|gpt-6.1-terra|high"
 
-usage() { sed -n '2,31p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,32p' "${BASH_SOURCE[0]}"; }
 
 entry_field() {
   # entry_field <id> <1-based field>; prints nothing if the id is unknown.
   printf '%s\n' "$entries" | awk -F'|' -v n="$1" -v f="$2" '$1 == n { print $f }'
 }
 
-mode="" target="" sha="" worktree="" draft="" entry="${TANDEM_SECONDARY:-}" timeout_s=2700
+mode="" target="" sha="" worktree="" draft="" entry="${TANDEM_SECONDARY:-}" timeout_s=2700 extra_file=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --list)
@@ -61,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     --draft)    draft="${2:-}"; shift 2 ;;
     --entry)    entry="${2:-}"; shift 2 ;;
     --timeout)  timeout_s="${2:-}"; shift 2 ;;
+    --extra-instructions-file) extra_file="${2:-}"; shift 2 ;;
     -h|--help)  usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -91,6 +93,10 @@ fi
 [[ "$timeout_s" =~ ^[0-9]+$ ]] || { echo "error: --timeout must be a number of seconds." >&2; exit 2; }
 [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]] || { echo "error: --sha must be 7 to 40 hex characters." >&2; exit 2; }
 [[ -d "$worktree" ]] || { echo "error: no such worktree: $worktree" >&2; exit 2; }
+if [[ -n "$extra_file" ]]; then
+  [[ "$mode" != "local" ]] || { echo "error: --extra-instructions-file is for pr and stack only." >&2; exit 2; }
+  [[ -s "$extra_file" ]] || { echo "error: no such extra instructions file: $extra_file" >&2; exit 2; }
+fi
 case "$(basename "$draft")" in
   *-"$entry".md) ;;
   *) echo "error: the draft name must end in -$entry.md, so it is recognizable as a draft: $draft" >&2; exit 2 ;;
@@ -101,6 +107,7 @@ model="$(entry_field "$entry" 3)"
 effort="$(entry_field "$entry" 4)"
 prompt_file="$agents_root/prompts/review/$prompt_name.md"
 tandem_file="$agents_root/prompts/review/tandem.md"
+extra_prompt="$agents_root/prompts/review/extra-instructions.md"
 
 mkdir -p "$log_dir" "$(dirname "$draft")"
 stamp="$(date +%Y%m%d-%H%M%S)"
@@ -199,6 +206,15 @@ You have no network access, so gh and git fetch will fail. Use this file whereve
 
 Your final message is written verbatim to the draft file. It must be the complete report, beginning with its "$reviewed_marker" line, with nothing before or after it.
 EOF
+
+# The owner's text stays in its own file: the secondary reads it, under the prompt that limits it, exactly as the primary does.
+if [[ -n "$extra_file" ]]; then
+  cat >> "$instructions" <<EOF
+
+Extra instructions: $extra_file
+Read $extra_prompt in full and apply that file as it says.
+EOF
+fi
 
 # The secondary's command line, per agent. Each one must run read-only and offline
 # and deliver the report through the agent's own output capture, never through a

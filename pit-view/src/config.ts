@@ -53,6 +53,23 @@ export const runnerNames: readonly RunnerName[] = ['claude', 'codex']
 
 export const defaultClaudeModel = 'sonnet'
 
+// the owner's extra review instructions (section 8 of DESIGN.md, Extra instructions): what a run used, and whether it came from Settings or was typed for this run
+export type ExtraInstructions = { text: string, source: 'default' | 'box' }
+
+export const maxExtraInstructions = 2000
+
+// the text as it is stored and written: every line break a plain newline, and nothing around it
+export const normalizeExtraInstructions = (text: string): string => text.replace(/\r\n?|[\u2028\u2029]/g, '\n').trim()
+
+// why the text is refused, finishing a sentence that names it, or null when it is fine. Control characters are looked for before the trim, which would otherwise hide one at either end. A character is a code point, as a reader counts it. The page keeps the same rule in public/settings-form.ts, which a test keeps in step
+export const extraInstructionsProblem = (text: string): string | null => {
+  const characters = [...text.replace(/\r\n?|[\u2028\u2029]/g, '\n')]
+  const at = characters.findIndex((character) => /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(character))
+  if (at >= 0) return `must be plain text: character ${at + 1} is the control character U+${(characters[at] as string).charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}, and only line breaks and tabs are allowed`
+  const length = [...normalizeExtraInstructions(text)].length
+  return length > maxExtraInstructions ? `must be at most ${maxExtraInstructions.toLocaleString('en-US')} characters; it has ${length.toLocaleString('en-US')}` : null
+}
+
 export type AgentSettings = {
   // the default runner; a single run may pick the other
   runner: RunnerName
@@ -83,6 +100,8 @@ export type Config = {
   maxConcurrentReviews: number
   // whether one self-review may run over that cap
   selfReviewOverCap: boolean
+  // the standing default for the extra review instructions; empty means none (section 8 of DESIGN.md, Extra instructions)
+  extraReviewInstructions: string
   // host names a reverse proxy may reach the server by, besides its loopback names
   allowedHosts: string[]
   // the owner's local clone of repo, stored with ~; manual runs work in it. Whether it is a
@@ -132,6 +151,7 @@ export const defaultConfig = (): Config => ({
   showAgentColumn: false,
   maxConcurrentReviews: 2,
   selfReviewOverCap: false,
+  extraReviewInstructions: '',
   allowedHosts: [],
   agent: { runner: 'claude', claudeModel: defaultClaudeModel },
 })
@@ -191,6 +211,13 @@ const idleMinutes = (obj: Record<string, unknown>, where: string): number =>
 // a whole number of 1 or more that a JSON number holds exactly, so the Settings page, which shows it in digits, can save back every cap kept here
 export const isReviewCap = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 1
 
+const extraReviewInstructions = (obj: Record<string, unknown>, where: string): string => {
+  const text = obj.extraReviewInstructions
+  if (typeof text !== 'string') return fail(`${where}.extraReviewInstructions must be a string`)
+  const problem = extraInstructionsProblem(text)
+  return problem === null ? normalizeExtraInstructions(text) : fail(`${where}.extraReviewInstructions ${problem}`)
+}
+
 const maxConcurrentReviews = (obj: Record<string, unknown>, where: string): number =>
   isReviewCap(obj.maxConcurrentReviews) ? obj.maxConcurrentReviews : fail(`${where}.maxConcurrentReviews must be a whole number of 1 or more`)
 
@@ -203,7 +230,7 @@ const personKeys = ['login', 'alias', 'initials', 'color', 'avatar'] as const
 const ticketKeys = ['enabled', 'kind', 'name', 'source', 'pattern', 'baseUrl', 'linkTemplate'] as const
 const configKeys = [
   'repo', 'viewer', 'people', 'tickets', 'refreshSeconds', 'idleMinutes', 'todayStartsAt',
-  'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'allowedHosts', 'cloneDir', 'agent', 'notifications', 'autoReview',
+  'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'extraReviewInstructions', 'allowedHosts', 'cloneDir', 'agent', 'notifications', 'autoReview',
 ] as const
 
 // a bare DNS name: dot-separated labels of letters, digits and inner hyphens, with no scheme,
@@ -384,6 +411,7 @@ export const validateConfig = (input: unknown): Config => {
     showAgentColumn: bool(input, 'showAgentColumn', 'config'),
     maxConcurrentReviews: maxConcurrentReviews(input, 'config'),
     selfReviewOverCap: bool(input, 'selfReviewOverCap', 'config'),
+    extraReviewInstructions: extraReviewInstructions(input, 'config'),
     allowedHosts: toAllowedHosts(list(input, 'allowedHosts', 'config')),
     // absent and empty both mean unset, and an unset cloneDir is left out of the file
     ...(cloneDir === undefined ? {} : { cloneDir }),

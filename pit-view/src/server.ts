@@ -17,12 +17,12 @@ import { openCache } from './cache.ts'
 import type { Cache } from './cache.ts'
 import { createClients, keepsSchedule } from './clients.ts'
 import type { ClientState, Clients } from './clients.ts'
-import { cacheFile, ConfigError, configFile, expandHome, readConfig, runnerNames, saveConfig, stateDir, tildePath, validateConfig } from './config.ts'
+import { cacheFile, ConfigError, configFile, expandHome, extraInstructionsProblem, readConfig, runnerNames, saveConfig, stateDir, tildePath, validateConfig } from './config.ts'
 import type { Clock, Config, RunnerName } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner } from './github.ts'
 import { latestReviewsOf, markedStack } from './derive.ts'
-import { createLauncher, createReviewLine, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest } from './launcher.ts'
+import { chooseExtraInstructions, createLauncher, createReviewLine, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest, withExtraInstructions } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Queueing, Spawn, StartKind } from './launcher.ts'
 import { renderMarkdown } from './markdown.ts'
 import { createNotifier, noDeliver, systemDeliver, systemExec } from './notify.ts'
@@ -573,11 +573,11 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   const startRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
     requireToken(req)
     const number = prNumber(raw)
-    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex", "repo": "owner/name", "viewer": "login", "checkComments": true | false }'
+    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex", "repo": "owner/name", "viewer": "login", "checkComments": true | false, "extraInstructions": "text" }'
     const length = Number(req.headers['content-length'] ?? 0)
     const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
-    const { runner: asked, kind: askedKind, repo: confirmedRepo, viewer: confirmed, checkComments, ...rest } = body as Record<string, unknown>
+    const { runner: asked, kind: askedKind, repo: confirmedRepo, viewer: confirmed, checkComments, extraInstructions: box, ...rest } = body as Record<string, unknown>
     if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
     // the page always names the repository its confirmation showed; a start that does not is from an older page and is refused rather than guessed at
     if (typeof confirmedRepo !== 'string') throw new HttpError(400, `repo is required and must be a string; ${usage}`)
@@ -585,6 +585,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (asked !== undefined && !runnerNames.includes(asked as RunnerName)) throw new HttpError(400, 'runner must be claude or codex')
     if (askedKind !== undefined && !startKinds.includes(askedKind as StartKind)) throw new HttpError(400, 'kind must be default, tandem, stack or fix')
     if (checkComments !== undefined && typeof checkComments !== 'boolean') throw new HttpError(400, 'checkComments must be true or false')
+    if (box !== undefined && typeof box !== 'string') throw new HttpError(400, 'extraInstructions must be a string')
+    const boxProblem = box === undefined ? null : extraInstructionsProblem(box as string)
+    if (boxProblem !== null) throw new HttpError(400, `extraInstructions ${boxProblem}`)
     const kind = (askedKind ?? 'default') as StartKind
     // a tandem primary launches its secondary in the background, which only Claude can do
     if (kind === 'tandem' && asked === 'codex') throw new HttpError(400, 'Review in tandem runs with Claude only; send runner claude or leave it out')
@@ -605,17 +608,20 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     // the comments check rides on a Self-review alone: the option carries the args it runs with, and no other start has them
     const args = checkComments === true ? option.checkCommentsArgs : option.args
     if (args === undefined) throw new HttpError(422, `Check the latest comments is offered only on a Self-review of your own PR, and this start of #${number} is not one`)
+    // the box rides on a review's start alone, as the option says, so a Fix session or a Dependabot review neither takes it nor takes the standing default
+    if (box !== undefined && option.extraInstructions === undefined) throw new HttpError(422, `Extra instructions are offered only on a review, a re-review, a self-review, a tandem review, or a stack review, and this start of #${number} is not one`)
+    const extra = option.extraInstructions === undefined ? null : chooseExtraInstructions(box as string | undefined, config.extraReviewInstructions)
     // a tandem or fix start without a runner is Claude's, whatever the configured default is
     const runner = asked as RunnerName | undefined ?? (kind === 'tandem' || kind === 'fix' ? 'claude' : undefined)
     try {
-      const run = await launcher.start({
+      const run = await launcher.start(withExtraInstructions({
         repo: config.repo,
         number,
         command: option.command,
         args,
         label: option.label,
         ...(runner === undefined ? {} : { runner }),
-      })
+      }, extra))
       json(res, 200, runView(run))
     } catch (error) {
       launchFailure(error)

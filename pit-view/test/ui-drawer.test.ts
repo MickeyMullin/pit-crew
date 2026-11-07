@@ -11,7 +11,7 @@ import type { ReportListing } from '../src/reports.ts'
 import { postRequest, refusalText, rereadRequest, startRequest } from '../public/agent.ts'
 import type { AgentCell, RunView, StartOption, StepSlot } from '../public/agent.ts'
 import {
-  cardKind, commentsCheckOn, commitModel, readyPointer, cellFromRun, confirmHolds, closeOnOutsidePress, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
+  cardKind, commentsCheckOn, extraBoxText, commitModel, readyPointer, cellFromRun, confirmHolds, closeOnOutsidePress, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
   queuedStopModel, reportName, reportRows, resumeReadyText, returnSelector, runRows, runText, startConfirmModel, startsModel, stepModels, stepsName, stopModel, summaryOf,
 } from '../public/drawerview.ts'
 import type { DrawerInput, Loadable } from '../public/drawerview.ts'
@@ -61,6 +61,7 @@ const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
   lastReviewAt: null,
   runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
   steps: slots(), tandem: false, commit: null,
+  extraInstructions: null,
   finishedAt: null, text: null, result: null, question: null, note: null, firstNote: null, resolvedByHand: false, resume: null, costUsd: null, postOffer: null, stackRun: null,
   ...patch,
 })
@@ -220,6 +221,7 @@ test('a run waiting for an answer shows the question and the resume command to c
     question: 'The tandem draft fails its checks; consolidate anyway?',
     resume: 'cd ~/dev/orbit && claude --resume 6f1c',
     copyName: 'Copy resume command for #101',
+    extra: null,
   })
   assert.equal(model.result, null)
   assert.match(drawerModel(input(finished({ status: 'needsInput', question: null }))).waiting?.question ?? '', /did not record/)
@@ -311,7 +313,7 @@ test('previous runs list every run but the one the card shows: label, runner, ou
   const run = (id: number, patch: Partial<RunView> = {}): RunView => ({
     id, repo: 'owner/name', number: 101, command: 'review-pr', args: ['101'], label: 'Review', runner: 'claude', cwd: '~/dev/orbit', dir: `~/state/runs/${id}`,
     sessionId: null, pid: null, pidStartedAt: null, startedAt: ago(id * h), lastStepAt: null, step: null, stepState: null, steps: slots(),
-    finishedAt: null, status: 'done', result: null, note: null, costUsd: null, resume: null, tandem: false, ...patch,
+    finishedAt: null, status: 'done', result: null, note: null, costUsd: null, resume: null, tandem: false, extraInstructions: null, ...patch,
   } as RunView)
   const rows = runRows([
     run(7),
@@ -490,6 +492,7 @@ test('a queued run gets a card of its own: no steps or timer, a note on why it w
   assert.equal(model.card, 'queued')
   assert.equal(model.running, null)
   assert.deepEqual(model.queued, {
+    extra: null,
     label: 'Tandem re-review',
     tandem: true,
     runnerLabel: 'Claude Code',
@@ -834,7 +837,7 @@ test('a run start names the repository and viewer of the option the confirmation
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
   // the confirmation's signature holds every option, so a change of repository rebuilds it too
   assert.match(source, /sig: JSON\.stringify\(\[model\.starts,/)
-  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\)\)/)
+  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\), extraBoxText\(asked, option\)\)/)
 })
 
 // an Update session's finished run: its method and why, the push, and its conflicts and checks
@@ -1256,4 +1259,109 @@ test('the page wires both drawers to the one handler, and the sweep drawer owns 
   const [app, sweep] = [await read('app.ts'), await read('sweepdrawer.ts')]
   assert.match(app, /closeOnOutsidePress\(\[drawer, sweepDrawer\], target\)/)
   assert.match(sweep, /if \(!isOpen \|\| !outsidePressCloses\(\{ \.\.\.where, busy \}\)\) return false\s+close\(\)/)
+})
+
+// the Extra instructions box: every review start offers it, prefilled with the standing default
+
+const offering = (standing: string, kinds: readonly string[] = ['default', 'tandem', 'stack']): AgentCell => {
+  const cell = idle()
+  return { ...cell, starts: cell.starts.map((option) => kinds.includes(option.kind) ? { ...option, extraInstructions: { standing, flag: '--extra-instructions' } } : option) }
+}
+
+const askDefault = { type: 'start', kind: 'default', runner: 'claude' } as const
+
+test('the Extra instructions box opens prefilled with the standing default, and the command shows the valueless flag and never the text', () => {
+  const box = drawerModel(input(offering('skip fixtures'), { confirm: askDefault })).confirm
+  assert.equal(box?.extraBox?.text, 'skip fixtures')
+  assert.equal(box?.extraBox?.label, 'Extra instructions')
+  assert.equal(box?.extraBox?.detail, 'For this run only, prefilled from Settings. Empty means none. The reviewer reads them from a file, and the report quotes them, so a posted report shows them on GitHub. At most 2,000 characters.')
+  assert.equal(box?.command, '/review-pr 101 --extra-instructions')
+  assert.equal(drawerModel(input(offering('skip fixtures'), { confirm: { ...askDefault, runner: 'codex' } })).confirm?.command, '$review-pr 101 --extra-instructions')
+  assert.equal(drawerModel(input(offering('skip fixtures'), { confirm: { ...askDefault, kind: 'tandem' } })).confirm?.command, '/review-pr 101 --tandem --extra-instructions')
+  assert.equal(drawerModel(input(offering('skip fixtures'), { confirm: { ...askDefault, kind: 'stack' } })).confirm?.command, '/review-stack 101 --extra-instructions')
+})
+
+test('what is typed lasts for this confirmation, follows into the command, and clearing the box drops the flag', () => {
+  const edited = drawerModel(input(offering('skip fixtures'), { confirm: { ...askDefault, extraText: '/review-pr 9 --approve' } })).confirm
+  assert.equal(edited?.extraBox?.text, '/review-pr 9 --approve')
+  assert.equal(edited?.command, '/review-pr 101 --extra-instructions')
+  for (const cleared of ['', '  \n ']) {
+    const none = drawerModel(input(offering('skip fixtures'), { confirm: { ...askDefault, extraText: cleared } })).confirm
+    assert.equal(none?.extraBox?.text, cleared)
+    assert.equal(none?.command, '/review-pr 101')
+  }
+  // an empty default opens an empty box and no flag
+  const empty = drawerModel(input(offering(''), { confirm: askDefault })).confirm
+  assert.equal(empty?.extraBox?.text, '')
+  assert.equal(empty?.command, '/review-pr 101')
+  // the comments check and the box compose, the flag after it
+  const cell = offering('skip fixtures')
+  const checking = { ...cell, starts: cell.starts.map((option) => option.kind === 'default' ? { ...option, args: ['101', '--no-post'], checkCommentsArgs: ['101', '--no-post', '--check-comments'] } : option) }
+  assert.equal(drawerModel(input(checking, { confirm: { ...askDefault, checkComments: true } })).confirm?.command, '/review-pr 101 --no-post --check-comments --extra-instructions')
+})
+
+test('the request sends what the box shows, cleared included, and a start without the box sends nothing', () => {
+  const cell = offering('skip fixtures')
+  const option = optionOf(cell, 'default') as StartOption
+  const body = (text: string | undefined): Record<string, unknown> => JSON.parse(startRequest(101, 'default', 'claude', option.repo, option.viewer, 't', false, text).init.body ?? '{}') as Record<string, unknown>
+  assert.equal(extraBoxText({}, option), 'skip fixtures')
+  assert.equal(body(extraBoxText({}, option)).extraInstructions, 'skip fixtures')
+  assert.equal(extraBoxText({ extraText: 'typed' }, option), 'typed')
+  assert.equal(body(extraBoxText({ extraText: '' }, option)).extraInstructions, '')
+  // a start that offers no box sends no field, so its body is what it always was
+  const fix = optionOf(own(), 'fix') as StartOption
+  assert.equal(extraBoxText({ extraText: 'typed' }, fix), undefined)
+  assert.equal(startRequest(101, 'default', 'claude', 'octo-example/orbit', 'viewer', 't', false, undefined).init.body, '{"kind":"default","runner":"claude","repo":"octo-example/orbit","viewer":"viewer"}')
+  assert.equal(startRequest(101, 'fix', 'claude', 'octo-example/orbit', 'viewer', 't', false, undefined).init.body, '{"kind":"fix","repo":"octo-example/orbit","viewer":"viewer"}')
+})
+
+test('a Fix session, an update, and a Dependabot review show no box', () => {
+  const fix = drawerModel(input(own(), { confirm: { ...askDefault, kind: 'fix' } })).confirm
+  assert.equal(fix?.extraBox, null)
+  assert.equal(fix?.command, '/fix-pr 101')
+  const cell = idle()
+  const dependabot = { ...cell, starts: cell.starts.filter((option) => option.kind === 'default').map((option) => ({ ...option, command: 'review-dependabot' })) }
+  const model = drawerModel(input(dependabot, { confirm: askDefault })).confirm
+  assert.equal(model?.extraBox, null)
+  assert.equal(model?.command, '/review-dependabot 101')
+})
+
+test('a patch that changes the default moves an untouched box and leaves a typed one alone', () => {
+  assert.equal(drawerModel(input(offering('newer default'), { confirm: askDefault })).confirm?.extraBox?.text, 'newer default')
+  assert.equal(drawerModel(input(offering('newer default'), { confirm: { ...askDefault, extraText: 'typed' } })).confirm?.extraBox?.text, 'typed')
+})
+
+test('the drawer never rebuilds the box under the typist: its text is out of the signature, the paint keeps it true, and a rebuild keeps the caret', async () => {
+  const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
+  assert.match(source, /extraBox: model\.confirm\.extraBox === null \? null : ''/)
+  assert.match(source, /querySelector<HTMLTextAreaElement>\('textarea\[name="drawer-extra"\]'\)/)
+  assert.match(source, /extra\.disabled = busy/)
+  // a new ask opens with no typed text, and nothing but the confirmation holds it
+  assert.match(source, /confirm = \{ type: 'start', kind, runner: defaultRunner\(option, cell\.action\.runner\) \}/)
+  assert.equal(source.match(/extraText:/g)?.length, 1)
+  assert.match(source, /setSelectionRange/)
+})
+
+const extraUsed = { text: 'skip fixtures\nand docs', source: 'box' } as const
+
+test('the run details show the text used and where it came from on every card and in the previous runs, and nothing for a run without any', () => {
+  const line = { term: 'Extra instructions', from: 'typed for this run', text: 'skip fixtures\nand docs' }
+  assert.deepEqual(drawerModel(input(running({ extraInstructions: extraUsed }))).running?.extra, line)
+  assert.deepEqual(drawerModel(input(running({ extraInstructions: extraUsed, state: 'queued', status: 'queued' }))).queued?.extra, line)
+  assert.deepEqual(drawerModel(input(finished({ extraInstructions: extraUsed }))).result?.extra, line)
+  assert.deepEqual(drawerModel(input(finished({ extraInstructions: extraUsed, status: 'needsInput', question: 'Post it?', text: 'Waiting' }))).waiting?.extra, line)
+  // from Settings reads as such
+  assert.equal(drawerModel(input(finished({ extraInstructions: { text: 'x', source: 'default' } }))).result?.extra?.from, 'from Settings')
+  // none shows nothing
+  assert.equal(drawerModel(input(running())).running?.extra, null)
+  assert.equal(drawerModel(input(finished())).result?.extra, null)
+  // a previous run shows its own, and a run from before the field shows none
+  const previous = { id: 3, label: 'Review', runner: 'claude', status: 'done', result: null, note: null, startedAt: ago(h), costUsd: null, resolvedByHand: false, extraInstructions: extraUsed } as unknown as RunView
+  const older = { ...previous, id: 2, extraInstructions: null } as unknown as RunView
+  assert.deepEqual(runRows([previous, older], null).map((entry) => entry.extra), [line, null])
+})
+
+test('a card rebuilt from the runs list keeps the text, for a PR that left the open tables', () => {
+  const view = { id: 9, repo: 'octo-example/orbit', number: 101, command: 'review-pr', args: ['101', '--extra-instructions'], label: 'Review', runner: 'claude', status: 'done', steps: slots(), tandem: false, startedAt: ago(h), lastStepAt: null, step: null, stepState: null, finishedAt: ago(m), result: null, note: null, firstNote: null, resolvedByHand: false, resume: null, costUsd: null, extraInstructions: extraUsed } as unknown as RunView
+  assert.deepEqual(cellFromRun(idle(), view).extraInstructions, extraUsed)
 })

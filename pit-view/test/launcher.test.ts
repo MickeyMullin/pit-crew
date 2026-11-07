@@ -43,6 +43,7 @@ const prOf = async (number: number): Promise<RawOpenPr> => {
 
 // a run row as the cache would hold it, for the pure cell functions
 const runRow = (patch: Partial<Run> = {}): Run => ({
+  extraInstructions: null,
   id: 7, repo: scenario.repo, number: 106, command: 'review-pr', args: ['106'], label: 'Re-review', runner: 'claude',
   cwd: '~/dev/orbit', dir: '~/.local/state/pit-view/runs/7', sessionId: 'sess-1', pid: 4001, pidStartedAt: 'start-4001',
   startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, steps: null, finishedAt: null, status: 'running',

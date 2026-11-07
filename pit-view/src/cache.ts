@@ -3,15 +3,15 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { SQLInputValue, SQLOutputValue } from 'node:sqlite'
-import type { Clock, RunnerName } from './config.ts'
+import type { Clock, ExtraInstructions, RunnerName } from './config.ts'
 import type { ClosedResult, GhErrorKind, OpenPage, RawOpenPr } from './github.ts'
 import type { RunResultJson, StepSlot } from './launcher.ts'
 
 // why a run was queued (section 10 of DESIGN.md, What qualifies)
 export type QueueReason = 'requested' | 'new' | 'pushed' | 'selfReview' | 'dependabot'
 
-// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table. Version 12 added the database id of the latest reviews to the open-PR query, which the Changes requested links read, so the GitHub tables are rebuilt again. Version 13 added GitHub's stack marker (stack and stackEntry) to the open-PR query, which the stack chip, the Review stack start, and the stack report lookup read in place of the base-branch guess, so the GitHub tables are rebuilt again. Version 14 added the ticks table and auto-review's columns on runs and sweeps (origin, tick, reason, queued_at, posting, and worktree on both, and head_oid on runs), changing no GitHub table; a row from before it reads as a manual run
-export const schemaVersion = 14
+// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table. Version 12 added the database id of the latest reviews to the open-PR query, which the Changes requested links read, so the GitHub tables are rebuilt again. Version 13 added GitHub's stack marker (stack and stackEntry) to the open-PR query, which the stack chip, the Review stack start, and the stack report lookup read in place of the base-branch guess, so the GitHub tables are rebuilt again. Version 14 added the ticks table and auto-review's columns on runs and sweeps (origin, tick, reason, queued_at, posting, and worktree on both, and head_oid on runs), changing no GitHub table; a row from before it reads as a manual run. Version 15 added runs.extra_instructions, the extra review instructions a run used and where they came from, and changed no GitHub table; a row from before it reads as having none
+export const schemaVersion = 15
 
 // the last version that changed what the GitHub tables hold; a cache at this version or later keeps them through a bump, since a bump after it only adds tables
 export const githubTablesVersion = 13
@@ -143,15 +143,15 @@ export type Session = {
 }
 
 // one review session Pit View started (section 8 of DESIGN.md, Launching runs); resolvedByHand is set when the owner's re-read replaced the outcome recorded at exit, and firstNote keeps the note recorded at exit once a failed re-read replaced it (an empty string when that note was null); reportHash is the SHA-256 of the report a review finished with, null when it named none or the report could not be read, and postAttemptedAt is when Post it began a post, written before gh runs and cleared only when GitHub refused it; headOid is the head a scheduled run was queued for, or last moved to
-export type Run = Session & { number: number, resolvedByHand: boolean, firstNote: string | null, reportHash: string | null, postAttemptedAt: string | null, headOid: string | null }
+export type Run = Session & { number: number, resolvedByHand: boolean, firstNote: string | null, reportHash: string | null, postAttemptedAt: string | null, headOid: string | null, extraInstructions: ExtraInstructions | null }
 
 // one Dependabot sweep Pit View started (section 8, Sweeps): a record of its own with no PR number
 export type Sweep = Session
 
 type AutoFields = 'origin' | 'tick' | 'reason' | 'queuedAt' | 'posting' | 'worktree'
-export type NewRun = Omit<Run, 'id' | 'dir' | 'steps' | 'resolvedByHand' | 'firstNote' | 'reportHash' | 'postAttemptedAt' | 'headOid' | AutoFields> & Partial<Pick<Run, 'headOid' | AutoFields>>
+export type NewRun = Omit<Run, 'id' | 'dir' | 'steps' | 'resolvedByHand' | 'firstNote' | 'reportHash' | 'postAttemptedAt' | 'headOid' | 'extraInstructions' | AutoFields> & Partial<Pick<Run, 'headOid' | 'extraInstructions' | AutoFields>>
 export type NewSweep = Omit<Sweep, 'id' | 'dir' | 'steps' | AutoFields> & Partial<Pick<Sweep, AutoFields>>
-export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>> & { resolvedByHand?: boolean, firstNote?: string | null, reportHash?: string | null, postAttemptedAt?: string | null, headOid?: string | null }
+export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>> & { resolvedByHand?: boolean, firstNote?: string | null, reportHash?: string | null, postAttemptedAt?: string | null, headOid?: string | null, extraInstructions?: ExtraInstructions | null }
 
 // one scheduler tick (section 10 of DESIGN.md, Recording). state and finishedAt are null while it runs; interrupted is a tick the server stopped under or that failed on its own, and the rest are the spec's reasons to skip
 export type TickState = 'ran' | 'skipped'
@@ -259,7 +259,7 @@ const schema = [
 
 // kept across rebuilds: no status CHECK, so phase 4's queued and skipped need no rebuild
 const runsSchema = [
-  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, resolved_by_hand INTEGER NOT NULL DEFAULT 0, first_note TEXT, report_hash TEXT, post_attempted_at TEXT, origin TEXT NOT NULL DEFAULT \'manual\', tick INTEGER, head_oid TEXT, reason TEXT, queued_at TEXT, posting INTEGER NOT NULL DEFAULT 0, worktree TEXT)',
+  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, resolved_by_hand INTEGER NOT NULL DEFAULT 0, first_note TEXT, report_hash TEXT, post_attempted_at TEXT, origin TEXT NOT NULL DEFAULT \'manual\', tick INTEGER, head_oid TEXT, reason TEXT, queued_at TEXT, posting INTEGER NOT NULL DEFAULT 0, worktree TEXT, extra_instructions TEXT)',
   'CREATE INDEX IF NOT EXISTS runs_by_pr ON runs (repo, number, id)',
   'CREATE INDEX IF NOT EXISTS runs_by_status ON runs (status)',
 ]
@@ -336,7 +336,10 @@ const toSession = (row: Row): Session => {
   }
 }
 
-const toRun = (row: Row): Run => ({ ...toSession(row), number: int(row, 'number'), resolvedByHand: int(row, 'resolved_by_hand') === 1, firstNote: strOrNull(row, 'first_note'), reportHash: strOrNull(row, 'report_hash'), postAttemptedAt: strOrNull(row, 'post_attempted_at'), headOid: strOrNull(row, 'head_oid') })
+const toRun = (row: Row): Run => {
+  const extra = strOrNull(row, 'extra_instructions')
+  return { ...toSession(row), number: int(row, 'number'), resolvedByHand: int(row, 'resolved_by_hand') === 1, firstNote: strOrNull(row, 'first_note'), reportHash: strOrNull(row, 'report_hash'), postAttemptedAt: strOrNull(row, 'post_attempted_at'), headOid: strOrNull(row, 'head_oid'), extraInstructions: extra === null ? null : JSON.parse(extra) as ExtraInstructions }
+}
 
 const toTick = (row: Row): Tick => ({
   id: int(row, 'id'),
@@ -394,10 +397,11 @@ const runColumns: Record<keyof RunChanges, string> = {
   posting: 'posting',
   worktree: 'worktree',
   headOid: 'head_oid',
+  extraInstructions: 'extra_instructions',
 }
 
 const runValue = (key: keyof RunChanges, value: unknown): SQLInputValue => {
-  if (key === 'args' || key === 'result' || key === 'steps') return value === null || value === undefined ? null : JSON.stringify(value)
+  if (key === 'args' || key === 'result' || key === 'steps' || key === 'extraInstructions') return value === null || value === undefined ? null : JSON.stringify(value)
   if (key === 'resolvedByHand' || key === 'posting') return value === true ? 1 : 0
   return (value ?? null) as SQLInputValue
 }
@@ -516,6 +520,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
         if (!sweepColumns.includes(name)) db.exec(`ALTER TABLE sweeps ADD COLUMN ${name} ${type}`)
       }
       if (!columns.includes('head_oid')) db.exec('ALTER TABLE runs ADD COLUMN head_oid TEXT')
+      if (!columns.includes('extra_instructions')) db.exec('ALTER TABLE runs ADD COLUMN extra_instructions TEXT')
       for (const statement of ticksSchema) db.exec(statement)
       setMeta('schemaVersion', schemaVersion)
     })

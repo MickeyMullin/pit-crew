@@ -300,7 +300,7 @@ const removeTicket = (id: string): void => {
 
 // the fixed fields
 
-const staticText = ['repo', 'viewer', 'idleMinutes', 'bots', 'reportsDir', 'maxConcurrentReviews'] as const
+const staticText = ['repo', 'viewer', 'idleMinutes', 'bots', 'reportsDir', 'maxConcurrentReviews', 'extraReviewInstructions'] as const
 
 const fillStatic = (): void => {
   if (page === null) return

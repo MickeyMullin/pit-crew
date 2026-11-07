@@ -28,7 +28,7 @@ const cellOf = (models: RunnerModels): AgentCell => {
     posts: { kind: push ? 'push' : 'review', text: 'Posts.' }, repo: scenario.repo, viewer: scenario.viewer, unavailable: null,
   })
   return {
-    state: 'idle', label: 'Review', action: { kind: 'review', label: 'Review', command: 'review-pr', args: ['101'], runner: 'claude' },
+    state: 'idle', label: 'Review', action: { kind: 'review', label: 'Review', command: 'review-pr', args: ['101'], runner: 'claude' }, extraInstructions: null,
     starts: [
       start('default', 'review-pr', ['101'], ['claude', 'codex']),
       start('tandem', 'review-pr', ['101', '--tandem'], ['claude']),

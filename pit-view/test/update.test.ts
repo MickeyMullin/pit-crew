@@ -22,6 +22,7 @@ const pr101 = async (sha: string): Promise<RawOpenPr> => {
 }
 
 const updateRun = (result: Record<string, unknown> | null, patch: Partial<Run> = {}): Run => ({
+  extraInstructions: null,
   id: 9, repo: scenario.repo, number: 101, command: 'update-pr', args: ['101', `--head=${updateHead}`], label: 'Update branch', runner: 'claude',
   cwd: '~/dev/orbit', dir: '~/.local/state/pit-view/runs/9', sessionId: 'sess-9', pid: 4009, pidStartedAt: 'start-4009',
   startedAt: '2026-10-28T14:00:00Z', lastStepAt: null, step: null, stepState: null, steps: null, finishedAt: '2026-10-28T14:05:00Z',

@@ -1221,7 +1221,7 @@ test('version 14 keeps the GitHub tables and adds the ticks table and the auto-r
     for (const column of ['origin', 'tick', 'reason', 'queued_at', 'posting', 'worktree']) old.exec(`ALTER TABLE sweeps DROP COLUMN ${column}`)
     old.exec('UPDATE meta SET value = \'13\' WHERE key = \'schemaVersion\'')
     old.close()
-    assert.equal(schemaVersion, 14)
+    assert.equal(schemaVersion, 15)
     assert.equal(githubTablesVersion, 13)
     const cache = openCache({ path, clock: handClock().clock })
     assert.equal(count(cache, 'prs'), 1)

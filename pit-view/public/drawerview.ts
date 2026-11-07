@@ -15,8 +15,8 @@ export type Loadable<T> = { state: 'loading' } | { state: 'error', message: stri
 
 // what the drawer is asking about: a start waiting for its Start, a stop waiting for its Stop, or a direct action on the PR waiting for its confirmation
 export type Confirm =
-  // checkComments is the Self-review's box: it lives here, so it lasts as long as this confirmation and no longer
-  | { type: 'start', kind: StartKind, runner: RunnerName, checkComments?: boolean }
+  // checkComments is the Self-review's box and extraText what was typed in a review's Extra instructions box, undefined until then: both live here, so they last as long as this confirmation and no longer
+  | { type: 'start', kind: StartKind, runner: RunnerName, checkComments?: boolean, extraText?: string }
   | { type: 'stop', andOpen: boolean, runId: number }
   // a re-read of the latest run's result, with everything its confirmation showed
   | { type: 'reread', runId: number, repo: string, viewer: string, headSha: string, baseRef: string }
@@ -83,6 +83,10 @@ export const defaultRunner = (option: Pick<StartOption, 'kind' | 'runners'>, con
 export const commentsCheckOn = (asked: { checkComments?: boolean }, option: Pick<StartOption, 'checkCommentsArgs'>): boolean =>
   asked.checkComments === true && option.checkCommentsArgs !== undefined
 
+// what a review's Extra instructions box holds, which is what its start sends: what was typed, or until then the standing default; undefined for a start with no box
+export const extraBoxText = (asked: { extraText?: string }, option: Pick<StartOption, 'extraInstructions'>): string | undefined =>
+  option.extraInstructions === undefined ? undefined : asked.extraText ?? option.extraInstructions.standing
+
 export type StartConfirmModel = {
   kind: StartKind
   heading: string
@@ -98,6 +102,8 @@ export type StartConfirmModel = {
   models: RunnerModels
   // the Self-review's box; null for a start that does not offer it
   commentsCheck: { label: string, detail: string, checked: boolean } | null
+  // a review's Extra instructions box; null for a start that does not offer it
+  extraBox: { label: string, detail: string, text: string } | null
   effect: string
   effectKind: StartOption['posts']['kind']
   // a start that pushes to the PR's branch is confirmed with a caution treatment and this plain
@@ -109,17 +115,21 @@ export type StartConfirmModel = {
 
 // null when the PR no longer offers that start. A Fix session pushes commits, so its confirmation
 // names the branch in its heading, says plainly what the push does, and has a Start of its own
-export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headRef'>, cell: AgentCell, kind: StartKind, runner: RunnerName, checkComments = false): StartConfirmModel | null => {
+export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headRef'>, cell: AgentCell, kind: StartKind, runner: RunnerName, checkComments = false, extraText?: string): StartConfirmModel | null => {
   const option = optionOf(cell, kind)
   if (option === undefined) return null
   const chosen = option.runners.includes(runner) ? runner : defaultRunner(option, cell.action.runner)
   const push = option.posts.kind === 'push'
   const checked = commentsCheckOn({ checkComments }, option)
+  const args = checked ? option.checkCommentsArgs ?? option.args : option.args
+  const box = extraBoxText(extraText === undefined ? {} : { extraText }, option)
+  // the command shows the flag, and never the text, while the box holds anything but space
+  const flagged = box !== undefined && box.trim() !== '' && option.extraInstructions !== undefined ? [...args, option.extraInstructions.flag] : args
   return {
     kind,
     heading: push ? `Push fixes to ${row.headRef}?` : `${option.label} #${row.number}?`,
     title: row.title,
-    command: commandLine({ command: option.command, args: checked ? option.checkCommentsArgs ?? option.args : option.args }, chosen),
+    command: commandLine({ command: option.command, args: flagged }, chosen),
     runners: option.runners.map((name) => ({ name, label: runnerLabels[name] })),
     runner: chosen,
     runnerLabel: runnerLabels[chosen],
@@ -130,6 +140,11 @@ export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headR
       detail: 'Reads the PR\'s latest comments from anyone and reports which points the branch has not addressed. It changes nothing.',
       checked,
     },
+    extraBox: box === undefined ? null : {
+      label: 'Extra instructions',
+      detail: 'For this run only, prefilled from Settings. Empty means none. The reviewer reads them from a file, and the report quotes them, so a posted report shows them on GitHub. At most 2,000 characters.',
+      text: box,
+    },
     effect: option.posts.text,
     effectKind: option.posts.kind,
     caution: push ? `It pushes new commits to ${row.headRef} on GitHub under your account, and never force-pushes.` : null,
@@ -137,6 +152,12 @@ export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headR
     busy: push ? 'Starting fix session…' : 'Starting…',
   }
 }
+
+// the extra review instructions a run used, for its card and its line in the previous runs; a run without any shows nothing
+export type ExtraLine = { term: string, from: string, text: string }
+
+export const extraLine = (extra: AgentCell['extraInstructions']): ExtraLine | null =>
+  extra === null ? null : { term: 'Extra instructions', from: extra.source === 'default' ? 'from Settings' : 'typed for this run', text: extra.text }
 
 // the five-step bar
 const stepOrder = ['resolveBase', 'review', 'consolidate', 'writeReport', 'post'] as const
@@ -180,6 +201,7 @@ export const newestNote = (steps: readonly StepSlot[], command: string | null = 
 }
 
 export type RunningModel = {
+  extra: ExtraLine | null
   label: string
   tandem: boolean
   runnerLabel: string
@@ -200,17 +222,19 @@ export const runningModel = (row: Pick<OpenRow, 'headOid'>, cell: AgentCell): Ru
     steps,
     stepsName: stepsName(steps),
     note: newestNote(cell.steps, cell.command),
+    extra: extraLine(cell.extraInstructions),
   }
 }
 
 // a review waiting for a slot under the cap on concurrent reviews: what waits and why, with no steps or timer, since nothing runs yet
-export type QueuedModel = { label: string, tandem: boolean, runnerLabel: string, note: string }
+export type QueuedModel = { label: string, tandem: boolean, runnerLabel: string, note: string, extra: ExtraLine | null }
 
 export const queuedModel = (cell: AgentCell): QueuedModel => ({
   label: cell.label,
   tandem: cell.tandem,
   runnerLabel: cell.runner === null ? 'its runner' : runnerLabels[cell.runner],
   note: 'Waiting for a review slot: it starts by itself when an earlier review or sweep ends, in the order it was queued.',
+  extra: extraLine(cell.extraInstructions),
 })
 
 // the stop confirmation: what stops and what stays behind
@@ -307,12 +331,13 @@ export const postAskModel = (row: Pick<OpenRow, 'number' | 'title'>, offer: NonN
   }
 }
 
-export type WaitingModel = { question: string, resume: string | null, copyName: string }
+export type WaitingModel = { question: string, resume: string | null, copyName: string, extra: ExtraLine | null }
 
 export const waitingModel = (cell: AgentCell, number: number): WaitingModel => ({
   question: cell.question ?? 'The run stopped to ask a question but did not record it. Open its session to see it.',
   resume: cell.resume,
   copyName: `Copy resume command for #${number}`,
+  extra: extraLine(cell.extraInstructions),
 })
 
 // why a run failed, in words; the kinds are Pit View's own, and a detail after the colon is kept
@@ -466,6 +491,7 @@ export const commitModel = (commit: string | null, repo: string | undefined, hea
 }
 
 export type ResultModel = {
+  extra: ExtraLine | null
   text: string
   tone: DoneTone
   runnerLabel: string
@@ -534,6 +560,7 @@ export const resultModel = (cell: AgentCell, number: number, headOid: string, of
   ready: readyPointer(cell.text, offers),
   notPosted: isBlockedPost(cell.result) ? 'Review done, post not made: a permission check refused the post before it ran, so nothing reached GitHub.' : null,
   report: blockedReport(cell.result),
+  extra: extraLine(cell.extraInstructions),
 })
 
 // which card the latest run gets
@@ -549,7 +576,7 @@ export const cardKind = (cell: AgentCell): CardKind => {
 }
 
 // previous runs: a compact line each
-export type RunRow = { id: number, label: string, runner: string, text: string, tone: Tone, startedAt: string, cost: string | null }
+export type RunRow = { id: number, label: string, runner: string, text: string, tone: Tone, startedAt: string, cost: string | null, extra: ExtraLine | null }
 
 const failureShort: Readonly<Record<string, string>> = {
   badResult: 'bad result',
@@ -627,6 +654,7 @@ export const runRows = (runs: readonly RunView[], shownId: number | null): RunRo
     ...runText(run),
     startedAt: run.startedAt,
     cost: formatCost(run.costUsd),
+    extra: extraLine(run.extraInstructions),
   }))
 
 // reports on disk: a review's carries its verdict and a Tandem tag; a Fix session's a Fix tag and
@@ -706,7 +734,7 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
   const { row, confirm } = input
   const cell = row.agent
   const card = cell === null ? 'none' : cardKind(cell)
-  const startAsk = confirm?.type === 'start' && cell !== null ? startConfirmModel(row, cell, confirm.kind, confirm.runner, confirm.checkComments) : null
+  const startAsk = confirm?.type === 'start' && cell !== null ? startConfirmModel(row, cell, confirm.kind, confirm.runner, confirm.checkComments, confirm.extraText) : null
   const runs = input.runs
   const reports = input.reports
   return {
@@ -820,6 +848,7 @@ export const cellFromRun = (cell: AgentCell, run: RunView): AgentCell => {
     firstNote: run.firstNote,
     resume: run.resume,
     costUsd: run.costUsd,
+    extraInstructions: run.extraInstructions,
     // the server's offer is about one run, and a newer run on the list is not it
     postOffer: cell.runId === run.id ? cell.postOffer : null,
   }

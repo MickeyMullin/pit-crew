@@ -1,6 +1,6 @@
 ---
-description: "Review a whole stack of stacked PRs as one cumulative tree and offer to post one report on the top layer. Reports only; never fixes. Add --tandem to launch a second reviewer and consolidate (--tandem=<id> picks it, --tandem=manual means you start it yourself), or --tandem-secondary to be that second reviewer. Add --emit-json=<run-dir> to also write machine-readable progress and results to that directory."
-argument-hint: "[stack number | PR number | branch | PR URL] [--tandem[=<id>,... | =manual] | --tandem-secondary[@sha]] [--emit-json=<run-dir>]"
+description: "Review a whole stack of stacked PRs as one cumulative tree and offer to post one report on the top layer. Reports only; never fixes. Add --tandem to launch a second reviewer and consolidate (--tandem=<id> picks it, --tandem=manual means you start it yourself), or --tandem-secondary to be that second reviewer. Add --emit-json=<run-dir> to also write machine-readable progress and results to that directory. Add --extra-instructions beside --emit-json to also apply the text in that directory's extra-instructions.txt."
+argument-hint: "[stack number | PR number | branch | PR URL] [--tandem[=<id>,... | =manual] | --tandem-secondary[@sha]] [--extra-instructions] [--emit-json=<run-dir>]"
 ---
 
 Follow the instructions in `{{HOME}}/agents/prompts/review/review-stack.md` in full. You are
@@ -16,3 +16,5 @@ unless exactly one is open.
 A `--tandem[=<id>,...]`, `--tandem=manual`, or `--tandem-secondary[@<sha>]` flag in the arguments is not part of the stack identity: follow the prompt's Tandem mode section, remove the flag, and resolve the rest.
 
 A `--emit-json=<run-dir>` flag in the arguments is not part of the stack identity either: follow the prompt's Machine-readable output section, remove the flag, and resolve the rest.
+
+An `--extra-instructions` flag in the arguments is not part of the stack identity either: follow the prompt's Extra instructions section, remove the flag, and resolve the rest.

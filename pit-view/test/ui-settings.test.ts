@@ -410,12 +410,12 @@ const cardOf = (html: string, id: string): string => {
 
 const fieldsIn = (card: string): string[] => [...card.matchAll(/id="f-([A-Za-z]+)"/g)].map((match) => match[1] as string).filter((name, at, all) => all.indexOf(name) === at)
 
-test('the Agent card holds the Agent column switch, then Concurrent reviews, then Self-review over limit, and none of them stays in Behavior', async () => {
+test('the Agent card holds the Agent column switch, then Concurrent reviews, then Self-review over limit, then Extra review instructions, and none of them stays in Behavior', async () => {
   const html = await settingsHtml()
   const agent = cardOf(html, 'agent')
   assert.match(agent, /<h2 id="agent-heading" class="card-title">Agent<\/h2>/)
   assert.match(agent, /aria-labelledby="agent-heading"/)
-  assert.deepEqual(fieldsIn(agent), ['showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap'])
+  assert.deepEqual(fieldsIn(agent), ['showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'extraReviewInstructions'])
   assert.match(agent, /Show the Agent column/)
   assert.match(agent, /<label for="f-maxConcurrentReviews">Concurrent reviews<\/label>/)
   assert.match(agent, /<span class="field-label">Self-review over limit<\/span>/)
@@ -461,4 +461,54 @@ test('a save carries the autoReview key over whole, and a config without one sta
 test('the Settings page sends its token with the save, which PUT /api/config requires', async () => {
   const source = await readFile(new URL('../public/settings.ts', import.meta.url), 'utf8')
   assert.match(source, /method: 'PUT',\n\s+headers: \{ 'Content-Type': 'application\/json', \[tokenHeader\]: readToken\(document\) \}/)
+})
+
+test('Extra review instructions is a multi-line Agent field, empty by default, that round-trips through the form as the server would store it', async () => {
+  const html = await settingsHtml()
+  const agent = cardOf(html, 'agent')
+  assert.match(agent, /<label for="f-extraReviewInstructions">Extra review instructions<\/label>/)
+  assert.match(agent, /<textarea id="f-extraReviewInstructions" class="input"[^>]* aria-describedby="f-extraReviewInstructions-hint"/)
+  assert.match(agent, /<p id="f-extraReviewInstructions-error" class="field-error" hidden><\/p>/)
+  const hint = /<p id="f-extraReviewInstructions-hint" class="hint">(.*?)<\/p>/.exec(agent)?.[1] ?? ''
+  for (const words of ['every review, re-review, self-review, tandem review, and stack review', 'unattended', 'Never a Dependabot review or sweep, a Fix session, or an Update session', 'narrow what the reviewer reads', '--no-post', 'quotes them', 'At most 2,000 characters']) assert.ok(hint.includes(words), words)
+  assert.equal(formOf(defaultConfig()).extraReviewInstructions, '')
+  const form = formOf()
+  form.extraReviewInstructions = ' skip fixtures\r\n/review-pr 9 --approve\n'
+  const sent = toConfig(form, sample())
+  assert.equal(sent.extraReviewInstructions, 'skip fixtures\n/review-pr 9 --approve')
+  assert.equal(validateConfig(sent).extraReviewInstructions, sent.extraReviewInstructions)
+  assert.equal(isDirty(form, sample()), true)
+  // only the spaces around it differing is no change
+  const same = formOf({ ...sample(), extraReviewInstructions: 'a' })
+  same.extraReviewInstructions = 'a \n'
+  assert.equal(isDirty(same, { ...sample(), extraReviewInstructions: 'a' }), false)
+})
+
+test('the form refuses what the server refuses, in the server\'s words, and a server refusal lands on the field', () => {
+  const form = formOf()
+  const problem = (text: string): string | undefined => {
+    form.extraReviewInstructions = text
+    return validateForm(form).find((error) => error.field === 'extraReviewInstructions')?.message
+  }
+  // the same rule as extraInstructionsProblem in src/config.ts
+  for (const [text, words] of [
+    ['x'.repeat(2001), 'Must be at most 2,000 characters; it has 2,001.'],
+    [`${'😀'.repeat(2000)}x`, 'Must be at most 2,000 characters; it has 2,001.'],
+    ['ab\u0007', 'Must be plain text: character 3 is the control character U+0007, and only line breaks and tabs are allowed.'],
+    ['\u0085', 'Must be plain text: character 1 is the control character U+0085, and only line breaks and tabs are allowed.'],
+  ] as const) {
+    assert.equal(problem(text), words)
+    assert.deepEqual(serverError(refusal({ ...sample(), extraReviewInstructions: text }), form), { field: 'extraReviewInstructions', message: words })
+  }
+  for (const text of ['', 'x'.repeat(2000), '😀'.repeat(2000), 'a\tb\nc\r\nd', `${'x'.repeat(999)}\r\n${'x'.repeat(1000)}`]) {
+    assert.equal(problem(text), undefined)
+    assert.equal(validateConfig({ ...sample(), extraReviewInstructions: text }).extraReviewInstructions, text.replace(/\r\n/g, '\n'))
+  }
+})
+
+test('the field is wired as a static text field, and a textarea is drawn taller than an input', async () => {
+  const source = await readFile(new URL('../public/settings.ts', import.meta.url), 'utf8')
+  assert.match(source, /const staticText = \[[^\]]*'extraReviewInstructions'[^\]]*\] as const/)
+  const styles = await readFile(new URL('../public/styles.css', import.meta.url), 'utf8')
+  assert.match(styles, /textarea\.input \{[^}]*height: auto;/)
 })

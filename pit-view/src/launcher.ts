@@ -4,8 +4,8 @@ import { closeSync, openSync, watch as watchDir } from 'node:fs'
 import { mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import type { Cache, NewRun, NewSweep, QueueReason, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
-import { expandHome, tildePath } from './config.ts'
-import type { AgentSettings, Clock, Config, RunnerName } from './config.ts'
+import { expandHome, normalizeExtraInstructions, tildePath } from './config.ts'
+import type { AgentSettings, Clock, Config, ExtraInstructions, RunnerName } from './config.ts'
 import { isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
 import type { Stack } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
@@ -580,6 +580,24 @@ export const defaultRun = (pr: RawOpenPr, config: Config): DefaultRun => {
   }
 }
 
+// extra review instructions (section 8 of DESIGN.md, Extra instructions): never on a command line, where quoting, length, and flag-like words would corrupt the invocation. The text goes to this file in the run directory, and the request carries the flag, which prompts/review/extra-instructions.md reads
+export const extraInstructionsFlag = '--extra-instructions'
+export const extraInstructionsFile = 'extra-instructions.txt'
+
+// the commands that accept the flag: a review of a PR or a stack, and no Dependabot review, sweep, Fix session, or Update session
+const takesExtraInstructions = (command: string): boolean => command === 'review-pr' || command === 'review-stack'
+
+// the text a start runs under: the box's when a box was sent, cleared meaning none, or else the standing default. It counts as the default whenever it reads the same as the default
+export const chooseExtraInstructions = (box: string | undefined, standing: string): ExtraInstructions | null => {
+  const text = box === undefined ? standing : normalizeExtraInstructions(box)
+  if (text === '') return null
+  return { text, source: text === standing ? 'default' : 'box' }
+}
+
+// a start under those instructions: the one place the flag joins the arguments and the text joins the request, so a run never has one without the other
+export const withExtraInstructions = (request: StartRequest, extra: ExtraInstructions | null): StartRequest =>
+  extra === null ? request : { ...request, args: [...request.args, extraInstructionsFlag], extraInstructions: extra }
+
 // the starts the drawer offers (section 8 of DESIGN.md, Drawer): the row's default run, the same
 // review in tandem (Claude only), a review of the whole stack, and on the viewer's own PRs a fix
 // session (Claude only), which acts on the changes reviewers requested and pushes its fixes
@@ -611,6 +629,8 @@ export type StartOption = {
   unavailable: string | null
   // only a Self-review's default start has this: its args with the comments check on, which the page shows and the server runs, so neither builds the flag itself
   checkCommentsArgs?: string[]
+  // only a review's start has this: the standing default its box opens with, and the flag the run takes while the box holds text, so the page builds neither
+  extraInstructions?: { standing: string, flag: string }
 }
 
 export const isTandemRun = (args: readonly string[]): boolean => args.includes('--tandem')
@@ -659,10 +679,13 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
   const unavailable = busy
     ? `a run for #${pr.number} is already in flight`
     : config.cloneDir === undefined ? `set cloneDir in the config to your local clone of ${config.repo} before starting a run` : null
+  const extraBox = (command: string): Pick<StartOption, 'extraInstructions'> =>
+    takesExtraInstructions(command) ? { extraInstructions: { standing: config.extraReviewInstructions, flag: extraInstructionsFlag } } : {}
   const options: StartOption[] = [{
     kind: 'default', label: plan.label, button: reviewButton(buttons[plan.kind]), command: plan.command, args: plan.args,
     runners: ['claude', 'codex'], posts: postsFor(plan.command, plan.args, viewer), repo, viewer, unavailable,
     ...(plan.kind === 'selfReview' ? { checkCommentsArgs: [...plan.args, '--check-comments'] } : {}),
+    ...extraBox(plan.command),
   }]
   if (notOffered('tandem', pr, config, stack) === null) {
     // --tandem goes before --no-post; the review-pr prompt reads either flag wherever it stands
@@ -670,13 +693,13 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
     const label = plan.kind === 'selfReview' ? 'Tandem self-review' : plan.kind === 'reReview' ? 'Tandem re-review' : 'Tandem review'
     options.push({
       kind: 'tandem', label, button: reviewButton(`${buttons[plan.kind].replace(/ PR$/, '')} in tandem`), command: 'review-pr', args,
-      runners: ['claude'], posts: postsFor('review-pr', args, viewer), repo, viewer, unavailable,
+      runners: ['claude'], posts: postsFor('review-pr', args, viewer), repo, viewer, unavailable, ...extraBox('review-pr'),
     })
   }
   if (notOffered('stack', pr, config, stack) === null) {
     options.push({
       kind: 'stack', label: 'Review stack', button: reviewButton('Review stack'), command: 'review-stack', args: [String(pr.number)],
-      runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), repo, viewer, unavailable,
+      runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), repo, viewer, unavailable, ...extraBox('review-stack'),
     })
   }
   // never --no-post: the push is what it is for
@@ -786,6 +809,8 @@ export type AgentCell = {
   firstNote: string | null
   resume: string | null
   costUsd: number | null
+  // the extra review instructions the latest run used and where they came from; null for none
+  extraInstructions: ExtraInstructions | null
   // the post a blocked run's report may still get from the drawer's Post it; null for anything else
   postOffer: PostOffer | null
   // set while the run on show is a stack review started from another PR: that PR's number, and the status of this PR's own latest run behind it, null with none. Null on the PR it started from, and on every other cell
@@ -1029,7 +1054,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     state: 'idle', label: plan.label, action, models: modelLabels(config.agent), starts: startOptions(pr, config, stack, ownInFlight, queueing), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
-    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, postOffer: null, stackRun: null,
+    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, postOffer: null, stackRun: null,
   }
   // the newer of the PR's own latest run and the stack run that covers it
   const covered = cover !== undefined && cover.id > (ownRun?.id ?? 0)
@@ -1068,6 +1093,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     firstNote: run.firstNote,
     resume: run.resume,
     costUsd: run.costUsd,
+    extraInstructions: run.extraInstructions,
     postOffer: postOffer(pr, config, run),
   }
 }
@@ -1949,6 +1975,8 @@ export type StartRequest = {
   runner?: RunnerName
   // cloneDir when left out; phase 4 passes its worktree
   cwd?: string
+  // set by withExtraInstructions alone, with the flag it adds to args: the launch writes this text to the run directory and records it
+  extraInstructions?: ExtraInstructions
 }
 
 // the actions that start the Update session, and the label each run carries: Resolve conflicts is the same session, asked for on a conflicting PR
@@ -2151,7 +2179,7 @@ const messageOf = (error: unknown): string => error instanceof Error ? error.mes
 export const runStore = (cache: Cache): SessionStore<Run> => ({
   folder: 'runs',
   noun: 'run',
-  create: (request, fields, dirOf) => cache.createRun({ ...fields, number: request.number } satisfies NewRun, dirOf),
+  create: (request, fields, dirOf) => cache.createRun({ ...fields, number: request.number, ...(request.extraInstructions === undefined ? {} : { extraInstructions: request.extraInstructions }) } satisfies NewRun, dirOf),
   get: cache.getRun,
   update: cache.updateRun,
   running: cache.runningRuns,
@@ -2706,7 +2734,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         sessionId,
         argv: [invocation.command, ...invocation.args],
         startedAt: run.startedAt,
+        ...(request.extraInstructions === undefined ? {} : { extraInstructions: request.extraInstructions }),
       }
+      // before the spawn, so a run never carries the flag without its file; a write refused fails the start here
+      if (request.extraInstructions !== undefined) await fs.writeFile(join(dir, extraInstructionsFile), `${request.extraInstructions.text}\n`)
       await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid: null, pidStartedAt: null }, null, 2)}\n`)
       // the last thing before the spawn, with nothing awaited between this reading and it: a review or a sweep starts only for the repository and the viewer its start was confirmed for, and only while it still fits, under the config in effect now
       if (admitted !== null) {

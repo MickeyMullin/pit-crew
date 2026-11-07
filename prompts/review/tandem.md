@@ -38,13 +38,14 @@ Unless the flag was `--tandem=manual`, the primary starts its secondaries itself
 - **The command**, with every value resolved:
 
 ```
-{{HOME}}/agents/bin/tandem-secondary --mode pr|local|stack --target <target> --sha <short-sha or tree hash> --worktree <path> --draft <unsuffixed report path with -<id> before .md> [--entry <id>]
+{{HOME}}/agents/bin/tandem-secondary --mode pr|local|stack --target <target> --sha <short-sha or tree hash> --worktree <path> --draft <unsuffixed report path with -<id> before .md> [--entry <id>] [--extra-instructions-file <path>]
 ```
 
   - `--target`: the PR number for `pr`; the stack number or the PR number you resolved it from for `stack`; the branch name for `local`.
   - `--worktree`: your worktree, or the checkout itself when you are reviewing in place (always, for `review-local.md`).
   - `--draft`: for example `{{HOME}}/agents/output/PR-805-codex.md`. Name it with the entry id, not the agent name.
   - `--entry`: one run per id named in `--tandem=<id>,...`. Omit it for a bare `--tandem` and the launcher uses its default; read the id it chose from its summary line.
+  - `--extra-instructions-file`: only when the invocation carries `--extra-instructions`, and then on every run: `<run-dir>/extra-instructions.txt`, the file `{{HOME}}/agents/prompts/review/extra-instructions.md` describes. The secondary reads that file through the launcher's instructions, so every reviewer works under the same text.
 - **Run it in the background and do not wait for it before starting your own review.** A real review takes minutes. Use your environment's way to start a command in the background and be told when it exits. If your environment has none, do not run it in the foreground: fall back to `--tandem=manual`, say so, and give the user each secondary's invocation to start by hand.
 - **Leave the reviewed code alone until every launched secondary has exited.** It is reading the same worktree, or for `review-local.md` the same live tree. Do not remove the worktree, check anything out in it, or, under `review-local.md`, make the WIP commit or edit any file.
 - **The launcher's last line of output is its verdict**: `tandem-secondary: ok ...` or `tandem-secondary: failed ... reason=<why>`, with the draft and log paths. Read that line; do not judge by exit code alone.
@@ -80,7 +81,8 @@ Consolidating (primary only):
 - **Re-derive every citation from a fresh read**, under the calling prompt's citation rules. A secondary's report is another numbering source you did not produce; treat its line numbers as untrustworthy, exactly like a diff hunk.
 - **Apply the calling prompt's required passes to any recommended fix you merge or rewrite.** A merged recommendation is a new recommendation.
 - Merge the closing notes: the union of the validation actually performed (inspected CI, gates run, required passes), with no claim of work neither reviewer did. Keep one merge recommendation, derived from the consolidated findings.
-- **The consolidated report reads as one review.** It does not mention tandem mode, the number of reviewers, which reviewer found what, which findings were dropped, or any agent or model name. The no-attribution rule in the calling prompt's output section applies to it in full.
+- **The consolidated report reads as one review.** It does not mention tandem mode, the number of reviewers, which reviewer found what, which findings were dropped, or any agent or model name. The no-attribution rule in the calling prompt's output section applies to it in full. Its one permitted line about the run's instructions is `Extra instructions in effect:`, under `--extra-instructions`.
+- The consolidated report carries the `Extra instructions in effect:` line once, as `extra-instructions.md` gives it, and a finding a reviewer met in an excluded path is still reported.
 - Report the consolidation to the user in chat instead: which findings came from which draft, which were merged, which were dropped or re-ranked and why, and any finding you first dismissed and then kept. Chat is where attribution belongs; the report is not.
 - Write the consolidated report to the unsuffixed path, then continue with the calling prompt from its posting section (for `review-local.md`, from "Fixing what you found"). The verdict, the posting form, the CI gate, the authorship checks, fix mode, and the `Fix attempts:` bound all run on the consolidated findings exactly as they would on a single review.
 - **In fix mode, the re-review after fixing is a single-agent review by the primary.** Tandem mode covers the review that found the problems, not this automatic second pass of the same run. Say so in chat, so the user can run another tandem round instead if they want one. This rule is not a precedent for a re-review the user asks for afterward, which repeats the tandem flag (see "Re-reviews").
