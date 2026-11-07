@@ -1148,45 +1148,62 @@ test('rows of another repository with the same PR number hold nothing in this on
 
 // restart recovery
 
-test('at startup, whether or not auto-review is on, the sweep removes a crashed run\'s worktree and leaves another run\'s live one, a queued one, and anything else alone', async () => {
+test('at startup, whether or not auto-review is on, the sweep removes the worktree of a crashed run that is settled, a done run\'s leftover, and one with no row, and leaves a crashed run still unsettled, a live run, a queued one, and anything else alone', async () => {
   const world = await setup({ auto: { enabled: false } })
   try {
-    const folder = world.worktrees
-    await mkdir(folder, { recursive: true })
-    const real = await realpath(folder)
-    const cache = world.server.cache
-    const row = (number: number, status: Run['status'], pid: number | null = null): Run => cache.createRun({
-      repo: scenario.repo, number, command: 'review-pr', args: [String(number)], label: 'Review', runner: 'claude', cwd: '~/x', sessionId: null, pid, pidStartedAt: pid === null ? null : `start-${pid}`, startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, finishedAt: status === 'running' || status === 'queued' ? null : '2026-10-26T14:01:00Z', status, result: null, note: null, costUsd: null, resume: null, origin: 'auto',
-    }, (id) => `~/.local/state/pit-view/runs/${id}`)
-    const crashed = row(106, 'done')
-    const liveRun = row(113, 'running', 5151)
-    const queued = row(107, 'queued')
+    await listed(world)
+    // a crash: recorded as running, its process gone, and no result.json. One has a newer run of its PR in this repository, one's PR is no longer open, and one's PR is still open at its head
+    const superseded = seedRun(world, { number: 106, status: 'running', pid: 7101, head: headOf(world, 106) })
+    seedRun(world, { number: 106, status: 'done', pid: 7102, head: headOf(world, 106) })
+    const closed = seedRun(world, { number: 109, status: 'running', pid: 7103, head: headOf(world, 109) })
+    const unsettled = seedRun(world, { number: 111, status: 'running', pid: 7104, head: headOf(world, 111) })
+    world.server.cache.closePr(scenario.repo, 109)
+    const leftover = seedRun(world, { number: 108, status: 'done', head: headOf(world, 108) })
+    const liveRun = seedRun(world, { number: 113, status: 'running', pid: 5151, head: headOf(world, 113) })
+    const queued = seedRun(world, { number: 107, status: 'queued' })
     world.launch.alive.add(5151)
     world.launch.processes.push({ pid: 5151, ppid: 1, pgid: 5151 })
-    const worktree = (name: string): string => join(real, name)
-    world.git.state.worktrees.add(worktree(`run-${crashed.id}`))
-    world.git.state.worktrees.add(worktree(`run-${liveRun.id}`))
-    world.git.state.worktrees.add(worktree(`run-${queued.id}`))
+    const worktreeOf = async (run: Run): Promise<string> => seedWorktree(world, 'run', run.id)
+    const pathSuperseded = await worktreeOf(superseded)
+    const pathClosed = await worktreeOf(closed)
+    const pathUnsettled = await worktreeOf(unsettled)
+    const pathLeftover = await worktreeOf(leftover)
+    const pathLive = await worktreeOf(liveRun)
+    const pathQueued = await worktreeOf(queued)
+    const folder = await realpath(world.worktrees)
     // no row at all
-    world.git.state.worktrees.add(worktree('run-999'))
+    world.git.state.worktrees.add(join(folder, 'run-999'))
     // not Pit View's: another name in the folder, and one elsewhere
-    world.git.state.worktrees.add(worktree('scratch'))
+    world.git.state.worktrees.add(join(folder, 'scratch'))
     world.git.state.worktrees.add(join(world.clone, 'run-5'))
     // a directory git no longer lists is reported, not deleted
-    await mkdir(join(folder, 'run-777'), { recursive: true })
+    await mkdir(join(world.worktrees, 'run-777'), { recursive: true })
+    const githubCalls = world.gh.calls.filter((args) => args[0] === 'api').length
     await world.restart()
-    const removed = world.git.verbs('worktree', 'remove').map((call) => basename(call.args[4] ?? ''))
-    assert.deepEqual(removed.sort(), [`run-${crashed.id}`, 'run-999'].sort())
-    assert.ok(world.git.state.worktrees.has(worktree(`run-${liveRun.id}`)))
-    assert.ok(world.git.state.worktrees.has(worktree(`run-${queued.id}`)))
-    assert.ok(world.git.state.worktrees.has(worktree('scratch')))
+    const cache = world.server.cache
+    for (const crashed of [superseded, closed, unsettled]) {
+      const row = cache.getRun(crashed.id)
+      assert.equal(row?.status, 'failed', `run ${crashed.id}`)
+      assert.match(row?.note ?? '', /^serverRestarted/)
+    }
+    assert.deepEqual(removedNames(world), [`run-${superseded.id}`, `run-${closed.id}`, `run-${leftover.id}`, 'run-999'].sort())
+    for (const gone of [pathSuperseded, pathClosed, pathLeftover]) assert.equal(world.git.state.worktrees.has(gone), false)
+    for (const run of [superseded, closed, leftover]) assert.equal(cache.getRun(run.id)?.worktree, null, `run ${run.id}`)
+    // its PR is open at the head it reviewed and no newer run has started, so the owner may still resume it, where its worktree is
+    assert.ok(world.git.state.worktrees.has(pathUnsettled))
+    assert.notEqual(cache.getRun(unsettled.id)?.worktree, null)
+    assert.ok(world.git.state.worktrees.has(pathLive))
+    assert.ok(world.git.state.worktrees.has(pathQueued))
+    assert.ok(world.git.state.worktrees.has(join(folder, 'scratch')))
     assert.ok(world.git.state.worktrees.has(join(world.clone, 'run-5')))
+    assert.ok(world.git.verbs('worktree', 'remove').every((call) => !call.args.includes('--force')))
     assert.equal(world.git.verbs('worktree', 'prune').length > 0, true)
     assert.deepEqual(world.server.scheduler.view()?.worktrees.unlisted, ['run-777'])
-    assert.equal(world.server.cache.getRun(liveRun.id)?.status, 'running')
-    assert.equal(world.server.cache.getRun(queued.id)?.status, 'queued')
+    assert.equal(cache.getRun(liveRun.id)?.status, 'running')
+    assert.equal(cache.getRun(queued.id)?.status, 'queued')
     // no GitHub call, and auto-review stayed off
-    assert.equal(world.gh.calls.filter((args) => args[0] === 'api').length, 0)
+    assert.equal(world.gh.calls.filter((args) => args[0] === 'api').length, githubCalls)
+    assert.equal(ticks(world).length, 0)
   } finally {
     await world.cleanup()
   }
