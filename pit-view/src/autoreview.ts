@@ -743,7 +743,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
   const optedIn = (reason: QueueReason | null, auto: AutoReviewSettings): boolean =>
     reason === 'dependabot' ? auto.dependabot : reason === 'selfReview' ? auto.own : auto.others
 
-  // the tick's last step: as many as fit, one at a time, each read afresh, since a save, the cap, and the clock may all move meanwhile. Answers whether the day's limit had been reached before any started
+  // the tick's last step: as many as fit, one at a time, oldest first, each read afresh, since a save, the cap, and the clock may all move meanwhile. Answers whether the day's limit had been reached before any started
   const startQueued = async (repo: string, exempt: boolean, open: readonly RawOpenPr[]): Promise<boolean> => {
     const budget = (auto: AutoReviewSettings): ReturnType<typeof startBudget> => {
       const { autoRuns, autoSweeps } = records(repo)
@@ -768,7 +768,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       // a run in flight when the window closes finishes, and nothing new starts until it reopens; Run now is the one tick exempt
       if (!exempt && !isActiveAt(auto.activeHours, clock.now(), timeZone)) break
       if (budget(auto).count === 0) break
-      // an opt-in turned off since it was queued keeps it waiting, and starts nothing the owner has just said not to
+      // one whose opt-in has been turned off since it was queued cannot start, so it is ahead of no one: it stays queued in its place, and the next that can start goes
       if (!optedIn(candidate.row.reason, auto)) continue
       const next = candidate.kind === 'run' ? await startRun(candidate.row, settings, open) : await startSweep(candidate.row, settings, auto)
       if (!next) break

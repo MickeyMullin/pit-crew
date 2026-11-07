@@ -1691,6 +1691,128 @@ test('an opt-in turned off leaves what it queued waiting, and starts none of it'
   }
 })
 
+// the line among queued runs: a run whose opt-in is off cannot start, so it is ahead of no one, and a run that can start and does not end up running ends the tick's starts
+
+const saveAuto = async (world: World, patch: Partial<AutoReviewSettings>): Promise<void> => {
+  const stored = await (await fetch(`${world.server.url}/api/config`)).json() as Config
+  assert.equal((await fetch(`${world.server.url}/api/config`, { method: 'PUT', headers: headers(world), body: JSON.stringify({ ...stored, autoReview: { ...stored.autoReview, ...patch } }) })).status, 200)
+}
+
+const queuedOwn = (world: World): Run[] => autoRuns(world).filter((run) => run.status === 'queued' && run.reason === 'selfReview')
+const queuedOthers = (world: World): Run[] => autoRuns(world).filter((run) => run.status === 'queued' && run.reason !== 'selfReview')
+
+test('a tick passes a queued run whose opt-in is off, even the oldest: a later run that can start starts, the older one stays queued, and it starts first once its opt-in is back on', async () => {
+  const world = await setup({ auto: { others: true, own: true, concurrency: 1 } })
+  try {
+    await tick(world)
+    const older = queuedOthers(world)
+    const own = queuedOwn(world)
+    assert.ok(older.length > 0 && own.length > 0)
+    assert.ok(older[0]!.id < own[0]!.id, 'the opted-out run is the oldest in the line')
+    await saveAuto(world, { others: false })
+    await finish(world, running(world)[0]!)
+    await tick(world)
+    assert.deepEqual(running(world).map((run) => run.id), [own[0]!.id])
+    for (const run of older) {
+      const row = world.server.cache.getRun(run.id)
+      assert.equal(row?.status, 'queued')
+      assert.equal(row?.worktree, null)
+    }
+    assert.equal(ticks(world)[0]?.state, 'ran')
+    // it kept its place
+    await saveAuto(world, { others: true })
+    await finish(world, running(world)[0]!)
+    await tick(world)
+    assert.deepEqual(running(world).map((run) => run.id), [older[0]!.id])
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('Run now passes a queued run whose opt-in is off too, and the sweep behind it starts', async () => {
+  const world = await setup({ auto: { others: true, dependabot: true, concurrency: 1 } })
+  try {
+    await tick(world)
+    const older = queuedOthers(world)
+    assert.ok(older.length > 0)
+    const sweep = world.server.cache.allSweeps().find((entry) => entry.origin === 'auto')
+    assert.equal(sweep?.status, 'queued')
+    await saveAuto(world, { others: false })
+    await finish(world, running(world)[0]!)
+    assert.equal(world.server.scheduler.runNow()?.started, true)
+    await world.server.scheduler.idle()
+    assert.equal(world.server.cache.getSweep(sweep!.id)?.status, 'running')
+    for (const run of older) assert.equal(world.server.cache.getRun(run.id)?.status, 'queued')
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('within one tick, an opt-in turned off while a run is being started passes the rest of that kind, queued by that same tick, and a later run that can start starts', async () => {
+  const world = await setup({ auto: { others: true, own: true, concurrency: 2 }, config: { maxConcurrentReviews: 4 } })
+  try {
+    let release = (): void => {}
+    world.git.state.holdAdd = new Promise<void>((resume) => {
+      release = resume
+    })
+    world.time.advance(15 * minute)
+    await waitFor(() => world.git.verbs('worktree', 'add').length === 1)
+    await saveAuto(world, { others: false })
+    const older = queuedOthers(world)
+    const own = queuedOwn(world)
+    assert.ok(older.length > 0 && own.length > 0)
+    assert.ok(older[0]!.id < own[0]!.id, 'an opted-out run is first in the line')
+    release()
+    await world.server.scheduler.idle()
+    assert.equal(world.server.cache.getRun(own[0]!.id)?.status, 'running')
+    for (const run of older) assert.equal(world.server.cache.getRun(run.id)?.status, 'queued')
+    assert.equal(running(world).length, 2)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('the oldest queued run that can start and does not end up running stops the tick, a failed fetch here: nothing behind it is tried, and it stops there with an opted-out run ahead of it too', async () => {
+  const world = await setup({ auto: { others: true, own: true, concurrency: 3 }, config: { maxConcurrentReviews: 4 } })
+  const failFetch = async (target: World): Promise<void> => {
+    target.git.state.fetchFailures = 2
+    const before = target.git.verbs('fetch').length
+    target.time.advance(15 * minute)
+    await waitFor(() => target.git.verbs('fetch').length === before + 1)
+    await waitFor(() => target.time.pending() > 0)
+    target.time.advance(5000)
+    await target.server.scheduler.idle()
+    assert.equal(target.git.verbs('fetch').length, before + 2)
+  }
+  try {
+    await failFetch(world)
+    const failure = autoRuns(world).filter((run) => run.status === 'failed')
+    assert.equal(failure.length, 1)
+    assert.match(failure[0]!.note ?? '', /^worktreeFailed: /)
+    assert.equal(failure[0]!.id, Math.min(...autoRuns(world).map((run) => run.id)), 'the oldest was the one tried')
+    assert.equal(world.launch.children.length, 0)
+    assert.deepEqual(world.git.verbs('worktree', 'add'), [])
+    assert.equal(autoRuns(world).filter((run) => run.status === 'queued').length, autoRuns(world).length - 1)
+  } finally {
+    await world.cleanup()
+  }
+  const passed = await setup({ auto: { others: true, own: true, concurrency: 1 } })
+  try {
+    await tick(passed)
+    const older = queuedOthers(passed)
+    const own = queuedOwn(passed)
+    assert.ok(older.length > 0 && own.length >= 2)
+    await saveAuto(passed, { others: false })
+    await finish(passed, running(passed)[0]!)
+    await failFetch(passed)
+    assert.match(passed.server.cache.getRun(own[0]!.id)?.note ?? '', /^worktreeFailed: /)
+    assert.equal(passed.server.cache.getRun(own[0]!.id)?.status, 'failed')
+    for (const run of [...older, ...own.slice(1)]) assert.equal(passed.server.cache.getRun(run.id)?.status, 'queued')
+  } finally {
+    await passed.cleanup()
+  }
+})
+
 test('the mapping onto the pure rules: a run that never started has no start time, and a manual review\'s head comes from what it reviewed', async () => {
   const world = await setup()
   try {
