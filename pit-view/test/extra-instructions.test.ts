@@ -168,6 +168,7 @@ test('Settings keeps the standing default: empty unless set, stored normalized, 
 const kinds: { name: string, number: number, ask: Record<string, unknown>, args: string[] }[] = [
   { name: 'a review', number: 113, ask: { kind: 'default', runner: 'claude' }, args: ['113', flag] },
   { name: 'a re-review', number: 106, ask: { kind: 'default', runner: 'claude' }, args: ['106', flag] },
+  { name: 'a re-review with Codex', number: 106, ask: { kind: 'default', runner: 'codex' }, args: ['106', flag] },
   { name: 'a self-review', number: 104, ask: { kind: 'default', runner: 'claude' }, args: ['104', '--no-post', flag] },
   { name: 'a tandem review', number: 113, ask: { kind: 'tandem', runner: 'claude' }, args: ['113', '--tandem', flag] },
   { name: 'a tandem self-review', number: 104, ask: { kind: 'tandem', runner: 'claude' }, args: ['104', '--tandem', '--no-post', flag] },
