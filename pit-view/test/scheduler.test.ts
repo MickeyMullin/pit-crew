@@ -998,6 +998,154 @@ test('the session of a waiting run having ended, shown by a new result.json in i
   }
 })
 
+// rows a test seeds to reach a state a tick would take many steps to, each with the fields a scheduled run leaves; a pid means it really started
+
+const sessionFields = (status: Run['status'], pid: number | null) => ({
+  command: 'review-pr', label: 'Review', runner: 'claude' as const, cwd: '~/x', sessionId: null, pid, pidStartedAt: pid === null ? null : `start-${pid}`, startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, finishedAt: status === 'running' || status === 'queued' ? null : '2026-10-26T14:01:00Z', status, result: null, note: null, costUsd: null, resume: null, origin: 'auto' as const,
+})
+
+const seedRun = (world: World, { repo = scenario.repo, number, status, pid = null, head = null }: { repo?: string, number: number, status: Run['status'], pid?: number | null, head?: string | null }): Run => {
+  const run = world.server.cache.createRun({ repo, number, args: [String(number)], ...sessionFields(status, pid) }, (id) => `~/.local/state/pit-view/runs/${id}`)
+  return head === null ? run : world.server.cache.updateRun(run.id, { headOid: head })
+}
+
+const seedSweep = (world: World, { repo = scenario.repo, status, pid = null }: { repo?: string, status: Sweep['status'], pid?: number | null }): Sweep =>
+  world.server.cache.createSweep({ repo, args: [repo], ...sessionFields(status, pid) }, (id) => `~/.local/state/pit-view/sweeps/${id}`)
+
+// a worktree git lists for the row, as the row records it
+const seedWorktree = async (world: World, kind: 'run' | 'sweep', id: number): Promise<string> => {
+  await mkdir(world.worktrees, { recursive: true })
+  const path = join(await realpath(world.worktrees), `${kind}-${id}`)
+  world.git.state.worktrees.add(path)
+  const changes = { worktree: `~/.local/state/pit-view/worktrees/${kind}-${id}` }
+  if (kind === 'run') world.server.cache.updateRun(id, changes)
+  else world.server.cache.updateSweep(id, changes)
+  return path
+}
+
+const listed = async (world: World): Promise<void> => {
+  world.server.poller.refresh('manual')
+  await world.server.poller.idle()
+}
+
+const headOf = (world: World, number: number): string => {
+  const row = world.server.cache.readView(scenario.repo).open.find((entry) => entry.number === number)
+  assert.ok(row, `#${number} is open`)
+  return row.pr.headRefOid
+}
+
+const otherRepo = 'octo-example/another'
+
+const removedNames = (world: World): string[] => world.git.verbs('worktree', 'remove').map((call) => basename(call.args[4] ?? '')).sort()
+
+// a run or a sweep that ends each way a worktree outlives it: failed, waiting for input, or found running with its process gone and no result.json, which recovery marks failed with the note serverRestarted
+const unsettledShapes = [
+  { seeded: 'failed', ends: 'failed', note: null },
+  { seeded: 'needsInput', ends: 'needsInput', note: null },
+  { seeded: 'running', ends: 'failed', note: /^serverRestarted/ },
+] as const
+
+// the settlement of a run, in two repositories
+
+test('two repositories with the same PR number: a later started run of the other repository settles nothing here, at a restart or at a tick, whether the run here failed, waits for input, or crashed; a later started run of its own repository does', async () => {
+  for (const { seeded, ends, note } of unsettledShapes) {
+    const world = await setup({ auto: { others: false } })
+    try {
+      await listed(world)
+      const head = headOf(world, 113)
+      const pid = (base: number): number | null => seeded === 'running' ? base : null
+      const here = seedRun(world, { number: 113, status: seeded, pid: pid(6101), head })
+      const there = seedRun(world, { repo: otherRepo, number: 113, status: seeded, pid: pid(6102), head })
+      seedRun(world, { repo: otherRepo, number: 113, status: 'done', pid: 6103, head })
+      const pathHere = await seedWorktree(world, 'run', here.id)
+      const pathThere = await seedWorktree(world, 'run', there.id)
+      // the same shape, on another PR, with the later run in its own repository
+      const superseded = seedRun(world, { number: 106, status: seeded, pid: pid(6104), head: headOf(world, 106) })
+      seedRun(world, { number: 106, status: 'done', pid: 6105, head: headOf(world, 106) })
+      const pathSuperseded = await seedWorktree(world, 'run', superseded.id)
+      await world.restart()
+      const after = world.server.cache.getRun(here.id)
+      assert.equal(after?.status, ends, seeded)
+      if (note !== null) assert.match(after?.note ?? '', note)
+      assert.notEqual(after?.worktree, null, `${seeded}: the row keeps its worktree`)
+      assert.deepEqual(removedNames(world), [`run-${superseded.id}`], `${seeded}: at the restart`)
+      assert.ok(world.git.state.worktrees.has(pathHere))
+      assert.ok(world.git.state.worktrees.has(pathThere))
+      assert.equal(world.git.state.worktrees.has(pathSuperseded), false)
+      assert.equal(world.server.cache.getRun(superseded.id)?.worktree, null)
+      await tick(world)
+      assert.equal(ticks(world)[0]?.state, 'ran')
+      assert.deepEqual(removedNames(world), [`run-${superseded.id}`], `${seeded}: at the tick`)
+      assert.ok(world.git.state.worktrees.has(pathHere))
+      assert.notEqual(world.server.cache.getRun(here.id)?.worktree, null)
+    } finally {
+      await world.cleanup()
+    }
+  }
+})
+
+test('two repositories: a later started sweep of the other repository settles no sweep here and lifts no hold, whether the sweep here failed, waits for input, or crashed; a later started sweep of its own repository does', async () => {
+  for (const { seeded, ends, note } of unsettledShapes) {
+    const world = await setup({ auto: { others: false } })
+    try {
+      const pid = (base: number): number | null => seeded === 'running' ? base : null
+      const here = seedSweep(world, { status: seeded, pid: pid(6201) })
+      const there = seedSweep(world, { repo: otherRepo, status: seeded, pid: pid(6202) })
+      seedSweep(world, { repo: otherRepo, status: 'done', pid: 6203 })
+      const pathHere = await seedWorktree(world, 'sweep', here.id)
+      const pathThere = await seedWorktree(world, 'sweep', there.id)
+      await world.restart()
+      const after = world.server.cache.getSweep(here.id)
+      assert.equal(after?.status, ends, seeded)
+      if (note !== null) assert.match(after?.note ?? '', note)
+      assert.notEqual(after?.worktree, null, `${seeded}: the row keeps its worktree`)
+      assert.deepEqual(removedNames(world), [], `${seeded}: at the restart`)
+      assert.equal(world.server.scheduler.view()?.sweepHold, ends === 'needsInput' ? 'needsInput' : null, seeded)
+      await tick(world)
+      assert.deepEqual(removedNames(world), [], `${seeded}: at the tick`)
+      assert.ok(world.git.state.worktrees.has(pathHere))
+      assert.ok(world.git.state.worktrees.has(pathThere))
+      seedSweep(world, { status: 'done', pid: 6204 })
+      await tick(world)
+      assert.deepEqual(removedNames(world), [`sweep-${here.id}`], `${seeded}: once one of its own has started`)
+      assert.equal(world.server.scheduler.view()?.sweepHold, null, seeded)
+      assert.ok(world.git.state.worktrees.has(pathThere))
+    } finally {
+      await world.cleanup()
+    }
+  }
+})
+
+test('rows of another repository with the same PR number hold nothing in this one\'s tick: no live run, done run, stop, or failures of theirs reach a PR here, and a failure here counts once', async () => {
+  const world = await setup({ auto: { dependabot: true, concurrency: 1 } })
+  try {
+    await listed(world)
+    const qualifying = world.server.poller.openRows().filter((row) => row.section === 'others' && row.group === 'yourMove' && row.number !== 114 && row.number !== 115).map((row) => row.number)
+    assert.ok(qualifying.length >= 2)
+    const theirs: Run[] = []
+    for (const number of qualifying) {
+      const head = headOf(world, number)
+      for (const status of ['done', 'stopped', 'failed', 'failed', 'queued'] as const) theirs.push(seedRun(world, { repo: otherRepo, number, status, pid: status === 'queued' ? null : 6300, head }))
+    }
+    seedSweep(world, { repo: otherRepo, status: 'failed', pid: 6301 })
+    seedSweep(world, { repo: otherRepo, status: 'failed', pid: 6302 })
+    const first = qualifying[0]!
+    const failedHere = seedRun(world, { number: first, status: 'failed', pid: 6303, head: headOf(world, first) })
+    await tick(world)
+    const here = autoRuns(world).filter((run) => run.repo === scenario.repo && run.id !== failedHere.id)
+    assert.deepEqual([...new Set(here.map((run) => run.number))].sort(), [...qualifying].sort())
+    assert.equal(ticks(world)[0]?.alreadyCurrent, 0)
+    // its retry is queued or running, and it is not marked as failed twice
+    assert.ok(here.some((run) => run.number === first && (run.status === 'queued' || run.status === 'running')))
+    assert.equal(world.server.cache.getRun(failedHere.id)?.note, null)
+    for (const run of theirs) assert.equal(world.server.cache.getRun(run.id)?.note, null)
+    assert.equal(world.server.cache.allSweeps().filter((sweep) => sweep.repo === scenario.repo).length, 1)
+    assert.equal(world.server.scheduler.view()?.sweepHold, null)
+  } finally {
+    await world.cleanup()
+  }
+})
+
 // restart recovery
 
 test('at startup, whether or not auto-review is on, the sweep removes a crashed run\'s worktree and leaves another run\'s live one, a queued one, and anything else alone', async () => {
@@ -1549,6 +1697,7 @@ test('the mapping onto the pure rules: a run that never started has no start tim
     const cache = world.server.cache
     const base = { repo: scenario.repo, number: 106, command: 'review-pr', args: ['106'], label: 'Review', runner: 'claude' as const, cwd: '~/x', sessionId: null, pid: null, pidStartedAt: null, startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, finishedAt: null, result: null, note: null, costUsd: null, resume: null }
     const make = (patch: Partial<Run>): Run => cache.updateRun(cache.createRun({ ...base, status: 'queued' }, (id) => `~/runs/${id}`).id, patch)
+    assert.equal(toAutoRun(make({ status: 'queued' })).repo, scenario.repo)
     assert.equal(toAutoRun(make({ status: 'queued' })).startedAt, null)
     assert.equal(toAutoRun(make({ status: 'running' })).startedAt, '2026-10-26T14:00:00Z')
     assert.equal(toAutoRun(make({ status: 'stopped' })).startedAt, null)
@@ -1565,6 +1714,7 @@ test('the mapping onto the pure rules: a run that never started has no start tim
     const started = make({ status: 'failed', steps: [{ step: 'post', state: 'started', at: null, note: null }] })
     assert.equal(toAutoRun(started).postStarted, true)
     const sweep = cache.createSweep({ ...base, status: 'stopped' }, (id) => `~/sweeps/${id}`)
+    assert.equal(toAutoSweep(sweep).repo, scenario.repo)
     assert.equal(toAutoSweep(sweep).startedAt, null)
     assert.equal(toAutoSweep(sweep, new Set([sweep.id])).settled, true)
   } finally {

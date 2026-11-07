@@ -75,6 +75,8 @@ export type AutoRunStatus = RunStatus
 
 export type AutoRun = {
   id: number
+  // its repository: PR numbers repeat across repositories, and the cache holds runs of every one it has had, so only rows of this one can settle this run
+  repo: string
   origin: 'manual' | 'auto'
   // the pit-crew command, which tells a manual review-pr from a stack review or a fix or update session
   command: string
@@ -96,6 +98,7 @@ export type AutoRun = {
 
 export type AutoSweep = {
   id: number
+  repo: string
   origin: 'manual' | 'auto'
   status: AutoRunStatus
   startedAt: string | null
@@ -160,7 +163,7 @@ export type QueueInput = {
   settings: AutoReviewSettings
   // report lookup by PR number (scanReports or findReport), for others' PRs
   reports: ReadonlyMap<number, ReportInfo>
-  // every recorded run and sweep that may matter. Manual runs count only as what supersedes a stopped auto run; a manual sweep counts as what holds the slot, settles a waiting one, or clears the failure count
+  // every recorded run and sweep of the tick's repository that may matter, since PR numbers repeat across repositories. Manual runs count only as what supersedes a stopped auto run; a manual sweep counts as what holds the slot, settles a waiting one, or clears the failure count
   runs: readonly AutoRun[]
   sweeps: readonly AutoSweep[]
   // the last scheduler sweep's rows, or null when it has none
@@ -200,9 +203,9 @@ const sweepIsDue = (dependabot: readonly RawOpenPr[], last: readonly SweepMemory
   return due ? dependabot.map((pr) => pr.number) : []
 }
 
-// a needsInput or failed sweep waits for the owner until it is settled: a newer sweep has started, or the caller knows its session ended
+// a needsInput or failed sweep waits for the owner until it is settled: a newer sweep of its own repository has started, or the caller knows its session ended
 const sweepSettled = (record: AutoSweep, sweeps: readonly AutoSweep[]): boolean =>
-  record.settled === true || sweeps.some((other) => other.id > record.id && hasStarted(other))
+  record.settled === true || sweeps.some((other) => other.repo === record.repo && other.id > record.id && hasStarted(other))
 
 // at most one sweep is queued or running, and a scheduled one waiting for input holds the worktree the owner may be answering in, which a new sweep would settle
 const sweepHeld = (sweeps: readonly AutoSweep[]): boolean =>
@@ -321,6 +324,8 @@ export const parseWorktreeList = (porcelain: string): string[] =>
 const worktreeName = /^(run|sweep)-(\d+)$/
 
 export type OrphanInput = {
+  // the repository in effect, the only one openPrs describes
+  repo: string
   // the paths git lists, which are resolved
   listed: readonly string[]
   // Pit View's worktrees folder, resolved the same way, because git lists resolved paths
@@ -331,19 +336,21 @@ export type OrphanInput = {
   openPrs: readonly RawOpenPr[] | null
 }
 
-// a needsInput or failed run waits for the owner until it is settled: a newer run has started for the PR, the PR closed or got a new head, or the caller knows its session ended
+// a needsInput or failed run of the repository in effect waits for the owner until it is settled: a newer run of its own repository has started for the PR, the PR closed or got a new head, or the caller knows its session ended
 const runSettled = (record: AutoRun, runs: readonly AutoRun[], openPrs: readonly RawOpenPr[] | null): boolean => {
-  if (record.settled === true || runs.some((other) => other.number === record.number && other.id > record.id && hasStarted(other))) return true
+  if (record.settled === true || runs.some((other) => other.repo === record.repo && other.number === record.number && other.id > record.id && hasStarted(other))) return true
   if (openPrs === null) return false
   const pr = openPrs.find((candidate) => candidate.number === record.number)
   return pr === undefined || (record.headOid !== null && !sameHead(pr.headRefOid, record.headOid))
 }
 
-const worktreeKept = (entry: WorktreeEntry, { runs, sweeps, openPrs }: OrphanInput): boolean => {
+const worktreeKept = (entry: WorktreeEntry, { repo, runs, sweeps, openPrs }: OrphanInput): boolean => {
   const record = entry.kind === 'run' ? runs.find((candidate) => candidate.id === entry.id) : sweeps.find((candidate) => candidate.id === entry.id)
   if (record === undefined) return false
   if (record.status === 'queued' || record.status === 'running') return true
   if (record.status !== 'needsInput' && record.status !== 'failed') return false
+  // the open list says nothing about another repository's PRs, so a waiting row of one stays, and the absence of its number from that list is never read as its PR having closed
+  if (record.repo !== repo) return true
   if (entry.kind === 'sweep') return !sweepSettled(record, sweeps)
   return !runSettled(record as AutoRun, runs, openPrs)
 }
@@ -454,6 +461,7 @@ export const toAutoRun = (run: Run, settled: ReadonlySet<number> = new Set()): A
   const postSlot = stepsOf(run).find((slot) => slot.step === 'post')?.state
   return {
     id: run.id,
+    repo: run.repo,
     origin: run.origin,
     command: run.command,
     number: run.number,
@@ -471,6 +479,7 @@ export const toAutoRun = (run: Run, settled: ReadonlySet<number> = new Set()): A
 
 export const toAutoSweep = (sweep: Sweep, settled: ReadonlySet<number> = new Set()): AutoSweep => ({
   id: sweep.id,
+  repo: sweep.repo,
   origin: sweep.origin,
   status: sweep.status,
   startedAt: startedAtOf(sweep),
@@ -600,6 +609,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     const sweeps = cache.allSweeps()
     const cached = cache.readView(settings.repo)
     const { remove: doomed } = selectOrphanWorktrees({
+      repo: settings.repo,
       listed: parseWorktreeList(listing.stdout),
       dir,
       runs: runs.map((run) => toAutoRun(run, settledRuns)),
@@ -607,12 +617,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       // until a listing has completed the open list cannot say a PR closed or moved on
       openPrs: cached.lastSuccessAt === null ? null : cached.open.map((row) => row.pr),
     })
-    // the open list says nothing about another repository's PRs, so a waiting run of one stays
-    const otherRepo = (entry: WorktreeEntry): boolean => {
-      const row = entry.kind === 'run' ? runs.find((candidate) => candidate.id === entry.id) : sweeps.find((candidate) => candidate.id === entry.id)
-      return row !== undefined && row.repo !== settings.repo && (row.status === 'needsInput' || row.status === 'failed')
-    }
-    for (const entry of doomed.filter((candidate) => !otherRepo(candidate))) {
+    for (const entry of doomed) {
       if (stopped) return
       await remove(entry.kind, entry.id, entry.path)
     }

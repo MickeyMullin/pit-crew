@@ -5,7 +5,7 @@ import {
   buildQueue, defaultAutoReview, isActiveAt, isReviewedAtHead, nextActiveStart, parseWorktreeList, recheckQueued, retryDecision, sameHead,
   selectOrphanWorktrees, startBudget, startedToday, unlistedDirectories, weekdayNames, worktreePath,
 } from '../src/autoreview.ts'
-import type { ActiveHours, AutoRun, AutoSweep, AutoReviewSettings, QueueInput } from '../src/autoreview.ts'
+import type { ActiveHours, AutoRun, AutoSweep, AutoReviewSettings, OrphanInput, QueueInput } from '../src/autoreview.ts'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import { deriveOpenRows } from '../src/derive.ts'
@@ -32,10 +32,13 @@ const patchPr = (number: number, patch: Partial<RawOpenPr>): RawOpenPr[] => fixt
 const settings = (patch: Partial<AutoReviewSettings> = {}): AutoReviewSettings => ({ ...defaultAutoReview(), enabled: true, ...patch })
 
 const run = (patch: Partial<AutoRun> & Pick<AutoRun, 'id' | 'number'>): AutoRun => ({
-  origin: 'auto', command: 'review-pr', headOid: null, status: 'done', startedAt: null, posting: false, postStarted: false, posted: false, ghFailed: false, ...patch,
+  repo: scenario.repo, origin: 'auto', command: 'review-pr', headOid: null, status: 'done', startedAt: null, posting: false, postStarted: false, posted: false, ghFailed: false, ...patch,
 })
 
-const sweep = (patch: Partial<AutoSweep> & Pick<AutoSweep, 'id'>): AutoSweep => ({ origin: 'auto', status: 'done', startedAt: null, ...patch })
+const sweep = (patch: Partial<AutoSweep> & Pick<AutoSweep, 'id'>): AutoSweep => ({ repo: scenario.repo, origin: 'auto', status: 'done', startedAt: null, ...patch })
+
+// the sweep's selection for the repository in effect, which is the one the open list describes
+const orphans = (input: Omit<OrphanInput, 'repo'>): ReturnType<typeof selectOrphanWorktrees> => selectOrphanWorktrees({ repo: scenario.repo, ...input })
 
 const queueInput = (rows: readonly OpenRow[], patch: Partial<QueueInput> = {}): QueueInput => ({
   rows, openPrs: fixturePrs, settings: settings(), reports: new Map(), runs: [], sweeps: [], lastSweepRows: null, ...patch,
@@ -551,7 +554,7 @@ test('a scheduled sweep that ends needsInput blocks a new scheduled sweep, howev
     assert.equal(queue.sweepFailedTwice, false)
   }
   // so its worktree, which a later started sweep would settle, stays
-  assert.deepEqual(selectOrphanWorktrees({ listed: [`${dir}/sweep-1`], dir, runs: [], sweeps: [waiting], openPrs: fixturePrs }).keep.map((entry) => entry.id), [1])
+  assert.deepEqual(orphans({ listed: [`${dir}/sweep-1`], dir, runs: [], sweeps: [waiting], openPrs: fixturePrs }).keep.map((entry) => entry.id), [1])
 })
 
 test('a waiting sweep lets go when the owner finished its session or started a sweep of their own', async () => {
@@ -816,7 +819,7 @@ test('the sweep removes only direct run-<digits> and sweep-<digits> entries whos
     run({ id: 52, number: 6, status: 'done' }),
   ]
   const sweeps = [sweep({ id: 3, status: 'done' }), sweep({ id: 4, status: 'running' })]
-  const { remove, keep } = selectOrphanWorktrees({ listed, dir, runs, sweeps, openPrs: [] })
+  const { remove, keep } = orphans({ listed, dir, runs, sweeps, openPrs: [] })
   assert.deepEqual(remove.map((entry) => entry.path), [`${dir}/run-42`, `${dir}/run-47`, `${dir}/sweep-3`])
   assert.deepEqual(keep.map((entry) => entry.path), [`${dir}/run-43`, `${dir}/run-44`, `${dir}/sweep-4`])
 })
@@ -836,18 +839,18 @@ test('a stopped, done, or rowless run goes; a waiting or failed one stays until 
     run({ id: 5, number: 999, headOid: head, status: 'needsInput' }),
     run({ id: 6, number: 107, headOid: 'aaaaaaa1', status: 'failed' }),
   ]
-  const result = selectOrphanWorktrees({ listed, dir, runs, sweeps: [], openPrs: fixturePrs })
+  const result = orphans({ listed, dir, runs, sweeps: [], openPrs: fixturePrs })
   assert.deepEqual(result.keep.map((entry) => entry.id), [1, 2])
   assert.deepEqual(result.remove.map((entry) => entry.id), [3, 4, 5, 6, 7])
   // a caller that knows the session ended says so
-  const settled = selectOrphanWorktrees({ listed, dir, runs: runs.map((entry) => entry.id === 1 ? { ...entry, settled: true } : entry), sweeps: [], openPrs: fixturePrs })
+  const settled = orphans({ listed, dir, runs: runs.map((entry) => entry.id === 1 ? { ...entry, settled: true } : entry), sweeps: [], openPrs: fixturePrs })
   assert.deepEqual(settled.keep.map((entry) => entry.id), [2])
 })
 
 test('a failed or waiting sweep stays until a newer sweep has started', () => {
   const listed = [`${dir}/sweep-1`, `${dir}/sweep-2`]
-  const select = (newer: AutoSweep) => selectOrphanWorktrees({ listed: [`${dir}/sweep-1`], dir, runs: [], sweeps: [sweep({ id: 1, status: 'failed' }), newer], openPrs: fixturePrs })
-  const alone = selectOrphanWorktrees({ listed, dir, runs: [], sweeps: [sweep({ id: 1, status: 'failed' })], openPrs: [] })
+  const select = (newer: AutoSweep) => orphans({ listed: [`${dir}/sweep-1`], dir, runs: [], sweeps: [sweep({ id: 1, status: 'failed' }), newer], openPrs: fixturePrs })
+  const alone = orphans({ listed, dir, runs: [], sweeps: [sweep({ id: 1, status: 'failed' })], openPrs: [] })
   assert.deepEqual(alone.keep.map((entry) => entry.id), [1])
   assert.deepEqual(select(sweep({ id: 2, status: 'queued' })).keep.map((entry) => entry.id), [1], 'queued')
   assert.deepEqual(select(sweep({ id: 2, status: 'stopped' })).keep.map((entry) => entry.id), [1], 'stopped before it started')
@@ -856,10 +859,69 @@ test('a failed or waiting sweep stays until a newer sweep has started', () => {
   assert.deepEqual(select(sweep({ id: 2, status: 'stopped', startedAt: '2026-10-26T13:00:00Z' })).remove.map((entry) => entry.id), [1], 'stopped after it started')
 })
 
+test('a waiting or failed run is settled only by a run of its own repository: a later started run of another repository with the same PR number leaves its worktree in place', () => {
+  const started = '2026-10-26T13:00:00Z'
+  const head = fixturePrs.find((pr) => pr.number === 113)!.headRefOid
+  const select = (status: AutoRun['status'], newerRepo: string) => orphans({
+    listed: [`${dir}/run-1`],
+    dir,
+    runs: [run({ id: 1, number: 113, headOid: head, status }), run({ id: 2, repo: newerRepo, number: 113, headOid: head, status: 'running', startedAt: started })],
+    sweeps: [],
+    openPrs: fixturePrs,
+  })
+  for (const status of ['needsInput', 'failed'] as const) {
+    assert.deepEqual(select(status, 'octo-example/another').keep.map((entry) => entry.id), [1], `${status}, a newer run of another repository`)
+    assert.deepEqual(select(status, scenario.repo).remove.map((entry) => entry.id), [1], `${status}, a newer run of its own repository`)
+  }
+})
+
+test('a waiting or failed sweep is settled only by a sweep of its own repository', () => {
+  const started = '2026-10-26T13:00:00Z'
+  const select = (status: AutoSweep['status'], newerRepo: string) => orphans({
+    listed: [`${dir}/sweep-1`],
+    dir,
+    runs: [],
+    sweeps: [sweep({ id: 1, status }), sweep({ id: 2, repo: newerRepo, status: 'running', startedAt: started })],
+    openPrs: fixturePrs,
+  })
+  for (const status of ['needsInput', 'failed'] as const) {
+    assert.deepEqual(select(status, 'octo-example/another').keep.map((entry) => entry.id), [1], `${status}, a newer sweep of another repository`)
+    assert.deepEqual(select(status, scenario.repo).remove.map((entry) => entry.id), [1], `${status}, a newer sweep of its own repository`)
+  }
+})
+
+test('a waiting or failed row of another repository stays with its worktree, since the open list describes only the repository in effect; a done one of that repository goes', () => {
+  const other = 'octo-example/another'
+  const started = '2026-10-26T13:00:00Z'
+  const head = fixturePrs.find((pr) => pr.number === 113)!.headRefOid
+  const moved = 'c'.repeat(40)
+  const absent = 987654
+  for (const status of ['needsInput', 'failed'] as const) {
+    const listed = [`${dir}/run-1`, `${dir}/run-2`, `${dir}/run-3`, `${dir}/sweep-1`]
+    const select = orphans({
+      listed,
+      dir,
+      runs: [
+        // its number is not in this list, and would read as a PR that closed
+        run({ id: 1, repo: other, number: absent, headOid: head, status }),
+        // its number is, at another head, and would read as a PR that moved on
+        run({ id: 2, repo: other, number: 113, headOid: moved, status }),
+        run({ id: 3, repo: other, number: 113, headOid: head, status: 'done' }),
+        // a newer run of its own repository does not take it either, as the row of a repository not in effect
+        run({ id: 4, repo: other, number: absent, headOid: head, status: 'done', startedAt: started }),
+      ],
+      sweeps: [sweep({ id: 1, repo: other, status }), sweep({ id: 2, repo: other, status: 'done', startedAt: started })],
+      openPrs: fixturePrs,
+    })
+    assert.deepEqual(select.keep.map((entry) => `${entry.kind}-${entry.id}`), ['run-1', 'run-2', 'sweep-1'], status)
+    assert.deepEqual(select.remove.map((entry) => `${entry.kind}-${entry.id}`), ['run-3'], status)
+  }
+})
+
 test('a waiting or failed run is settled by a newer run that started, not one that only exists', () => {
   const started = '2026-10-26T13:00:00Z'
   const head = fixturePrs.find((pr) => pr.number === 113)!.headRefOid
-  const select = (newer: AutoRun, status: AutoRun['status'] = 'needsInput') => selectOrphanWorktrees({
+  const select = (newer: AutoRun, status: AutoRun['status'] = 'needsInput') => orphans({
     listed: [`${dir}/run-1`],
     dir,
     runs: [run({ id: 1, number: 113, headOid: head, status }), newer],
@@ -888,17 +950,17 @@ test('a PR converted to a draft has not closed: its waiting and failed worktrees
   const prs = patchPr(113, { isDraft: true })
   assert.equal(rowsOf(prs).some((row) => row.number === 113), false)
   const runs = [run({ id: 1, number: 113, headOid: head, status: 'needsInput' }), run({ id: 2, number: 113, headOid: head, status: 'failed' })]
-  const kept = selectOrphanWorktrees({ listed: [`${dir}/run-1`, `${dir}/run-2`], dir, runs, sweeps: [], openPrs: prs })
+  const kept = orphans({ listed: [`${dir}/run-1`, `${dir}/run-2`], dir, runs, sweeps: [], openPrs: prs })
   assert.deepEqual(kept.keep.map((entry) => entry.id), [1, 2])
   // the draft's head is read from the open list too, so a push to it is still noticed
-  const moved = selectOrphanWorktrees({ listed: [`${dir}/run-1`], dir, runs, sweeps: [], openPrs: patchPr(113, { isDraft: true, headRefOid: 'c'.repeat(40) }) })
+  const moved = orphans({ listed: [`${dir}/run-1`], dir, runs, sweeps: [], openPrs: patchPr(113, { isDraft: true, headRefOid: 'c'.repeat(40) }) })
   assert.deepEqual(moved.remove.map((entry) => entry.id), [1])
 })
 
 test('a PR that left the open list has closed, and one at a new head has moved on', () => {
   const head = fixturePrs.find((pr) => pr.number === 113)!.headRefOid
   const runs = [run({ id: 1, number: 113, headOid: head, status: 'needsInput' })]
-  const select = (openPrs: readonly RawOpenPr[]) => selectOrphanWorktrees({ listed: [`${dir}/run-1`], dir, runs, sweeps: [], openPrs })
+  const select = (openPrs: readonly RawOpenPr[]) => orphans({ listed: [`${dir}/run-1`], dir, runs, sweeps: [], openPrs })
   assert.deepEqual(select(fixturePrs).keep.map((entry) => entry.id), [1])
   assert.deepEqual(select(fixturePrs.filter((pr) => pr.number !== 113)).remove.map((entry) => entry.id), [1])
   assert.deepEqual(select(patchPr(113, { headRefOid: 'c'.repeat(40) })).remove.map((entry) => entry.id), [1])
@@ -914,20 +976,20 @@ test('with no open list yet nothing reads as closed, so an unsettled worktree st
     run({ id: 6, number: 111, headOid: 'abc1234', status: 'failed' }),
     run({ id: 7, number: 111, headOid: 'abc1234', status: 'running', startedAt: '2026-10-26T13:00:00Z' }),
   ]
-  const result = selectOrphanWorktrees({ listed: [1, 2, 3, 4, 5, 6].map((id) => `${dir}/run-${id}`), dir, runs: runs.slice(0, 5), sweeps: [], openPrs: null })
+  const result = orphans({ listed: [1, 2, 3, 4, 5, 6].map((id) => `${dir}/run-${id}`), dir, runs: runs.slice(0, 5), sweeps: [], openPrs: null })
   assert.deepEqual(result.keep.map((entry) => entry.id), [1, 2, 6])
   assert.deepEqual(result.remove.map((entry) => entry.id), [3, 4, 5])
   // what the records alone can settle is still settled
-  const started = selectOrphanWorktrees({ listed: [`${dir}/run-6`], dir, runs, sweeps: [], openPrs: null })
+  const started = orphans({ listed: [`${dir}/run-6`], dir, runs, sweeps: [], openPrs: null })
   assert.deepEqual(started.remove.map((entry) => entry.id), [6])
 })
 
 test('the listed paths are compared as given, so a caller passes git\'s resolved folder', () => {
   // git lists resolved paths; a dir that is only a symlink spelling matches nothing
-  const result = selectOrphanWorktrees({ listed: [`${dir}/run-1`], dir: '/fixture/link/worktrees', runs: [], sweeps: [], openPrs: [] })
+  const result = orphans({ listed: [`${dir}/run-1`], dir: '/fixture/link/worktrees', runs: [], sweeps: [], openPrs: [] })
   assert.deepEqual([result.remove, result.keep], [[], []])
   // a trailing slash on the folder is the same folder
-  assert.equal(selectOrphanWorktrees({ listed: [`${dir}/run-1`], dir: `${dir}/`, runs: [], sweeps: [], openPrs: [] }).remove.length, 1)
+  assert.equal(orphans({ listed: [`${dir}/run-1`], dir: `${dir}/`, runs: [], sweeps: [], openPrs: [] }).remove.length, 1)
 })
 
 test('directories in the folder that git no longer lists are reported, never selected for removal', () => {
