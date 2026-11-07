@@ -462,6 +462,10 @@ export const codexNote = (reportsDir: string): string =>
 export const mayPost = (command: string, args: readonly string[]): boolean =>
   ['review-pr', 'review-dependabot', 'review-dependabot-sweep'].includes(command) && !args.includes('--no-post')
 
+// the posting switch for a scheduled run's kind under this config: post.dependabot for a sweep or a Dependabot run, and post.others for any other. A config with no autoReview key gives no leave to post
+export const postSwitchOn = (reason: QueueReason | null, config: Config): boolean =>
+  (reason === 'dependabot' ? config.autoReview?.post.dependabot : config.autoReview?.post.others) === true
+
 export const claudeInvocation = (spec: LaunchSpec): Invocation => ({
   command: 'claude',
   args: [
@@ -2005,7 +2009,7 @@ export type Launcher<T extends Session = Run> = {
   close: () => void
   // scheduled starts (section 10 of DESIGN.md, One review cap): the row, queued in its own table and never in the line
   queueScheduled: (request: StartRequest, cwd: string, fields: ScheduledFields) => T
-  // starts a queued scheduled row through the same checks, turn, slot, and launch as any start, or leaves it queued when a new review would wait or gh cannot confirm the viewer. The slot is held before prepare runs, which makes the worktree and answers with its path; a failure there fails the run as worktreeFailed and gives the slot back
+  // starts a queued scheduled row through the same checks, turn, slot, and launch as any start, or leaves it queued when a new review would wait or gh cannot confirm the viewer. The slot is held before prepare runs, which makes the worktree and answers with its path; a failure there fails the run as worktreeFailed and gives the slot back. The arguments in changes are what the run was built with; the launch adds --no-post if the run's posting switch is off by its spawn
   startScheduled: (id: number, request: StartRequest, changes: RunChanges, prepare: (run: T) => Promise<string>) => Promise<T | null>
   // drops a queued scheduled row that will not start
   skipQueued: (id: number, note: string) => T
@@ -2690,7 +2694,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         throw new UnwritableRunDir(dir, reason)
       })
       spec = await specFor(run, dir)
-      const invocation = runners[runner].invocation(spec)
+      let invocation = runners[runner].invocation(spec)
       stdin = invocation.stdin
       // made before the spawn, so nothing that builds it can throw once a process exists; Codex's is written once its session id is read from the stream, so it is left out here
       resume = sessionId === null ? null : resumeFor(run, sessionId, spec)
@@ -2710,6 +2714,15 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         const why = unbound(request.repo, admitted.viewer, current)
         if (why !== null) throw new Error(`not started: ${why}`)
         if (!line.fitsAtSpawn(admitted.attempt, admitted.slot, current)) return notStarted(run, request, admitted, queuedSince ?? run.startedAt)
+        // a scheduled run built to post keeps that leave only while its switch is still on, and otherwise takes --no-post here. This only ever adds the flag: a switch turned on since never takes it away, so a run built without leave to post stays without it. A manual run answers to no switch
+        if (run.origin === 'auto' && mayPost(run.command, run.args) && !postSwitchOn(run.reason, current)) {
+          const args = [...run.args, '--no-post']
+          run = store.update(run.id, { args, posting: false })
+          spec = { ...spec, args }
+          invocation = runners[runner].invocation(spec)
+          stdin = invocation.stdin
+          record = { ...record, args, argv: [invocation.command, ...invocation.args] }
+        }
       }
       child = spawn({
         command: invocation.command,

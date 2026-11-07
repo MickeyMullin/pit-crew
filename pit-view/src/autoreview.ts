@@ -671,7 +671,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
 
   const sweepArgsNow = (repo: string, settings: AutoReviewSettings): string[] => [...(sweepRequest(repo).args), ...(settings.post.dependabot ? [] : ['--no-post'])]
 
-  // what each PR's run passes is decided here alone, from the settings in effect: a run of the viewer's own PR always takes --no-post, and any other takes it unless post.others is on
+  // what each PR's run is built with is decided here alone, from the settings in effect: a run of the viewer's own PR always takes --no-post, and any other takes it unless post.others is on. A switch turned off after this is the launcher's to catch, at the spawn
   const runArgs = (pr: RawOpenPr | undefined, number: number, reason: QueueReason | null, settings: Config): string[] => {
     const own = reason === 'selfReview' || (pr !== undefined && isMine(pr, settings))
     return othersArgs(number, own || settings.autoReview?.post.others !== true)

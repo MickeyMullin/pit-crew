@@ -1,7 +1,7 @@
 // test/scheduler.test.ts
 // the auto-review scheduler's runtime (section 10 of DESIGN.md): its own clock, the tick's steps, the launch through the launcher's engine, the worktrees, recovery, and the endpoints, all against a fake gh, a fake git, a fake clock, and a fake runner
 import assert from 'node:assert/strict'
-import { mkdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { defaultAutoReview, toAutoRun, toAutoSweep } from '../src/autoreview.ts'
@@ -12,6 +12,7 @@ import type { Runner } from '../src/github.ts'
 import type { Patch } from '../src/poller.ts'
 import { startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
+import { sweepRequest } from '../src/sweeps.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { failed, fakeLaunch, fakeRemotes, fakeTime, fixtureRunner, ok, quiet, reviewResult, sweepResult, sweepRow, tempDir, waitFor } from './helpers.ts'
 import type { FakeChild, FakeLaunch, FakeTime } from './helpers.ts'
@@ -35,6 +36,8 @@ const fakeGit = (clone: string, repo: string = scenario.repo) => {
     // paths, by their last part, whose removal git refuses
     refuse: new Set<string>(),
     holdFetch: null as Promise<void> | null,
+    holdAdd: null as Promise<void> | null,
+    holdRevParse: null as Promise<void> | null,
     remotes: fakeRemotes(repo) as string | null,
   }
   const name = (path: string): string => basename(path)
@@ -51,8 +54,10 @@ const fakeGit = (clone: string, repo: string = scenario.repo) => {
       }
       return ok('')
     }
+    if (verb[0] === 'rev-parse' && state.holdRevParse !== null) await state.holdRevParse
     if (verb[0] === 'rev-parse') return ok(`${clone}/.git/worktrees/${name(args[1] ?? '')}\n`)
     if (verb[0] === 'worktree' && verb[1] === 'add') {
+      if (state.holdAdd !== null) await state.holdAdd
       if (state.addFails) return failed('fatal: invalid reference: origin/main')
       const path = verb[3] ?? ''
       await mkdir(path, { recursive: true })
@@ -535,6 +540,244 @@ test('a scheduled sweep carries --parallel 1, and --no-post unless post.dependab
     assert.equal(sweep?.posting, true)
   } finally {
     await on.cleanup()
+  }
+})
+
+// the posting switch at the spawn: a run built to post has awaits ahead of it (the identity check, the fetch, the add, the run directory), and a switch turned off during any of them must reach the process it starts
+
+const savePost = async (world: World, post: AutoReviewSettings['post']): Promise<void> => {
+  const stored = await (await fetch(`${world.server.url}/api/config`)).json() as Config
+  const body = JSON.stringify({ ...stored, autoReview: { ...stored.autoReview, post } })
+  assert.equal((await fetch(`${world.server.url}/api/config`, { method: 'PUT', headers: headers(world), body })).status, 200)
+}
+
+type GitHold = 'holdFetch' | 'holdAdd' | 'holdRevParse'
+
+const heldVerbs: Record<GitHold, string[]> = { holdFetch: ['fetch'], holdAdd: ['worktree', 'add'], holdRevParse: ['rev-parse'] }
+
+// the next tick's start, held at one git step while the switches are saved, and then let go
+const saveWhileHeld = async (world: World, hold: GitHold, post: AutoReviewSettings['post'], minutes = 15): Promise<void> => {
+  const held = Promise.withResolvers<void>()
+  world.git.state[hold] = held.promise
+  const before = world.git.verbs(...heldVerbs[hold]).length
+  world.time.advance(minutes * minute)
+  await waitFor(() => world.git.verbs(...heldVerbs[hold]).length === before + 1)
+  await savePost(world, post)
+  held.resolve()
+  await world.server.scheduler.idle()
+}
+
+const requestFileOf = async (child: FakeChild): Promise<{ args: string[], argv: string[] }> =>
+  JSON.parse(await readFile(join(dirname(child.request.stdoutPath), 'request.json'), 'utf8')) as { args: string[], argv: string[] }
+
+test('post.others turned off while the fetch is held: the others run spawns with --no-post, and its row and request.json say so', async () => {
+  const world = await setup({ auto: { post: { others: true, dependabot: true } } })
+  try {
+    await saveWhileHeld(world, 'holdFetch', { others: false, dependabot: true })
+    const started = running(world)[0]
+    assert.ok(started)
+    assert.equal(world.launch.children.length, 1)
+    const child = world.launch.children[0]!
+    assert.match(stdinOf(child), /--no-post --emit-json=/)
+    assert.deepEqual(started.args, [String(started.number), '--no-post'])
+    assert.equal(started.posting, false)
+    const file = await requestFileOf(child)
+    assert.deepEqual(file.args, started.args)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('post.others turned off while the worktree is added: a row queued by an earlier tick spawns with --no-post too', async () => {
+  const world = await setup({ auto: { concurrency: 1, post: { others: true, dependabot: true } } })
+  try {
+    await tick(world)
+    const first = running(world)[0]
+    assert.ok(first)
+    assert.deepEqual(first.args, [String(first.number)])
+    const waiting = autoRuns(world).filter((run) => run.status === 'queued')
+    assert.ok(waiting.length > 0)
+    for (const run of waiting) assert.equal(run.posting, true)
+    await finish(world, first)
+    await saveWhileHeld(world, 'holdAdd', { others: false, dependabot: true })
+    const second = running(world)[0]
+    assert.ok(second)
+    assert.ok(waiting.some((run) => run.id === second.id))
+    assert.equal(world.launch.children.length, 2)
+    assert.match(stdinOf(world.launch.children[1]!), /--no-post --emit-json=/)
+    assert.deepEqual(second.args, [String(second.number), '--no-post'])
+    assert.equal(second.posting, false)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('post.others turned off during the launch\'s own last awaits, after the worktree exists: the Codex command line carries --no-post, in its argv and in request.json', async () => {
+  const world = await setup({ auto: { post: { others: true, dependabot: true } }, config: { agent: { runner: 'codex', claudeModel: 'sonnet' } } })
+  try {
+    await saveWhileHeld(world, 'holdRevParse', { others: false, dependabot: true })
+    const started = running(world)[0]
+    assert.ok(started)
+    const child = world.launch.children[0]!
+    assert.equal(started.runner, 'codex')
+    assert.equal(child.request.command, 'codex')
+    assert.match(child.request.args.at(-1) ?? '', /--no-post --emit-json=/)
+    assert.deepEqual(started.args, [String(started.number), '--no-post'])
+    assert.equal(started.posting, false)
+    const file = await requestFileOf(child)
+    assert.deepEqual(file.args, started.args)
+    assert.deepEqual(file.argv, [child.request.command, ...child.request.args])
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('post.dependabot turned off while the worktree is added: the scheduled sweep spawns with --no-post, which is what reaches every reviewer\'s brief', async () => {
+  const world = await setup({ auto: { others: false, dependabot: true, post: { others: true, dependabot: true } } })
+  try {
+    await saveWhileHeld(world, 'holdAdd', { others: true, dependabot: false })
+    const sweep = world.server.cache.allSweeps()[0]
+    assert.ok(sweep)
+    assert.equal(sweep.status, 'running')
+    const child = world.launch.children[0]!
+    assert.match(stdinOf(child), /--no-post --emit-json=/)
+    assert.deepEqual(sweep.args, [scenario.repo, '--parallel', '1', '--no-post'])
+    assert.equal(sweep.posting, false)
+    assert.deepEqual((await requestFileOf(child)).args, sweep.args)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a scheduled Dependabot PR run reads post.dependabot at the spawn, not post.others', async () => {
+  const startHeld = async (post: AutoReviewSettings['post']): Promise<{ args: string[], posting: boolean, stdin: string }> => {
+    const world = await setup({ auto: { others: false, post: { others: true, dependabot: true } } })
+    try {
+      const tickRow = world.server.cache.createTick(scenario.repo)
+      const request = { repo: scenario.repo, number: 900, command: 'review-dependabot', args: ['900'], label: 'Review' }
+      const row = world.server.launcher.queueScheduled(request, world.clone, { tick: tickRow.id, reason: 'dependabot', headOid: 'abc1234', posting: true })
+      const held = Promise.withResolvers<void>()
+      const entered = Promise.withResolvers<void>()
+      const starting = world.server.launcher.startScheduled(row.id, request, { args: request.args, posting: true }, async () => {
+        entered.resolve()
+        await held.promise
+        return join(world.worktrees, `run-${row.id}`)
+      })
+      await entered.promise
+      await savePost(world, post)
+      held.resolve()
+      const started = await starting
+      assert.equal(started?.status, 'running')
+      return { args: started?.args ?? [], posting: started?.posting ?? true, stdin: stdinOf(world.launch.children[0]!) }
+    } finally {
+      await world.cleanup()
+    }
+  }
+  const off = await startHeld({ others: true, dependabot: false })
+  assert.deepEqual(off.args, ['900', '--no-post'])
+  assert.equal(off.posting, false)
+  assert.match(off.stdin, /--no-post --emit-json=/)
+  // post.others off says nothing about it
+  const on = await startHeld({ others: false, dependabot: true })
+  assert.deepEqual(on.args, ['900'])
+  assert.equal(on.posting, true)
+  assert.doesNotMatch(on.stdin, /--no-post/)
+})
+
+test('a switch turned on while a run built with --no-post is held changes nothing: others, a sweep, and an own PR all keep it, once', async () => {
+  const others = await setup({ auto: { post: { others: false, dependabot: false } } })
+  try {
+    await saveWhileHeld(others, 'holdFetch', { others: true, dependabot: true })
+    const started = running(others)[0]
+    assert.ok(started)
+    assert.deepEqual(started.args, [String(started.number), '--no-post'])
+    assert.equal(started.posting, false)
+    assert.match(stdinOf(others.launch.children[0]!), /--no-post --emit-json=/)
+  } finally {
+    await others.cleanup()
+  }
+  const sweeps = await setup({ auto: { others: false, dependabot: true, post: { others: false, dependabot: false } } })
+  try {
+    await saveWhileHeld(sweeps, 'holdAdd', { others: true, dependabot: true })
+    const sweep = sweeps.server.cache.allSweeps()[0]
+    assert.deepEqual(sweep?.args, [scenario.repo, '--parallel', '1', '--no-post'])
+    assert.equal(sweep?.posting, false)
+    assert.match(stdinOf(sweeps.launch.children[0]!), /--no-post --emit-json=/)
+  } finally {
+    await sweeps.cleanup()
+  }
+  const own = await setup({ auto: { others: false, own: true, post: { others: false, dependabot: false } } })
+  try {
+    await saveWhileHeld(own, 'holdFetch', { others: true, dependabot: true })
+    const started = running(own)[0]
+    assert.ok(started)
+    assert.equal(started.reason, 'selfReview')
+    assert.deepEqual(started.args, [String(started.number), '--no-post'])
+    assert.equal(started.posting, false)
+    assert.match(stdinOf(own.launch.children[0]!), /--no-post --emit-json=/)
+  } finally {
+    await own.cleanup()
+  }
+})
+
+test('an own PR run keeps --no-post once when the switch is turned off, and another kind\'s switch does not touch a run that may post', async () => {
+  const own = await setup({ auto: { others: false, own: true, post: { others: true, dependabot: true } } })
+  try {
+    await saveWhileHeld(own, 'holdFetch', { others: false, dependabot: true })
+    const started = running(own)[0]
+    assert.ok(started)
+    assert.deepEqual(started.args, [String(started.number), '--no-post'])
+  } finally {
+    await own.cleanup()
+  }
+  const others = await setup({ auto: { post: { others: true, dependabot: true } } })
+  try {
+    await saveWhileHeld(others, 'holdFetch', { others: true, dependabot: false })
+    const started = running(others)[0]
+    assert.ok(started)
+    assert.deepEqual(started.args, [String(started.number)])
+    assert.equal(started.posting, true)
+    assert.doesNotMatch(stdinOf(others.launch.children[0]!), /--no-post/)
+  } finally {
+    await others.cleanup()
+  }
+  const sweeps = await setup({ auto: { others: false, dependabot: true, post: { others: true, dependabot: true } } })
+  try {
+    await saveWhileHeld(sweeps, 'holdAdd', { others: false, dependabot: true })
+    const sweep = sweeps.server.cache.allSweeps()[0]
+    assert.deepEqual(sweep?.args, [scenario.repo, '--parallel', '1'])
+    assert.equal(sweep?.posting, true)
+  } finally {
+    await sweeps.cleanup()
+  }
+})
+
+test('the posting switches govern only scheduled runs: a review the owner starts, fresh or from the queue, and a sweep the owner starts spawn as they were asked', async () => {
+  const world = await setup({ auto: { post: { others: false, dependabot: false } }, config: { maxConcurrentReviews: 1 } })
+  try {
+    const first = await world.server.launcher.start({ repo: scenario.repo, number: 106, command: 'review-pr', args: ['106'], label: 'Review' })
+    assert.equal(first.status, 'running')
+    assert.deepEqual(first.args, ['106'])
+    assert.equal(first.posting, true)
+    assert.doesNotMatch(stdinOf(world.launch.children[0]!), /--no-post/)
+    const second = await world.server.launcher.start({ repo: scenario.repo, number: 107, command: 'review-pr', args: ['107'], label: 'Review' })
+    assert.equal(second.status, 'queued')
+    world.launch.children[0]!.exit(0)
+    await world.server.launcher.settled(first.id)
+    await waitFor(() => world.launch.children.length === 2)
+    await world.server.launcher.flushed()
+    const after = world.server.cache.getRun(second.id)
+    assert.deepEqual(after?.args, ['107'])
+    assert.equal(after?.posting, true)
+    assert.doesNotMatch(stdinOf(world.launch.children[1]!), /--no-post/)
+    world.launch.children[1]!.exit(0)
+    await world.server.launcher.settled(second.id)
+    const sweep = await world.server.sweepLauncher.start(sweepRequest(scenario.repo))
+    assert.deepEqual(sweep.args, [scenario.repo, '--parallel', '1'])
+    assert.equal(sweep.posting, true)
+    assert.doesNotMatch(stdinOf(world.launch.children[2]!), /--no-post/)
+  } finally {
+    await world.cleanup()
   }
 })
 
