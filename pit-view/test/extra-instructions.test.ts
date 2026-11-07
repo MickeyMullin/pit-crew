@@ -585,8 +585,7 @@ const assertSpawnedUnder = async (h: Harness, run: Run | undefined, text: string
   else assert.equal(await readFile(fileOf(h, run.id), 'utf8'), `${text}\n`)
   const record = await requestOf(h, run.id)
   assert.deepEqual(record.args, args)
-  assert.equal(record.argv[0], runner)
-  assert.deepEqual(record.argv, [child.request.command, ...child.request.args])
+  assert.deepEqual(record.argv, [runner, ...child.request.args])
   if (text === null) assert.equal(Object.hasOwn(record, 'extraInstructions'), false)
   else assert.deepEqual(record.extraInstructions, { text, source: 'default' })
 }
