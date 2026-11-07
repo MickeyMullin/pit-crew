@@ -359,7 +359,8 @@ test('each reviewer of a tandem reads the same file, and the launcher brings it 
   assert.ok(tandem.includes('{{HOME}}/agents/prompts/review/extra-instructions.md'))
   assert.ok(tandem.includes('[--extra-instructions-file <path>]'))
   assert.ok(tandem.includes('`--extra-instructions-file`'))
-  assert.match(tandem, /The consolidated report carries the `Extra instructions in effect:` line/)
+  assert.match(tandem, /When the calling invocation carries `--extra-instructions`, the consolidated report carries the `Extra instructions in effect:` line once/)
+  assert.match(tandem, /When it does not, the consolidated report has no such line/)
   assert.match(lineFrom(tandem, '- **The consolidated report reads as one review.**'), /Its one permitted line about the run's instructions is `Extra instructions in effect:`/)
 })
 
