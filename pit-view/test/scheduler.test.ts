@@ -775,6 +775,8 @@ test('the posting switches govern only scheduled runs: a review the owner starts
     const sweep = await world.server.sweepLauncher.start(sweepRequest(scenario.repo))
     assert.deepEqual(sweep.args, [scenario.repo, '--parallel', '1'])
     assert.equal(sweep.posting, true)
+    // it may answer queued while the second review's launch has yet to return (section 8, Queueing), and spawn once that has
+    await waitFor(() => world.launch.children.length === 3)
     assert.doesNotMatch(stdinOf(world.launch.children[2]!), /--no-post/)
   } finally {
     await world.cleanup()
