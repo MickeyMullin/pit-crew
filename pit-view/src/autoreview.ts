@@ -682,7 +682,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     return othersArgs(number, own || settings.autoReview?.post.others !== true)
   }
 
-  // an unattended review of a PR runs under the standing extra instructions in effect, read again when it starts, so a change while it waits applies; a sweep's arguments never come through here
+  // what a queued or preparing row shows of the standing extra instructions, as last read here. It decides nothing about the process: the launcher reads the default again at the spawn and settles the row, as it does for a posting switch. A sweep's arguments never come through here
   const underStandingText = (request: StartRequest, settings: Config): StartRequest =>
     withExtraInstructions(request, chooseExtraInstructions(undefined, settings.extraReviewInstructions))
 

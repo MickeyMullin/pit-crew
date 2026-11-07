@@ -598,6 +598,10 @@ export const chooseExtraInstructions = (box: string | undefined, standing: strin
 export const withExtraInstructions = (request: StartRequest, extra: ExtraInstructions | null): StartRequest =>
   extra === null ? request : { ...request, args: [...request.args, extraInstructionsFlag], extraInstructions: extra }
 
+// a scheduled run's arguments under the text its launch has just read: the flag is there exactly when the text is, and after the others, whichever way the arguments were built
+const argsUnderText = (args: readonly string[], extra: ExtraInstructions | null): string[] =>
+  [...args.filter((arg) => arg !== extraInstructionsFlag), ...(extra === null ? [] : [extraInstructionsFlag])]
+
 // the starts the drawer offers (section 8 of DESIGN.md, Drawer): the row's default run, the same
 // review in tandem (Claude only), a review of the whole stack, and on the viewer's own PRs a fix
 // session (Claude only), which acts on the changes reviewers requested and pushes its fixes
@@ -1975,7 +1979,7 @@ export type StartRequest = {
   runner?: RunnerName
   // cloneDir when left out; phase 4 passes its worktree
   cwd?: string
-  // set by withExtraInstructions alone, with the flag it adds to args: the launch writes this text to the run directory and records it
+  // set by withExtraInstructions alone, with the flag it adds to args: the launch of a manual start writes this text to the run directory and records it. A scheduled review's launch reads the standing default itself instead, and what is here is only what its row shows until then
   extraInstructions?: ExtraInstructions
 }
 
@@ -2037,7 +2041,7 @@ export type Launcher<T extends Session = Run> = {
   close: () => void
   // scheduled starts (section 10 of DESIGN.md, One review cap): the row, queued in its own table and never in the line
   queueScheduled: (request: StartRequest, cwd: string, fields: ScheduledFields) => T
-  // starts a queued scheduled row through the same checks, turn, slot, and launch as any start, or leaves it queued when a new review would wait or gh cannot confirm the viewer. The slot is held before prepare runs, which makes the worktree and answers with its path; a failure there fails the run as worktreeFailed and gives the slot back. The arguments in changes are what the run was built with; the launch adds --no-post if the run's posting switch is off by its spawn
+  // starts a queued scheduled row through the same checks, turn, slot, and launch as any start, or leaves it queued when a new review would wait or gh cannot confirm the viewer. The slot is held before prepare runs, which makes the worktree and answers with its path; a failure there fails the run as worktreeFailed and gives the slot back. The arguments in changes are what the run was built with; the launch adds --no-post if the run's posting switch is off by its spawn, and settles the flag and the text on the standing default in effect then
   startScheduled: (id: number, request: StartRequest, changes: RunChanges, prepare: (run: T) => Promise<string>) => Promise<T | null>
   // drops a queued scheduled row that will not start
   skipQueued: (id: number, note: string) => T
@@ -2722,32 +2726,47 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         throw new UnwritableRunDir(dir, reason)
       })
       spec = await specFor(run, dir)
-      let invocation = runners[runner].invocation(spec)
-      stdin = invocation.stdin
       // made before the spawn, so nothing that builds it can throw once a process exists; Codex's is written once its session id is read from the stream, so it is left out here
       resume = sessionId === null ? null : resumeFor(run, sessionId, spec)
-      record = {
-        runner,
-        command: run.command,
-        args: run.args,
-        cwd: run.cwd,
-        sessionId,
-        argv: [invocation.command, ...invocation.args],
-        startedAt: run.startedAt,
-        ...(request.extraInstructions === undefined ? {} : { extraInstructions: request.extraInstructions }),
-      }
-      // before the spawn, so a run never carries the flag without its file; a write refused fails the start here
-      if (request.extraInstructions !== undefined) await fs.writeFile(join(dir, extraInstructionsFile), `${request.extraInstructions.text}\n`)
-      await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid: null, pidStartedAt: null }, null, 2)}\n`)
+      // a manual start keeps the text confirmed for it and answers to no default. A scheduled review answers to the standing default in effect at its spawn, whatever it was built with, and this launch is the one place every scheduled start passes through
+      const scheduledText = run.origin === 'auto' && takesExtraInstructions(run.command)
+      const textNow = (): ExtraInstructions | null => scheduledText
+        ? chooseExtraInstructions(undefined, options.config().extraReviewInstructions)
+        : request.extraInstructions ?? null
+      let extra: ExtraInstructions | null
+      let invocation: Invocation
+      // the writes are awaited, so a save may land during them: a text no longer in effect once they end is written over, so what leaves this loop is the file, the record, and the command line of the text read in the same step as the spawn below. Another pass takes another save during this pass's own writes
+      do {
+        extra = textNow()
+        spec = { ...spec, args: scheduledText ? argsUnderText(run.args, extra) : run.args }
+        invocation = runners[runner].invocation(spec)
+        stdin = invocation.stdin
+        record = {
+          runner,
+          command: run.command,
+          args: spec.args,
+          cwd: run.cwd,
+          sessionId,
+          argv: [invocation.command, ...invocation.args],
+          startedAt: run.startedAt,
+          ...(extra === null ? {} : { extraInstructions: extra }),
+        }
+        // before the spawn, so a run never carries the flag without its file; a write refused fails the start here. A scheduled run with no text takes away what an earlier pass, or a launch the cap took back, wrote in this folder
+        if (extra !== null) await fs.writeFile(join(dir, extraInstructionsFile), `${extra.text}\n`)
+        else if (scheduledText) await fs.rm(join(dir, extraInstructionsFile))
+        await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid: null, pidStartedAt: null }, null, 2)}\n`)
+      } while (textNow()?.text !== extra?.text)
       // the last thing before the spawn, with nothing awaited between this reading and it: a review or a sweep starts only for the repository and the viewer its start was confirmed for, and only while it still fits, under the config in effect now
       if (admitted !== null) {
         const current = options.config()
         const why = unbound(request.repo, admitted.viewer, current)
         if (why !== null) throw new Error(`not started: ${why}`)
         if (!line.fitsAtSpawn(admitted.attempt, admitted.slot, current)) return notStarted(run, request, admitted, queuedSince ?? run.startedAt)
+        // the row says what the process is about to be told, and a start the cap took back above leaves its row as it was
+        if (scheduledText) run = store.update(run.id, { args: argsUnderText(run.args, extra), extraInstructions: extra })
         // a scheduled run built to post keeps that leave only while its switch is still on, and otherwise takes --no-post here. This only ever adds the flag: a switch turned on since never takes it away, so a run built without leave to post stays without it. A manual run answers to no switch
         if (run.origin === 'auto' && mayPost(run.command, run.args) && !postSwitchOn(run.reason, current)) {
-          const args = [...run.args, '--no-post']
+          const args = argsUnderText([...run.args, '--no-post'], extra)
           run = store.update(run.id, { args, posting: false })
           spec = { ...spec, args }
           invocation = runners[runner].invocation(spec)
