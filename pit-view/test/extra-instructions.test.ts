@@ -589,6 +589,8 @@ const assertSpawnedUnder = async (h: Harness, run: Run | undefined, text: string
   const fixedHead = runner === 'codex' ? ['exec', '--json'] : ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose']
   assert.deepEqual(child.request.args.slice(0, fixedHead.length), fixedHead)
   assert.deepEqual(record.argv, [runner, ...child.request.args])
+  // the text itself, the old one as well, is nowhere a process can see it but the file
+  assertNotOnCommandLine(child, text === null ? ['old text', 'new text'] : [text, ...['old text', 'new text'].filter((other) => other !== text && !text.includes(other))])
   if (text === null) assert.equal(Object.hasOwn(record, 'extraInstructions'), false)
   else assert.deepEqual(record.extraInstructions, { text, source: 'default' })
 }
