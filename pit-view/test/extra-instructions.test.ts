@@ -585,10 +585,17 @@ const assertSpawnedUnder = async (h: Harness, run: Run | undefined, text: string
   else assert.equal(await readFile(fileOf(h, run.id), 'utf8'), `${text}\n`)
   const record = await requestOf(h, run.id)
   assert.deepEqual(record.args, args)
-  // the runner's own fixed arguments, written down here, then the record against what was spawned
-  const fixedHead = runner === 'codex' ? ['exec', '--json'] : ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose']
-  assert.deepEqual(child.request.args.slice(0, fixedHead.length), fixedHead)
-  assert.deepEqual(record.argv, [runner, ...child.request.args])
+  // the whole argument list of each runner, written out here from its fixed flags and this run's own values, never read back from what was spawned; the record in request.json must equal it
+  const prompt = `${runner === 'codex' ? '$' : '/'}${line}`
+  if (runner === 'claude') {
+    assert.deepEqual(record.argv, ['claude', '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', 'sonnet', '--session-id', '00000000-0000-4000-8000-000000000001', '--permission-mode', 'auto', '--add-dir', join(h.home, 'agents')])
+    assert.deepEqual(child.request.args, (record.argv as string[]).slice(1))
+  } else {
+    const argv = record.argv as string[]
+    assert.deepEqual(argv.slice(0, 7), ['codex', 'exec', '--json', '-C', join(h.stateDir, 'worktrees', `run-${run.id}`), '-s', 'workspace-write'])
+    assert.equal(argv.at(-1)?.split('\n\n')[0], prompt)
+    assert.deepEqual(child.request.args, argv.slice(1))
+  }
   // the text itself, the old one as well, is nowhere a process can see it but the file
   assertNotOnCommandLine(child, text === null ? ['old text', 'new text'] : [text, ...['old text', 'new text'].filter((other) => other !== text && !text.includes(other))])
   if (text === null) assert.equal(Object.hasOwn(record, 'extraInstructions'), false)
