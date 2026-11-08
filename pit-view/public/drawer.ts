@@ -14,7 +14,7 @@ import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import {
-  commentsCheckOn, confirmHolds, extraBoxText, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
+  commentsCheckOn, confirmHolds, specialInstructionsSent, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
   rereadBound, resumeReadyText, returnSelector,
 } from './drawerview.ts'
 import type { Confirm, DrawerModel, ExtraLine, Loadable, Opener, StartConfirmModel, StopModel } from './drawerview.ts'
@@ -172,8 +172,16 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       h('span', { id: 'drawer-comments-detail', class: 'muted confirm-detail' }, check.detail))
   }
 
-  // a review's Extra instructions box: what is typed stays in the confirmation, and each keystroke only repaints the command
+  // a review's Special instructions box: a checkbox that turns the instructions on and shows the box, which is built only while it is checked. What is typed stays in the confirmation, also while the box is hidden, and each keystroke only repaints the command
   const extraBox = (box: NonNullable<StartConfirmModel['extraBox']>): HTMLElement => {
+    const toggle = h('input', { type: 'checkbox', name: 'drawer-extra-on', 'data-focus-key': 'confirm-extra-on', 'aria-describedby': 'drawer-extra-detail', checked: box.checked })
+    toggle.addEventListener('change', () => {
+      if (confirm?.type !== 'start') return
+      confirm = { ...confirm, extraOn: toggle.checked }
+      render()
+    })
+    const label = h('label', { class: 'confirm-runner' }, toggle, box.toggle)
+    if (!box.checked) return h('span', {}, label)
     const input = h('textarea', { id: 'drawer-extra', name: 'drawer-extra', class: 'input confirm-extra', rows: '3', spellcheck: 'false', 'data-focus-key': 'confirm-extra', 'aria-label': box.label, 'aria-describedby': 'drawer-extra-detail' })
     input.value = box.text
     input.addEventListener('input', () => {
@@ -181,7 +189,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       confirm = { ...confirm, extraText: input.value }
       paintConfirm()
     })
-    return h('span', {}, input, h('span', { id: 'drawer-extra-detail', class: 'muted confirm-detail' }, box.detail))
+    return h('span', {}, label, input, h('span', { id: 'drawer-extra-detail', class: 'muted confirm-detail' }, box.detail))
   }
 
   // the text a run used, kept as written with its line breaks
@@ -295,6 +303,12 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       const wanted = model?.confirm?.commentsCheck?.checked === true
       if (comments.checked !== wanted) comments.checked = wanted
       comments.disabled = busy
+    }
+    const extraOn = root.querySelector<HTMLInputElement>('input[name="drawer-extra-on"]')
+    if (extraOn !== null) {
+      const wanted = model?.confirm?.extraBox?.checked === true
+      if (extraOn.checked !== wanted) extraOn.checked = wanted
+      extraOn.disabled = busy
     }
     // the text follows the state only when the two differ, which typing never makes them, so the caret stays where it is
     const extra = root.querySelector<HTMLTextAreaElement>('textarea[name="drawer-extra"]')
@@ -445,7 +459,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     busy = true
     error = ''
     paintConfirm()
-    const answer = await sendRun(startRequest(n, asked.kind, asked.runner, option.repo, option.viewer, options.token, commentsCheckOn(asked, option), extraBoxText(asked, option)))
+    const answer = await sendRun(startRequest(n, asked.kind, asked.runner, option.repo, option.viewer, options.token, commentsCheckOn(asked, option), specialInstructionsSent(asked, option)))
     busy = false
     if (n !== number) return
     if (answer.ok) {
@@ -572,7 +586,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
 
   const startPart = (model: DrawerModel): Part => ({
     key: 'start',
-    sig: JSON.stringify([model.starts, model.confirm === null ? null : { ...model.confirm, runner: '', command: '', model: '', commentsCheck: model.confirm.commentsCheck === null ? null : '', extraBox: model.confirm.extraBox === null ? null : '' }]),
+    sig: JSON.stringify([model.starts, model.confirm === null ? null : { ...model.confirm, runner: '', command: '', model: '', commentsCheck: model.confirm.commentsCheck === null ? null : '', extraBox: model.confirm.extraBox === null ? null : model.confirm.extraBox.checked }]),
     build: () => {
       if (model.confirm !== null) return section('start', 'Start', startConfirmBlock(model.confirm))
       return section('start', 'Start',

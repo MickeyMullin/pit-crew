@@ -404,5 +404,5 @@ test('the specification states the rules the prompt does', async () => {
   const design = await read('pit-view/DESIGN.md')
   for (const words of ['`--extra-instructions`', 'extra-instructions.txt', '`extraReviewInstructions`', '`Extra instructions in effect:', '`--extra-instructions-file`']) assert.ok(design.includes(words), words)
   assert.match(design, /\*\*Extra instructions\*\*/)
-  assert.match(design, /\*\*Extra instructions box\*\*/)
+  assert.match(design, /\*\*Special instructions box\*\*/)
 })

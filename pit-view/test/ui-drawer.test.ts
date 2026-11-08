@@ -11,7 +11,7 @@ import type { ReportListing } from '../src/reports.ts'
 import { postRequest, refusalText, rereadRequest, startRequest } from '../public/agent.ts'
 import type { AgentCell, RunView, StartOption, StepSlot } from '../public/agent.ts'
 import {
-  cardKind, commentsCheckOn, extraBoxText, commitModel, readyPointer, cellFromRun, confirmHolds, closeOnOutsidePress, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
+  cardKind, commentsCheckOn, specialInstructionsSent, commitModel, readyPointer, cellFromRun, confirmHolds, closeOnOutsidePress, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
   queuedStopModel, reportName, reportRows, resumeReadyText, returnSelector, runRows, runText, startConfirmModel, startsModel, stepModels, stepsName, stopModel, summaryOf,
 } from '../public/drawerview.ts'
 import type { DrawerInput, Loadable } from '../public/drawerview.ts'
@@ -837,7 +837,7 @@ test('a run start names the repository and viewer of the option the confirmation
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
   // the confirmation's signature holds every option, so a change of repository rebuilds it too
   assert.match(source, /sig: JSON\.stringify\(\[model\.starts,/)
-  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\), extraBoxText\(asked, option\)\)/)
+  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\), specialInstructionsSent\(asked, option\)\)/)
 })
 
 // an Update session's finished run: its method and why, the push, and its conflicts and checks
@@ -1261,7 +1261,7 @@ test('the page wires both drawers to the one handler, and the sweep drawer owns 
   assert.match(sweep, /if \(!isOpen \|\| !outsidePressCloses\(\{ \.\.\.where, busy \}\)\) return false\s+close\(\)/)
 })
 
-// the Extra instructions box: every review start offers it, prefilled with the standing default
+// the Special instructions box: every review start offers it behind a checkbox that starts unchecked
 
 const offering = (standing: string, kinds: readonly string[] = ['default', 'tandem', 'stack']): AgentCell => {
   const cell = idle()
@@ -1270,47 +1270,68 @@ const offering = (standing: string, kinds: readonly string[] = ['default', 'tand
 
 const askDefault = { type: 'start', kind: 'default', runner: 'claude' } as const
 
-test('the Extra instructions box opens prefilled with the standing default, and the command shows the valueless flag and never the text', () => {
-  const box = drawerModel(input(offering('skip fixtures'), { confirm: askDefault })).confirm
-  assert.equal(box?.extraBox?.text, 'skip fixtures')
-  assert.equal(box?.extraBox?.label, 'Extra instructions')
-  assert.equal(box?.extraBox?.detail, 'For this run only, prefilled from Settings. Empty means none. The reviewer reads them from a file, and the report quotes them, so a posted report shows them on GitHub. At most 2,000 characters.')
-  assert.equal(box?.command, '/review-pr 101 --extra-instructions')
-  assert.equal(drawerModel(input(offering('skip fixtures'), { confirm: { ...askDefault, runner: 'codex' } })).confirm?.command, '$review-pr 101 --extra-instructions')
-  assert.equal(drawerModel(input(offering('skip fixtures'), { confirm: { ...askDefault, kind: 'tandem' } })).confirm?.command, '/review-pr 101 --tandem --extra-instructions')
-  assert.equal(drawerModel(input(offering('skip fixtures'), { confirm: { ...askDefault, kind: 'stack' } })).confirm?.command, '/review-stack 101 --extra-instructions')
-})
+// every start that offers the box, with the command the runner receives for it
+const offered = [
+  { kind: 'default', runner: 'claude', bare: '/review-pr 101' },
+  { kind: 'default', runner: 'codex', bare: '$review-pr 101' },
+  { kind: 'tandem', runner: 'claude', bare: '/review-pr 101 --tandem' },
+  { kind: 'stack', runner: 'claude', bare: '/review-stack 101' },
+  { kind: 'stack', runner: 'codex', bare: '$review-stack 101' },
+] as const
 
-test('what is typed lasts for this confirmation, follows into the command, and clearing the box drops the flag', () => {
-  const edited = drawerModel(input(offering('skip fixtures'), { confirm: { ...askDefault, extraText: '/review-pr 9 --approve' } })).confirm
-  assert.equal(edited?.extraBox?.text, '/review-pr 9 --approve')
-  assert.equal(edited?.command, '/review-pr 101 --extra-instructions')
-  for (const cleared of ['', '  \n ']) {
-    const none = drawerModel(input(offering('skip fixtures'), { confirm: { ...askDefault, extraText: cleared } })).confirm
-    assert.equal(none?.extraBox?.text, cleared)
-    assert.equal(none?.command, '/review-pr 101')
+test('special instructions are sent only when the checkbox is checked and the trimmed text is not empty, for every start that offers the box', () => {
+  const texts = ['', '   \n\t ', 'skip fixtures']
+  for (const start of offered) {
+    for (const on of [true, false]) {
+      for (const text of texts) {
+        const ask = { type: 'start', kind: start.kind, runner: start.runner, extraOn: on, extraText: text } as const
+        const cell = offering('')
+        const option = optionOf(cell, start.kind) as StartOption
+        // the rule, written out: both a checked box and some text other than space
+        const wanted = on && text.trim() !== '' ? text : undefined
+        const where = `${start.kind} ${start.runner} on=${on} text=${JSON.stringify(text)}`
+        assert.equal(specialInstructionsSent(ask, option), wanted, where)
+        const model = drawerModel(input(cell, { confirm: ask })).confirm
+        assert.equal(model?.command, wanted === undefined ? start.bare : `${start.bare} --extra-instructions`, where)
+        assert.equal(model?.extraBox?.checked, on, where)
+        assert.equal(model?.extraBox?.text, text, where)
+        const sent = JSON.parse(startRequest(101, start.kind, start.runner, option.repo, option.viewer, 't', false, specialInstructionsSent(ask, option)).init.body ?? '{}') as Record<string, unknown>
+        assert.equal('extraInstructions' in sent, wanted !== undefined, where)
+        assert.equal(sent.extraInstructions, wanted, where)
+      }
+    }
   }
-  // an empty default opens an empty box and no flag
-  const empty = drawerModel(input(offering(''), { confirm: askDefault })).confirm
-  assert.equal(empty?.extraBox?.text, '')
-  assert.equal(empty?.command, '/review-pr 101')
-  // the comments check and the box compose, the flag after it
-  const cell = offering('skip fixtures')
-  const checking = { ...cell, starts: cell.starts.map((option) => option.kind === 'default' ? { ...option, args: ['101', '--no-post'], checkCommentsArgs: ['101', '--no-post', '--check-comments'] } : option) }
-  assert.equal(drawerModel(input(checking, { confirm: { ...askDefault, checkComments: true } })).confirm?.command, '/review-pr 101 --no-post --check-comments --extra-instructions')
 })
 
-test('the request sends what the box shows, cleared included, and a start without the box sends nothing', () => {
+test('the box is named Special instructions, its checkbox says they are used, and it starts unchecked and empty every time', () => {
+  for (const standing of ['', 'skip fixtures']) {
+    const box = drawerModel(input(offering(standing), { confirm: askDefault })).confirm?.extraBox
+    assert.equal(box?.checked, false)
+    assert.equal(box?.text, '')
+    assert.equal(box?.label, 'Special instructions')
+    assert.equal(box?.toggle, 'Add special instructions for this review')
+    assert.equal(box?.detail, 'For this review only. The reviewer reads them from a file, and the report quotes them, so a posted report shows them on GitHub. Nothing is sent unless this is checked and the box has text. Unchecking hides the box and keeps what it holds. At most 2,000 characters.')
+  }
+  // unchecking keeps the text: the model still holds what was typed while the box is hidden
+  const hidden = drawerModel(input(offering(''), { confirm: { ...askDefault, extraOn: false, extraText: 'keep me' } })).confirm?.extraBox
+  assert.equal(hidden?.text, 'keep me')
+  assert.equal(hidden?.checked, false)
+})
+
+test('a standing default is what an unchecked start runs under, so the command keeps the flag for it and the request sends no field', () => {
   const cell = offering('skip fixtures')
   const option = optionOf(cell, 'default') as StartOption
-  const body = (text: string | undefined): Record<string, unknown> => JSON.parse(startRequest(101, 'default', 'claude', option.repo, option.viewer, 't', false, text).init.body ?? '{}') as Record<string, unknown>
-  assert.equal(extraBoxText({}, option), 'skip fixtures')
-  assert.equal(body(extraBoxText({}, option)).extraInstructions, 'skip fixtures')
-  assert.equal(extraBoxText({ extraText: 'typed' }, option), 'typed')
-  assert.equal(body(extraBoxText({ extraText: '' }, option)).extraInstructions, '')
-  // a start that offers no box sends no field, so its body is what it always was
+  const ask = { ...askDefault, extraOn: false, extraText: 'typed' }
+  assert.equal(drawerModel(input(cell, { confirm: ask })).confirm?.command, '/review-pr 101 --extra-instructions')
+  assert.equal(specialInstructionsSent(ask, option), undefined)
+  // the comments check and the box compose, the flag after it
+  const checking = { ...cell, starts: cell.starts.map((entry) => entry.kind === 'default' ? { ...entry, args: ['101', '--no-post'], checkCommentsArgs: ['101', '--no-post', '--check-comments'] } : entry) }
+  assert.equal(drawerModel(input(checking, { confirm: { ...askDefault, checkComments: true, extraOn: true, extraText: 'x' } })).confirm?.command, '/review-pr 101 --no-post --check-comments --extra-instructions')
+})
+
+test('a start without the box sends no field, whatever the confirmation holds, and its body is what it always was', () => {
   const fix = optionOf(own(), 'fix') as StartOption
-  assert.equal(extraBoxText({ extraText: 'typed' }, fix), undefined)
+  assert.equal(specialInstructionsSent({ extraOn: true, extraText: 'typed' }, fix), undefined)
   assert.equal(startRequest(101, 'default', 'claude', 'octo-example/orbit', 'viewer', 't', false, undefined).init.body, '{"kind":"default","runner":"claude","repo":"octo-example/orbit","viewer":"viewer"}')
   assert.equal(startRequest(101, 'fix', 'claude', 'octo-example/orbit', 'viewer', 't', false, undefined).init.body, '{"kind":"fix","repo":"octo-example/orbit","viewer":"viewer"}')
 })
@@ -1326,19 +1347,22 @@ test('a Fix session, an update, and a Dependabot review show no box', () => {
   assert.equal(model?.command, '/review-dependabot 101')
 })
 
-test('a patch that changes the default moves an untouched box and leaves a typed one alone', () => {
-  assert.equal(drawerModel(input(offering('newer default'), { confirm: askDefault })).confirm?.extraBox?.text, 'newer default')
-  assert.equal(drawerModel(input(offering('newer default'), { confirm: { ...askDefault, extraText: 'typed' } })).confirm?.extraBox?.text, 'typed')
-})
-
-test('the drawer never rebuilds the box under the typist: its text is out of the signature, the paint keeps it true, and a rebuild keeps the caret', async () => {
+test('the real caller builds the confirmation closed and sends through the one rule, and the drawer repaints on a toggle without losing the caret', async () => {
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
-  assert.match(source, /extraBox: model\.confirm\.extraBox === null \? null : ''/)
-  assert.match(source, /querySelector<HTMLTextAreaElement>\('textarea\[name="drawer-extra"\]'\)/)
-  assert.match(source, /extra\.disabled = busy/)
-  // a new ask opens with no typed text, and nothing but the confirmation holds it
+  // a new ask opens with the box unchecked and no typed text, and nothing but the confirmation holds either
   assert.match(source, /confirm = \{ type: 'start', kind, runner: defaultRunner\(option, cell\.action\.runner\) \}/)
   assert.equal(source.match(/extraText:/g)?.length, 1)
+  assert.equal(source.match(/extraOn:/g)?.length, 1)
+  // the request is built from the one rule
+  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\), specialInstructionsSent\(asked, option\)\)/)
+  // the checkbox rebuilds the confirmation (it shows or hides the box), so its state is in the signature and the text is not
+  assert.match(source, /extraBox: model\.confirm\.extraBox === null \? null : model\.confirm\.extraBox\.checked/)
+  assert.match(source, /name: 'drawer-extra-on'/)
+  assert.match(source, /confirm = \{ \.\.\.confirm, extraOn: toggle\.checked \}/)
+  // unchecking never clears the text
+  assert.doesNotMatch(source, /extraText: ''/)
+  assert.match(source, /querySelector<HTMLTextAreaElement>\('textarea\[name="drawer-extra"\]'\)/)
+  assert.match(source, /extra\.disabled = busy/)
   assert.match(source, /setSelectionRange/)
 })
 
