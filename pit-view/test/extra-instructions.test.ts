@@ -597,9 +597,9 @@ const assertSpawnedUnder = async (h: Harness, run: Run | undefined, text: string
     assert.deepEqual(argv.slice(0, 9), ['codex', 'exec', '--json', '-C', join(h.stateDir, 'worktrees', `run-${run.id}`), '-s', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true'])
     assert.deepEqual([argv[9], argv[11], argv[13], argv[15], argv[17]], Array(5).fill('--add-dir'))
     assert.equal(argv[10], join(h.home, 'dev', 'orbit', '.git'))
-    assert.equal(typeof argv[12], 'string')
+    assert.equal(argv[12], 'origin\tgit@github.com:octo-example/orbit.git (fetch)\norigin\tgit@github.com:octo-example/orbit.git (push)')
     assert.deepEqual([argv[14], argv[16], argv[18]], [join(h.stateDir, 'runs', String(run.id)), join(h.home, 'agents', 'output'), join(h.home, 'agents', 'worktrees')])
-    assert.equal(argv.at(-1)?.split('\n\n')[0], prompt)
+    assert.equal(argv[19], `${prompt}\n\nNote: ~/agents/output resolves to ${join(h.home, 'agents', 'output')}. Write report files at that resolved path; file patches through the symlink are refused.`)
     assert.deepEqual(child.request.args, argv.slice(1))
   }
   // the text itself, the old one as well, is nowhere a process can see it but the file
