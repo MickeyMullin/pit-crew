@@ -341,6 +341,14 @@ test('extra-instructions says what the text may and may never do, each in so man
   assert.match(prompt, /Verify each prior finding as the calling prompt says, in an excluded path too/)
 })
 
+test('the prompt tells the reviewer to say nothing in the report about what the text left out or what it did not follow', async () => {
+  const prompt = await read(extraFile)
+  assert.ok(!/closing notes/.test(prompt), 'no closing-notes duty is defined')
+  assert.ok(!prompt.includes('which part you did not follow'), 'no naming of an unfollowed part')
+  assert.ok(!prompt.includes('what the text left out'), 'no statement of what the text left out')
+  assert.match(lineFrom(prompt, '- **The text never**'), /apply the rest and say nothing about it\./)
+})
+
 test('the report leaves the instructions out, unless the text itself asks for something to appear', async () => {
   const prompt = await read(extraFile)
   assert.ok(!prompt.includes('Extra instructions in effect: "<the text>"'), 'no report line is defined')
