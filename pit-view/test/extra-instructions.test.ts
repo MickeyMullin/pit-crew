@@ -592,7 +592,13 @@ const assertSpawnedUnder = async (h: Harness, run: Run | undefined, text: string
     assert.deepEqual(child.request.args, (record.argv as string[]).slice(1))
   } else {
     const argv = record.argv as string[]
-    assert.deepEqual(argv.slice(0, 7), ['codex', 'exec', '--json', '-C', join(h.stateDir, 'worktrees', `run-${run.id}`), '-s', 'workspace-write'])
+    // every entry of the Codex list is written out: the fixed head, the network setting, five writable-root pairs (the fake git answers the second root with its own text), and the prompt last; an added or changed argument anywhere changes the length or an entry
+    assert.equal(argv.length, 20)
+    assert.deepEqual(argv.slice(0, 9), ['codex', 'exec', '--json', '-C', join(h.stateDir, 'worktrees', `run-${run.id}`), '-s', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true'])
+    assert.deepEqual([argv[9], argv[11], argv[13], argv[15], argv[17]], Array(5).fill('--add-dir'))
+    assert.equal(argv[10], join(h.home, 'dev', 'orbit', '.git'))
+    assert.equal(typeof argv[12], 'string')
+    assert.deepEqual([argv[14], argv[16], argv[18]], [join(h.stateDir, 'runs', String(run.id)), join(h.home, 'agents', 'output'), join(h.home, 'agents', 'worktrees')])
     assert.equal(argv.at(-1)?.split('\n\n')[0], prompt)
     assert.deepEqual(child.request.args, argv.slice(1))
   }
