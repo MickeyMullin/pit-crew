@@ -19,7 +19,7 @@ const h = 60 * m
 const d = 24 * h
 
 const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
-  extraInstructions: null,
+  extraInstructions: null, origin: null, queuedAt: null, posted: null,
   state: 'idle',
   label: 'Review',
   action: { kind: 'review', label: 'Review', command: 'review-pr', args: ['101'], runner: 'claude' },
@@ -115,6 +115,43 @@ test('a done cell shows the server\'s text and when it finished, colored by what
   assert.equal(tones('Nothing to fix'), 'gray')
   for (const text of ['Not pushed', 'Not pushed · checks failed', 'Not pushed · checks not run', 'Not pushed · push refused']) assert.equal(tones(text), 'amber', text)
   assert.equal(tones('Failed · push refused', 'failed'), 'red')
+})
+
+test('an auto-review cell says auto in every state: queued with its age, running with its timers, done with whether it posted, and failed or skipped with the note as the tooltip', () => {
+  // queued: the age counts from when the scheduler queued it
+  const queued = idle({ state: 'queued', label: 'Re-review', runId: 7, runner: 'claude', command: 'review-pr', args: ['101'], status: 'queued', origin: 'auto', queuedAt: ago(4 * m + 10 * s), startedAt: ago(4 * m + 10 * s) })
+  assert.deepEqual(cellModel(queued, 101, now), { state: 'queued', label: 'auto · Re-review', line: 'queued · auto 4m', name: 'Open agent for #101, auto · Re-review queued' })
+  // running: "auto" before the label, the timers as for any run
+  const live = running({ origin: 'auto', label: 'Re-review', queuedAt: ago(10 * m) })
+  assert.deepEqual(cellModel(live, 101, now), {
+    state: 'running', label: 'auto · Re-review', line: 'running 3m · last step 20s ago', step: 'Step: review, started', name: 'Open agent for #101, auto · Re-review running',
+  })
+  // done: the server's result (with "not posted" already in it), then "auto · finished"
+  const unposted = done({ origin: 'auto', posted: false, text: 'Changes requested · not posted', finishedAt: ago(h + 5 * m) })
+  assert.deepEqual(cellModel(unposted, 101, now), {
+    state: 'done', text: 'Changes requested · not posted', tone: 'red', line: 'auto · finished 1h ago', tip: null, name: 'Open agent for #101, Changes requested · not posted',
+  })
+  // failed and skipped: "auto · failed" and "auto · skipped", the note as the tooltip
+  const failed = done({ origin: 'auto', status: 'failed', text: 'Failed · no result', note: 'noResult: no result.json; exit code 1', finishedAt: ago(h + 5 * m) })
+  assert.deepEqual(cellModel(failed, 101, now), {
+    state: 'done', text: 'auto · failed', tone: 'red', line: 'finished 1h ago', tip: 'noResult: no result.json; exit code 1', name: 'Open agent for #101, auto · failed',
+  })
+  const skipped = done({ origin: 'auto', status: 'skipped', text: 'Skipped', note: 'closed', finishedAt: ago(h + 5 * m) })
+  assert.deepEqual(cellModel(skipped, 101, now), {
+    state: 'done', text: 'auto · skipped', tone: 'gray', line: 'finished 1h ago', tip: 'closed', name: 'Open agent for #101, auto · skipped',
+  })
+  // a manual run reads exactly as before, a manual skip included
+  assert.equal(cellModel(done({ origin: 'manual', status: 'skipped', text: 'Skipped' }), 101, now).state === 'done' && (cellModel(done({ origin: 'manual', status: 'skipped', text: 'Skipped' }), 101, now) as { text: string }).text, 'Skipped')
+  assert.equal(doneTone({ status: 'skipped', text: 'Skipped' }), 'gray')
+})
+
+test('a queued auto-review cell and a manual one with the same run id rebuild when the origin changes', async () => {
+  const { agentCellSig } = await import('../public/agentcell.ts')
+  const sig = (cell: AgentCell): string => JSON.stringify(agentCellSig(cell, 101, now))
+  const queued = idle({ state: 'queued', label: 'Review', runId: 7, status: 'queued', startedAt: ago(m) })
+  assert.notEqual(sig(queued), sig({ ...queued, origin: 'auto', queuedAt: ago(m) }))
+  const doneAuto = done({ origin: 'auto', text: 'Changes requested · not posted' })
+  assert.notEqual(sig(doneAuto), sig({ ...doneAuto, finishedAt: ago(17 * h), origin: 'manual' }))
 })
 
 test('the banner offers a Fix session while the row offers one, available or not, and never without one', () => {

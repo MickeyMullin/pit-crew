@@ -17,7 +17,7 @@ export const agentCellSig = (cell: AgentCell | null, number: number, nowMs: numb
   if (model.state === 'idle') return { ...model, under: model.under !== null }
   if (model.state === 'queued') return { state: model.state, label: model.label, name: model.name, runId: cell.runId }
   if (model.state === 'running') return { state: model.state, label: model.label, name: model.name, runId: cell.runId, startedAt: cell.startedAt }
-  return { ...model, line: model.line !== '' }
+  return { ...model, line: model.line !== '', auto: cell.origin === 'auto' }
 }
 
 // after each draw: every cell's moving line, and a running cell's step as its tooltip and hidden text

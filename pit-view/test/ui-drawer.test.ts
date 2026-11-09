@@ -61,7 +61,7 @@ const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
   lastReviewAt: null,
   runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
   steps: slots(), tandem: false, commit: null,
-  extraInstructions: null,
+  extraInstructions: null, origin: null, queuedAt: null, posted: null,
   finishedAt: null, text: null, result: null, question: null, note: null, firstNote: null, resolvedByHand: false, resume: null, costUsd: null, postOffer: null, stackRun: null,
   ...patch,
 })

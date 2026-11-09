@@ -10,6 +10,7 @@ import type { OpenRow, OtherRow } from '../src/derive.ts'
 import { createGh } from '../src/github.ts'
 import { createPoller } from '../src/poller.ts'
 import type { Patch, Sync, View } from '../src/poller.ts'
+import type { AutoReviewView } from '../src/autoreview.ts'
 import { formatAge, formatClock, formatDay, formatInterval, formatSince } from '../public/format.ts'
 import {
   applyPatch, botGroupLabel, countRunning, emptyFeed, hasRunningRun, openRows, receivePatch, receiveView, regroup, restartFeed, rowFreshness,
@@ -160,6 +161,43 @@ test('regrouping matches the server for every row set, and the bots label follow
   const empty = regroup(server, [])
   assert.deepEqual(empty.mine.groups.map((group) => group.key), ['changesRequested', 'readyToMerge', 'awaitingReview', 'drafts'])
   assert.deepEqual(empty.others.groups.map((group) => [group.key, group.rows.length]), [['yourMove', 0], ['readyToMerge', 0], ['waitingOnAuthor', 0], ['bots', 0]])
+})
+
+test('a patch carries autoReview whole and the page replaces its own, and a patch without it leaves it alone', async () => {
+  const time = fakeTime()
+  const cache = openCache({ path: ':memory:', clock: time.clock })
+  const patches: Patch[] = []
+  let auto: AutoReviewView | null = null
+  const poller = createPoller({
+    cache, gh: createGh(fixtureRunner().runner), clock: time.clock, timers: time.timers, config, home: nowhere, timeZone: scenario.timeZone,
+    emit: (patch) => patches.push(patch), pageSize: scenario.pageSize, autoReview: () => auto,
+  })
+  poller.setActive(1, true)
+  await poller.idle()
+  const view = await poller.view()
+  assert.equal(view.autoReview, null)
+  const idle: AutoReviewView = {
+    enabled: true, state: 'idle', nextTickAt: '2026-10-27T14:45:00Z', running: 0, queued: 0, startedToday: 0,
+    lastTick: null, posting: { others: false, dependabot: false }, sweepHold: null, worktrees: { kept: [], unlisted: [] },
+  }
+  auto = idle
+  patches.length = 0
+  poller.autoReviewChanged()
+  assert.equal(patches.length, 1)
+  const shown = applyPatch(view, patches[0]!)
+  assert.deepEqual(shown.autoReview, idle)
+  // a later patch that does not mention it keeps it; one that does replaces it whole, null included
+  const other = applyPatch(shown, { version: shown.version + 1, now: shown.now, rows: [], removed: [], closed: null })
+  assert.deepEqual(other.autoReview, idle)
+  auto = { ...idle, state: 'running', running: 1, queued: 2 }
+  patches.length = 0
+  poller.autoReviewChanged()
+  assert.deepEqual(applyPatch(other, patches[0]!).autoReview, auto)
+  auto = null
+  patches.length = 0
+  poller.autoReviewChanged()
+  assert.equal(applyPatch(other, patches[0]!).autoReview, null)
+  poller.stop()
 })
 
 test('a row moving group or section, or removed, lands where its fields say', async () => {

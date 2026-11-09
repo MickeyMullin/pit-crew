@@ -66,9 +66,15 @@ export const runningLine = (cell: Pick<AgentCell, 'startedAt' | 'lastStepAt'>, n
   return cell.lastStepAt === null ? `${running} · starting` : `${running} · last step ${formatSince(cell.lastStepAt, nowMs)}`
 }
 
-// "queued 4m": how long a review has waited for a slot under the cap, since it was queued
-export const queuedLine = (cell: Pick<AgentCell, 'startedAt'>, nowMs: number): string =>
-  cell.startedAt === null ? 'queued' : `queued ${formatDuration(cell.startedAt, nowMs)}`
+// "queued 4m": how long a review has waited for a slot under the cap, since it was queued; an auto-review run reads "queued · auto 4m", counted from when the scheduler queued it
+export const queuedLine = (cell: Pick<AgentCell, 'startedAt'> & Partial<Pick<AgentCell, 'origin' | 'queuedAt'>>, nowMs: number): string => {
+  const since = cell.origin === 'auto' ? cell.queuedAt ?? cell.startedAt : cell.startedAt
+  const word = cell.origin === 'auto' ? 'queued · auto' : 'queued'
+  return since === null ? word : `${word} ${formatDuration(since, nowMs)}`
+}
+
+// an auto-review run's label leads with "auto"
+const labelOf = (cell: Pick<AgentCell, 'label' | 'origin'>): string => cell.origin === 'auto' ? `auto · ${cell.label}` : cell.label
 
 // the newest step in words, for the running cell's tooltip and screen readers
 export const stepText = (step: AgentCell['step'], command: string | null = null): string => {
@@ -84,8 +90,8 @@ export const doneTone = (cell: Pick<AgentCell, 'status' | 'text'>): DoneTone => 
   const text = cell.text ?? ''
   if (cell.status === 'failed') return 'red'
   if (cell.status === 'needsInput' || text.endsWith('post failed') || text.includes('· post not made') || text === 'Clean · CI failed' || text.startsWith('Not pushed')) return 'amber'
-  if (cell.status === 'stopped' || text === 'Done' || text === 'Nothing to fix' || text === 'Already up to date') return 'gray'
-  return text === 'Changes requested' ? 'red' : 'green'
+  if (cell.status === 'stopped' || cell.status === 'skipped' || text === 'Done' || text === 'Nothing to fix' || text === 'Already up to date') return 'gray'
+  return text === 'Changes requested' || text === 'Changes requested · not posted' ? 'red' : 'green'
 }
 
 // what the cell shows, state by state. Every state has one button that opens the drawer, named
@@ -116,26 +122,32 @@ export const showsMerge = (row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase
 
 export const cellModel = (cell: AgentCell, number: number, nowMs: number, merge = false): CellModel => {
   if (cell.state === 'queued') {
-    return { state: 'queued', label: cell.label, line: queuedLine(cell, nowMs), name: `Open agent for #${number}, ${cell.label} queued` }
+    const label = labelOf(cell)
+    return { state: 'queued', label, line: queuedLine(cell, nowMs), name: `Open agent for #${number}, ${label} queued` }
   }
   if (cell.state === 'running') {
+    const label = labelOf(cell)
     return {
       state: 'running',
-      label: cell.label,
+      label,
       line: runningLine(cell, nowMs),
       step: stepText(cell.step, cell.command),
-      name: `Open agent for #${number}, ${cell.label} running`,
+      name: `Open agent for #${number}, ${label} running`,
     }
   }
   if (cell.state === 'done') {
     const waiting = cell.status === 'needsInput'
-    const text = cell.text ?? 'Done'
+    const auto = cell.origin === 'auto'
+    // an auto-review run that failed or was skipped reads "auto · failed" or "auto · skipped"; any other keeps the server's words, and its line leads with "auto"
+    const ranOut = cell.status === 'failed' || cell.status === 'skipped'
+    const text = auto && ranOut ? `auto · ${cell.status}` : cell.text ?? 'Done'
+    const finished = cell.finishedAt === null ? '' : `finished ${formatSince(cell.finishedAt, nowMs)}`
     return {
       state: 'done',
       text,
       tone: doneTone(cell),
-      line: cell.finishedAt === null ? '' : `finished ${formatSince(cell.finishedAt, nowMs)}`,
-      tip: waiting ? cell.question : cell.status === 'failed' ? failureTip(cell.note) : null,
+      line: auto && !ranOut && finished !== '' ? `auto · ${finished}` : finished,
+      tip: waiting ? cell.question : cell.status === 'failed' || (auto && cell.status === 'skipped') ? failureTip(cell.note) : null,
       name: `Open agent for #${number}, ${text}`,
     }
   }

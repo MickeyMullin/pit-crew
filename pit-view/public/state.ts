@@ -77,6 +77,8 @@ export const applyPatch = (view: View, patch: Patch): View => {
     tiles: patch.tiles ?? view.tiles,
     counts: patch.counts ?? view.counts,
     sync: patch.sync ?? view.sync,
+    // sent whole, null included, only when it changed; absent leaves the page's own
+    autoReview: patch.autoReview === undefined ? view.autoReview : patch.autoReview,
     closed: patch.closed ?? view.closed,
     // sent whole when a sweep or its start text changed
     sweeps: patch.sweeps ?? view.sweeps,

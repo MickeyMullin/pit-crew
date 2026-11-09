@@ -3,7 +3,7 @@ import { spawn as spawnChild } from 'node:child_process'
 import { closeSync, openSync, watch as watchDir } from 'node:fs'
 import { mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
-import type { Cache, NewRun, NewSweep, QueueReason, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
+import type { Cache, NewRun, NewSweep, Origin, QueueReason, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
 import { expandHome, normalizeExtraInstructions, tildePath } from './config.ts'
 import type { AgentSettings, Clock, Config, ExtraInstructions, RunnerName } from './config.ts'
 import { isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
@@ -815,6 +815,10 @@ export type AgentCell = {
   costUsd: number | null
   // the extra review instructions the latest run used and where they came from; null for none
   extraInstructions: ExtraInstructions | null
+  // who started the latest run, null with none; when an auto-review run was queued (null for a manual run); and whether the run posted: true when it did, false once it has ended without posting, null before it ends or with no run
+  origin: Origin | null
+  queuedAt: string | null
+  posted: boolean | null
   // the post a blocked run's report may still get from the drawer's Post it; null for anything else
   postOffer: PostOffer | null
   // set while the run on show is a stack review started from another PR: that PR's number, and the status of this PR's own latest run behind it, null with none. Null on the PR it started from, and on every other cell
@@ -876,7 +880,7 @@ const pushRefused = (result: RunResultJson | null): boolean =>
 const postNotes: Partial<Readonly<Record<NotPostedReason, string>>> = { ghFailed: ' · post failed', postBlocked: ' · post not made' }
 
 // the cell's text for a finished run, from section 8's mappings: a review's verdict and posted, a fix's push, an update's method
-export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'> & { resolvedByHand?: boolean }, ownDraft: boolean): string => {
+export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'> & { resolvedByHand?: boolean, origin?: Origin }, ownDraft: boolean): string => {
   if (run.status === 'stopped') return 'Stopped'
   if (run.status === 'skipped') return 'Skipped'
   if (run.status === 'needsInput') return 'Needs your answer'
@@ -895,7 +899,9 @@ export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'> & { resolv
   else if (ownDraft) text = 'Clean · mark ready?'
   else if (result.posted?.form === 'approve') text = 'Approved'
   else if (result.posted?.form === 'comment') text = 'Clean · CI failed'
-  return `${text}${result.notPostedReason === null ? '' : postNotes[result.notPostedReason] ?? ''}${byHand}`
+  // an auto-review run that passed --no-post says so; a manual one always read as its result alone
+  const unposted = run.origin === 'auto' && result.notPostedReason === 'noPost' ? ' · not posted' : ''
+  return `${text}${result.notPostedReason === null ? '' : postNotes[result.notPostedReason] ?? ''}${unposted}${byHand}`
 }
 
 const countBy = <K extends string>(keys: readonly K[], values: readonly K[]): Record<K, number> =>
@@ -1046,6 +1052,9 @@ export const stackRunCover = (runs: Iterable<Run>, prs: readonly RawOpenPr[]): M
   return cover
 }
 
+// whether a finished review put its post on GitHub; a fix or an update, and a run that ended with no result, posted nothing
+const posted = (result: RunResultJson | null): boolean => result?.schema === 'pit-crew/review-result@1' && result.posted !== null
+
 export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null, cover: Run | undefined = undefined): AgentCell => {
   const mine = isMine(pr, config)
   const plan = defaultRun(pr, config)
@@ -1058,7 +1067,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     state: 'idle', label: plan.label, action, models: modelLabels(config.agent), starts: startOptions(pr, config, stack, ownInFlight, queueing), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
-    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, postOffer: null, stackRun: null,
+    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, origin: null, queuedAt: null, posted: null, postOffer: null, stackRun: null,
   }
   // the newer of the PR's own latest run and the stack run that covers it
   const covered = cover !== undefined && cover.id > (ownRun?.id ?? 0)
@@ -1098,6 +1107,9 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     resume: run.resume,
     costUsd: run.costUsd,
     extraInstructions: run.extraInstructions,
+    origin: run.origin,
+    queuedAt: run.queuedAt,
+    posted: ended === null ? null : posted(withPostFate(run).result),
     postOffer: postOffer(pr, config, run),
   }
 }

@@ -296,6 +296,49 @@ test('Clean · mark ready? only on the viewer\'s own draft, and a moved head ret
   assert.equal(waiting.text, 'Needs your answer')
 })
 
+test('an auto-review run\'s cell carries its origin, when it was queued, and whether it posted', async () => {
+  const config = baseConfig()
+  const pr = await prOf(106)
+  const finished = (patch: Record<string, unknown>, run: Partial<Run> = {}): ReturnType<typeof agentCell> =>
+    agentCell(pr, config, runRow({ origin: 'auto', reason: 'new', queuedAt: '2026-10-26T13:50:00Z', status: 'done', finishedAt: '2026-10-26T14:03:00Z', result: reviewResult({ reviewed: { kind: 'commit', sha: pr.headRefOid }, ...patch }) as unknown as RunResultJson, ...run }), undefined)
+  // a --no-post auto run reads "not posted" after its result, and the cell says it did not post
+  const unposted = finished({ verdict: 'changesRequested', posted: null, notPostedReason: 'noPost' })
+  assert.equal(unposted.text, 'Changes requested · not posted')
+  assert.equal(unposted.origin, 'auto')
+  assert.equal(unposted.queuedAt, '2026-10-26T13:50:00Z')
+  assert.equal(unposted.posted, false)
+  // a clean own draft keeps its own words and gains the suffix
+  const own = agentCell(await prOf(103), config, runRow({ number: 103, origin: 'auto', status: 'done', result: reviewResult({ verdict: 'clean', findings: [], posted: null, notPostedReason: 'noPost', reviewed: { kind: 'commit', sha: (await prOf(103)).headRefOid } }) as unknown as RunResultJson }), undefined)
+  assert.equal(own.text, 'Clean · mark ready? · not posted')
+  // a refused post keeps its words, and is not told twice
+  const blocked = finished({ verdict: 'changesRequested', posted: null, notPostedReason: 'postBlocked' })
+  assert.equal(blocked.text, 'Changes requested · post not made')
+  assert.equal(blocked.posted, false)
+  // a post that happened
+  const posted = finished({ verdict: 'clean', findings: [], posted: { form: 'approve', url: 'https://example.test/r/1' }, notPostedReason: null })
+  assert.equal(posted.text, 'Approved')
+  assert.equal(posted.posted, true)
+  // failed and skipped runs did not post either
+  assert.equal(finished({}, { status: 'failed', result: null, note: 'noResult: no result.json' }).posted, false)
+  assert.equal(finished({}, { status: 'skipped', result: null, note: 'closed' }).posted, false)
+  // before the run ends there is nothing to say
+  const queued = agentCell(pr, config, runRow({ origin: 'auto', status: 'queued', queuedAt: '2026-10-26T13:50:00Z', startedAt: '2026-10-26T13:50:00Z' }), undefined)
+  assert.equal(queued.state, 'queued')
+  assert.equal(queued.posted, null)
+  assert.equal(queued.queuedAt, '2026-10-26T13:50:00Z')
+  const running = agentCell(pr, config, runRow({ origin: 'auto', status: 'running', queuedAt: '2026-10-26T13:50:00Z' }), undefined)
+  assert.equal(running.posted, null)
+  // a manual run says manual, and its --no-post reads as it always did
+  const manual = agentCell(pr, config, runRow({ status: 'done', result: reviewResult({ verdict: 'clean', findings: [], posted: null, notPostedReason: 'noPost', reviewed: { kind: 'commit', sha: pr.headRefOid } }) as unknown as RunResultJson }), undefined)
+  assert.equal(manual.origin, 'manual')
+  assert.equal(manual.text, 'Clean')
+  // no run, no origin
+  const idle = agentCell(pr, config, undefined, undefined)
+  assert.equal(idle.origin, null)
+  assert.equal(idle.queuedAt, null)
+  assert.equal(idle.posted, null)
+})
+
 // the starts the drawer offers
 
 test('a PR offers its default run, the same review in tandem, and a stack review only when stacked', async () => {
