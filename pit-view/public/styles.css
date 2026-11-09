@@ -2626,6 +2626,44 @@ select.input {
   margin: 0 0 0 24px;
 }
 
+/* the Auto-review card: the posting confirmation sits inline under its switch, and the login agent's status is plain text */
+
+.post-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 10px 24px;
+  padding: 12px 14px;
+  border: 1px solid var(--amber-edge);
+  border-radius: 8px;
+  background: var(--amber-bg);
+  color: var(--ink);
+}
+
+.post-ask[hidden] {
+  display: none;
+}
+
+.post-ask-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.post-ask p {
+  margin: 0;
+}
+
+.post-ask-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.status-line {
+  margin: 0;
+  font-weight: 600;
+}
+
 /* the error summary above the form after a refused save */
 
 .form-errors {

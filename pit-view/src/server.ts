@@ -59,6 +59,9 @@ export type LaunchDeps = {
   stopGraceMs?: number
 }
 
+// the optional login agent's plist (section 3, Hosting); scripts/service.ts builds the same path, which a test keeps in step
+export const loginAgentFile = (home: string): string => join(home, 'Library', 'LaunchAgents', 'com.mickey.pit-view.plist')
+
 export type ServerOptions = {
   home: string
   // 0 picks a free port (tests)
@@ -930,7 +933,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'POST', pattern: /^\/api\/sweeps\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopSweep(req, res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/auto-review\/ticks$/, handle: (_req, res) => json(res, 200, cache.ticksFor(effective().repo, 50)) },
     { method: 'POST', pattern: /^\/api\/auto-review\/run$/, handle: (req, res) => runNow(req, res) },
-    { method: 'GET', pattern: /^\/api\/instance$/, handle: (_req, res) => json(res, 200, { name: options.instance ?? '', configPath: tildePath(options.configPath, home), pid: process.pid }) },
+    { method: 'GET', pattern: /^\/api\/instance$/, handle: async (_req, res) => json(res, 200, { name: options.instance ?? '', configPath: tildePath(options.configPath, home), pid: process.pid, loginAgent: { installed: await options.launch.fs.exists(loginAgentFile(home)) } }) },
     { method: 'GET', pattern: /^\/api\/config$/, handle: (_req, res) => json(res, 200, stored) },
     { method: 'PUT', pattern: /^\/api\/config$/, handle: (req, res) => putConfig(req, res) },
     { method: 'GET', pattern: /^\/api\/people\/suggestions$/, handle: (_req, res) => json(res, 200, suggestions()) },

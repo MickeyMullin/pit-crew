@@ -2,7 +2,11 @@
 // which instance served the page: a named one, such as dev, is marked in the title and the header
 
 // pid lets pnpm service:status tell the agent's server from a manual start
-export type InstanceInfo = { name: string, configPath: string, pid: number }
+export type InstanceInfo = { name: string, configPath: string, pid: number, loginAgent?: { installed: boolean } }
+
+// the Settings page's line for the optional login agent: whether its plist is installed, with no claim that anything depends on it
+export const loginAgentText = (agent: InstanceInfo['loginAgent']): string =>
+  agent === undefined ? 'Unknown' : agent.installed ? 'Installed' : 'Not installed'
 
 // the default instance keeps the title as it is; a named one leads with its name
 export const instanceTitle = (title: string, name: string): string => name === '' ? title : `${name} · ${title}`

@@ -15,7 +15,7 @@ import type { View } from '../src/poller.ts'
 import {
   aliasOf, changeKind, colorFor, contrastWithWhite, errorId, fieldId, initialsOf, isDirty, kindDefaults, needsRefresh, newPerson, newTicket,
   idleLimits, notifyChoices, openSuggestions, parseBots, parseIdleMinutes, parseMaxReviews, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, timeFormatChoices, serverError, ticketSample, toConfig, toForm,
-  validateForm,
+  validateForm, autoDefaults, postingAsk, weekdayChoices, wantsPostConfirm,
 } from '../public/settings-form.ts'
 import type { Form, TicketForm } from '../public/settings-form.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -443,9 +443,9 @@ test('the Behavior card has a labeled time format select with a hint and an erro
   assert.match(behavior, /id="f-timeFormat-error" class="field-error" hidden/)
 })
 
-test('the Agent card sits right after Behavior and before Notifications, and no old label survives anywhere on the page', async () => {
+test('the Agent card sits right after Behavior, then Auto-review, then Notifications, and no old label survives anywhere on the page', async () => {
   const html = await settingsHtml()
-  const order = ['repository', 'people', 'tickets', 'behavior', 'agent', 'notifications'].map((id) => html.indexOf(`<section id="${id}"`))
+  const order = ['repository', 'people', 'tickets', 'behavior', 'agent', 'auto-review', 'notifications'].map((id) => html.indexOf(`<section id="${id}"`))
   assert.ok(order.every((at, index) => at !== -1 && (index === 0 || at > (order[index - 1] as number))), order.join(','))
   assert.doesNotMatch(html, /Reviews at once|Self-review over the limit/i)
 })
@@ -511,4 +511,165 @@ test('the field is wired as a static text field, and a textarea is drawn taller 
   assert.match(source, /const staticText = \[[^\]]*'extraReviewInstructions'[^\]]*\] as const/)
   const styles = await readFile(new URL('../public/styles.css', import.meta.url), 'utf8')
   assert.match(styles, /textarea\.input \{[^}]*height: auto;/)
+})
+
+// auto-review in Settings (section 10, In the UI)
+
+test('a config without autoReview shows the shipped defaults, leaves the key out until the form leaves them, and a clone folder rides along', () => {
+  const plain = sample()
+  const form = formOf(plain)
+  assert.deepEqual(
+    [form.autoEnabled, form.autoInterval, form.autoDays, form.autoFrom, form.autoTo, form.autoOthers, form.autoOwn, form.autoDependabot, form.autoConcurrency, form.autoDailyLimit, form.autoPostOthers, form.autoPostDependabot],
+    [false, '15', ['mon', 'tue', 'wed', 'thu', 'fri'], '09:00', '18:00', true, false, false, '1', '10', false, false],
+  )
+  assert.equal(form.cloneDir, '~/dev/orbit')
+  assert.equal('autoReview' in toConfig(form, plain), false)
+  // turning it on writes the whole key, as the server requires, and the server accepts it
+  form.autoEnabled = true
+  const sent = toConfig(form, plain)
+  assert.deepEqual(sent.autoReview, {
+    enabled: true, intervalMinutes: 15, activeHours: { days: ['mon', 'tue', 'wed', 'thu', 'fri'], from: '09:00', to: '18:00' },
+    others: true, own: false, dependabot: false, concurrency: 1, dailyLimit: 10, post: { others: false, dependabot: false },
+  })
+  assert.deepEqual(validateConfig(sent).autoReview, sent.autoReview)
+  // and turning it back off in the form leaves the key out again when nothing else changed
+  form.autoEnabled = false
+  assert.equal('autoReview' in toConfig(form, plain), false)
+  // the page's defaults are the server's
+  assert.deepEqual(autoDefaults, defaultAutoReview())
+})
+
+test('every auto-review option edits through the form and reaches the config as the server stores it', () => {
+  const saved: Config = { ...sample(), autoReview: { ...defaultAutoReview(), enabled: true } }
+  const form = formOf(saved)
+  assert.equal(isDirty(form, saved), false)
+  form.autoInterval = ' 30 '
+  form.autoDays = ['tue', 'mon', 'sat']
+  form.autoFrom = '08:30'
+  form.autoTo = '17:45'
+  form.autoOthers = false
+  form.autoOwn = true
+  form.autoDependabot = true
+  form.autoConcurrency = '2'
+  form.autoDailyLimit = '25'
+  form.autoPostOthers = true
+  form.autoPostDependabot = true
+  form.cloneDir = ' ~/dev/orbit-clone '
+  assert.equal(isDirty(form, saved), true)
+  assert.deepEqual(validateForm(form), [])
+  const sent = toConfig(form, saved)
+  // days are written in week order, whatever order they were chosen in
+  assert.deepEqual(sent.autoReview, {
+    enabled: true, intervalMinutes: 30, activeHours: { days: ['mon', 'tue', 'sat'], from: '08:30', to: '17:45' },
+    others: false, own: true, dependabot: true, concurrency: 2, dailyLimit: 25, post: { others: true, dependabot: true },
+  })
+  assert.equal(sent.cloneDir, '~/dev/orbit-clone')
+  assert.deepEqual(validateConfig(sent), sent)
+  // clearing the clone folder leaves it out, as the server reads an empty one
+  form.cloneDir = '  '
+  assert.equal('cloneDir' in toConfig(form, saved), false)
+  // days saved out of week order are not unsaved changes
+  const odd: Config = { ...saved, autoReview: { ...saved.autoReview!, activeHours: { days: ['fri', 'mon'], from: '09:00', to: '18:00' } } }
+  assert.equal(isDirty(formOf(odd), odd), false)
+  assert.deepEqual(weekdayChoices.map((day) => day.value), ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'])
+})
+
+test('the checks refuse what the server refuses for auto-review, name the field, and use the same words on the page and from the server', () => {
+  const saved: Config = { ...sample(), autoReview: defaultAutoReview() }
+  const problems = (patch: Partial<Form>): [string, string][] => validateForm({ ...formOf(saved), ...patch }).map((error) => [error.field ?? '', error.message])
+  assert.deepEqual(problems({}), [])
+  for (const bad of ['4', '0', '', 'abc', '5.5', '-5', '99999999999999999999']) {
+    assert.deepEqual(problems({ autoInterval: bad }), [['autoInterval', 'Use a whole number of minutes, 5 or more.']], bad)
+  }
+  assert.deepEqual(problems({ autoInterval: '5' }), [])
+  for (const bad of ['0', '', '1.5', '-1', 'ten', '99999999999999999999']) {
+    assert.deepEqual(problems({ autoDailyLimit: bad }), [['autoDailyLimit', 'Use a whole number of 1 or more.']], bad)
+    assert.deepEqual(problems({ autoConcurrency: bad }), [['autoConcurrency', 'Use a whole number of 1 or more.']], bad)
+  }
+  assert.deepEqual(problems({ autoDailyLimit: '1' }), [])
+  assert.deepEqual(problems({ autoDays: [] }), [['autoDays', 'Choose at least one day.']])
+  assert.deepEqual(problems({ autoFrom: '9:00' }), [['autoFrom', 'Use a 24-hour time such as 09:00.']])
+  assert.deepEqual(problems({ autoTo: '24:00' }), [['autoTo', 'Use a 24-hour time such as 09:00.']])
+  assert.deepEqual(problems({ autoFrom: '18:00', autoTo: '09:00' }), [['autoTo', 'Must be after the start time.']])
+  assert.deepEqual(problems({ autoFrom: '09:00', autoTo: '09:00' }), [['autoTo', 'Must be after the start time.']])
+  assert.deepEqual(problems({ cloneDir: 'dev/orbit' }), [['cloneDir', 'Give an absolute path or a path under ~, such as ~/dev/orbit.']])
+  assert.deepEqual(problems({ cloneDir: '' }), [])
+  // each refusal the page makes, the server makes too
+  for (const [patch, key] of [
+    [{ intervalMinutes: 4 }, 'autoInterval'], [{ dailyLimit: 0 }, 'autoDailyLimit'], [{ concurrency: 0 }, 'autoConcurrency'], [{ dailyLimit: 1.5 }, 'autoDailyLimit'],
+    [{ activeHours: { days: [], from: '09:00', to: '18:00' } }, 'autoDays'], [{ activeHours: { days: ['mon'], from: '18:00', to: '09:00' } }, 'autoFrom'],
+    [{ activeHours: { days: ['mon'], from: '9am', to: '18:00' } }, 'autoFrom'],
+  ] as const) {
+    const config = { ...saved, autoReview: { ...saved.autoReview!, ...patch } } as unknown as Config
+    assert.equal(serverError(refusal(config), formOf(saved)).field, key, JSON.stringify(patch))
+  }
+  assert.equal(serverError(refusal({ ...saved, cloneDir: 'dev/orbit' }), formOf(saved)).field, 'cloneDir')
+})
+
+test('turning a posting switch on asks first, naming what will post and under which login; turning one off, or leaving it on, does not', () => {
+  const form = formOf({ ...sample(), autoReview: { ...defaultAutoReview(), post: { others: false, dependabot: true } } })
+  assert.equal(wantsPostConfirm(form, 'others', true), true)
+  assert.equal(wantsPostConfirm(form, 'others', false), false)
+  // already on: nothing to confirm, and no question when it is turned off
+  assert.equal(wantsPostConfirm(form, 'dependabot', true), false)
+  assert.equal(wantsPostConfirm(form, 'dependabot', false), false)
+  assert.deepEqual(postingAsk('others', 'vera-quill'), {
+    title: 'Let auto-review post to GitHub as @vera-quill?',
+    lines: [
+      'Auto-review runs on other people\'s PRs will post their report as @vera-quill: an approval, a request for changes, or a comment, chosen by the findings and the checks.',
+      'Your own PRs never post, and never get fixes, whatever this says.',
+      'It applies to runs that start after you save.',
+    ],
+    confirm: 'Post as @vera-quill',
+    cancel: 'Cancel',
+  })
+  assert.deepEqual(postingAsk('dependabot', 'vera-quill'), {
+    title: 'Let scheduled Dependabot sweeps post to GitHub as @vera-quill?',
+    lines: [
+      'Each scheduled sweep will have its reviewers post as @vera-quill: an approval for a bump with nothing above P3 and green checks, and a comment or a request for changes for the rest.',
+      'A sweep you start by hand already posts this way, with or without this switch.',
+      'It applies to sweeps that start after you save.',
+    ],
+    confirm: 'Post as @vera-quill',
+    cancel: 'Cancel',
+  })
+  // no login resolved yet: the question still says whose account it is
+  assert.equal(postingAsk('others', '').title, 'Let auto-review post to GitHub as your gh login?')
+  assert.equal(postingAsk('others', '').confirm, 'Post as your gh login')
+})
+
+test('the Auto-review card holds every option in order, a labeled control and an error slot for each, the daily limit\'s note, the posting switches, and the login agent as a separate item', async () => {
+  const html = await settingsHtml()
+  const auto = cardOf(html, 'auto-review')
+  assert.match(auto, /<h2 id="auto-review-heading" class="card-title">Auto-review<\/h2>/)
+  assert.match(auto, /aria-labelledby="auto-review-heading"/)
+  assert.deepEqual(fieldsIn(auto), ['autoEnabled', 'autoInterval', 'autoDays', 'autoFrom', 'autoTo', 'autoOthers', 'autoOwn', 'autoDependabot', 'autoConcurrency', 'autoDailyLimit', 'cloneDir', 'autoPostOthers', 'autoPostDependabot'])
+  for (const field of ['autoEnabled', 'autoInterval', 'autoDays', 'autoFrom', 'autoTo', 'autoOthers', 'autoOwn', 'autoDependabot', 'autoConcurrency', 'autoDailyLimit', 'cloneDir', 'autoPostOthers', 'autoPostDependabot']) {
+    assert.match(auto, new RegExp(`id="f-${field}-error" class="field-error" hidden`), field)
+    assert.match(auto, new RegExp(`id="f-${field}-hint"`), field)
+  }
+  assert.match(auto, /<label for="f-autoDailyLimit">Daily limit<\/label>/)
+  assert.match(auto, /<input id="f-autoDailyLimit" class="input mono" type="number"[^>]*min="1" step="1"/)
+  assert.match(auto, /a whole number of 1 or more, 10 by default\. It caps only auto-review runs/)
+  assert.match(auto, /Each auto-review run uses its own worktree of this clone and never the checkout itself/)
+  assert.match(auto, /Runs happen whenever Pit View is running, with or without a page open/)
+  // the two posting questions in the owner\'s words, each with a confirmation slot of its own
+  assert.match(auto, /Post auto-reviews of other people's PRs\?/)
+  assert.match(auto, /Post scheduled Dependabot sweeps\?/)
+  assert.match(auto, /id="auto-post-ask-others" class="post-ask" role="group" hidden/)
+  assert.match(auto, /id="auto-post-ask-dependabot" class="post-ask" role="group" hidden/)
+  // the login agent is shown beside it, outside the form\'s fields, with the note that auto-review does not need it
+  assert.match(auto, /Start at login \(optional\)/)
+  assert.match(auto, /id="login-agent-status"/)
+  assert.match(auto, /Auto-review does not need it/)
+  assert.doesNotMatch(auto, /id="f-loginAgent/)
+})
+
+test('the page asks before a posting switch turns on through an in-app confirmation, never a browser dialog, and keeps the switch off until it is confirmed', async () => {
+  const source = await readFile(new URL('../public/settings.ts', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /\b(?:window\.)?(?:confirm|alert|prompt)\(/)
+  // the change handler decides with the pure rule, puts the switch back off, and opens the question
+  assert.match(source, /if \(wantsPostConfirm\(page\.form, kind, box\.checked\)\) \{\s*box\.checked = false\s*page\.postAsk = kind/)
+  // only the confirm button sets the form value to on
+  assert.equal([...source.matchAll(/page\.form\[key\] = true/g)].length, 1)
 })

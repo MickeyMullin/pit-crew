@@ -1,7 +1,7 @@
 // public/settings-form.ts
 // the Settings page's pure logic: config to form and back, the checks made before saving, the
 // server's refusals placed on their fields, people suggestions, and ticket samples
-import type { Config, Person, TicketSystem } from '../src/config.ts'
+import type { AutoReviewSettings, Config, Person, TicketSystem, WeekdayName } from '../src/config.ts'
 import type { NotificationKind } from '../src/notify.ts'
 import type { View } from '../src/poller.ts'
 
@@ -48,7 +48,43 @@ export type Form = {
   extraReviewInstructions: string
   notifyEnabled: boolean
   notifyKinds: NotificationKind[]
+  // the clone folder as typed: an absolute path or one under ~, empty for none
+  cloneDir: string
+  // auto-review (section 10): the numbers as typed, the days in week order, the times as HH:MM
+  autoEnabled: boolean
+  autoInterval: string
+  autoDays: WeekdayName[]
+  autoFrom: string
+  autoTo: string
+  autoOthers: boolean
+  autoOwn: boolean
+  autoDependabot: boolean
+  autoConcurrency: string
+  autoDailyLimit: string
+  autoPostOthers: boolean
+  autoPostDependabot: boolean
 }
+
+// the autoReview defaults, a copy of defaultAutoReview in src/autoreview.ts, which a test keeps in step (the page cannot import that module's code)
+export const autoDefaults: AutoReviewSettings = {
+  enabled: false,
+  intervalMinutes: 15,
+  activeHours: { days: ['mon', 'tue', 'wed', 'thu', 'fri'], from: '09:00', to: '18:00' },
+  others: true,
+  own: false,
+  dependabot: false,
+  concurrency: 1,
+  dailyLimit: 10,
+  post: { others: false, dependabot: false },
+}
+
+// the days as the page lists and saves them, Monday first
+export const weekdayChoices: readonly { value: WeekdayName, label: string }[] = [
+  { value: 'mon', label: 'Mon' }, { value: 'tue', label: 'Tue' }, { value: 'wed', label: 'Wed' }, { value: 'thu', label: 'Thu' },
+  { value: 'fri', label: 'Fri' }, { value: 'sat', label: 'Sat' }, { value: 'sun', label: 'Sun' },
+]
+
+const inWeekOrder = (days: readonly WeekdayName[]): WeekdayName[] => weekdayChoices.map((day) => day.value).filter((day) => days.includes(day))
 
 // the notification kinds in the order the page lists them; the same names as notificationKinds in src/notify.ts, which a test keeps in step (the page cannot import that module's code)
 export const notifyChoices: readonly { kind: NotificationKind, label: string, hint: string }[] = [
@@ -83,6 +119,23 @@ export const toForm = (config: Config, makeId: MakeId): Form => ({
   extraReviewInstructions: config.extraReviewInstructions,
   notifyEnabled: config.notifications?.enabled ?? false,
   notifyKinds: config.notifications?.kinds ?? allKinds,
+  cloneDir: config.cloneDir ?? '',
+  ...autoForm(config.autoReview ?? autoDefaults),
+})
+
+const autoForm = (auto: AutoReviewSettings): Pick<Form, 'autoEnabled' | 'autoInterval' | 'autoDays' | 'autoFrom' | 'autoTo' | 'autoOthers' | 'autoOwn' | 'autoDependabot' | 'autoConcurrency' | 'autoDailyLimit' | 'autoPostOthers' | 'autoPostDependabot'> => ({
+  autoEnabled: auto.enabled,
+  autoInterval: String(auto.intervalMinutes),
+  autoDays: inWeekOrder(auto.activeHours.days),
+  autoFrom: auto.activeHours.from,
+  autoTo: auto.activeHours.to,
+  autoOthers: auto.others,
+  autoOwn: auto.own,
+  autoDependabot: auto.dependabot,
+  autoConcurrency: String(auto.concurrency),
+  autoDailyLimit: String(auto.dailyLimit),
+  autoPostOthers: auto.post.others,
+  autoPostDependabot: auto.post.dependabot,
 })
 
 const personForm = (person: Person, id: string): PersonForm => {
@@ -122,6 +175,9 @@ export const parseMaxReviews = (text: string): number => {
   return /^\d+$/.test(value) ? Number(value) : Number.NaN
 }
 
+// a whole number as typed; anything else is NaN, which the checks refuse before a save
+const parseWhole = (text: string): number => parseMaxReviews(text)
+
 // the same rule and the same words as normalizeExtraInstructions and extraInstructionsProblem in src/config.ts, which a test keeps in step (the page cannot import that module's code)
 const extraBreaks = /\r\n?|[\u2028\u2029]/g
 
@@ -135,7 +191,7 @@ const extraProblem = (text: string): string | null => {
   return length > 2000 ? `Must be at most 2,000 characters; it has ${length.toLocaleString('en-US')}.` : null
 }
 
-// the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit (allowedHosts, cloneDir, agent, and autoReview) are carried over from the config it loaded
+// the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit (allowedHosts and agent) are carried over from the config it loaded
 export const toConfig = (form: Form, base: Config): Config => {
   const config: Config = {
     repo: form.repo.trim(),
@@ -166,16 +222,31 @@ export const toConfig = (form: Form, base: Config): Config => {
     selfReviewOverCap: form.selfReviewOverCap,
     extraReviewInstructions: normalizeExtra(form.extraReviewInstructions),
     allowedHosts: base.allowedHosts,
-    ...(base.cloneDir === undefined ? {} : { cloneDir: base.cloneDir }),
+    // an empty clone folder is left out, as the server reads it
+    ...(form.cloneDir.trim() === '' ? {} : { cloneDir: form.cloneDir.trim() }),
     agent: base.agent,
   }
   // absent means off, so a config that never had the key and a form still at that default leave it out
   const kinds = allKinds.filter((kind) => form.notifyKinds.includes(kind))
   const untouched = !form.notifyEnabled && kinds.length === allKinds.length
   if (base.notifications !== undefined || !untouched) config.notifications = { enabled: form.notifyEnabled, kinds }
-  if (base.autoReview !== undefined) config.autoReview = base.autoReview
+  // absent means off, so a config that never had the key and a form still at the defaults leave it out
+  const auto = autoSettings(form)
+  if (base.autoReview !== undefined || JSON.stringify(auto) !== JSON.stringify(autoDefaults)) config.autoReview = auto
   return config
 }
+
+const autoSettings = (form: Form): AutoReviewSettings => ({
+  enabled: form.autoEnabled,
+  intervalMinutes: parseWhole(form.autoInterval),
+  activeHours: { days: inWeekOrder(form.autoDays), from: form.autoFrom.trim(), to: form.autoTo.trim() },
+  others: form.autoOthers,
+  own: form.autoOwn,
+  dependabot: form.autoDependabot,
+  concurrency: parseWhole(form.autoConcurrency),
+  dailyLimit: parseWhole(form.autoDailyLimit),
+  post: { others: form.autoPostOthers, dependabot: form.autoPostDependabot },
+})
 
 // unsaved changes: the form differs from the saved config once both are normalized the same way
 export const isDirty = (form: Form, saved: Config): boolean =>
@@ -267,16 +338,98 @@ export const validateForm = (form: Form): FieldError[] => {
   if (!(Number.isSafeInteger(cap) && cap >= 1)) errors.push({ field: 'maxConcurrentReviews', message: 'Use a whole number of 1 or more.' })
   const extra = extraProblem(form.extraReviewInstructions)
   if (extra !== null) errors.push({ field: 'extraReviewInstructions', message: extra })
+  errors.push(...autoErrors(form))
   return errors
 }
 
-const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'extraReviewInstructions', 'notifyEnabled'])
+// the same rules as toAutoReview and toCloneDir in src/config.ts, which a test keeps in step
+const clockPattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/
+
+const autoErrors = (form: Form): FieldError[] => {
+  const errors: FieldError[] = []
+  const interval = parseWhole(form.autoInterval)
+  if (!(Number.isSafeInteger(interval) && interval >= 5)) errors.push({ field: 'autoInterval', message: 'Use a whole number of minutes, 5 or more.' })
+  if (form.autoDays.length === 0) errors.push({ field: 'autoDays', message: 'Choose at least one day.' })
+  const from = form.autoFrom.trim()
+  const to = form.autoTo.trim()
+  if (!clockPattern.test(from)) errors.push({ field: 'autoFrom', message: 'Use a 24-hour time such as 09:00.' })
+  if (!clockPattern.test(to)) errors.push({ field: 'autoTo', message: 'Use a 24-hour time such as 09:00.' })
+  // a window never crosses midnight
+  else if (clockPattern.test(from) && from >= to) errors.push({ field: 'autoTo', message: 'Must be after the start time.' })
+  for (const [field, text] of [['autoConcurrency', form.autoConcurrency], ['autoDailyLimit', form.autoDailyLimit]] as const) {
+    const value = parseWhole(text)
+    if (!(Number.isSafeInteger(value) && value >= 1)) errors.push({ field, message: 'Use a whole number of 1 or more.' })
+  }
+  const clone = form.cloneDir.trim()
+  if (clone !== '' && clone !== '~' && !clone.startsWith('~/') && !clone.startsWith('/')) {
+    errors.push({ field: 'cloneDir', message: 'Give an absolute path or a path under ~, such as ~/dev/orbit.' })
+  }
+  return errors
+}
+
+export type PostKind = 'others' | 'dependabot'
+
+// turning a posting switch on is the one change that asks first; turning one off, or saving one that is already on, does not
+export const wantsPostConfirm = (form: Pick<Form, 'autoPostOthers' | 'autoPostDependabot'>, kind: PostKind, on: boolean): boolean =>
+  on && !(kind === 'others' ? form.autoPostOthers : form.autoPostDependabot)
+
+export type PostingAsk = { title: string, lines: string[], confirm: string, cancel: string }
+
+// what the confirmation says: what will post, and under which login (the gh login's name when the viewer is not yet known)
+export const postingAsk = (kind: PostKind, login: string): PostingAsk => {
+  const who = login === '' ? 'your gh login' : `@${login}`
+  if (kind === 'others') {
+    return {
+      title: `Let auto-review post to GitHub as ${who}?`,
+      lines: [
+        `Auto-review runs on other people's PRs will post their report as ${who}: an approval, a request for changes, or a comment, chosen by the findings and the checks.`,
+        'Your own PRs never post, and never get fixes, whatever this says.',
+        'It applies to runs that start after you save.',
+      ],
+      confirm: `Post as ${who}`,
+      cancel: 'Cancel',
+    }
+  }
+  return {
+    title: `Let scheduled Dependabot sweeps post to GitHub as ${who}?`,
+    lines: [
+      `Each scheduled sweep will have its reviewers post as ${who}: an approval for a bump with nothing above P3 and green checks, and a comment or a request for changes for the rest.`,
+      'A sweep you start by hand already posts this way, with or without this switch.',
+      'It applies to sweeps that start after you save.',
+    ],
+    confirm: `Post as ${who}`,
+    cancel: 'Cancel',
+  }
+}
+
+const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'extraReviewInstructions', 'notifyEnabled', 'cloneDir'])
+
+// the server's autoReview paths and the fields they land on
+const autoFields: Readonly<Record<string, string>> = {
+  enabled: 'autoEnabled',
+  intervalMinutes: 'autoInterval',
+  others: 'autoOthers',
+  own: 'autoOwn',
+  dependabot: 'autoDependabot',
+  concurrency: 'autoConcurrency',
+  dailyLimit: 'autoDailyLimit',
+  'activeHours.days': 'autoDays',
+  'activeHours.from': 'autoFrom',
+  'activeHours.to': 'autoTo',
+  'post.others': 'autoPostOthers',
+  'post.dependabot': 'autoPostDependabot',
+}
 
 const capitalize = (text: string): string => text === '' ? text : `${text[0]!.toUpperCase()}${text.slice(1)}`
 
 // a refusal from PUT /api/config ("people[2].avatar must be ...") placed on the field it names;
 // anything the form has no field for (an unknown key) stays a message for the whole form
 export const serverError = (message: string, form: Form): FieldError => {
+  const auto = /^autoReview\.((?:activeHours|post)\.\w+|\w+) (.+)$/.exec(message)
+  if (auto !== null) {
+    const field = autoFields[auto[1] ?? '']
+    return field === undefined ? { field: null, message } : { field, message: `${capitalize(auto[2] ?? '')}.` }
+  }
   const match = /^(config|people\[(\d+)\]|tickets\[(\d+)\])\.(\w+) (.+)$/.exec(message)
   if (match === null) return { field: null, message: capitalize(message) }
   // a setting the form has no field for keeps its path, so the message still says which

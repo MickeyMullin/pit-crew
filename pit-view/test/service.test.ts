@@ -12,6 +12,7 @@ import {
   install, label, logFiles, parseLaunchctlPrint, plistFile, renderPlist, restart, ServiceError, servicePath, status, templateFile, uninstall,
 } from '../scripts/service.ts'
 import type { Answer, ServiceDeps } from '../scripts/service.ts'
+import { loginAgentFile } from '../src/server.ts'
 import { fakeRunner, failed, ok, tempDir } from './helpers.ts'
 
 const appRoot = join(import.meta.dirname, '..')
@@ -233,4 +234,8 @@ test('status is healthy only when the agent runs and its own process answers as 
   } finally {
     await w.cleanup()
   }
+})
+
+test('the server looks for the login agent where the installer writes it', () => {
+  assert.equal(loginAgentFile('/home/tester'), plistFile('/home/tester'))
 })

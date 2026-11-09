@@ -681,9 +681,27 @@ test('GET /api/instance names the default instance, its config file under ~ and 
   try {
     const { status, body } = await getJson<Record<string, unknown>>(`${h.base}/api/instance`)
     assert.equal(status, 200)
-    assert.deepEqual(body, { name: '', configPath: '~/.config/pit-view/config.json', pid: process.pid })
+    assert.deepEqual(body, { name: '', configPath: '~/.config/pit-view/config.json', pid: process.pid, loginAgent: { installed: false } })
   } finally {
     await h.cleanup()
+  }
+})
+
+test('GET /api/instance says whether the optional login agent is installed, by its plist under the home folder', async () => {
+  const h = await setup({ files: { 'Library/LaunchAgents/com.mickey.pit-view.plist': '<plist></plist>' } })
+  try {
+    const { body } = await getJson<{ loginAgent: { installed: boolean } }>(`${h.base}/api/instance`)
+    assert.deepEqual(body.loginAgent, { installed: true })
+  } finally {
+    await h.cleanup()
+  }
+  // another launch agent in the same folder is not Pit View's
+  const other = await setup({ files: { 'Library/LaunchAgents/com.example.other.plist': '<plist></plist>' } })
+  try {
+    const { body } = await getJson<{ loginAgent: { installed: boolean } }>(`${other.base}/api/instance`)
+    assert.deepEqual(body.loginAgent, { installed: false })
+  } finally {
+    await other.cleanup()
   }
 })
 
@@ -710,7 +728,7 @@ test('a dev instance runs beside the app with its own config and cache, sharing 
   })
   try {
     const { body } = await getJson<Record<string, unknown>>(`${server.url}/api/instance`)
-    assert.deepEqual(body, { name: 'dev', configPath: '~/.config/pit-view-dev/config.json', pid: process.pid })
+    assert.deepEqual(body, { name: 'dev', configPath: '~/.config/pit-view-dev/config.json', pid: process.pid, loginAgent: { installed: false } })
     const stored = (await getJson<Config>(`${server.url}/api/config`)).body
     const saved = await saveConfigAs(server, { ...stored, repo: 'octo-org/dev-only' })
     assert.equal(saved.status, 200)

@@ -8,13 +8,13 @@ import { tokenHeader } from './agent.ts'
 import { byId, h, setText, svg } from './dom.ts'
 import type { Shape } from './dom.ts'
 import { browserTimeZone, formatClock, parseTimeFormat, setTimeFormat } from './format.ts'
-import { loadInstance, showInstance } from './instance.ts'
+import { loadInstance, loginAgentText, showInstance } from './instance.ts'
 import {
   avatarChoices, changeKind, configChannel, configPathText, densityChoices, errorId, fieldId, isDirty, kindChoices, needsRefresh,
   newPerson, newTicket, notifyChoices, openSuggestions, previewPerson, refreshChoices, sampleTextsFrom, serverError, sourceChoices, ticketSample, timeFormatChoices,
-  toConfig, todayChoices, toForm, validateForm,
+  postingAsk, toConfig, todayChoices, toForm, validateForm, wantsPostConfirm, weekdayChoices,
 } from './settings-form.ts'
-import type { AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
+import type { AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, PostKind, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
 import { readToken } from './runapi.ts'
 import { mountStickyHeader, trackHeight } from './sticky.ts'
 import { mountThemeToggle } from './theme.ts'
@@ -41,6 +41,8 @@ type PageState = {
   checking: boolean
   saving: boolean
   status: { text: string, tone: Tone } | null
+  // the posting switch whose confirmation is open; the switch stays off until it is confirmed
+  postAsk: PostKind | null
 }
 
 let page: PageState | null = null
@@ -165,8 +167,11 @@ const renderPeople = (): void => {
   renderSuggestions()
 }
 
+// a group of checkboxes (the active days) takes focus on its first box
 const focusField = (key: FieldKey): void => {
-  document.getElementById(fieldId(key))?.focus()
+  const field = document.getElementById(fieldId(key))
+  const target = field instanceof HTMLFieldSetElement ? field.querySelector<HTMLElement>('input') : field
+  target?.focus()
 }
 
 const addPerson = (login = ''): void => {
@@ -300,7 +305,15 @@ const removeTicket = (id: string): void => {
 
 // the fixed fields
 
-const staticText = ['repo', 'viewer', 'idleMinutes', 'bots', 'reportsDir', 'maxConcurrentReviews', 'extraReviewInstructions'] as const
+const staticText = ['repo', 'viewer', 'idleMinutes', 'bots', 'reportsDir', 'maxConcurrentReviews', 'extraReviewInstructions', 'cloneDir', 'autoInterval', 'autoFrom', 'autoTo', 'autoConcurrency', 'autoDailyLimit'] as const
+
+// the auto-review switches that need no question, by form key
+const autoSwitches = ['autoEnabled', 'autoOthers', 'autoOwn', 'autoDependabot'] as const
+
+const postSwitches: readonly { kind: PostKind, key: 'autoPostOthers' | 'autoPostDependabot' }[] = [
+  { kind: 'others', key: 'autoPostOthers' },
+  { kind: 'dependabot', key: 'autoPostDependabot' },
+]
 
 const fillStatic = (): void => {
   if (page === null) return
@@ -316,6 +329,20 @@ const fillStatic = (): void => {
   byId<HTMLInputElement>(fieldId('showAgentColumn')).checked = form.showAgentColumn
   byId<HTMLInputElement>(fieldId('selfReviewOverCap')).checked = form.selfReviewOverCap
   byId<HTMLInputElement>(fieldId('notifyEnabled')).checked = form.notifyEnabled
+  for (const key of autoSwitches) byId<HTMLInputElement>(fieldId(key)).checked = form[key]
+  for (const { key } of postSwitches) byId<HTMLInputElement>(fieldId(key)).checked = form[key]
+  byId('auto-days').replaceChildren(...weekdayChoices.map((day) => {
+    const box = h('input', { id: fieldId(`autoDay.${day.value}`), type: 'checkbox' })
+    box.checked = form.autoDays.includes(day.value)
+    box.addEventListener('change', () => {
+      if (page === null) return
+      const without = page.form.autoDays.filter((chosen) => chosen !== day.value)
+      page.form.autoDays = box.checked ? [...without, day.value] : without
+      changed()
+    })
+    return h('label', { class: 'check' }, box, day.label)
+  }))
+  showPostAsk()
   byId('notify-kinds').replaceChildren(...notifyChoices.map((choice) => {
     const id = fieldId(`notifyKind.${choice.kind}`)
     const box = h('input', { id, type: 'checkbox', 'aria-describedby': `${id}-hint` })
@@ -330,7 +357,72 @@ const fillStatic = (): void => {
   }))
 }
 
+// the login a posting question names: the viewer typed in the form, else the gh login
+const postingLogin = (): string => page === null ? '' : page.form.viewer.trim() || page.ghLogin
+
+// the open confirmation under its switch, and none under the other; Cancel and the confirm button are real buttons inside the group, and focus returns to the switch
+const showPostAsk = (): void => {
+  if (page === null) return
+  for (const { kind, key } of postSwitches) {
+    const slot = byId(`auto-post-ask-${kind}`)
+    if (page.postAsk !== kind) {
+      slot.hidden = true
+      slot.replaceChildren()
+      continue
+    }
+    const ask = postingAsk(kind, postingLogin())
+    const confirm = h('button', { type: 'button', class: 'button button-primary', 'data-focus-key': `post-ask-confirm:${kind}` }, ask.confirm)
+    const cancel = h('button', { type: 'button', class: 'button' }, ask.cancel)
+    const close = (): void => {
+      if (page === null) return
+      page.postAsk = null
+      showPostAsk()
+      byId<HTMLInputElement>(fieldId(key)).focus()
+    }
+    confirm.addEventListener('click', () => {
+      if (page === null) return
+      page.form[key] = true
+      byId<HTMLInputElement>(fieldId(key)).checked = true
+      changed()
+      close()
+    })
+    cancel.addEventListener('click', close)
+    slot.setAttribute('aria-labelledby', `post-ask-title-${kind}`)
+    slot.replaceChildren(
+      h('p', { id: `post-ask-title-${kind}`, class: 'post-ask-title' }, ask.title),
+      ...ask.lines.map((line) => h('p', {}, line)),
+      h('div', { class: 'post-ask-buttons' }, confirm, cancel))
+    slot.hidden = false
+    if (slot.contains(document.activeElement) === false) confirm.focus()
+  }
+}
+
 const bindStatic = (): void => {
+  for (const key of autoSwitches) {
+    const box = byId<HTMLInputElement>(fieldId(key))
+    box.addEventListener('change', () => {
+      if (page === null) return
+      page.form[key] = box.checked
+      changed()
+    })
+  }
+  // turning a posting switch on asks first and stays off until confirmed; turning one off is immediate
+  for (const { kind, key } of postSwitches) {
+    const box = byId<HTMLInputElement>(fieldId(key))
+    box.addEventListener('change', () => {
+      if (page === null) return
+      if (wantsPostConfirm(page.form, kind, box.checked)) {
+        box.checked = false
+        page.postAsk = kind
+        showPostAsk()
+        return
+      }
+      page.postAsk = null
+      page.form[key] = box.checked
+      showPostAsk()
+      changed()
+    })
+  }
   for (const key of staticText) {
     const input = byId<HTMLInputElement>(fieldId(key))
     input.addEventListener('input', () => {
@@ -521,6 +613,7 @@ const save = async (): Promise<void> => {
     current.form = toForm(current.saved, makeId)
     current.errors = []
     current.checking = false
+    current.postAsk = null
     renderAll()
     const at = formatClock(Date.now())
     setStatus(needsRefresh(before, current.saved) ? `Saved at ${at}. The dashboard is refreshing from GitHub with these settings.` : `Saved at ${at}.`, 'ok')
@@ -547,6 +640,7 @@ const revert = (): void => {
   page.errors = []
   page.checking = false
   page.status = null
+  page.postAsk = null
   renderAll()
   setStatus('Changes discarded.')
 }
@@ -566,6 +660,7 @@ const loadExtras = async (): Promise<void> => {
   setText(byId('f-viewer-hint'), `Defaults to the gh login${page.ghLogin === '' ? '' : `, ${page.ghLogin}`}. Uses gh's own token; nothing else to sign in to.`)
   refreshSamples()
   renderSuggestions()
+  showPostAsk()
 }
 
 const load = async (): Promise<void> => {
@@ -592,6 +687,7 @@ const load = async (): Promise<void> => {
     checking: false,
     saving: false,
     status: null,
+    postAsk: null,
   }
   renderAll()
   state.hidden = true
@@ -608,6 +704,7 @@ void loadInstance().then((info) => {
   if (info === null) return
   showInstance(info)
   setText(byId('config-path'), info.configPath)
+  setText(byId('login-agent-status'), loginAgentText(info.loginAgent))
 })
 mountStickyHeader(byId('site-header'))
 trackHeight(byId('save-bar'), '--save-bar-height')
