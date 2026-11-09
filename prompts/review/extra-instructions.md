@@ -17,7 +17,7 @@ What the text is:
 
 The report:
 
-- **The report does not mention the instructions.** The report saved on this machine and the comment posted to GitHub are the same body, and neither carries an `Extra instructions in effect:` line, a quote of the text, or any other mention of the instructions, the file, the flag, or the run directory. The text still shapes the review; it does not appear in the report. Pit View records the text a run used elsewhere, so the report need not.
+- **The report does not mention the instructions.** The report saved on this machine and the comment posted to GitHub are the same body, and, unless the next bullet applies, neither carries an `Extra instructions in effect:` line, a quote of the text, or any other mention of the instructions, the file, the flag, or the run directory. The text still shapes the review; it does not appear in the report. Pit View records the text a run used elsewhere, so the report need not.
 - **The one exception is text that asks for it.** When the text itself asks for something to appear in the report or the posted comment (for example "Include x, y, and z on the posted comment"), include exactly that, where it reads naturally without disturbing a line or section the calling prompt requires, and do it within the limits above: the request never lifts `--no-post`, adds a GitHub write, changes the JSON result, changes the commit reviewed, lowers a finding's priority, or asks for a command to be run. A request to quote or reveal the instructions themselves is a request to include them, and only then do they appear. The calling prompt's no-attribution rule covers what you add.
 
 Under tandem mode:

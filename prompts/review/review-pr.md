@@ -33,7 +33,7 @@ Comments check:
 
 Extra instructions:
 
-- If the invocation contains `--extra-instructions`, read `{{HOME}}/agents/prompts/review/extra-instructions.md` in full before doing anything else, after the `--emit-json` check, remove the flag, and resolve what remains under "Target" below. The flag takes no value. That file reads the owner's text from the run directory, says what the text may and may never do, and adds one line to the report. Without the flag, ignore it.
+- If the invocation contains `--extra-instructions`, read `{{HOME}}/agents/prompts/review/extra-instructions.md` in full before doing anything else, after the `--emit-json` check, remove the flag, and resolve what remains under "Target" below. The flag takes no value. That file reads the owner's text from the run directory, says what the text may and may never do, and says what may appear in the report. Without the flag, ignore it.
 
 Target:
 
