@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import type { AutoReviewView } from '../src/autoreview.ts'
 import type { Tick } from '../src/cache.ts'
 import { setTimeFormat } from '../public/format.ts'
-import { indicator, popoverModel, runNowRequest, runNowResult, skipWords } from '../public/autoreviewbar.ts'
+import { indicator, popoverFocus, popoverModel, runNowRequest, runNowResult, skipWords } from '../public/autoreviewbar.ts'
 
 setTimeFormat('12h')
 
@@ -132,4 +132,39 @@ test('the dashboard\'s header holds the auto-review button hidden by default, be
   assert.doesNotMatch(block, /aria-live|role="status"|role="alert"/)
   // the popover starts hidden and is a labeled dialog
   assert.match(block, /<div id="auto-review-popover"[^>]*role="dialog"[^>]*aria-label="Auto-review"[^>]*hidden>/)
+})
+
+test('after the popover is rebuilt, focus goes back to the control that had it, or to the header button when that control is gone or disabled', () => {
+  // focus was outside the popover: nothing to restore
+  assert.deepEqual(popoverFocus(null, ['auto-run-now', 'auto-settings']), { target: 'none' })
+  // the same control is still there and enabled
+  assert.deepEqual(popoverFocus('auto-run-now', ['auto-run-now', 'auto-settings']), { target: 'key', key: 'auto-run-now' })
+  assert.deepEqual(popoverFocus('auto-settings', ['auto-settings']), { target: 'key', key: 'auto-settings' })
+  // Run now is disabled while it starts, so it is not in the enabled list
+  assert.deepEqual(popoverFocus('auto-run-now', ['auto-settings']), { target: 'toggle' })
+  // focus was on something with no key, such as a PR link that the rebuild removed
+  assert.deepEqual(popoverFocus('', ['auto-run-now']), { target: 'toggle' })
+  assert.deepEqual(popoverFocus('auto-run-now', []), { target: 'toggle' })
+})
+
+test('the popover remembers its focus before it rebuilds and restores it after, and its Settings link has a focus key', async () => {
+  const source = await readFile(new URL('../public/autoreviewmenu.ts', import.meta.url), 'utf8')
+  const draw = source.slice(source.indexOf('const draw = '), source.indexOf('const loadTicks'))
+  const before = draw.indexOf('document.activeElement')
+  const replace = draw.indexOf('popover.replaceChildren()')
+  const after = draw.indexOf('popoverFocus(')
+  assert.ok(before > -1 && before < replace, 'focus is read before the popover is cleared')
+  assert.ok(after > draw.indexOf('append(popover'), 'focus is restored after the new content is in')
+  assert.match(source, /'data-focus-key': 'auto-settings'/)
+  assert.match(draw, /button\.focus\(/)
+})
+
+test('DESIGN.md does not say the clone folder is missing from the Settings page, and says where it is edited', async () => {
+  const design = await readFile(new URL('../DESIGN.md', import.meta.url), 'utf8')
+  const row = design.split('\n').find((line) => line.startsWith('| `cloneDir` |')) ?? ''
+  assert.notEqual(row, '')
+  assert.doesNotMatch(row, /Not on the Settings page/)
+  assert.doesNotMatch(row, /carries it over unchanged/)
+  assert.match(row, /Edited in the Auto-review section of the Settings page/)
+  assert.match(row, /is checked at every start, not on save/)
 })

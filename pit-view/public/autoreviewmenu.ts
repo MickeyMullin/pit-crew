@@ -2,7 +2,7 @@
 // the header's auto-review button and its popover (autoreviewbar.ts says what each reads): hidden until the config has autoReview, a button rather than a live region so a tick never announces itself, the last ticks fetched when it opens, and Run now with the per-start token
 import type { Tick } from '../src/cache.ts'
 import type { View } from '../src/poller.ts'
-import { indicator, popoverModel, runNowRequest, runNowResult } from './autoreviewbar.ts'
+import { indicator, popoverFocus, popoverModel, runNowRequest, runNowResult } from './autoreviewbar.ts'
 import type { PopoverModel } from './autoreviewbar.ts'
 import { append, h, newTab, setText } from './dom.ts'
 import { getJson, sendRun } from './runapi.ts'
@@ -67,7 +67,7 @@ export const createAutoReviewMenu = ({ root, button, popover, token, nowMs, view
         type: 'button', class: 'button', 'data-auto-run': '', 'data-focus-key': 'auto-run-now',
         disabled: model.runNow.disabled || running, title: model.runNow.reason,
       }, running ? 'Starting…' : 'Run now'),
-      h('a', { class: 'auto-settings', href: '/settings.html#auto-review' }, 'Settings')))
+      h('a', { class: 'auto-settings', 'data-focus-key': 'auto-settings', href: '/settings.html#auto-review' }, 'Settings')))
     if (model.runNow.reason !== null) parts.push(h('p', { class: 'auto-note' }, model.runNow.reason))
     parts.push(h('p', { class: 'auto-note', role: 'status' }, message))
     return parts
@@ -82,8 +82,15 @@ export const createAutoReviewMenu = ({ root, button, popover, token, nowMs, view
     const sig = JSON.stringify([model, ticksFailed, message, running])
     if (sig === drawn) return
     drawn = sig
+    // a rebuild that replaces the focused control puts focus on its replacement, or on the header button when that is gone or disabled
+    const active = document.activeElement
+    const focusedKey = active instanceof HTMLElement && popover.contains(active) ? active.dataset.focusKey ?? '' : null
     popover.replaceChildren()
     append(popover, [h('h2', { class: 'auto-title' }, 'Auto-review'), ...content(model)])
+    const enabledKeys = [...popover.querySelectorAll<HTMLElement>('[data-focus-key]')].filter((el) => !(el instanceof HTMLButtonElement && el.disabled)).map((el) => el.dataset.focusKey ?? '')
+    const focus = popoverFocus(focusedKey, enabledKeys)
+    if (focus.target === 'toggle') button.focus({ preventScroll: true })
+    else if (focus.target === 'key') popover.querySelector<HTMLElement>(`[data-focus-key="${CSS.escape(focus.key)}"]`)?.focus({ preventScroll: true })
   }
 
   const loadTicks = async (): Promise<void> => {

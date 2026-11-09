@@ -108,3 +108,11 @@ export const runNowResult = (status: number, body: { started: boolean, tick: num
   const text = sentence(error ?? '')
   return text === '' ? `Pit View refused with status ${status}.` : `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 }
+
+export type PopoverFocus = { target: 'none' } | { target: 'toggle' } | { target: 'key', key: string }
+
+// where focus goes when the popover is rebuilt: focusedKey is the data-focus-key of the control that had focus inside it ('' for one without a key, null when focus was outside), enabledKeys the keys of the enabled controls in the new content; the same control when it is still enabled, otherwise the header button, so focus never falls to the page
+export const popoverFocus = (focusedKey: string | null, enabledKeys: readonly string[]): PopoverFocus => {
+  if (focusedKey === null) return { target: 'none' }
+  return focusedKey !== '' && enabledKeys.includes(focusedKey) ? { target: 'key', key: focusedKey } : { target: 'toggle' }
+}
