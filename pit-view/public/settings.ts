@@ -690,16 +690,14 @@ const revert = (): void => {
   setStatus('Changes discarded.')
 }
 
-// the view (for the sample keys), the gh login, and the suggestions are extras: the form works without them
+// the view (for the gh login and sample keys) and the suggestions are extras: the form works without them
 const loadExtras = async (): Promise<void> => {
-  const [view, gh, suggestions] = await Promise.all([
+  const [view, suggestions] = await Promise.all([
     getJson<View>('/api/view').catch(() => null),
-    getJson<{ login: string }>('/api/gh-login').catch(() => null),
     getJson<Suggestion[]>('/api/people/suggestions').catch(() => []),
   ])
   if (page === null) return
-  // the account gh is signed in as, never the view's viewer, which is the configured one when there is one
-  page.ghLogin = gh?.login ?? ''
+  page.ghLogin = view?.viewer.login ?? ''
   page.texts = sampleTextsFrom(view)
   page.suggestions = suggestions
   const viewer = byId<HTMLInputElement>(fieldId('viewer'))
