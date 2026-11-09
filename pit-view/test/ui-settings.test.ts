@@ -15,7 +15,7 @@ import type { View } from '../src/poller.ts'
 import {
   aliasOf, changeKind, colorFor, contrastWithWhite, errorId, fieldId, initialsOf, isDirty, kindDefaults, needsRefresh, newPerson, newTicket,
   idleLimits, notifyChoices, openSuggestions, parseBots, parseIdleMinutes, parseMaxReviews, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, timeFormatChoices, serverError, ticketSample, toConfig, toForm,
-  validateForm, autoDefaults, postingAsk, postingLoginOf, postAskIsStale, weekdayChoices, wantsPostConfirm,
+  validateForm, autoDefaults, postingAsk, postingLoginOf, postAskIsStale, postSwitchesToTurnOff, weekdayChoices, wantsPostConfirm,
 } from '../public/settings-form.ts'
 import type { Form, TicketForm } from '../public/settings-form.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -702,4 +702,58 @@ test('an open posting question closes when the login it names changes, from the 
   assert.match(stale, /page\.postAsk = null/)
   assert.doesNotMatch(stale, /\.focus\(/, 'closing does not steal focus from the field being typed in')
   assert.match(source, /page\.postAskLogin = postingLogin\(\)/)
+})
+
+test('a posting switch confirmed for one login turns back off when the login the form would post as changes before Save, and stays off', () => {
+  const on = { autoPostOthers: true, autoPostDependabot: true }
+  // two switches confirmed for different logins: only the one whose login no longer matches turns off
+  assert.deepEqual(postSwitchesToTurnOff({ others: 'vera-quill', dependabot: 'ines-hale' }, on, 'ines-hale'), ['others'])
+  assert.deepEqual(postSwitchesToTurnOff({ others: 'vera-quill', dependabot: 'ines-hale' }, on, 'rafe-moss'), ['others', 'dependabot'])
+  assert.deepEqual(postSwitchesToTurnOff({ others: 'vera-quill', dependabot: 'vera-quill' }, on, 'vera-quill'), [])
+  // a switch already saved on has no record, so a login change leaves it alone
+  assert.deepEqual(postSwitchesToTurnOff({ dependabot: 'vera-quill' }, on, 'ines-hale'), ['dependabot'])
+  assert.deepEqual(postSwitchesToTurnOff({}, on, 'ines-hale'), [])
+  // a record whose switch is not on in the form turns nothing off
+  assert.deepEqual(postSwitchesToTurnOff({ others: 'vera-quill' }, { autoPostOthers: false, autoPostDependabot: false }, 'ines-hale'), [])
+  // the login changes and changes back: the caller clears the record when it turns the switch off, so the next decision finds nothing and the switch stays off
+  const records: { others?: string } = { others: 'vera-quill' }
+  assert.deepEqual(postSwitchesToTurnOff(records, on, 'ines-hale'), ['others'])
+  delete records.others
+  assert.deepEqual(postSwitchesToTurnOff(records, on, 'vera-quill'), [])
+  // an empty viewer falls back to the gh login: confirmed for the gh login, then the viewer is typed, then cleared again
+  assert.deepEqual(postSwitchesToTurnOff({ others: 'vera-quill' }, on, postingLoginOf('', 'vera-quill')), [])
+  assert.deepEqual(postSwitchesToTurnOff({ others: 'vera-quill' }, on, postingLoginOf('ines-hale', 'vera-quill')), ['others'])
+  // confirmed while the gh login was still unknown (named ''), then the gh login arrives
+  assert.deepEqual(postSwitchesToTurnOff({ others: '' }, on, postingLoginOf('', 'vera-quill')), ['others'])
+})
+
+test('the page records the login each posting switch was confirmed for, turns the switch off with a notice when the login changes, and clears the record on cancel, on switching off, on save, and on reload', async () => {
+  const source = await readFile(new URL('../public/settings.ts', import.meta.url), 'utf8')
+  // the confirm click records the login it named
+  const confirm = source.slice(source.indexOf("confirm.addEventListener('click'"), source.indexOf("cancel.addEventListener('click'"))
+  assert.match(confirm, /page\.postConfirmed\[kind\] = page\.postAskLogin/)
+  // one function applies the pure decision, for both paths that change the login
+  const turnOff = source.slice(source.indexOf('const postNoticeText'), source.indexOf('// the open confirmation under its switch'))
+  assert.match(turnOff, /postSwitchesToTurnOff\(/)
+  assert.match(turnOff, /page\.form\[key\] = false/)
+  assert.match(turnOff, /\.checked = false/)
+  assert.match(turnOff, /delete page\.postConfirmed\[/)
+  assert.match(turnOff, /changed\(\)/)
+  assert.match(turnOff, /Turned off because the login changed\. Turn it on again to be asked again\./)
+  assert.doesNotMatch(turnOff, /\.focus\(/, 'the notice does not steal focus from the viewer field')
+  const viewerHandler = source.slice(source.indexOf("input.addEventListener('input'"), source.indexOf("const refresh = byId"))
+  assert.match(viewerHandler, /turnOffUnconfirmed\(\)/)
+  const extras = source.slice(source.indexOf('const loadExtras'), source.indexOf('const load = '))
+  assert.ok(extras.indexOf('turnOffUnconfirmed()') > extras.indexOf('page.ghLogin ='), 'checked after the gh login is set')
+  // cancel and turning a switch off clear the record
+  const cancel = source.slice(source.indexOf("cancel.addEventListener('click'"), source.indexOf("slot.setAttribute('aria-labelledby'"))
+  assert.match(cancel, /delete page\.postConfirmed\[kind\]/)
+  const bound = source.slice(source.indexOf('// turning a posting switch on asks first'), source.indexOf('const refresh = byId'))
+  assert.match(bound, /delete page\.postConfirmed\[kind\]/)
+  // save and revert and a new page start with no records
+  const saved = source.slice(source.indexOf('current.saved = body as Config'), source.indexOf('renderAll()', source.indexOf('current.saved = body as Config')))
+  assert.match(saved, /current\.postConfirmed = \{\}/)
+  const revert = source.slice(source.indexOf('const revert'), source.indexOf('// the view (for the gh login'))
+  assert.match(revert, /page\.postConfirmed = \{\}/)
+  assert.match(source, /postAsk: null,\s*postAskLogin: '',\s*postConfirmed: \{\}/)
 })

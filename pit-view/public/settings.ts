@@ -12,9 +12,9 @@ import { loadInstance, loginAgentText, showInstance } from './instance.ts'
 import {
   avatarChoices, changeKind, configChannel, configPathText, densityChoices, errorId, fieldId, isDirty, kindChoices, needsRefresh,
   newPerson, newTicket, notifyChoices, openSuggestions, previewPerson, refreshChoices, sampleTextsFrom, serverError, sourceChoices, ticketSample, timeFormatChoices,
-  postAskIsStale, postingAsk, postingLoginOf, toConfig, todayChoices, toForm, validateForm, wantsPostConfirm, weekdayChoices,
+  postAskIsStale, postSwitchesToTurnOff, postingAsk, postingLoginOf, toConfig, todayChoices, toForm, validateForm, wantsPostConfirm, weekdayChoices,
 } from './settings-form.ts'
-import type { AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, PostKind, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
+import type { AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, PostConfirmed, PostKind, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
 import { readToken } from './runapi.ts'
 import { mountStickyHeader, trackHeight } from './sticky.ts'
 import { mountThemeToggle } from './theme.ts'
@@ -45,6 +45,8 @@ type PageState = {
   postAsk: PostKind | null
   // the login that question named when it was drawn
   postAskLogin: string
+  // the login each posting switch was confirmed for, until the form is saved or reloaded; a switch already saved on has none
+  postConfirmed: PostConfirmed
 }
 
 let page: PageState | null = null
@@ -369,6 +371,26 @@ const closeStalePostAsk = (): void => {
   showPostAsk()
 }
 
+const postNoticeText = 'Turned off because the login changed. Turn it on again to be asked again.'
+
+// a switch confirmed for a login the form would no longer post as goes back off, with a short notice beside it and no move of focus, and its record is cleared so it stays off until turned on again
+const turnOffUnconfirmed = (): void => {
+  if (page === null) return
+  const kinds = postSwitchesToTurnOff(page.postConfirmed, page.form, postingLogin())
+  if (kinds.length === 0) return
+  for (const kind of kinds) {
+    const key = postSwitches.find((entry) => entry.kind === kind)?.key
+    if (key === undefined) continue
+    page.form[key] = false
+    byId<HTMLInputElement>(fieldId(key)).checked = false
+    delete page.postConfirmed[kind]
+    const notice = byId(`${fieldId(key)}-notice`)
+    setText(notice, postNoticeText)
+    notice.hidden = false
+  }
+  changed()
+}
+
 // the open confirmation under its switch, and none under the other; Cancel and the confirm button are real buttons inside the group, and focus returns to the switch
 const showPostAsk = (): void => {
   if (page === null) return
@@ -391,11 +413,15 @@ const showPostAsk = (): void => {
     confirm.addEventListener('click', () => {
       if (page === null) return
       page.form[key] = true
+      page.postConfirmed[kind] = page.postAskLogin
       byId<HTMLInputElement>(fieldId(key)).checked = true
       changed()
       close()
     })
-    cancel.addEventListener('click', close)
+    cancel.addEventListener('click', () => {
+      if (page !== null) delete page.postConfirmed[kind]
+      close()
+    })
     slot.setAttribute('aria-labelledby', `post-ask-title-${kind}`)
     slot.replaceChildren(
       h('p', { id: `post-ask-title-${kind}`, class: 'post-ask-title' }, ask.title),
@@ -429,6 +455,8 @@ const bindStatic = (): void => {
       }
       page.postAsk = null
       page.form[key] = box.checked
+      delete page.postConfirmed[kind]
+      byId(`${fieldId(key)}-notice`).hidden = true
       showPostAsk()
       changed()
     })
@@ -440,7 +468,10 @@ const bindStatic = (): void => {
       page.form[key] = input.value
       // the repo fills {repo} in the samples
       if (key === 'repo') refreshSamples()
-      if (key === 'viewer') closeStalePostAsk()
+      if (key === 'viewer') {
+        closeStalePostAsk()
+        turnOffUnconfirmed()
+      }
       changed()
     })
   }
@@ -578,6 +609,7 @@ const changed = (): void => {
 }
 
 const renderAll = (): void => {
+  for (const { key } of postSwitches) byId(`${fieldId(key)}-notice`).hidden = true
   fillStatic()
   renderPeople()
   renderTickets()
@@ -625,6 +657,7 @@ const save = async (): Promise<void> => {
     current.errors = []
     current.checking = false
     current.postAsk = null
+    current.postConfirmed = {}
     renderAll()
     const at = formatClock(Date.now())
     setStatus(needsRefresh(before, current.saved) ? `Saved at ${at}. The dashboard is refreshing from GitHub with these settings.` : `Saved at ${at}.`, 'ok')
@@ -652,6 +685,7 @@ const revert = (): void => {
   page.checking = false
   page.status = null
   page.postAsk = null
+  page.postConfirmed = {}
   renderAll()
   setStatus('Changes discarded.')
 }
@@ -672,6 +706,7 @@ const loadExtras = async (): Promise<void> => {
   refreshSamples()
   renderSuggestions()
   closeStalePostAsk()
+  turnOffUnconfirmed()
   showPostAsk()
 }
 
@@ -701,6 +736,7 @@ const load = async (): Promise<void> => {
     status: null,
     postAsk: null,
     postAskLogin: '',
+    postConfirmed: {},
   }
   renderAll()
   state.hidden = true
