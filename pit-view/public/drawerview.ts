@@ -145,7 +145,7 @@ export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headR
     extraBox: option.extraInstructions === undefined ? null : {
       label: 'Special instructions',
       toggle: 'Add special instructions for this review',
-      detail: 'For this review only. The reviewer reads them from a file, and the report quotes them, so a posted report shows them on GitHub. Nothing is sent unless this is checked and the box has text. Unchecking hides the box and keeps what it holds. At most 2,000 characters.',
+      detail: 'For this review only. The reviewer reads them from a file, and the report does not show them unless they ask for that. Nothing is sent unless this is checked and the box has text. Unchecking hides the box and keeps what it holds. At most 2,000 characters.',
       checked: extraOn,
       text: extraText ?? '',
     },

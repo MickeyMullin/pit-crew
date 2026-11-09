@@ -1310,7 +1310,7 @@ test('the box is named Special instructions, its checkbox says they are used, an
     assert.equal(box?.text, '')
     assert.equal(box?.label, 'Special instructions')
     assert.equal(box?.toggle, 'Add special instructions for this review')
-    assert.equal(box?.detail, 'For this review only. The reviewer reads them from a file, and the report quotes them, so a posted report shows them on GitHub. Nothing is sent unless this is checked and the box has text. Unchecking hides the box and keeps what it holds. At most 2,000 characters.')
+    assert.equal(box?.detail, 'For this review only. The reviewer reads them from a file, and the report does not show them unless they ask for that. Nothing is sent unless this is checked and the box has text. Unchecking hides the box and keeps what it holds. At most 2,000 characters.')
   }
   // unchecking keeps the text: the model still holds what was typed while the box is hidden
   const hidden = drawerModel(input(offering(''), { confirm: { ...askDefault, extraOn: false, extraText: 'keep me' } })).confirm?.extraBox
