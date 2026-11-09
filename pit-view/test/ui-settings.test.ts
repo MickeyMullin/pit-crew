@@ -15,7 +15,7 @@ import type { View } from '../src/poller.ts'
 import {
   aliasOf, changeKind, colorFor, contrastWithWhite, errorId, fieldId, initialsOf, isDirty, kindDefaults, needsRefresh, newPerson, newTicket,
   idleLimits, notifyChoices, openSuggestions, parseBots, parseIdleMinutes, parseMaxReviews, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, timeFormatChoices, serverError, ticketSample, toConfig, toForm,
-  validateForm, autoDefaults, postingAsk, postingLoginOf, postAskIsStale, postSwitchesToTurnOff, weekdayChoices, wantsPostConfirm,
+  validateForm, autoDefaults, postingAsk, postingLoginOf, postAskIsStale, postSwitchesToTurnOff, postingNeedsViewer, postViewerNeededText, weekdayChoices, wantsPostConfirm,
 } from '../public/settings-form.ts'
 import type { Form, TicketForm } from '../public/settings-form.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -633,9 +633,9 @@ test('turning a posting switch on asks first, naming what will post and under wh
     confirm: 'Post as @vera-quill',
     cancel: 'Cancel',
   })
-  // no login resolved yet: the question still says whose account it is
-  assert.equal(postingAsk('others', '').title, 'Let auto-review post to GitHub as your gh login?')
-  assert.equal(postingAsk('others', '').confirm, 'Post as your gh login')
+  // the question always names the login it is given, with its at sign
+  assert.equal(postingAsk('others', 'ines-hale').title, 'Let auto-review post to GitHub as @ines-hale?')
+  assert.equal(postingAsk('dependabot', 'ines-hale').confirm, 'Post as @ines-hale')
 })
 
 test('the Auto-review card holds every option in order, a labeled control and an error slot for each, the daily limit\'s note, the posting switches, and the login agent as a separate item', async () => {
@@ -669,39 +669,67 @@ test('the page asks before a posting switch turns on through an in-app confirmat
   const source = await readFile(new URL('../public/settings.ts', import.meta.url), 'utf8')
   assert.doesNotMatch(source, /\b(?:window\.)?(?:confirm|alert|prompt)\(/)
   // the change handler decides with the pure rule, puts the switch back off, and opens the question
-  assert.match(source, /if \(wantsPostConfirm\(page\.form, kind, box\.checked\)\) \{\s*box\.checked = false\s*page\.postAsk = kind/)
+  assert.match(source, /if \(wantsPostConfirm\(page\.form, kind, box\.checked\)\) \{\s*box\.checked = false/)
+  assert.match(source, /page\.postAsk = kind\s*page\.postAskLogin = postingLogin\(\)\s*showPostAsk\(true\)/)
   // only the confirm button sets the form value to on
   assert.equal([...source.matchAll(/page\.form\[key\] = true/g)].length, 1)
 })
 
-test('the login a posting question names is the typed viewer, else the gh login, and a question naming another login is stale', () => {
-  assert.equal(postingLoginOf('', 'vera-quill'), 'vera-quill')
-  assert.equal(postingLoginOf('  ', 'vera-quill'), 'vera-quill')
-  assert.equal(postingLoginOf(' ines-hale ', 'vera-quill'), 'ines-hale')
-  assert.equal(postingLoginOf('', ''), '')
-  // the question was drawn for vera-quill and the viewer field now says ines-hale
-  assert.equal(postAskIsStale('vera-quill', 'ines-hale', 'vera-quill'), true)
-  // typing the same login again, or clearing back to the gh login it named, is not stale
-  assert.equal(postAskIsStale('vera-quill', 'vera-quill', 'other-login'), false)
-  assert.equal(postAskIsStale('vera-quill', '', 'vera-quill'), false)
-  // the gh login arrives after the question was drawn with none
-  assert.equal(postAskIsStale('', '', 'vera-quill'), true)
-  // a confirmation drawn for ines-hale names @ines-hale, never the new login
-  assert.equal(postingAsk('others', 'ines-hale').confirm, 'Post as @ines-hale')
+test('a posting switch can be confirmed only with an explicit viewer, and the question names exactly the typed viewer', () => {
+  assert.equal(postingNeedsViewer(''), true)
+  assert.equal(postingNeedsViewer('   '), true)
+  assert.equal(postingNeedsViewer('ines-hale'), false)
+  assert.equal(postingNeedsViewer(' ines-hale '), false)
+  assert.equal(postingLoginOf(''), '')
+  assert.equal(postingLoginOf('  '), '')
+  assert.equal(postingLoginOf(' ines-hale '), 'ines-hale')
+  assert.equal(postViewerNeededText, 'Enter a viewer first: the confirmation has to name the account that will post, and an empty viewer does not name one.')
+  // the question was drawn for ines-hale and the viewer field now says rafe-moss, or is cleared: stale
+  assert.equal(postAskIsStale('ines-hale', 'rafe-moss'), true)
+  assert.equal(postAskIsStale('ines-hale', ''), true)
+  assert.equal(postAskIsStale('ines-hale', '   '), true)
+  // typing the same login again, with stray spaces, is not stale
+  assert.equal(postAskIsStale('ines-hale', ' ines-hale '), false)
+  // a confirmation drawn for ines-hale names @ines-hale, never another login
+  assert.equal(postingAsk('others', postingLoginOf(' ines-hale ')).confirm, 'Post as @ines-hale')
 })
 
-test('an open posting question closes when the login it names changes, from the viewer field or from the gh login arriving, and the switch stays off', async () => {
+test('the page opens no posting question while the viewer field is empty, keeps the switch off with an inline notice, and the question closes when the viewer changes or is cleared', async () => {
   const source = await readFile(new URL('../public/settings.ts', import.meta.url), 'utf8')
   assert.match(source, /const closeStalePostAsk = /)
-  const viewerHandler = source.slice(source.indexOf("input.addEventListener('input'"), source.indexOf("const refresh = byId"))
+  const bound = source.slice(source.indexOf('// turning a posting switch on asks first'), source.indexOf('const refresh = byId'))
+  // the empty-viewer check comes before the question opens, puts the switch back off, shows the notice, and does not focus
+  const empty = bound.slice(bound.indexOf('wantsPostConfirm('), bound.indexOf('page.postAsk = kind'))
+  assert.match(empty, /postingNeedsViewer\(page\.form\.viewer\)/)
+  assert.match(empty, /box\.checked = false/)
+  assert.match(empty, /postViewerNeededText/)
+  assert.match(empty, /return/)
+  assert.doesNotMatch(empty, /\.focus\(/, 'the notice does not steal focus')
+  const viewerHandler = source.slice(source.indexOf("input.addEventListener('input'"), source.indexOf('const refresh = byId'))
   assert.match(viewerHandler, /closeStalePostAsk\(\)/)
-  const extras = source.slice(source.indexOf('const loadExtras'), source.indexOf('const load = '))
-  assert.ok(extras.indexOf('closeStalePostAsk()') > extras.indexOf('page.ghLogin ='), 'checked after the gh login is set')
-  const stale = source.slice(source.indexOf('const closeStalePostAsk'), source.indexOf('// the open confirmation under its switch'))
-  assert.match(stale, /postAskIsStale\(/)
+  const stale = source.slice(source.indexOf('const closeStalePostAsk'), source.indexOf('const postNoticeText'))
+  assert.match(stale, /postAskIsStale\(page\.postAskLogin, page\.form\.viewer\)/)
   assert.match(stale, /page\.postAsk = null/)
   assert.doesNotMatch(stale, /\.focus\(/, 'closing does not steal focus from the field being typed in')
   assert.match(source, /page\.postAskLogin = postingLogin\(\)/)
+})
+
+test('the page never claims to know the gh login: no lookup route, no gh login state, no name in the viewer field\'s placeholder or hint', async () => {
+  const dir = new URL('../', import.meta.url)
+  for (const file of ['public/settings.ts', 'public/settings-form.ts', 'public/settings.html', 'public/app.ts', 'src/server.ts']) {
+    assert.doesNotMatch(await readFile(new URL(file, dir), 'utf8'), /\/api\/gh-login/, file)
+  }
+  for (const file of ['public/settings.ts', 'public/settings-form.ts']) {
+    assert.doesNotMatch(await readFile(new URL(file, dir), 'utf8'), /ghLogin/, file)
+  }
+  const source = await readFile(new URL('public/settings.ts', dir), 'utf8')
+  assert.doesNotMatch(source, /viewer\.login/, 'the view\'s viewer is not presented as the gh login')
+  assert.doesNotMatch(source, /\(the gh login\)/)
+  assert.doesNotMatch(source, /f-viewer-hint/, 'the hint is static text in the page')
+  assert.doesNotMatch(source, /viewer\.placeholder/, 'the viewer field\'s placeholder is static text in the page')
+  const html = await settingsHtml()
+  assert.match(html, /id="f-viewer"[^>]*placeholder="the account gh is signed in as"/)
+  assert.match(html, /<p id="f-viewer-hint" class="hint">Leave it empty to use the account gh is signed in as\. Uses gh's own token; nothing else to sign in to\.<\/p>/)
 })
 
 test('a posting switch confirmed for one login turns back off when the login the form would post as changes before Save, and stays off', () => {
@@ -720,11 +748,34 @@ test('a posting switch confirmed for one login turns back off when the login the
   assert.deepEqual(postSwitchesToTurnOff(records, on, 'ines-hale'), ['others'])
   delete records.others
   assert.deepEqual(postSwitchesToTurnOff(records, on, 'vera-quill'), [])
-  // an empty viewer falls back to the gh login: confirmed for the gh login, then the viewer is typed, then cleared again
-  assert.deepEqual(postSwitchesToTurnOff({ others: 'vera-quill' }, on, postingLoginOf('', 'vera-quill')), [])
-  assert.deepEqual(postSwitchesToTurnOff({ others: 'vera-quill' }, on, postingLoginOf('ines-hale', 'vera-quill')), ['others'])
-  // confirmed while the gh login was still unknown (named ''), then the gh login arrives
-  assert.deepEqual(postSwitchesToTurnOff({ others: '' }, on, postingLoginOf('', 'vera-quill')), ['others'])
+  // confirmed for ines-hale, then the field is cleared: the switch turns off, and the record is gone so it stays off
+  const cleared: { others?: string } = { others: 'ines-hale' }
+  assert.deepEqual(postSwitchesToTurnOff(cleared, on, postingLoginOf('')), ['others'])
+  assert.deepEqual(postSwitchesToTurnOff({ others: 'ines-hale' }, on, postingLoginOf('  ')), ['others'])
+  delete cleared.others
+  assert.deepEqual(postSwitchesToTurnOff(cleared, on, postingLoginOf('ines-hale')), [])
+  // confirmed for A, changed to B turns off, and changed back to A stays off
+  const moved: { others?: string } = { others: 'ines-hale' }
+  assert.deepEqual(postSwitchesToTurnOff(moved, on, postingLoginOf('rafe-moss')), ['others'])
+  delete moved.others
+  assert.deepEqual(postSwitchesToTurnOff(moved, on, postingLoginOf('ines-hale')), [])
+  // typing the confirmed login with stray spaces leaves it on
+  assert.deepEqual(postSwitchesToTurnOff({ others: 'ines-hale' }, on, postingLoginOf(' ines-hale ')), [])
+})
+
+test('a late loadExtras never touches an open confirmation or moves focus, and showPostAsk focuses the confirm button only when the user opens the question', async () => {
+  const source = await readFile(new URL('../public/settings.ts', import.meta.url), 'utf8')
+  const extras = source.slice(source.indexOf('const loadExtras'), source.indexOf('const load = '))
+  assert.doesNotMatch(extras, /showPostAsk\(|closeStalePostAsk\(|turnOffUnconfirmed\(|postAsk|\.focus\(/)
+  const show = source.slice(source.indexOf('const showPostAsk'), source.indexOf('const bindStatic'))
+  assert.match(show, /const showPostAsk = \(opened = false\): void =>/)
+  assert.match(show, /if \(opened\) confirm\.focus\(\)/)
+  assert.doesNotMatch(show, /document\.activeElement/)
+  assert.equal([...show.matchAll(/\.focus\(\)/g)].length, 2, 'the confirm button and the switch after closing')
+  // only the change handler that opens the question asks for focus
+  assert.deepEqual([...source.matchAll(/showPostAsk\(true\)/g)].length, 1)
+  const bound = source.slice(source.indexOf('// turning a posting switch on asks first'), source.indexOf('const refresh = byId'))
+  assert.match(bound, /page\.postAskLogin = postingLogin\(\)\s*showPostAsk\(true\)/)
 })
 
 test('the page records the login each posting switch was confirmed for, turns the switch off with a notice when the login changes, and clears the record on cancel, on switching off, on save, and on reload', async () => {
@@ -743,8 +794,6 @@ test('the page records the login each posting switch was confirmed for, turns th
   assert.doesNotMatch(turnOff, /\.focus\(/, 'the notice does not steal focus from the viewer field')
   const viewerHandler = source.slice(source.indexOf("input.addEventListener('input'"), source.indexOf("const refresh = byId"))
   assert.match(viewerHandler, /turnOffUnconfirmed\(\)/)
-  const extras = source.slice(source.indexOf('const loadExtras'), source.indexOf('const load = '))
-  assert.ok(extras.indexOf('turnOffUnconfirmed()') > extras.indexOf('page.ghLogin ='), 'checked after the gh login is set')
   // cancel and turning a switch off clear the record
   const cancel = source.slice(source.indexOf("cancel.addEventListener('click'"), source.indexOf("slot.setAttribute('aria-labelledby'"))
   assert.match(cancel, /delete page\.postConfirmed\[kind\]/)
@@ -753,7 +802,7 @@ test('the page records the login each posting switch was confirmed for, turns th
   // save and revert and a new page start with no records
   const saved = source.slice(source.indexOf('current.saved = body as Config'), source.indexOf('renderAll()', source.indexOf('current.saved = body as Config')))
   assert.match(saved, /current\.postConfirmed = \{\}/)
-  const revert = source.slice(source.indexOf('const revert'), source.indexOf('// the view (for the gh login'))
+  const revert = source.slice(source.indexOf('const revert'), source.indexOf('// the view (for sample keys'))
   assert.match(revert, /page\.postConfirmed = \{\}/)
   assert.match(source, /postAsk: null,\s*postAskLogin: '',\s*postConfirmed: \{\}/)
 })

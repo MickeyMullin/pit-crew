@@ -12,7 +12,7 @@ import { loadInstance, loginAgentText, showInstance } from './instance.ts'
 import {
   avatarChoices, changeKind, configChannel, configPathText, densityChoices, errorId, fieldId, isDirty, kindChoices, needsRefresh,
   newPerson, newTicket, notifyChoices, openSuggestions, previewPerson, refreshChoices, sampleTextsFrom, serverError, sourceChoices, ticketSample, timeFormatChoices,
-  postAskIsStale, postSwitchesToTurnOff, postingAsk, postingLoginOf, toConfig, todayChoices, toForm, validateForm, wantsPostConfirm, weekdayChoices,
+  postAskIsStale, postSwitchesToTurnOff, postViewerNeededText, postingAsk, postingLoginOf, postingNeedsViewer, toConfig, todayChoices, toForm, validateForm, wantsPostConfirm, weekdayChoices,
 } from './settings-form.ts'
 import type { AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, PostConfirmed, PostKind, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
 import { readToken } from './runapi.ts'
@@ -32,8 +32,6 @@ type Tone = 'normal' | 'ok' | 'error'
 type PageState = {
   saved: Config
   form: Form
-  // the gh login an empty viewer stands for, from the view
-  ghLogin: string
   texts: SampleText[]
   suggestions: Suggestion[]
   errors: FieldError[]
@@ -321,11 +319,8 @@ const postSwitches: readonly { kind: PostKind, key: 'autoPostOthers' | 'autoPost
 
 const fillStatic = (): void => {
   if (page === null) return
-  const { form, ghLogin } = page
+  const { form } = page
   for (const key of staticText) byId<HTMLInputElement>(fieldId(key)).value = form[key]
-  const viewer = byId<HTMLInputElement>(fieldId('viewer'))
-  viewer.placeholder = ghLogin === '' ? 'the gh login' : `${ghLogin} (the gh login)`
-  setText(byId('f-viewer-hint'), `Defaults to the gh login${ghLogin === '' ? '' : `, ${ghLogin}`}. Uses gh's own token; nothing else to sign in to.`)
   options(byId<HTMLSelectElement>(fieldId('refreshSeconds')), refreshChoices, form.refreshSeconds)
   options(byId<HTMLSelectElement>(fieldId('todayStartsAt')), todayChoices(browserTimeZone()), form.todayStartsAt)
   options(byId<HTMLSelectElement>(fieldId('density')), densityChoices, form.density)
@@ -361,19 +356,19 @@ const fillStatic = (): void => {
   }))
 }
 
-// the login a posting question names: the viewer typed in the form, else the gh login
-const postingLogin = (): string => page === null ? '' : postingLoginOf(page.form.viewer, page.ghLogin)
+// the login a posting question names: the viewer typed in the form and nothing else
+const postingLogin = (): string => page === null ? '' : postingLoginOf(page.form.viewer)
 
-// an open question closes, with its switch still off, when the login it names is no longer the one the form would post as; it does not move focus, since the viewer field is usually being typed in
+// an open question closes, with its switch still off, when the login it names is no longer the one typed in the viewer field, or the field is cleared; it does not move focus, since the viewer field is usually being typed in
 const closeStalePostAsk = (): void => {
-  if (page === null || page.postAsk === null || !postAskIsStale(page.postAskLogin, page.form.viewer, page.ghLogin)) return
+  if (page === null || page.postAsk === null || !postAskIsStale(page.postAskLogin, page.form.viewer)) return
   page.postAsk = null
   showPostAsk()
 }
 
 const postNoticeText = 'Turned off because the login changed. Turn it on again to be asked again.'
 
-// a switch confirmed for a login the form would no longer post as goes back off, with a short notice beside it and no move of focus, and its record is cleared so it stays off until turned on again
+// a switch confirmed for a login the viewer field no longer holds goes back off, with a short notice beside it and no move of focus, and its record is cleared so it stays off until turned on again
 const turnOffUnconfirmed = (): void => {
   if (page === null) return
   const kinds = postSwitchesToTurnOff(page.postConfirmed, page.form, postingLogin())
@@ -391,8 +386,8 @@ const turnOffUnconfirmed = (): void => {
   changed()
 }
 
-// the open confirmation under its switch, and none under the other; Cancel and the confirm button are real buttons inside the group, and focus returns to the switch
-const showPostAsk = (): void => {
+// the open confirmation under its switch, and none under the other; Cancel and the confirm button are real buttons inside the group, and focus returns to the switch; the confirm button takes focus only when the user has just opened the question, never on a redraw
+const showPostAsk = (opened = false): void => {
   if (page === null) return
   for (const { kind, key } of postSwitches) {
     const slot = byId(`auto-post-ask-${kind}`)
@@ -428,7 +423,7 @@ const showPostAsk = (): void => {
       ...ask.lines.map((line) => h('p', {}, line)),
       h('div', { class: 'post-ask-buttons' }, confirm, cancel))
     slot.hidden = false
-    if (slot.contains(document.activeElement) === false) confirm.focus()
+    if (opened) confirm.focus()
   }
 }
 
@@ -448,9 +443,17 @@ const bindStatic = (): void => {
       if (page === null) return
       if (wantsPostConfirm(page.form, kind, box.checked)) {
         box.checked = false
+        const notice = byId(`${fieldId(key)}-notice`)
+        // the confirmation has to name an account, so an empty viewer field opens no question and the switch stays off; the notice does not take focus
+        if (postingNeedsViewer(page.form.viewer)) {
+          setText(notice, postViewerNeededText)
+          notice.hidden = false
+          return
+        }
+        notice.hidden = true
         page.postAsk = kind
         page.postAskLogin = postingLogin()
-        showPostAsk()
+        showPostAsk(true)
         return
       }
       page.postAsk = null
@@ -690,24 +693,17 @@ const revert = (): void => {
   setStatus('Changes discarded.')
 }
 
-// the view (for the gh login and sample keys) and the suggestions are extras: the form works without them
+// the view (for sample keys) and the suggestions are extras: the form works without them
 const loadExtras = async (): Promise<void> => {
   const [view, suggestions] = await Promise.all([
     getJson<View>('/api/view').catch(() => null),
     getJson<Suggestion[]>('/api/people/suggestions').catch(() => []),
   ])
   if (page === null) return
-  page.ghLogin = view?.viewer.login ?? ''
   page.texts = sampleTextsFrom(view)
   page.suggestions = suggestions
-  const viewer = byId<HTMLInputElement>(fieldId('viewer'))
-  viewer.placeholder = page.ghLogin === '' ? 'the gh login' : `${page.ghLogin} (the gh login)`
-  setText(byId('f-viewer-hint'), `Defaults to the gh login${page.ghLogin === '' ? '' : `, ${page.ghLogin}`}. Uses gh's own token; nothing else to sign in to.`)
   refreshSamples()
   renderSuggestions()
-  closeStalePostAsk()
-  turnOffUnconfirmed()
-  showPostAsk()
 }
 
 const load = async (): Promise<void> => {
@@ -727,7 +723,6 @@ const load = async (): Promise<void> => {
   page = {
     saved,
     form: toForm(saved, makeId),
-    ghLogin: '',
     texts: [],
     suggestions: [],
     errors: [],

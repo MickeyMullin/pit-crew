@@ -374,15 +374,21 @@ export const wantsPostConfirm = (form: Pick<Form, 'autoPostOthers' | 'autoPostDe
   on && !(kind === 'others' ? form.autoPostOthers : form.autoPostDependabot)
 
 // the login a posting question names: the viewer typed in the form, else the gh login
-export const postingLoginOf = (viewer: string, ghLogin: string): string => viewer.trim() || ghLogin
+// a posting switch can be confirmed only when the form's viewer field holds a login, since the confirmation has to name the account that will post and an empty viewer does not name one
+export const postingNeedsViewer = (viewer: string): boolean => viewer.trim() === ''
 
-// an open question was drawn for one login; it is stale once the form and the gh login would name another, and then it must be closed and asked again rather than confirmed
-export const postAskIsStale = (named: string, viewer: string, ghLogin: string): boolean => postingLoginOf(viewer, ghLogin) !== named
+export const postViewerNeededText = 'Enter a viewer first: the confirmation has to name the account that will post, and an empty viewer does not name one.'
+
+// the login a posting question names: the viewer typed in the form and nothing else
+export const postingLoginOf = (viewer: string): string => viewer.trim()
+
+// an open question was drawn for one login; it is stale once the viewer field holds another, or none, and then it must be closed and asked again rather than confirmed
+export const postAskIsStale = (named: string, viewer: string): boolean => postingLoginOf(viewer) !== named
 
 // the login each posting switch was confirmed for in this form session and has not saved on yet; a switch already saved on has no record
 export type PostConfirmed = Partial<Record<PostKind, string>>
 
-// the switches to turn back off: those that are on, were confirmed for a login, and whose confirmed login is no longer the one the form would post as
+// the switches to turn back off: those that are on, were confirmed for a login, and whose confirmed login is no longer the one typed in the viewer field (a cleared field included)
 export const postSwitchesToTurnOff = (confirmed: PostConfirmed, form: Pick<Form, 'autoPostOthers' | 'autoPostDependabot'>, login: string): PostKind[] => {
   const switches: [PostKind, boolean][] = [['others', form.autoPostOthers], ['dependabot', form.autoPostDependabot]]
   return switches.flatMap(([kind, on]) => on && confirmed[kind] !== undefined && confirmed[kind] !== login ? [kind] : [])
@@ -390,9 +396,9 @@ export const postSwitchesToTurnOff = (confirmed: PostConfirmed, form: Pick<Form,
 
 export type PostingAsk = { title: string, lines: string[], confirm: string, cancel: string }
 
-// what the confirmation says: what will post, and under which login (the gh login's name when the viewer is not yet known)
+// what the confirmation says: what will post, and under which login
 export const postingAsk = (kind: PostKind, login: string): PostingAsk => {
-  const who = login === '' ? 'your gh login' : `@${login}`
+  const who = `@${login}`
   if (kind === 'others') {
     return {
       title: `Let auto-review post to GitHub as ${who}?`,
