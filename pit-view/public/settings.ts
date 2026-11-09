@@ -12,7 +12,7 @@ import { loadInstance, loginAgentText, showInstance } from './instance.ts'
 import {
   avatarChoices, changeKind, configChannel, configPathText, densityChoices, errorId, fieldId, isDirty, kindChoices, needsRefresh,
   newPerson, newTicket, notifyChoices, openSuggestions, previewPerson, refreshChoices, sampleTextsFrom, serverError, sourceChoices, ticketSample, timeFormatChoices,
-  postingAsk, toConfig, todayChoices, toForm, validateForm, wantsPostConfirm, weekdayChoices,
+  postAskIsStale, postingAsk, postingLoginOf, toConfig, todayChoices, toForm, validateForm, wantsPostConfirm, weekdayChoices,
 } from './settings-form.ts'
 import type { AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, PostKind, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
 import { readToken } from './runapi.ts'
@@ -43,6 +43,8 @@ type PageState = {
   status: { text: string, tone: Tone } | null
   // the posting switch whose confirmation is open; the switch stays off until it is confirmed
   postAsk: PostKind | null
+  // the login that question named when it was drawn
+  postAskLogin: string
 }
 
 let page: PageState | null = null
@@ -358,7 +360,14 @@ const fillStatic = (): void => {
 }
 
 // the login a posting question names: the viewer typed in the form, else the gh login
-const postingLogin = (): string => page === null ? '' : page.form.viewer.trim() || page.ghLogin
+const postingLogin = (): string => page === null ? '' : postingLoginOf(page.form.viewer, page.ghLogin)
+
+// an open question closes, with its switch still off, when the login it names is no longer the one the form would post as; it does not move focus, since the viewer field is usually being typed in
+const closeStalePostAsk = (): void => {
+  if (page === null || page.postAsk === null || !postAskIsStale(page.postAskLogin, page.form.viewer, page.ghLogin)) return
+  page.postAsk = null
+  showPostAsk()
+}
 
 // the open confirmation under its switch, and none under the other; Cancel and the confirm button are real buttons inside the group, and focus returns to the switch
 const showPostAsk = (): void => {
@@ -414,6 +423,7 @@ const bindStatic = (): void => {
       if (wantsPostConfirm(page.form, kind, box.checked)) {
         box.checked = false
         page.postAsk = kind
+        page.postAskLogin = postingLogin()
         showPostAsk()
         return
       }
@@ -430,6 +440,7 @@ const bindStatic = (): void => {
       page.form[key] = input.value
       // the repo fills {repo} in the samples
       if (key === 'repo') refreshSamples()
+      if (key === 'viewer') closeStalePostAsk()
       changed()
     })
   }
@@ -660,6 +671,7 @@ const loadExtras = async (): Promise<void> => {
   setText(byId('f-viewer-hint'), `Defaults to the gh login${page.ghLogin === '' ? '' : `, ${page.ghLogin}`}. Uses gh's own token; nothing else to sign in to.`)
   refreshSamples()
   renderSuggestions()
+  closeStalePostAsk()
   showPostAsk()
 }
 
@@ -688,6 +700,7 @@ const load = async (): Promise<void> => {
     saving: false,
     status: null,
     postAsk: null,
+    postAskLogin: '',
   }
   renderAll()
   state.hidden = true

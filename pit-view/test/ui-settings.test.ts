@@ -15,7 +15,7 @@ import type { View } from '../src/poller.ts'
 import {
   aliasOf, changeKind, colorFor, contrastWithWhite, errorId, fieldId, initialsOf, isDirty, kindDefaults, needsRefresh, newPerson, newTicket,
   idleLimits, notifyChoices, openSuggestions, parseBots, parseIdleMinutes, parseMaxReviews, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, timeFormatChoices, serverError, ticketSample, toConfig, toForm,
-  validateForm, autoDefaults, postingAsk, weekdayChoices, wantsPostConfirm,
+  validateForm, autoDefaults, postingAsk, postingLoginOf, postAskIsStale, weekdayChoices, wantsPostConfirm,
 } from '../public/settings-form.ts'
 import type { Form, TicketForm } from '../public/settings-form.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -672,4 +672,34 @@ test('the page asks before a posting switch turns on through an in-app confirmat
   assert.match(source, /if \(wantsPostConfirm\(page\.form, kind, box\.checked\)\) \{\s*box\.checked = false\s*page\.postAsk = kind/)
   // only the confirm button sets the form value to on
   assert.equal([...source.matchAll(/page\.form\[key\] = true/g)].length, 1)
+})
+
+test('the login a posting question names is the typed viewer, else the gh login, and a question naming another login is stale', () => {
+  assert.equal(postingLoginOf('', 'vera-quill'), 'vera-quill')
+  assert.equal(postingLoginOf('  ', 'vera-quill'), 'vera-quill')
+  assert.equal(postingLoginOf(' ines-hale ', 'vera-quill'), 'ines-hale')
+  assert.equal(postingLoginOf('', ''), '')
+  // the question was drawn for vera-quill and the viewer field now says ines-hale
+  assert.equal(postAskIsStale('vera-quill', 'ines-hale', 'vera-quill'), true)
+  // typing the same login again, or clearing back to the gh login it named, is not stale
+  assert.equal(postAskIsStale('vera-quill', 'vera-quill', 'other-login'), false)
+  assert.equal(postAskIsStale('vera-quill', '', 'vera-quill'), false)
+  // the gh login arrives after the question was drawn with none
+  assert.equal(postAskIsStale('', '', 'vera-quill'), true)
+  // a confirmation drawn for ines-hale names @ines-hale, never the new login
+  assert.equal(postingAsk('others', 'ines-hale').confirm, 'Post as @ines-hale')
+})
+
+test('an open posting question closes when the login it names changes, from the viewer field or from the gh login arriving, and the switch stays off', async () => {
+  const source = await readFile(new URL('../public/settings.ts', import.meta.url), 'utf8')
+  assert.match(source, /const closeStalePostAsk = /)
+  const viewerHandler = source.slice(source.indexOf("input.addEventListener('input'"), source.indexOf("const refresh = byId"))
+  assert.match(viewerHandler, /closeStalePostAsk\(\)/)
+  const extras = source.slice(source.indexOf('const loadExtras'), source.indexOf('const load = '))
+  assert.ok(extras.indexOf('closeStalePostAsk()') > extras.indexOf('page.ghLogin ='), 'checked after the gh login is set')
+  const stale = source.slice(source.indexOf('const closeStalePostAsk'), source.indexOf('// the open confirmation under its switch'))
+  assert.match(stale, /postAskIsStale\(/)
+  assert.match(stale, /page\.postAsk = null/)
+  assert.doesNotMatch(stale, /\.focus\(/, 'closing does not steal focus from the field being typed in')
+  assert.match(source, /page\.postAskLogin = postingLogin\(\)/)
 })

@@ -373,6 +373,12 @@ export type PostKind = 'others' | 'dependabot'
 export const wantsPostConfirm = (form: Pick<Form, 'autoPostOthers' | 'autoPostDependabot'>, kind: PostKind, on: boolean): boolean =>
   on && !(kind === 'others' ? form.autoPostOthers : form.autoPostDependabot)
 
+// the login a posting question names: the viewer typed in the form, else the gh login
+export const postingLoginOf = (viewer: string, ghLogin: string): string => viewer.trim() || ghLogin
+
+// an open question was drawn for one login; it is stale once the form and the gh login would name another, and then it must be closed and asked again rather than confirmed
+export const postAskIsStale = (named: string, viewer: string, ghLogin: string): boolean => postingLoginOf(viewer, ghLogin) !== named
+
 export type PostingAsk = { title: string, lines: string[], confirm: string, cancel: string }
 
 // what the confirmation says: what will post, and under which login (the gh login's name when the viewer is not yet known)
