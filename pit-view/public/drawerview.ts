@@ -625,6 +625,7 @@ const outcomeText = (run: Pick<RunView, 'status' | 'result' | 'note'>): { text: 
   if (run.status === 'running') return { text: 'Running', tone: 'blue' }
   if (run.status === 'needsInput') return { text: 'Needs your answer', tone: 'amber' }
   if (run.status === 'stopped') return { text: 'Stopped', tone: 'gray' }
+  if (run.status === 'skipped') return { text: 'Skipped', tone: 'gray' }
   if (run.status === 'failed') {
     const short = failureShort[(run.note ?? '').split(':')[0] ?? '']
     if (short !== undefined) return { text: `Failed · ${short}`, tone: 'red' }
@@ -645,9 +646,9 @@ const outcomeText = (run: Pick<RunView, 'status' | 'result' | 'note'>): { text: 
   return { text: `Clean${failedPost}`, tone: failedPost === '' ? 'green' : 'amber' }
 }
 
-// every run but the one the card above already shows
+// every run but the one the card above already shows, and the auto-review runs, which have their own list
 export const runRows = (runs: readonly RunView[], shownId: number | null): RunRow[] =>
-  runs.filter((run) => run.id !== shownId).map((run) => ({
+  runs.filter((run) => run.id !== shownId && run.origin !== 'auto').map((run) => ({
     id: run.id,
     label: run.label,
     runner: runnerLabels[run.runner],
@@ -655,6 +656,64 @@ export const runRows = (runs: readonly RunView[], shownId: number | null): RunRo
     startedAt: run.startedAt,
     cost: formatCost(run.costUsd),
     extra: extraLine(run.extraInstructions),
+  }))
+
+// the Auto-review list: each auto run of the PR (section 10, In the UI). startedAt is null until the run really started: a queued run, or one that failed or was skipped before its process, holds only the time it was queued
+export type AutoRunRow = {
+  id: number
+  reason: string
+  sha: string | null
+  text: string
+  tone: Tone
+  posted: string
+  note: string | null
+  queuedAt: string | null
+  startedAt: string | null
+  finishedAt: string | null
+}
+
+const autoReasons: Readonly<Record<string, string>> = {
+  requested: 'Review requested',
+  new: 'New PR',
+  pushed: 'Pushed since the last review',
+  selfReview: 'Self-review',
+  dependabot: 'Dependabot',
+}
+
+const postedForms: Readonly<Record<PostForm, string>> = {
+  approve: 'Posted as an approval',
+  requestChanges: 'Posted as a change request',
+  comment: 'Posted as a comment',
+}
+
+const unpostedWords: Readonly<Record<string, string>> = {
+  noPost: 'Not posted: set to not post',
+  postBlocked: 'Not posted: a permission check refused the post',
+  ghFailed: 'Post failed',
+  ownPr: 'Not posted: your own PR',
+  awaitingAnswer: 'Not posted: waiting for your answer',
+}
+
+const autoPostedWords = (run: RunView): string => {
+  if (run.status === 'queued' || run.status === 'running' || run.status === 'needsInput') return 'Not yet'
+  const result = run.result
+  if (result?.schema !== 'pit-crew/review-result@1') return 'No'
+  if (result.posted !== null) return postedForms[result.posted.form]
+  return result.notPostedReason === null ? 'No' : unpostedWords[result.notPostedReason] ?? 'No'
+}
+
+export const autoRunRows = (runs: readonly RunView[]): AutoRunRow[] =>
+  runs.filter((run) => run.origin === 'auto').map((run) => ({
+    id: run.id,
+    reason: autoReasons[run.reason ?? ''] ?? 'Auto-review',
+    sha: run.headOid === null ? null : shortSha(run.headOid),
+    ...runText(run),
+    posted: autoPostedWords(run),
+    note: run.note,
+    queuedAt: run.queuedAt,
+    // started_at holds the queue time until the run really starts (section 10, Recording)
+    startedAt: run.status === 'queued' || (run.status !== 'running' && run.pid === null) ? null : run.startedAt,
+    finishedAt: run.finishedAt,
   }))
 
 // reports on disk: a review's carries its verdict and a Tandem tag; a Fix session's a Fix tag and
@@ -727,6 +786,8 @@ export type DrawerModel = {
   waiting: WaitingModel | null
   result: ResultModel | null
   runs: { state: Loadable<RunView>['state'], message: string | null, rows: RunRow[] }
+  // the PR's auto-review runs, once the runs are read; empty with none
+  autoRuns: AutoRunRow[]
   reports: { state: Loadable<ReportListing>['state'], message: string | null, rows: ReportRow[] }
 }
 
@@ -760,6 +821,7 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
       message: runs.state === 'error' ? runs.message : null,
       rows: runs.state === 'ready' ? runRows(runs.items, cell?.runId ?? null) : [],
     },
+    autoRuns: runs.state === 'ready' ? autoRunRows(runs.items) : [],
     reports: {
       state: reports.state,
       message: reports.state === 'error' ? reports.message : null,

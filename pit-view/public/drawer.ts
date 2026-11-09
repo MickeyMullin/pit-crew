@@ -872,6 +872,25 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           extraDetail(row.extra))))),
   })
 
+  // the PR's auto-review runs (section 10, In the UI), under their own heading and only when there are some; each time is an age that moves in place
+  const autoRunsPart = (model: DrawerModel): Part => ({
+    key: 'auto-runs',
+    sig: JSON.stringify(model.autoRuns),
+    build: () => section('auto-runs', 'Auto-review',
+      h('ul', { class: 'drawer-list' },
+        model.autoRuns.map((row) => h('li', { class: 'drawer-item', title: row.note },
+          h('span', { class: 'drawer-item-main' },
+            h('span', { class: 'drawer-item-name' }, row.reason),
+            tag(row.text, row.tone)),
+          h('span', { class: 'drawer-item-meta' }, row.sha === null ? '' : `${row.sha} · `, row.posted),
+          h('span', { class: 'drawer-item-meta' },
+            row.queuedAt === null ? null : ageSpan(row.queuedAt, 'queued ', options.nowMs()),
+            row.startedAt === null ? null : ' · ',
+            row.startedAt === null ? null : ageSpan(row.startedAt, 'started ', options.nowMs()),
+            row.finishedAt === null ? null : ' · ',
+            row.finishedAt === null ? null : ageSpan(row.finishedAt, 'finished ', options.nowMs())))))),
+  })
+
   const reportsPart = (model: DrawerModel): Part => ({
     key: 'reports',
     // a report rewritten under the same name (a second Fix session's FIX-<n>.md) has a new time, so it rebuilds
@@ -938,6 +957,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     else if (model.card === 'result') items.push(resultCard(model, number))
     const sweepLink = options.sweepLink(number)
     if (sweepLink !== null) items.push(sweepPart(sweepLink))
+    if (model.autoRuns.length > 0) items.push(autoRunsPart(model))
     items.push(runsPart(model), reportsPart(model))
     sync(body, items)
 

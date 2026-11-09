@@ -309,6 +309,55 @@ test('a start confirmation is in the model only while asked for and while the PR
   assert.equal(drawerModel(input(null)).starts.buttons.length, 0)
 })
 
+test('the Auto-review list holds every auto run of the PR, with its reason, head, outcome, whether it posted, and its times; Previous runs keep to the owner\'s own', () => {
+  const run = (id: number, patch: Partial<RunView> = {}): RunView => ({
+    id, repo: 'owner/name', number: 101, command: 'review-pr', args: ['101'], label: 'Review', runner: 'claude', cwd: '~/dev/orbit', dir: `~/state/runs/${id}`,
+    sessionId: null, pid: 4000 + id, pidStartedAt: 'x', startedAt: '2026-10-28T13:00:00Z', lastStepAt: null, step: null, stepState: null, steps: slots(),
+    finishedAt: '2026-10-28T13:04:00Z', status: 'done', result: null, note: null, costUsd: null, resume: null, tandem: false, extraInstructions: null,
+    origin: 'auto', tick: 3, headOid: '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7', reason: 'pushed', queuedAt: '2026-10-28T12:50:00Z', posting: false, worktree: null, ...patch,
+  } as RunView)
+  const review = (patch: Record<string, unknown>) => ({
+    schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: null, reviewed: { kind: 'commit', sha: '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7' }, verdict: 'changesRequested', recommendation: null,
+    findings: [], ci: 'green', fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: '~/agents/output/PR-101.md', question: null, error: null, ...patch,
+  }) as unknown as RunView['result']
+  const runs = [
+    run(9, { status: 'queued', reason: 'requested', startedAt: '2026-10-28T14:50:00Z', queuedAt: '2026-10-28T14:50:00Z', finishedAt: null, pid: null }),
+    run(8, { status: 'running', reason: 'new', startedAt: '2026-10-28T14:40:00Z', finishedAt: null }),
+    run(7, { result: review({}), posting: false }),
+    run(6, { result: review({ verdict: 'clean', posted: { form: 'approve', url: 'https://example.test/r/1' }, notPostedReason: null }), posting: true, reason: 'new' }),
+    run(5, { result: review({ notPostedReason: 'postBlocked' }), posting: true }),
+    run(4, { status: 'failed', note: 'noResult: exited with code 1', result: null }),
+    run(3, { status: 'skipped', note: 'closed', pid: null, startedAt: '2026-10-28T12:50:00Z', finishedAt: '2026-10-28T12:55:00Z', reason: 'selfReview', headOid: null }),
+    run(2, { origin: 'manual', tick: null, reason: null, queuedAt: null, headOid: null }),
+  ]
+  const model = drawerModel(input(idle(), { runs: { state: 'ready', items: runs } }))
+  assert.deepEqual(model.autoRuns.map((entry) => [entry.id, entry.reason, entry.sha, entry.text, entry.tone, entry.posted]), [
+    [9, 'Review requested', '755b78b', 'Queued', 'blue', 'Not yet'],
+    [8, 'New PR', '755b78b', 'Running', 'blue', 'Not yet'],
+    [7, 'Pushed since the last review', '755b78b', 'Changes requested', 'red', 'Not posted: set to not post'],
+    [6, 'New PR', '755b78b', 'Approved', 'green', 'Posted as an approval'],
+    [5, 'Pushed since the last review', '755b78b', 'Changes requested · post not made', 'amber', 'Not posted: a permission check refused the post'],
+    [4, 'Pushed since the last review', '755b78b', 'Failed · no result', 'red', 'No'],
+    [3, 'Self-review', null, 'Skipped', 'gray', 'No'],
+  ])
+  // queued, started and finished: a queued run has no start, a run that never spawned has none either, and a finished one has all three
+  assert.deepEqual(model.autoRuns.map((entry) => [entry.id, entry.queuedAt, entry.startedAt, entry.finishedAt]), [
+    [9, '2026-10-28T14:50:00Z', null, null],
+    [8, '2026-10-28T12:50:00Z', '2026-10-28T14:40:00Z', null],
+    [7, '2026-10-28T12:50:00Z', '2026-10-28T13:00:00Z', '2026-10-28T13:04:00Z'],
+    [6, '2026-10-28T12:50:00Z', '2026-10-28T13:00:00Z', '2026-10-28T13:04:00Z'],
+    [5, '2026-10-28T12:50:00Z', '2026-10-28T13:00:00Z', '2026-10-28T13:04:00Z'],
+    [4, '2026-10-28T12:50:00Z', '2026-10-28T13:00:00Z', '2026-10-28T13:04:00Z'],
+    [3, '2026-10-28T12:50:00Z', null, '2026-10-28T12:55:00Z'],
+  ])
+  assert.equal(model.autoRuns.find((entry) => entry.id === 3)?.note, 'closed')
+  // Previous runs hold the manual run only; the card\'s own run is never listed twice
+  assert.deepEqual(model.runs.rows.map((entry) => entry.id), [2])
+  // no auto runs, no list; a list still loading or failed has no rows either
+  assert.deepEqual(drawerModel(input(idle(), { runs: { state: 'ready', items: [runs[7]!] } })).autoRuns, [])
+  assert.deepEqual(drawerModel(input(idle())).autoRuns, [])
+})
+
 test('previous runs list every run but the one the card shows: label, runner, outcome, age and cost', () => {
   const run = (id: number, patch: Partial<RunView> = {}): RunView => ({
     id, repo: 'owner/name', number: 101, command: 'review-pr', args: ['101'], label: 'Review', runner: 'claude', cwd: '~/dev/orbit', dir: `~/state/runs/${id}`,
