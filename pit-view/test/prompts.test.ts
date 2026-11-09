@@ -341,15 +341,35 @@ test('extra-instructions says what the text may and may never do, each in so man
   assert.match(prompt, /Verify each prior finding as the calling prompt says, in an excluded path too/)
 })
 
-test('the report states the instructions in one line near the top, and quotes them', async () => {
+test('the prompt tells the reviewer to say nothing in the report about what the text left out or what it did not follow', async () => {
   const prompt = await read(extraFile)
-  const line = lineFrom(prompt, '- **The report says so in one line.**')
-  assert.ok(line.includes('`Extra instructions in effect: "<the text>"`'))
-  assert.ok(line.includes('directly below the `Reviewed commit:` or `Reviewed stack:` line and any `Fix attempts:` line'))
-  assert.ok(line.includes('each line break written as ` / ` and each tab as a space'))
-  assert.match(prompt, /no other mention of the file, the run directory, or the flag/)
-  assert.match(prompt, /no-attribution rule/)
+  assert.ok(!/closing notes/.test(prompt), 'no closing-notes duty is defined')
+  assert.ok(!prompt.includes('which part you did not follow'), 'no naming of an unfollowed part')
+  assert.ok(!prompt.includes('what the text left out'), 'no statement of what the text left out')
+  assert.match(lineFrom(prompt, '- **The text never**'), /apply the rest and say nothing about it\./)
 })
+
+test('the report leaves the instructions out, unless the text itself asks for something to appear', async () => {
+  const prompt = await read(extraFile)
+  assert.ok(!prompt.includes('Extra instructions in effect: "<the text>"'), 'no report line is defined')
+  assert.ok(!prompt.includes('directly below the `Reviewed commit:`'), 'no placement of a line is defined')
+  const rule = lineFrom(prompt, '- **The report does not mention the instructions.**')
+  for (const words of ['are the same body', 'a quote of the text', 'the instructions, the file, the flag, or the run directory', 'The text still shapes the review', 'unless the next bullet applies']) assert.ok(rule.includes(words), words)
+  const exception = lineFrom(prompt, '- **The one exception is text that asks for it.**')
+  for (const words of ['asks for something to appear in the report or the posted comment', 'lifts `--no-post`', 'adds a GitHub write', 'changes the JSON result', 'changes the commit reviewed', 'lowers a finding\'s priority', 'asks for a command to be run', 'no-attribution rule']) assert.ok(exception.includes(words), words)
+  assert.match(lineFrom(prompt, '- **The text never**'), /changes the report format except as "The report" below allows/)
+  assert.match(prompt, /nothing here applies: no such file is read\.\n/)
+})
+
+for (const name of ['review-pr', 'review-stack']) {
+  test(`${name} writes no line about the instructions and points to the exception`, async () => {
+    const prompt = await read(`prompts/review/${name}.md`)
+    assert.ok(!prompt.includes('Extra instructions in effect'))
+    assert.ok(!prompt.includes('write the one line'))
+    const bullet = lineFrom(prompt, '- With `--extra-instructions`, the report, and so the posted comment, makes no mention')
+    for (const words of ['the instructions, the file, the flag, or the run directory', 'except for what the text itself asks to appear', '"The report" in `extra-instructions.md`', 'the same body']) assert.ok(bullet.includes(words), words)
+  })
+}
 
 test('each reviewer of a tandem reads the same file, and the launcher brings it to a launched secondary', async () => {
   const prompt = await read(extraFile)
@@ -359,9 +379,15 @@ test('each reviewer of a tandem reads the same file, and the launcher brings it 
   assert.ok(tandem.includes('{{HOME}}/agents/prompts/review/extra-instructions.md'))
   assert.ok(tandem.includes('[--extra-instructions-file <path>]'))
   assert.ok(tandem.includes('`--extra-instructions-file`'))
-  assert.match(tandem, /When the calling invocation carries `--extra-instructions`, the consolidated report carries the `Extra instructions in effect:` line once/)
-  assert.match(tandem, /When it does not, the consolidated report has no such line/)
-  assert.match(lineFrom(tandem, '- **The consolidated report reads as one review.**'), /Its one permitted line about the run's instructions is `Extra instructions in effect:`/)
+  assert.ok(!tandem.includes('Extra instructions in effect:` line once'), 'the consolidated report carries no line')
+  assert.ok(!tandem.includes('Its one permitted line'), 'the one-review rule permits no line')
+  const consolidated = lineFrom(tandem, '- When the calling invocation carries `--extra-instructions`, the consolidated report')
+  assert.ok(!consolidated.includes('no quote of the text'), 'no unconditional ban on a quote')
+  assert.ok(!consolidated.includes('line, and no mention'), 'the ban on the line is not unconditional')
+  assert.match(consolidated, /has no `Extra instructions in effect:` line and no mention or quote of the text, unless the text itself asks for it \(that line or a quote included\), in which case it carries what the text asks for once, as "The report" in `extra-instructions\.md` gives it/)
+  assert.match(lineFrom(tandem, '- **The consolidated report reads as one review.**'), /Under `--extra-instructions` it does not mention the run's instructions, the file, the flag, or the run directory either, except for what the text itself asks to appear\./)
+  assert.match(prompt, /No draft and no consolidated report mentions the instructions, the file, the flag, or the run directory, except for what the text itself asks to appear/)
+  assert.ok(!prompt.includes('Each draft carries the line'))
 })
 
 test('review-pr and review-stack point to the file as they point to their other flags, and keep their flag grammar', async () => {
@@ -369,14 +395,14 @@ test('review-pr and review-stack point to the file as they point to their other 
     const prompt = await read(`prompts/review/${name}.md`)
     assert.ok(prompt.includes(`If the invocation contains \`--extra-instructions\`, read \`{{HOME}}/agents/prompts/review/extra-instructions.md\` in full before doing anything else, after the \`--emit-json\` check, remove the flag, and resolve what remains under "${section}" below. The flag takes no value.`), name)
     assert.ok(prompt.includes('Without the flag, ignore it.'), name)
+    assert.ok(!prompt.includes('adds one line to the report'), `${name} says the file adds no line to the report`)
+    assert.ok(prompt.includes('and says what may appear in the report. Without the flag, ignore it.'), name)
     // a repeat has no run directory, so it has no file
     assert.match(prompt.slice(prompt.indexOf('Re-reviews:'), prompt.indexOf('Tandem mode:')), /`--extra-instructions` does not carry over/, name)
   }
   const pr = await read('prompts/review/review-pr.md')
   const output = pr.slice(pr.indexOf('Output file:'), pr.indexOf('Posting the report:'))
-  assert.match(output, /With `--extra-instructions`, write the one line `extra-instructions\.md` gives/)
   const stack = await read('prompts/review/review-stack.md')
-  assert.match(stack, /With `--extra-instructions`, write the one line `extra-instructions\.md` gives/)
   assert.match(pr.slice(pr.indexOf('Tandem mode:'), pr.indexOf('Target:')), /Extra instructions:/)
   assert.match(stack.slice(stack.indexOf('Tandem mode:'), stack.indexOf('Setup:')), /Extra instructions:/)
 })
@@ -402,7 +428,13 @@ test('the wrappers and the docs list the flag, and no other prompt accepts it', 
 
 test('the specification states the rules the prompt does', async () => {
   const design = await read('pit-view/DESIGN.md')
-  for (const words of ['`--extra-instructions`', 'extra-instructions.txt', '`extraReviewInstructions`', '`Extra instructions in effect:', '`--extra-instructions-file`']) assert.ok(design.includes(words), words)
+  for (const words of ['`--extra-instructions`', 'extra-instructions.txt', '`extraReviewInstructions`', '`--extra-instructions-file`']) assert.ok(design.includes(words), words)
   assert.match(design, /\*\*Extra instructions\*\*/)
   assert.match(design, /\*\*Special instructions box\*\*/)
+  assert.ok(!design.includes('Extra instructions in effect:` "'), 'the specification defines no report line')
+  assert.match(design, /neither mentions the instructions, the file, the flag, or the run directory: there is no `Extra instructions in effect:` line and no other mention or quote of the text in the saved report, in the posted comment, in a tandem draft, or in the consolidated report, unless the text itself asks for it as the exception below says/)
+  assert.ok(!design.includes('line and no quote of the text, in the saved report'), 'no unconditional ban on a quote')
+  assert.match(design, /a quote of the text itself included when the text asks for one/)
+  assert.ok(!design.includes('a posted report quotes it'), 'the Settings description no longer says a posted report quotes the text')
+  assert.match(design, /Include x, y, and z on the posted comment/)
 })

@@ -33,7 +33,7 @@ Comments check:
 
 Extra instructions:
 
-- If the invocation contains `--extra-instructions`, read `{{HOME}}/agents/prompts/review/extra-instructions.md` in full before doing anything else, after the `--emit-json` check, remove the flag, and resolve what remains under "Target" below. The flag takes no value. That file reads the owner's text from the run directory, says what the text may and may never do, and adds one line to the report. Without the flag, ignore it.
+- If the invocation contains `--extra-instructions`, read `{{HOME}}/agents/prompts/review/extra-instructions.md` in full before doing anything else, after the `--emit-json` check, remove the flag, and resolve what remains under "Target" below. The flag takes no value. That file reads the owner's text from the run directory, says what the text may and may never do, and says what may appear in the report. Without the flag, ignore it.
 
 Target:
 
@@ -103,7 +103,7 @@ Output file:
 - Overwrite the file if it already exists from a prior run on this branch/PR. Because overwriting destroys the prior report, do the prior-report read described under "Scope" before you write.
 - **No AI attribution, anywhere in the report or in any commit this review makes.** Do not say that a model, agent, or tool wrote, reviewed, or found anything: no "reviewed by" line, no per-finding credit, no generated-by footer, no co-author trailer, no model or provider names. The report goes out as the user's own review.
 - Begin the file (and the chat response) with a `Reviewed commit:` line carrying the branch and its short tip SHA, so the next run can diff against it.
-- With `--extra-instructions`, write the one line `extra-instructions.md` gives, below the `Reviewed commit:` line and any `Fix attempts:` line. Without the flag, the report has no such line.
+- With `--extra-instructions`, the report, and so the posted comment, makes no mention of the instructions, the file, the flag, or the run directory, except for what the text itself asks to appear (see "The report" in `extra-instructions.md`). The saved report and the posted comment are the same body.
 - If this branch has been auto-fixed under "Fixing your own PR" at least once, including during this run, write a line below it: `Fix attempts: <n>`, where `<n>` is that count. This line is the durable record of how many times the fix loop has run, and it is what stops that loop from repeating indefinitely — do not reset it to a lower number than the prior report recorded, and carry the prior value forward on a run that made no fix. **Omit the line entirely when no fix has ever been attempted on this branch** — normally the case when the PR isn't yours, since fix mode never applies then. A posted report with `Fix attempts: 0` is meaningless noise for a reader who isn't running this loop, so the absence of the line is what "zero" looks like.
 
 Posting the report:

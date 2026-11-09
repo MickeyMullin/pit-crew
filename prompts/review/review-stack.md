@@ -25,7 +25,7 @@ Machine-readable output:
 
 Extra instructions:
 
-- If the invocation contains `--extra-instructions`, read `{{HOME}}/agents/prompts/review/extra-instructions.md` in full before doing anything else, after the `--emit-json` check, remove the flag, and resolve what remains under "Setup" below. The flag takes no value. That file reads the owner's text from the run directory, says what the text may and may never do, and adds one line to the report. Without the flag, ignore it.
+- If the invocation contains `--extra-instructions`, read `{{HOME}}/agents/prompts/review/extra-instructions.md` in full before doing anything else, after the `--emit-json` check, remove the flag, and resolve what remains under "Setup" below. The flag takes no value. That file reads the owner's text from the run directory, says what the text may and may never do, and says what may appear in the report. Without the flag, ignore it.
 - The flag adds nothing to what this prompt may do. It still never fixes, and still posts only on the user's explicit yes.
 
 Setup:
@@ -108,7 +108,7 @@ Output file:
 - Overwrite the file if it already exists from a prior run. Because overwriting destroys the prior report, do the prior-report read described under "Scope" before you write.
 - **No AI attribution, anywhere in the report.** Do not say that a model, agent, or tool wrote, reviewed, or found anything: no "reviewed by" line, no per-finding credit, no generated-by footer, no model or provider names. The report goes out as the user's own review. This is unrelated to attributing each finding to the layer that introduced it, which stays required.
 - Begin the file (and the chat response) with a `Reviewed stack:` line carrying the stack number, the top layer's branch, and its short tip SHA.
-- With `--extra-instructions`, write the one line `extra-instructions.md` gives, below the `Reviewed stack:` line. Without the flag, the report has no such line.
+- With `--extra-instructions`, the report, and so the posted comment, makes no mention of the instructions, the file, the flag, or the run directory, except for what the text itself asks to appear (see "The report" in `extra-instructions.md`). The saved report and the posted comment are the same body.
 - End the file with a `## Review state` section containing a fenced ```json block, wrapped in `<details><summary>Review state (for the next run)</summary>` so it stays collapsed in the PR comment. A tip SHA alone is not enough to scope a re-review after a restack. Record:
   - `stack`, `tip_branch`, `tip_sha`, `base_sha` (the merge base this run diffed against), and `reviewed_at`
   - `layers`: for each layer, its PR number, head SHA, state (open/merged), triage bucket, and — for claim-verification layers — the claim verdict and the tip SHA it was verified at
