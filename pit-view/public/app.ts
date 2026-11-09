@@ -5,6 +5,7 @@ import type { Config } from '../src/config.ts'
 import type { Patch, View } from '../src/poller.ts'
 import { announcements } from './agent.ts'
 import { tickTimers, updateAgentCells } from './agentcell.ts'
+import { createAutoReviewMenu } from './autoreviewmenu.ts'
 import { byId, setText } from './dom.ts'
 import { createDrawer } from './drawer.ts'
 import { closeOnOutsidePress, escapeApplies } from './drawerview.ts'
@@ -184,6 +185,7 @@ const draw = (): void => {
   updateSweepAges(document, nowMs())
   // one part failing must not stop the rest of the page drawing
   try {
+    autoReviewMenu.update()
     drawer.update()
     sweepDrawer.update()
     reportPanel.refresh()
@@ -391,6 +393,16 @@ const drawer = createDrawer({
     drawer.close()
     sweepDrawer.open({ key: `sweep-link:${link.number}` }, { sweepId: link.sweepId, pr: link.number })
   },
+})
+
+// the header's auto-review button: hidden until the config has autoReview; its popover lists the last ticks and offers Run now
+const autoReviewMenu = createAutoReviewMenu({
+  root: byId('auto-review'),
+  button: byId<HTMLButtonElement>('auto-review-button'),
+  popover: byId('auto-review-popover'),
+  token: readToken(document),
+  nowMs,
+  view: () => feed.view,
 })
 
 // the sweep drawer is the repository's, not one PR's: the bot group's Run sweep and status open it, and so does the broom beside a Dependabot PR's agent button. It and the PR drawer never show together

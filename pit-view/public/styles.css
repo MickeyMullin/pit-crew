@@ -450,6 +450,97 @@ button {
   font-weight: 600;
 }
 
+/* the header's auto-review button and its popover: text only, in the sync status's colors; the popover opens under the button, like the hover card */
+
+.auto-review {
+  position: relative;
+}
+
+.auto-review[hidden],
+.auto-review-popover[hidden] {
+  display: none;
+}
+
+.auto-review-button {
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.auto-review-button:hover {
+  border-color: var(--line-control);
+}
+
+.auto-review-button[data-tone='warn'] {
+  color: var(--amber-fg);
+  font-weight: 600;
+}
+
+.auto-review-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  width: min(420px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.auto-title,
+.auto-heading {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.auto-heading {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.auto-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.auto-ticks {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.auto-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.auto-warn {
+  color: var(--amber-fg);
+}
+
+.auto-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.auto-settings {
+  color: var(--blue-fg);
+}
+
 /* offline banner: under the header while the latest cycle has failed; it scrolls away under the
    header, whose sync status still says offline */
 

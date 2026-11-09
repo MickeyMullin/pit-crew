@@ -52,6 +52,10 @@
   <div class="spacer"></div>
   <span id="sync-status" class="sync-status mono" data-tone="normal">connecting…</span>
   <span id="sync-live" class="sr-only" aria-live="polite"></span>
+  <div id="auto-review" class="auto-review" hidden>
+    <button id="auto-review-button" type="button" class="auto-review-button mono" data-tone="normal" aria-expanded="false" aria-haspopup="dialog" aria-controls="auto-review-popover"></button>
+    <div id="auto-review-popover" class="auto-review-popover" role="dialog" aria-label="Auto-review" hidden></div>
+  </div>
   <div class="page-search" role="search">
     <input id="page-search" type="search" class="page-search-input" placeholder="Search all PRs" aria-label="Search all PRs by number, title, author, branch, or ticket" aria-keyshortcuts="/" autocomplete="off" spellcheck="false">
     <button id="page-search-clear" type="button" class="page-search-clear" aria-label="Clear page search" title="Clear page search" hidden>

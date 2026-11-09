@@ -93,6 +93,8 @@ const textPairs: [string, string][] = [
   ['ink', 'gray-bg'], ['red-fg', 'surface'], ['green-fg', 'green-bg'], ['blue-fg', 'blue-bg'],
   // the sweep drawer's card a PR's link opened it at (ink, muted, and the chips' own pairs on blue-bg) and the bot group header's sweep status in each tone on ground
   ['ink', 'blue-bg'], ['muted', 'blue-bg'], ['amber-fg', 'ground'],
+  // the header's auto-review button (muted, or amber for a skipped tick) and its popover on surface, with the Settings link
+  ['muted', 'surface'], ['amber-fg', 'surface'], ['ink', 'surface'], ['blue-fg', 'surface'],
 ]
 
 test('text meets 4.5:1 contrast in both color schemes', async () => {
