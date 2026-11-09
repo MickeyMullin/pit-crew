@@ -15,8 +15,8 @@ export type Loadable<T> = { state: 'loading' } | { state: 'error', message: stri
 
 // what the drawer is asking about: a start waiting for its Start, a stop waiting for its Stop, or a direct action on the PR waiting for its confirmation
 export type Confirm =
-  // checkComments is the Self-review's box and extraText what was typed in a review's Extra instructions box, undefined until then: both live here, so they last as long as this confirmation and no longer
-  | { type: 'start', kind: StartKind, runner: RunnerName, checkComments?: boolean, extraText?: string }
+  // checkComments is the Self-review's box, extraOn the checkbox of a review's Special instructions box (unchecked until clicked), and extraText what was typed in that box, undefined until then: all three live here, so they last as long as this confirmation and no longer
+  | { type: 'start', kind: StartKind, runner: RunnerName, checkComments?: boolean, extraOn?: boolean, extraText?: string }
   | { type: 'stop', andOpen: boolean, runId: number }
   // a re-read of the latest run's result, with everything its confirmation showed
   | { type: 'reread', runId: number, repo: string, viewer: string, headSha: string, baseRef: string }
@@ -83,10 +83,12 @@ export const defaultRunner = (option: Pick<StartOption, 'kind' | 'runners'>, con
 export const commentsCheckOn = (asked: { checkComments?: boolean }, option: Pick<StartOption, 'checkCommentsArgs'>): boolean =>
   asked.checkComments === true && option.checkCommentsArgs !== undefined
 
-// what a review's Extra instructions box holds, which is what its start sends: what was typed, or until then the standing default; undefined for a start with no box
-export const extraBoxText = (asked: { extraText?: string }, option: Pick<StartOption, 'extraInstructions'>): string | undefined =>
-  option.extraInstructions === undefined ? undefined : asked.extraText ?? option.extraInstructions.standing
-
+// the special instructions a start sends: the box's text, only when this start offers the box, its checkbox is checked, and the text is not empty once space is trimmed; otherwise undefined, which sends no field
+export const specialInstructionsSent = (asked: { extraOn?: boolean, extraText?: string }, option: Pick<StartOption, 'extraInstructions'>): string | undefined => {
+  if (option.extraInstructions === undefined || asked.extraOn !== true) return undefined
+  const text = asked.extraText ?? ''
+  return text.trim() === '' ? undefined : text
+}
 export type StartConfirmModel = {
   kind: StartKind
   heading: string
@@ -102,8 +104,8 @@ export type StartConfirmModel = {
   models: RunnerModels
   // the Self-review's box; null for a start that does not offer it
   commentsCheck: { label: string, detail: string, checked: boolean } | null
-  // a review's Extra instructions box; null for a start that does not offer it
-  extraBox: { label: string, detail: string, text: string } | null
+  // a review's Special instructions box, behind a checkbox; null for a start that does not offer it. The text is kept while the box is unchecked and hidden
+  extraBox: { label: string, toggle: string, detail: string, checked: boolean, text: string } | null
   effect: string
   effectKind: StartOption['posts']['kind']
   // a start that pushes to the PR's branch is confirmed with a caution treatment and this plain
@@ -115,16 +117,16 @@ export type StartConfirmModel = {
 
 // null when the PR no longer offers that start. A Fix session pushes commits, so its confirmation
 // names the branch in its heading, says plainly what the push does, and has a Start of its own
-export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headRef'>, cell: AgentCell, kind: StartKind, runner: RunnerName, checkComments = false, extraText?: string): StartConfirmModel | null => {
+export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headRef'>, cell: AgentCell, kind: StartKind, runner: RunnerName, checkComments = false, extraText?: string, extraOn = false): StartConfirmModel | null => {
   const option = optionOf(cell, kind)
   if (option === undefined) return null
   const chosen = option.runners.includes(runner) ? runner : defaultRunner(option, cell.action.runner)
   const push = option.posts.kind === 'push'
   const checked = commentsCheckOn({ checkComments }, option)
   const args = checked ? option.checkCommentsArgs ?? option.args : option.args
-  const box = extraBoxText(extraText === undefined ? {} : { extraText }, option)
-  // the command shows the flag, and never the text, while the box holds anything but space
-  const flagged = box !== undefined && box.trim() !== '' && option.extraInstructions !== undefined ? [...args, option.extraInstructions.flag] : args
+  const sent = specialInstructionsSent({ extraOn, ...(extraText === undefined ? {} : { extraText }) }, option)
+  // the command shows the flag, and never the text, when special instructions are sent or, with none sent, a standing default is set, which a start without the field runs under
+  const flagged = option.extraInstructions !== undefined && (sent !== undefined || option.extraInstructions.standing.trim() !== '') ? [...args, option.extraInstructions.flag] : args
   return {
     kind,
     heading: push ? `Push fixes to ${row.headRef}?` : `${option.label} #${row.number}?`,
@@ -140,10 +142,12 @@ export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headR
       detail: 'Reads the PR\'s latest comments from anyone and reports which points the branch has not addressed. It changes nothing.',
       checked,
     },
-    extraBox: box === undefined ? null : {
-      label: 'Extra instructions',
-      detail: 'For this run only, prefilled from Settings. Empty means none. The reviewer reads them from a file, and the report quotes them, so a posted report shows them on GitHub. At most 2,000 characters.',
-      text: box,
+    extraBox: option.extraInstructions === undefined ? null : {
+      label: 'Special instructions',
+      toggle: 'Add special instructions for this review',
+      detail: 'For this review only. The reviewer reads them from a file, and the report does not show them unless they ask for that. Nothing is sent unless this is checked and the box has text. Unchecking hides the box and keeps what it holds. At most 2,000 characters.',
+      checked: extraOn,
+      text: extraText ?? '',
     },
     effect: option.posts.text,
     effectKind: option.posts.kind,
@@ -795,7 +799,7 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
   const { row, confirm } = input
   const cell = row.agent
   const card = cell === null ? 'none' : cardKind(cell)
-  const startAsk = confirm?.type === 'start' && cell !== null ? startConfirmModel(row, cell, confirm.kind, confirm.runner, confirm.checkComments, confirm.extraText) : null
+  const startAsk = confirm?.type === 'start' && cell !== null ? startConfirmModel(row, cell, confirm.kind, confirm.runner, confirm.checkComments, confirm.extraText, confirm.extraOn) : null
   const runs = input.runs
   const reports = input.reports
   return {

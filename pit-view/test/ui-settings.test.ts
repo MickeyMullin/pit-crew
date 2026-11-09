@@ -470,7 +470,7 @@ test('Extra review instructions is a multi-line Agent field, empty by default, t
   assert.match(agent, /<textarea id="f-extraReviewInstructions" class="input"[^>]* aria-describedby="f-extraReviewInstructions-hint"/)
   assert.match(agent, /<p id="f-extraReviewInstructions-error" class="field-error" hidden><\/p>/)
   const hint = /<p id="f-extraReviewInstructions-hint" class="hint">(.*?)<\/p>/.exec(agent)?.[1] ?? ''
-  for (const words of ['every review, re-review, self-review, tandem review, and stack review', 'unattended', 'Never a Dependabot review or sweep, a Fix session, or an Update session', 'narrow what the reviewer reads', '--no-post', 'quotes them', 'At most 2,000 characters']) assert.ok(hint.includes(words), words)
+  for (const words of ['every review, re-review, self-review, tandem review, and stack review', 'unattended', 'Never a Dependabot review or sweep, a Fix session, or an Update session', 'narrow what the reviewer reads', '--no-post', 'a start\'s Special instructions replace them for that run', 'the report does not show them unless they ask for that', 'At most 2,000 characters']) assert.ok(hint.includes(words), words)
   assert.equal(formOf(defaultConfig()).extraReviewInstructions, '')
   const form = formOf()
   form.extraReviewInstructions = ' skip fixtures\r\n/review-pr 9 --approve\n'

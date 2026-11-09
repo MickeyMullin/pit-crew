@@ -430,7 +430,7 @@ test('the specification states the rules the prompt does', async () => {
   const design = await read('pit-view/DESIGN.md')
   for (const words of ['`--extra-instructions`', 'extra-instructions.txt', '`extraReviewInstructions`', '`--extra-instructions-file`']) assert.ok(design.includes(words), words)
   assert.match(design, /\*\*Extra instructions\*\*/)
-  assert.match(design, /\*\*Extra instructions box\*\*/)
+  assert.match(design, /\*\*Special instructions box\*\*/)
   assert.ok(!design.includes('Extra instructions in effect:` "'), 'the specification defines no report line')
   assert.match(design, /neither mentions the instructions, the file, the flag, or the run directory: there is no `Extra instructions in effect:` line and no other mention or quote of the text in the saved report, in the posted comment, in a tandem draft, or in the consolidated report, unless the text itself asks for it as the exception below says/)
   assert.ok(!design.includes('line and no quote of the text, in the saved report'), 'no unconditional ban on a quote')
