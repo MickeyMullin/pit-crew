@@ -56,6 +56,9 @@ export const tickLine = (tick: Tick, reading: Reading): TickLine => {
 
 export type RunLink = { number: number, state: 'running' | 'queued', title: string, url: string, text: string }
 
+// the focus key of a PR link: its number, never its position, so a rebuild finds the same link again
+export const runLinkKey = (run: { number: number }): string => `auto-pr:${run.number}`
+
 export type PopoverModel = {
   ticks: TickLine[]
   runs: RunLink[]

@@ -2,7 +2,7 @@
 // the header's auto-review button and its popover (autoreviewbar.ts says what each reads): hidden until the config has autoReview, a button rather than a live region so a tick never announces itself, the last ticks fetched when it opens, and Run now with the per-start token
 import type { Tick } from '../src/cache.ts'
 import type { View } from '../src/poller.ts'
-import { indicator, popoverFocus, popoverModel, runNowRequest, runNowResult } from './autoreviewbar.ts'
+import { indicator, popoverFocus, popoverModel, runLinkKey, runNowRequest, runNowResult } from './autoreviewbar.ts'
 import type { PopoverModel } from './autoreviewbar.ts'
 import { append, h, newTab, setText } from './dom.ts'
 import { getJson, sendRun } from './runapi.ts'
@@ -52,7 +52,7 @@ export const createAutoReviewMenu = ({ root, button, popover, token, nowMs, view
     const parts: Node[] = []
     const runs = model.runs.map((run) => {
       const href = safeHref(run.url)
-      return href === null ? run.text : h('a', { href, ...newTab, title: run.title }, run.text)
+      return href === null ? run.text : h('a', { href, ...newTab, title: run.title, 'data-focus-key': runLinkKey(run) }, run.text)
     })
     if (runs.length + model.sweeps.length > 0) parts.push(section('Running and queued', list([...runs, ...model.sweeps], 'auto-list')))
     if (model.hold !== null) parts.push(h('p', { class: 'auto-note auto-warn' }, model.hold))

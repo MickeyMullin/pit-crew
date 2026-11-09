@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import type { AutoReviewView } from '../src/autoreview.ts'
 import type { Tick } from '../src/cache.ts'
 import { setTimeFormat } from '../public/format.ts'
-import { indicator, popoverFocus, popoverModel, runNowRequest, runNowResult, skipWords } from '../public/autoreviewbar.ts'
+import { indicator, popoverFocus, runLinkKey, popoverModel, runNowRequest, runNowResult, skipWords } from '../public/autoreviewbar.ts'
 
 setTimeFormat('12h')
 
@@ -145,6 +145,10 @@ test('after the popover is rebuilt, focus goes back to the control that had it, 
   // focus was on something with no key, such as a PR link that the rebuild removed
   assert.deepEqual(popoverFocus('', ['auto-run-now']), { target: 'toggle' })
   assert.deepEqual(popoverFocus('auto-run-now', []), { target: 'toggle' })
+  // a PR link keeps its place by its number, not its position in the list
+  assert.equal(runLinkKey({ number: 412 }), 'auto-pr:412')
+  assert.deepEqual(popoverFocus('auto-pr:412', ['auto-pr:97', 'auto-pr:412', 'auto-run-now']), { target: 'key', key: 'auto-pr:412' })
+  assert.deepEqual(popoverFocus('auto-pr:412', ['auto-pr:97', 'auto-run-now']), { target: 'toggle' })
 })
 
 test('the popover remembers its focus before it rebuilds and restores it after, and its Settings link has a focus key', async () => {
@@ -156,6 +160,7 @@ test('the popover remembers its focus before it rebuilds and restores it after, 
   assert.ok(before > -1 && before < replace, 'focus is read before the popover is cleared')
   assert.ok(after > draw.indexOf('append(popover'), 'focus is restored after the new content is in')
   assert.match(source, /'data-focus-key': 'auto-settings'/)
+  assert.match(source, /'data-focus-key': runLinkKey\(run\)/)
   assert.match(draw, /button\.focus\(/)
 })
 
