@@ -340,7 +340,7 @@ test('the Auto-review list holds every auto run of the PR, with its reason, head
     [4, 'Pushed since the last review', '755b78b', 'Failed · no result', 'red', 'No'],
     [3, 'Self-review', null, 'Skipped', 'gray', 'No'],
   ])
-  // queued, started and finished: a queued run has no start, a run that never spawned has none either, and a finished one has all three
+  // queued, started, and finished: a queued run has no start, a run that never spawned has none either, and a finished one has all three
   assert.deepEqual(model.autoRuns.map((entry) => [entry.id, entry.queuedAt, entry.startedAt, entry.finishedAt]), [
     [9, '2026-10-28T14:50:00Z', null, null],
     [8, '2026-10-28T12:50:00Z', '2026-10-28T14:40:00Z', null],
