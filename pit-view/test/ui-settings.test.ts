@@ -636,6 +636,11 @@ test('turning a posting switch on asks first, naming what will post and under wh
   // no login resolved yet: the question still says whose account it is
   assert.equal(postingAsk('others', '').title, 'Let auto-review post to GitHub as your gh login?')
   assert.equal(postingAsk('others', '').confirm, 'Post as your gh login')
+  // unknown is said plainly, first, for both kinds; a known login gets no such line
+  const unknownLine = 'Pit View could not read the gh login, so it cannot say which account this will be. It posts as whoever gh is signed in as when a run starts.'
+  assert.equal(postingAsk('others', '').lines[0], unknownLine)
+  assert.equal(postingAsk('dependabot', '').lines[0], unknownLine)
+  assert.ok(!postingAsk('others', 'ines-hale').lines.includes(unknownLine))
 })
 
 test('the Auto-review card holds every option in order, a labeled control and an error slot for each, the daily limit\'s note, the posting switches, and the login agent as a separate item', async () => {
@@ -753,7 +758,30 @@ test('the page records the login each posting switch was confirmed for, turns th
   // save and revert and a new page start with no records
   const saved = source.slice(source.indexOf('current.saved = body as Config'), source.indexOf('renderAll()', source.indexOf('current.saved = body as Config')))
   assert.match(saved, /current\.postConfirmed = \{\}/)
-  const revert = source.slice(source.indexOf('const revert'), source.indexOf('// the view (for the gh login'))
+  const revert = source.slice(source.indexOf('const revert'), source.indexOf('// the view (for the sample keys)'))
   assert.match(revert, /page\.postConfirmed = \{\}/)
   assert.match(source, /postAsk: null,\s*postAskLogin: '',\s*postConfirmed: \{\}/)
+})
+
+test('a switch confirmed for the configured viewer turns off when the field is cleared and the gh login is another account', () => {
+  const on = { autoPostOthers: true, autoPostDependabot: false }
+  // confirmed for vera-quill (typed in the viewer field); the field is cleared and gh is signed in as rafe-moss
+  assert.equal(postingLoginOf('', 'rafe-moss'), 'rafe-moss')
+  assert.deepEqual(postSwitchesToTurnOff({ others: 'vera-quill' }, on, postingLoginOf('', 'rafe-moss')), ['others'])
+  // a confirmation opened after clearing names the gh login, not the old viewer
+  assert.equal(postingAsk('others', postingLoginOf('', 'rafe-moss')).confirm, 'Post as @rafe-moss')
+  // confirmed while nothing was known, then the gh login arrives
+  assert.equal(postingLoginOf('', ''), '')
+  assert.deepEqual(postSwitchesToTurnOff({ others: '' }, on, postingLoginOf('', 'rafe-moss')), ['others'])
+  // still unknown: nothing changed, so the switch stays on
+  assert.deepEqual(postSwitchesToTurnOff({ others: '' }, on, postingLoginOf('', '')), [])
+})
+
+test('Settings takes the gh login from its own route, never from the viewer the view reports', async () => {
+  const source = await readFile(new URL('../public/settings.ts', import.meta.url), 'utf8')
+  const extras = source.slice(source.indexOf('const loadExtras'), source.indexOf('const load = '))
+  assert.match(extras, /'\/api\/gh-login'/)
+  assert.match(extras, /page\.ghLogin = gh\?\.login \?\? ''/)
+  assert.doesNotMatch(source, /ghLogin\s*=\s*view/)
+  assert.doesNotMatch(extras, /viewer\.login/)
 })

@@ -316,6 +316,20 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   let ghLogin = stored.viewer === '' ? await localLogin(runner) : ''
   const effective = (): Config => ({ ...stored, viewer: stored.viewer === '' ? ghLogin : stored.viewer })
 
+  // the account gh is signed in as, whatever the viewer is configured to be: the value already held when the viewer is empty, else a local lookup remembered for a short while; a lookup that finds nothing is not remembered, and is shared by reads that arrive during it
+  let foundGhLogin: { login: string, at: number } | null = null
+  let ghLoginLookup: Promise<string> | null = null
+  const ghLoginTtlMs = 30_000
+  const signedInAs = async (): Promise<string> => {
+    if (stored.viewer === '' && ghLogin !== '') return ghLogin
+    if (foundGhLogin !== null && clock.now() - foundGhLogin.at < ghLoginTtlMs) return foundGhLogin.login
+    ghLoginLookup ??= localLogin(runner).then((login) => {
+      foundGhLogin = login === '' ? null : { login, at: clock.now() }
+      return login
+    }).finally(() => { ghLoginLookup = null })
+    return await ghLoginLookup
+  }
+
   // the port comes first: a second server must exit before it touches the running one's cache
   let dispatch: ((req: IncomingMessage, res: ServerResponse) => void) | null = null
   const server = createServer((req, res) => {
@@ -916,6 +930,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
 
   const routes: Route[] = [
     { method: 'GET', pattern: /^\/api\/view$/, handle: async (_req, res) => json(res, 200, await poller.view()) },
+    { method: 'GET', pattern: /^\/api\/gh-login$/, handle: async (_req, res) => json(res, 200, { login: await signedInAs() }) },
     { method: 'GET', pattern: /^\/api\/events$/, handle: (req, res, url) => events(req, res, url) },
     { method: 'POST', pattern: /^\/api\/clients\/([^/]+)$/, handle: (req, res, _url, match) => updateClient(req, res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/refresh$/, handle: (_req, res) => json(res, 200, poller.refresh('manual')) },

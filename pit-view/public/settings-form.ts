@@ -390,13 +390,16 @@ export const postSwitchesToTurnOff = (confirmed: PostConfirmed, form: Pick<Form,
 
 export type PostingAsk = { title: string, lines: string[], confirm: string, cancel: string }
 
-// what the confirmation says: what will post, and under which login (the gh login's name when the viewer is not yet known)
+// what the confirmation says: what will post, and under which login (and, when neither the form nor gh names one, a plain line saying it is unknown)
 export const postingAsk = (kind: PostKind, login: string): PostingAsk => {
   const who = login === '' ? 'your gh login' : `@${login}`
+  // when nothing names the login, the question says so rather than guess
+  const unknown = login === '' ? ['Pit View could not read the gh login, so it cannot say which account this will be. It posts as whoever gh is signed in as when a run starts.'] : []
   if (kind === 'others') {
     return {
       title: `Let auto-review post to GitHub as ${who}?`,
       lines: [
+        ...unknown,
         `Auto-review runs on other people's PRs will post their report as ${who}: an approval, a request for changes, or a comment, chosen by the findings and the checks.`,
         'Your own PRs never post, and never get fixes, whatever this says.',
         'It applies to runs that start after you save.',
@@ -408,6 +411,7 @@ export const postingAsk = (kind: PostKind, login: string): PostingAsk => {
   return {
     title: `Let scheduled Dependabot sweeps post to GitHub as ${who}?`,
     lines: [
+      ...unknown,
       `Each scheduled sweep will have its reviewers post as ${who}: an approval for a bump with nothing above P3 and green checks, and a comment or a request for changes for the rest.`,
       'A sweep you start by hand already posts this way, with or without this switch.',
       'It applies to sweeps that start after you save.',
