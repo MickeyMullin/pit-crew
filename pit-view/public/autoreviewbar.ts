@@ -108,4 +108,3 @@ export const runNowResult = (status: number, body: { started: boolean, tick: num
   const text = sentence(error ?? '')
   return text === '' ? `Pit View refused with status ${status}.` : `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 }
-
