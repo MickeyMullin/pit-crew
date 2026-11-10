@@ -446,6 +446,11 @@ const longestTimer = 2 ** 31 - 1
 // a cache younger than this is reused rather than fetched again
 const reuseMs = 60_000
 
+type StartOutcome = 'running' | 'queued' | 'failed' | 'dropped'
+
+// a start step that sees this many starts fail ends: a fetch or a clone that failed for one is likely to fail for the next, and it is the next trigger that tries again
+const failedStartsPerPass = 2
+
 const blockedBy: readonly (TickSkip | null)[] = ['identityMismatch', 'noClone', 'dailyLimit']
 
 const isLive = (session: { status: RunStatus }): boolean => session.status === 'queued' || session.status === 'running'
@@ -521,6 +526,9 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
   const pending = new Set<Promise<unknown>>()
   let sweeping: Promise<void> = Promise.resolve()
   const removing = new Map<string, Promise<void>>()
+  // the rows the start step is starting now, and the last status seen of each row, so only a row that ends is a reason to start the next
+  const ownStarts = new Set<string>()
+  const statuses = new Map<string, RunStatus>()
 
   const track = <T>(work: Promise<T>): Promise<T> => {
     const held = work.catch(() => {}).finally(() => pending.delete(held))
@@ -718,12 +726,12 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
 
   const inFlight = (): number => [...cache.runningRuns(), ...cache.runningSweeps()].filter((session) => session.origin === 'auto').length
 
-  // one queued row started as the settings now say, or dropped; true when the next may be tried
-  const startRun = async (run: Run, settings: Config, open: readonly RawOpenPr[]): Promise<boolean> => {
+  // one queued row started as the settings now say, or dropped; what became of it decides whether the pass goes on (startQueued)
+  const startRun = async (run: Run, settings: Config, open: readonly RawOpenPr[]): Promise<StartOutcome> => {
     const recheck = recheckQueued({ kind: 'others', number: run.number, reason: 'new', retry: false, headSha: run.headOid ?? '' }, open)
     if (recheck.action === 'drop') {
       launcher.skipQueued(run.id, recheck.note)
-      return true
+      return 'dropped'
     }
     const pr = open.find((candidate) => candidate.number === run.number)
     const args = runArgs(pr, run.number, run.reason, settings)
@@ -732,24 +740,26 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     return await afterStart('run', started)
   }
 
-  const startSweep = async (sweep: Sweep, settings: Config, auto: AutoReviewSettings): Promise<boolean> => {
+  const startSweep = async (sweep: Sweep, settings: Config, auto: AutoReviewSettings): Promise<StartOutcome> => {
     const args = sweepArgsNow(sweep.repo, auto)
     const request: StartRequest = { ...sweepRequest(settings.repo, sweep.runner), args }
     const started = await sweepLauncher.startScheduled(sweep.id, request, { args, posting: mayPost(sweep.command, args) }, prepare('sweep', sweep.repo))
     return await afterStart('sweep', started)
   }
 
-  // a start the cap took back at the last moment leaves its row queued with a fresh worktree, which goes, since it starts over when it next fits. Anything but a run now running ends the tick's starts
-  const afterStart = async (kind: WorktreeKind, session: Session | null): Promise<boolean> => {
+  // a start the cap took back at the last moment leaves its row queued with a fresh worktree, which goes, since it starts over when it next fits. What the row is now says how the pass goes on: running, it goes on; still queued, the cap or the login held it back, which holds for every row behind it, so the pass ends; failed, the row has left the line and counts toward the pass's bound; any other end (stopped by the owner) leaves the line and the pass goes on
+  const afterStart = async (kind: WorktreeKind, session: Session | null): Promise<StartOutcome> => {
     if (session?.status === 'queued' && session.worktree !== null) await remove(kind, session.id, expandHome(session.worktree, home))
-    return session?.status === 'running'
+    if (session?.status === 'running') return 'running'
+    if (session?.status === 'queued') return 'queued'
+    return session?.status === 'failed' ? 'failed' : 'dropped'
   }
 
   const optedIn = (reason: QueueReason | null, auto: AutoReviewSettings): boolean =>
     reason === 'dependabot' ? auto.dependabot : reason === 'selfReview' ? auto.own : auto.others
 
-  // the tick's last step: as many as fit, one at a time, oldest first, each read afresh, since a save, the cap, and the clock may all move meanwhile. Answers whether the day's limit had been reached before any started
-  const startQueued = async (repo: string, exempt: boolean, open: readonly RawOpenPr[]): Promise<boolean> => {
+  // the start step, run by a tick (as its last step) and by whatever frees room between ticks: as many as fit, one at a time, oldest first, each read afresh, since a save, the cap, and the clock may all move meanwhile. Answers whether the day's limit had been reached before any started
+  const startQueued = async (repo: string, exempt: boolean): Promise<boolean> => {
     const budget = (auto: AutoReviewSettings): ReturnType<typeof startBudget> => {
       const { autoRuns, autoSweeps } = records(repo)
       return startBudget({
@@ -762,10 +772,15 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     }
     const opening = config().autoReview
     if (opening === undefined || budget(opening).skip !== null) return opening !== undefined
+    // until a listing has completed the open list cannot say a PR closed, so nothing is dropped or started on it
+    const cached = cache.readView(repo)
+    if (cached.lastSuccessAt === null) return false
+    const open = cached.open.map((row) => row.pr)
     const candidates: ({ kind: 'run', row: Run } | { kind: 'sweep', row: Sweep })[] = [
       ...cache.queuedRuns().filter((run) => run.origin === 'auto' && run.repo === repo).map((row) => ({ kind: 'run' as const, row })),
       ...cache.queuedSweeps().filter((sweep) => sweep.origin === 'auto' && sweep.repo === repo).map((row) => ({ kind: 'sweep' as const, row })),
     ]
+    let failures = 0
     for (const candidate of candidates) {
       const settings = config()
       const auto = settings.autoReview
@@ -775,10 +790,68 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       if (budget(auto).count === 0) break
       // one whose opt-in has been turned off since it was queued cannot start, so it is ahead of no one: it stays queued in its place, and the next that can start goes
       if (!optedIn(candidate.row.reason, auto)) continue
-      const next = candidate.kind === 'run' ? await startRun(candidate.row, settings, open) : await startSweep(candidate.row, settings, auto)
-      if (!next) break
+      // the row's own end is not a trigger for another pass: this one goes on, or stops, by itself
+      const key = `${candidate.kind}-${candidate.row.id}`
+      ownStarts.add(key)
+      let outcome: StartOutcome
+      try {
+        outcome = candidate.kind === 'run' ? await startRun(candidate.row, settings, open) : await startSweep(candidate.row, settings, auto)
+      } finally {
+        ownStarts.delete(key)
+      }
+      if (outcome === 'queued') break
+      if (outcome === 'failed') {
+        failures += 1
+        if (failures >= failedStartsPerPass) break
+      }
     }
     return false
+  }
+
+  // the one start step at a time: a trigger that arrives while it works does not run beside it but asks for one more pass after it, so two triggers (a tick and a run's end) never try the same row together. A tick's answer is its own request's pass
+  let draining: Promise<boolean> | null = null
+  let again: { repo: string, exempt: boolean } | null = null
+  const takeAgain = (): { repo: string, exempt: boolean } | null => {
+    const asked = again
+    again = null
+    return asked
+  }
+
+  const drain = (repo: string, exempt: boolean): Promise<boolean> => {
+    if (draining !== null) {
+      again = { repo, exempt: exempt || again?.exempt === true }
+      return draining
+    }
+    const job = (async (): Promise<boolean> => {
+      let limited = false
+      let want: { repo: string, exempt: boolean } | null = { repo, exempt }
+      while (want !== null) {
+        limited = await startQueued(want.repo, want.exempt)
+        want = stopped ? null : takeAgain()
+      }
+      return limited
+    })().finally(() => {
+      draining = null
+    })
+    draining = job
+    return job
+  }
+
+  // the start step between ticks, for a scheduled run that ended, a save, or the cap's room opening: the same checks as a tick's, on the cache as the last board check left it, and nothing while the last tick found the login or the clone wrong, since that tick's checks are what says they are right. It runs a turn later, so the engine's own queue has taken the room it gives its waiting reviews first
+  const kick = (): void => {
+    if (stopped) return
+    const settings = config()
+    if (settings.autoReview?.enabled !== true) return
+    void track(Promise.resolve().then(async () => {
+      let last: Tick | null = null
+      try {
+        last = cache.latestTick(settings.repo)
+      } catch (error) {
+        log(`auto-review: cannot read the last tick: ${messageOf(error)}`)
+      }
+      if (last?.skipReason === 'identityMismatch' || last?.skipReason === 'noClone') return
+      await drain(settings.repo, false)
+    }).catch((error: unknown) => log(`auto-review: cannot start the queue: ${messageOf(error)}`)))
   }
 
   const runTick = async (tick: Tick, exempt: boolean): Promise<void> => {
@@ -851,7 +924,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     const queued = queueItems(queue.items, tick.id, settings, auto, clone, open)
     const counts: TickChanges = { cycle, qualified: queue.qualified, alreadyCurrent: queue.alreadyCurrent, queued }
     announce()
-    const limited = await startQueued(repo, exempt, open)
+    const limited = await drain(repo, exempt)
     if (limited) return skip('dailyLimit', counts)
     finish({ ...counts, state: 'ran' })
   }
@@ -967,6 +1040,11 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       void remove(kind, session.id, expandHome(session.worktree, home))
     }
     announce()
+    // a session that has just ended frees its place under the concurrency and the cap, and the queue goes on without waiting for a tick
+    const key = `${kind}-${session.id}`
+    const before = statuses.get(key)
+    statuses.set(key, session.status)
+    if (!isLive(session) && (before === undefined || before === 'queued' || before === 'running') && !ownStarts.has(key)) kick()
   }
 
   return {
@@ -979,7 +1057,10 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       if (config().autoReview?.enabled !== true) return null
       return { started: true, tick: begin(true) }
     },
-    configChanged: plan,
+    configChanged: () => {
+      plan()
+      kick()
+    },
     sessionChanged,
     view,
     idle: async () => {

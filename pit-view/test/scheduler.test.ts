@@ -600,8 +600,15 @@ test('post.others turned off while the worktree is added: a row queued by an ear
     const waiting = autoRuns(world).filter((run) => run.status === 'queued')
     assert.ok(waiting.length > 0)
     for (const run of waiting) assert.equal(run.posting, true)
-    await finish(world, first)
-    await saveWhileHeld(world, 'holdAdd', { others: false, dependabot: true })
+    // the run ending starts the next at once, held at its worktree add while the switch is saved
+    const held = Promise.withResolvers<void>()
+    world.git.state.holdAdd = held.promise
+    const added = world.git.verbs('worktree', 'add').length
+    await endWithoutIdle(world, first)
+    await waitFor(() => world.git.verbs('worktree', 'add').length === added + 1)
+    await savePost(world, { others: false, dependabot: true })
+    held.resolve()
+    await world.server.scheduler.idle()
     const second = running(world)[0]
     assert.ok(second)
     assert.ok(waiting.some((run) => run.id === second.id))
@@ -835,19 +842,18 @@ test('a fetch that fails is tried once more a few seconds later, and a second fa
     await waitFor(() => bad.time.pending() > 0)
     bad.time.advance(5000)
     await bad.server.scheduler.idle()
-    assert.equal(bad.launch.children.length, 0)
-    assert.deepEqual(bad.git.verbs('worktree', 'add'), [])
     const failure = autoRuns(bad).find((run) => run.status === 'failed')
     assert.ok(failure)
     assert.match(failure.note ?? '', /^worktreeFailed: /)
     assert.equal(failure.pid, null)
-    // the slot came back
-    assert.equal(bad.server.launcher.queueing().review, false)
-    assert.equal(bad.server.scheduler.view()?.startedToday, 0)
-    // the next tick retries it: the daily limit of one was not spent
+    // the slot came back, and the row behind the failed one took it in the same pass; the failed start did not count toward the daily limit, the next did
+    assert.equal(bad.launch.children.length, 1)
+    assert.equal(bad.server.cache.getRun(failure.id)?.status, 'failed')
+    assert.equal(bad.server.scheduler.view()?.startedToday, 1)
+    // the limit of one is spent, so the next tick retries nothing until the day ends
     await tick(bad)
     assert.equal(bad.launch.children.length, 1)
-    assert.equal(ticks(bad)[0]?.skipReason, null)
+    assert.equal(ticks(bad)[0]?.skipReason, 'dailyLimit')
   } finally {
     await bad.cleanup()
   }
@@ -1294,12 +1300,13 @@ test('a review the owner started fills the cap, so a scheduled run stays queued,
     assert.deepEqual(world.git.verbs('worktree', 'add'), [])
     assert.ok(autoRuns(world).length > 0)
     assert.ok(autoRuns(world).every((run) => run.status === 'queued'))
-    // the launcher's start pass never holds a scheduled row: it stays queued when the owner's review ends
+    // the owner's review ending opens the cap, and the oldest scheduled self-review starts at once, with no tick; the cap holds it to one
     world.launch.children[0]!.exit(0)
     await world.server.launcher.settled(manual.id)
-    await world.server.launcher.flushed()
-    assert.equal(world.launch.children.length, spawned)
-    assert.ok(autoRuns(world).every((run) => run.status === 'queued'))
+    await world.server.scheduler.idle()
+    assert.equal(world.launch.children.length, spawned + 1)
+    assert.equal(running(world).length, 1)
+    assert.equal(ticks(world).length, 1)
   } finally {
     await world.cleanup()
   }
@@ -1388,18 +1395,20 @@ test('a daily limit saved as 0 after a dailyLimit skip stops that skip counting 
     const recorded = ticks(world)[0]
     patches.length = 0
     await saveAuto(world, { dailyLimit: 0 })
+    await world.server.scheduler.idle()
+    // with no limit the save opens room, and the oldest queued run starts at once
     const view = world.server.scheduler.view()
-    assert.equal(view?.state, 'idle')
+    assert.equal(view?.state, 'running')
     assert.equal(view?.lastTick, null)
-    assert.equal(view?.startedToday, 1)
+    assert.equal(view?.startedToday, 2)
     assert.notEqual(view?.nextTickAt, null)
     const words = await pageWords(world)
     assert.equal(words.header?.includes('daily limit'), false)
     assert.equal(words.now.includes('daily limit'), false)
     assert.equal(words.fix, null)
     // the open page is told in the same step as the save, not at the next tick
-    await waitFor(() => patches.some((patch) => patch.autoReview?.state === 'idle'))
-    assert.equal(patches.find((patch) => patch.autoReview?.state === 'idle')?.autoReview?.lastTick, null)
+    await waitFor(() => patches.some((patch) => patch.autoReview?.lastTick === null))
+    assert.equal(patches.find((patch) => patch.autoReview?.lastTick === null)?.autoReview?.enabled, true)
     // nothing recorded is rewritten or removed
     assert.deepEqual(ticks(world)[0], recorded)
   } finally {
@@ -1412,9 +1421,11 @@ test('a daily limit raised above the runs started today stops a dailyLimit skip 
   const world = await setup({ auto: { dailyLimit: 1, concurrency: 1 } })
   try {
     await skippedAtLimit(world)
-    await saveAuto(world, { dailyLimit: 2 })
-    assert.equal(world.server.scheduler.view()?.startedToday, 1)
-    assert.equal(world.server.scheduler.view()?.state, 'idle')
+    await saveAuto(world, { dailyLimit: 5 })
+    await world.server.scheduler.idle()
+    // the raised limit opens room, and the oldest queued run starts at once
+    assert.equal(world.server.scheduler.view()?.startedToday, 2)
+    assert.equal(world.server.scheduler.view()?.state, 'running')
     assert.equal(world.server.scheduler.view()?.lastTick, null)
     const words = await pageWords(world)
     assert.equal(words.header?.includes('daily limit'), false)
@@ -1500,17 +1511,12 @@ test('a queued PR that closed is dropped as skipped with the note closed, counte
     assert.ok(waiting.length >= 2)
     const closing = waiting[0]!
     const moving = waiting[1]!
-    await finish(world, running(world)[0]!)
-    // the tick reuses the cache: a cycle finished within 60 seconds, so what the test wrote stands
-    world.time.advance(15 * minute - 30_000)
-    world.server.poller.refresh('manual')
-    await world.server.poller.idle()
+    // what the cache says when the run ends is what the start step reads, with no tick in between
     world.server.cache.closePr(scenario.repo, closing.number)
     const row = world.server.cache.readView(scenario.repo).open.find((entry) => entry.number === moving.number)
     assert.ok(row)
     world.server.cache.writePr(scenario.repo, { ...row.pr, headRefOid: 'abc1234abc1234abc1234abc1234abc1234abc12' }, scenario.defaultBranch)
-    world.time.advance(30_000)
-    await world.server.scheduler.idle()
+    await finish(world, running(world)[0]!)
     const dropped = world.server.cache.getRun(closing.id)
     assert.equal(dropped?.status, 'skipped')
     assert.equal(dropped?.note, 'closed')
@@ -1747,13 +1753,13 @@ test('a start the cap takes back at the last moment reads queued again in its ow
     assert.equal(back?.queuedAt, queuedSince)
     assert.equal(world.git.state.worktrees.size, 0)
     assert.equal(world.launch.children.length, 1)
-    // the owner's review ending starts no scheduled row: only a tick does
+    // the owner's review ending opens the cap again, and the same row starts at once, without a tick
     world.launch.children[0]!.exit(0)
     await world.server.launcher.settled(manual.id)
     await world.server.launcher.flushed()
     await world.server.scheduler.idle()
-    assert.equal(world.launch.children.length, 1)
-    assert.equal(world.server.cache.getRun(starting.id)?.status, 'queued')
+    assert.equal(world.launch.children.length, 2)
+    assert.equal(world.server.cache.getRun(starting.id)?.status, 'running')
   } finally {
     await world.cleanup()
   }
@@ -1915,7 +1921,7 @@ test('within one tick, an opt-in turned off while a run is being started passes 
   }
 })
 
-test('the oldest queued run that can start and does not end up running stops the tick, a failed fetch here: nothing behind it is tried, and it stops there with an opted-out run ahead of it too', async () => {
+test('a queued run that fails to start does not hold the rows behind it: the next is tried, an opted-out run ahead of it is passed, and the failed row is not tried again', async () => {
   const world = await setup({ auto: { others: true, own: true, concurrency: 3 }, config: { maxConcurrentReviews: 4 } })
   const failFetch = async (target: World): Promise<void> => {
     target.git.state.fetchFailures = 2
@@ -1925,7 +1931,8 @@ test('the oldest queued run that can start and does not end up running stops the
     await waitFor(() => target.time.pending() > 0)
     target.time.advance(5000)
     await target.server.scheduler.idle()
-    assert.equal(target.git.verbs('fetch').length, before + 2)
+    // the failed row's two fetches, then one for each of the rows behind it that started
+    assert.ok(target.git.verbs('fetch').length >= before + 3)
   }
   try {
     await failFetch(world)
@@ -1933,9 +1940,9 @@ test('the oldest queued run that can start and does not end up running stops the
     assert.equal(failure.length, 1)
     assert.match(failure[0]!.note ?? '', /^worktreeFailed: /)
     assert.equal(failure[0]!.id, Math.min(...autoRuns(world).map((run) => run.id)), 'the oldest was the one tried')
-    assert.equal(world.launch.children.length, 0)
-    assert.deepEqual(world.git.verbs('worktree', 'add'), [])
-    assert.equal(autoRuns(world).filter((run) => run.status === 'queued').length, autoRuns(world).length - 1)
+    assert.equal(world.launch.children.length, 3)
+    assert.equal(running(world).length, 3)
+    assert.ok(running(world).every((run) => run.id !== failure[0]!.id))
   } finally {
     await world.cleanup()
   }
@@ -1944,13 +1951,21 @@ test('the oldest queued run that can start and does not end up running stops the
     await tick(passed)
     const older = queuedOthers(passed)
     const own = queuedOwn(passed)
-    assert.ok(older.length > 0 && own.length >= 2)
+    assert.ok(older.length > 0 && own.length >= 3)
     await saveAuto(passed, { others: false })
     await finish(passed, running(passed)[0]!)
-    await failFetch(passed)
-    assert.match(passed.server.cache.getRun(own[0]!.id)?.note ?? '', /^worktreeFailed: /)
-    assert.equal(passed.server.cache.getRun(own[0]!.id)?.status, 'failed')
-    for (const run of [...older, ...own.slice(1)]) assert.equal(passed.server.cache.getRun(run.id)?.status, 'queued')
+    assert.equal(passed.server.cache.getRun(own[0]!.id)?.status, 'running')
+    passed.git.state.fetchFailures = 2
+    const fetched = passed.git.verbs('fetch').length
+    await endWithoutIdle(passed, running(passed)[0]!)
+    await waitFor(() => passed.git.verbs('fetch').length === fetched + 1)
+    await waitFor(() => passed.time.pending() > 0)
+    passed.time.advance(5000)
+    await passed.server.scheduler.idle()
+    assert.match(passed.server.cache.getRun(own[1]!.id)?.note ?? '', /^worktreeFailed: /)
+    assert.equal(passed.server.cache.getRun(own[1]!.id)?.status, 'failed')
+    assert.equal(passed.server.cache.getRun(own[2]!.id)?.status, 'running')
+    for (const run of older) assert.equal(passed.server.cache.getRun(run.id)?.status, 'queued')
   } finally {
     await passed.cleanup()
   }
@@ -2098,6 +2113,260 @@ test('PUT /api/config needs the Origin and the token, so another page cannot tur
     assert.equal(((await (await fetch(url)).json()) as Config).autoReview?.enabled, false)
     assert.equal((await fetch(url, { method: 'PUT', headers: headers(world), body })).status, 200)
     assert.equal(((await (await fetch(url)).json()) as Config).autoReview?.enabled, true)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+// the queue drains when a scheduled run ends or the cap has room, not at the next tick: "Check every" paces the board checks and the queueing alone (section 10, Scheduler)
+
+const queuedAuto = (world: World): Run[] => autoRuns(world).filter((run) => run.status === 'queued').sort((a, b) => a.id - b.id)
+
+// a run's process ends with a result, without waiting for the scheduler to go idle, since a start it triggers may be held
+const endWithoutIdle = async (world: World, run: Run): Promise<void> => {
+  const child = world.launch.children.find((candidate) => basename(candidate.request.cwd) === `run-${run.id}`)
+  assert.ok(child, `run ${run.id} has a process`)
+  await child.result(reviewResult({ target: { repo: scenario.repo, pr: run.number }, posted: null, notPostedReason: 'noPost' }))
+  child.exit(0)
+  await world.server.launcher.settled(run.id)
+}
+
+test('a scheduled run that ends starts the next queued one at once, in queue order, with no tick in between and never twice', async () => {
+  const world = await setup({ auto: { concurrency: 1 }, config: { maxConcurrentReviews: 3 } })
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    assert.ok(line.length >= 2, 'a queue longer than the concurrency')
+    const first = running(world)[0]!
+    const ticksBefore = ticks(world).length
+    const clockBefore = world.time.clock.now()
+    await finish(world, first)
+    assert.equal(world.time.clock.now(), clockBefore, 'the clock did not move')
+    assert.deepEqual(running(world).map((run) => run.id), [line[0]!.id])
+    await finish(world, running(world)[0]!)
+    assert.deepEqual(running(world).map((run) => run.id), [line[1]!.id])
+    assert.equal(ticks(world).length, ticksBefore, 'no tick ran')
+    assert.equal(world.launch.children.length, 3)
+    // one worktree and one process per started row
+    assert.equal(world.git.verbs('worktree', 'add').length, 3)
+    assert.equal(new Set(world.launch.children.map((child) => child.request.cwd)).size, 3)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a queue longer than the review cap drains as the owner\'s review and the scheduled runs end, each start taking the cap\'s room as it opens', async () => {
+  const world = await setup({ auto: { concurrency: 5 }, config: { maxConcurrentReviews: 2 } })
+  try {
+    await tick(world)
+    assert.equal(running(world).length, 2)
+    const waiting = queuedAuto(world)
+    assert.ok(waiting.length >= 2)
+    await finish(world, running(world)[0]!)
+    assert.equal(running(world).length, 2)
+    assert.equal(world.server.cache.getRun(waiting[0]!.id)?.status, 'running')
+    assert.equal(world.server.cache.getRun(waiting[1]!.id)?.status, 'queued')
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a cap raised by a save opens room that a queued scheduled run takes at once', async () => {
+  const raised = await setup({ auto: { concurrency: 3 }, config: { maxConcurrentReviews: 1 } })
+  try {
+    await tick(raised)
+    assert.equal(running(raised).length, 1)
+    const stored = await (await fetch(`${raised.server.url}/api/config`)).json() as Config
+    const saved = await fetch(`${raised.server.url}/api/config`, { method: 'PUT', headers: headers(raised), body: JSON.stringify({ ...stored, maxConcurrentReviews: 3 }) })
+    assert.equal(saved.status, 200)
+    await raised.server.scheduler.idle()
+    assert.equal(running(raised).length, 3)
+  } finally {
+    await raised.cleanup()
+  }
+})
+
+test('the drain stops at the daily limit, leaves the rest queued, and starts nothing outside the active hours', async () => {
+  const world = await setup({ auto: { concurrency: 1, dailyLimit: 2 }, config: { maxConcurrentReviews: 3 } })
+  try {
+    await tick(world)
+    await finish(world, running(world)[0]!)
+    assert.equal(running(world).length, 1)
+    assert.equal(world.server.scheduler.view()?.startedToday, 2)
+    await finish(world, running(world)[0]!)
+    assert.equal(running(world).length, 0, 'the limit of two is reached')
+    assert.ok(queuedAuto(world).length > 0)
+    assert.equal(world.launch.children.length, 2)
+  } finally {
+    await world.cleanup()
+  }
+  const closed = await setup({ auto: { concurrency: 1 }, config: { maxConcurrentReviews: 3 } })
+  try {
+    await tick(closed)
+    const first = running(closed)[0]!
+    // past 18:00 local: the window is shut, and a run in flight finishes
+    closed.time.advance(9 * 60 * minute)
+    await closed.server.scheduler.idle()
+    assert.equal(closed.server.scheduler.view()?.state, 'running')
+    await finish(closed, first)
+    assert.equal(running(closed).length, 0)
+    assert.ok(queuedAuto(closed).length > 0)
+    assert.equal(closed.launch.children.length, 1)
+  } finally {
+    await closed.cleanup()
+  }
+})
+
+test('a queued run whose opt-in is off is not started by a run ending, and keeps its place', async () => {
+  const world = await setup({ auto: { others: true, concurrency: 1 } })
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    assert.ok(line.length > 0)
+    await saveAuto(world, { others: false })
+    await finish(world, running(world)[0]!)
+    assert.equal(running(world).length, 0)
+    assert.equal(world.launch.children.length, 1)
+    for (const run of line) assert.equal(world.server.cache.getRun(run.id)?.status, 'queued')
+    // the run that ended started nothing while the switch was off, and turning it back on starts the oldest
+    await saveAuto(world, { others: true })
+    await world.server.scheduler.idle()
+    assert.deepEqual(running(world).map((run) => run.id), [line[0]!.id])
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a drain does not start while the last tick skipped over the gh login, and an unconfirmed login at the start leaves the row queued without failing it or looping', async () => {
+  const world = await setup({ auto: { concurrency: 1 } })
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    world.gh.login = 'somebody-else'
+    const asked = (): number => world.gh.calls.filter((args) => args[0] === 'api' && args[1] === 'user').length
+    const before = asked()
+    await finish(world, running(world)[0]!)
+    // retaken: the launcher's own identity check left it queued; the pass ended there, once
+    assert.equal(asked() - before, 1)
+    assert.equal(running(world).length, 0)
+    for (const run of line) assert.equal(world.server.cache.getRun(run.id)?.status, 'queued')
+    assert.equal(autoRuns(world).filter((run) => run.status === 'failed').length, 0)
+    // the next tick says why, and a drain after a skip as identityMismatch starts nothing and asks nobody
+    await tick(world)
+    assert.equal(ticks(world)[0]?.skipReason, 'identityMismatch')
+    const afterTick = asked()
+    await saveAuto(world, { concurrency: 2 })
+    await world.server.scheduler.idle()
+    assert.equal(asked(), afterTick)
+    assert.equal(running(world).length, 0)
+    // the login back and the next tick starts the oldest
+    world.gh.login = scenario.viewer
+    await tick(world)
+    assert.equal(running(world).length, 2)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a start that fails does not hold the rows behind it, a second failure in one pass ends it, and a failed row never makes the drain loop', async () => {
+  const world = await setup({ auto: { concurrency: 1, own: true }, config: { maxConcurrentReviews: 3 } })
+  const failNext = async (fetches: number): Promise<void> => {
+    world.git.state.fetchFailures = fetches
+    const before = world.git.verbs('fetch').length
+    await endWithoutIdle(world, running(world)[0]!)
+    await waitFor(() => world.git.verbs('fetch').length === before + 1)
+    await waitFor(() => world.time.pending() > 0)
+  }
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    assert.ok(line.length >= 4)
+    // the first queued row's fetch fails twice (its own retry), the row behind it starts
+    await failNext(2)
+    world.time.advance(5000)
+    await world.server.scheduler.idle()
+    assert.equal(world.server.cache.getRun(line[0]!.id)?.status, 'failed')
+    assert.match(world.server.cache.getRun(line[0]!.id)?.note ?? '', /^worktreeFailed: /)
+    assert.equal(world.server.cache.getRun(line[1]!.id)?.status, 'running')
+    // two failures in a row: the pass ends, the rest stay queued, and nothing retries by itself
+    world.git.state.fetchFailures = 4
+    const before = world.git.verbs('fetch').length
+    await endWithoutIdle(world, running(world)[0]!)
+    // the first row of the pass: its fetch fails, waits for its one retry, and fails again; the row behind it does the same, and the pass ends
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await waitFor(() => world.git.verbs('fetch').length >= before + 2 * attempt - 1)
+      await waitFor(() => world.time.pending() > 0)
+      world.time.advance(5000)
+    }
+    await world.server.scheduler.idle()
+    assert.equal(world.server.cache.getRun(line[2]!.id)?.status, 'failed')
+    assert.equal(world.server.cache.getRun(line[3]!.id)?.status, 'failed')
+    assert.equal(running(world).length, 0)
+    const rest = queuedAuto(world)
+    assert.ok(rest.length > 0)
+    assert.equal(world.git.verbs('fetch').length, before + 4)
+    await world.server.scheduler.idle()
+    assert.equal(world.git.verbs('fetch').length, before + 4, 'the failed rows started nothing more')
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('two triggers at once, a run ending and a save, serialize: one start in the engine at a time, and each queued row starts once', async () => {
+  const world = await setup({ auto: { concurrency: 2 }, config: { maxConcurrentReviews: 4 } })
+  try {
+    await tick(world)
+    assert.equal(running(world).length, 2)
+    const line = queuedAuto(world)
+    assert.ok(line.length >= 2)
+    let inEngine = 0
+    let widest = 0
+    const launcher = world.server.launcher
+    const original = launcher.startScheduled.bind(launcher)
+    launcher.startScheduled = async (...args: Parameters<typeof original>) => {
+      inEngine += 1
+      widest = Math.max(widest, inEngine)
+      try {
+        return await original(...args)
+      } finally {
+        inEngine -= 1
+      }
+    }
+    const both = running(world)
+    await endWithoutIdle(world, both[0]!)
+    await endWithoutIdle(world, both[1]!)
+    await saveAuto(world, { dailyLimit: 50 })
+    await world.server.scheduler.idle()
+    assert.equal(widest, 1)
+    assert.deepEqual(running(world).map((run) => run.id).sort(), [line[0]!.id, line[1]!.id])
+    assert.equal(world.launch.children.length, 4)
+    assert.equal(new Set(world.launch.children.map((child) => child.request.cwd)).size, 4)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('the tick keeps its job: it still fetches, qualifies, and queues, and a tick racing a drain starts no row twice', async () => {
+  const world = await setup({ auto: { concurrency: 1 }, config: { maxConcurrentReviews: 3 } })
+  try {
+    await tick(world)
+    const queuedFirst = queuedAuto(world).length
+    assert.equal(ticks(world)[0]?.queued, queuedFirst + 1)
+    let release = (): void => {}
+    world.git.state.holdAdd = new Promise<void>((resume) => {
+      release = resume
+    })
+    await endWithoutIdle(world, running(world)[0]!)
+    await waitFor(() => world.git.verbs('worktree', 'add').length === 2)
+    world.time.advance(15 * minute)
+    await waitFor(() => ticks(world).length === 2)
+    for (let turn = 0; turn < 20; turn += 1) await new Promise<void>((resume) => setImmediate(resume))
+    release()
+    await world.server.scheduler.idle()
+    assert.equal(world.launch.children.length, 2)
+    assert.equal(world.git.verbs('worktree', 'add').length, 2)
+    assert.equal(running(world).length, 1)
+    assert.equal(ticks(world)[0]?.state, 'ran')
   } finally {
     await world.cleanup()
   }
