@@ -2515,6 +2515,121 @@ test('a queued run the owner stops while an earlier start is in progress stays s
   }
 })
 
+test('a between-ticks drain already under way when a tick begins starts no second row until that tick reaches its own start step, then the queue drains in order, never twice', async () => {
+  const world = await setup({ auto: { concurrency: 2 }, config: { maxConcurrentReviews: 5 } })
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    assert.ok(line.length >= 3)
+    const [one, two] = running(world)
+    let releaseAdd = (): void => {}
+    world.git.state.holdAdd = new Promise<void>((resume) => {
+      releaseAdd = resume
+    })
+    // both places free: the drain's first start waits on its worktree
+    await endWithoutIdle(world, one!)
+    await endWithoutIdle(world, two!)
+    await waitFor(() => world.git.verbs('worktree', 'add').length === 3)
+    // the launcher's own login check must stay free, so the tick waits in its board check
+    const releaseBoard = holdBoard(world)
+    world.time.advance(15 * minute)
+    await waitFor(() => ticks(world).length === 2)
+    const children = world.launch.children.length
+    world.git.state.holdAdd = null
+    releaseAdd()
+    await waitFor(() => world.launch.children.length === children + 1)
+    // time enough for a second candidate to start if nothing held it
+    for (let turn = 0; turn < 30; turn += 1) await new Promise<void>((resume) => setTimeout(resume, 2))
+    assert.equal(world.launch.children.length, children + 1, 'only the start already under way finished; the second candidate waited for the tick')
+    assert.equal(world.git.verbs('worktree', 'add').length, 3)
+    assert.equal(world.server.cache.getRun(line[1]!.id)?.status, 'queued')
+    world.gh.hold = null
+    releaseBoard()
+    await world.server.scheduler.idle()
+    assert.equal(ticks(world)[0]?.state, 'ran')
+    assert.deepEqual(running(world).map((run) => run.id), [line[0]!.id, line[1]!.id])
+    assert.equal(world.server.cache.getRun(line[2]!.id)?.status, 'queued', 'concurrency 2 holds the third')
+    assert.equal(world.launch.children.length, children + 2, 'each row started once')
+    assert.equal(world.git.verbs('worktree', 'add').length, 4)
+    // the queue goes on in order as places free
+    await endWithoutIdle(world, running(world)[0]!)
+    await world.server.scheduler.idle()
+    assert.ok(running(world).some((run) => run.id === line[2]!.id))
+    assert.equal(new Set(world.launch.children.map((child) => child.request.cwd)).size, world.launch.children.length)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a save arriving during the tick\'s own start pass cannot turn a tick that started the last permitted review into a dailyLimit skip, and the next tick skips', async () => {
+  const world = await setup({ auto: { concurrency: 1, dailyLimit: 1 }, config: { maxConcurrentReviews: 3 } })
+  try {
+    let release = (): void => {}
+    world.git.state.holdAdd = new Promise<void>((resume) => {
+      release = resume
+    })
+    world.time.advance(15 * minute)
+    await waitFor(() => world.git.verbs('worktree', 'add').length === 1)
+    // the save asks for another pass while the tick's own pass starts its only permitted review
+    await saveAuto(world, { others: true })
+    for (let turn = 0; turn < 20; turn += 1) await new Promise<void>((resume) => setImmediate(resume))
+    world.git.state.holdAdd = null
+    release()
+    await world.server.scheduler.idle()
+    assert.equal(world.launch.children.length, 1)
+    assert.equal(ticks(world)[0]?.state, 'ran')
+    assert.equal(ticks(world)[0]?.skipReason, null)
+    assert.equal(world.server.scheduler.view()?.startedToday, 1)
+    await finish(world, running(world)[0]!)
+    await tick(world)
+    assert.equal(ticks(world)[0]?.state, 'skipped')
+    assert.equal(ticks(world)[0]?.skipReason, 'dailyLimit')
+    assert.equal(world.launch.children.length, 1)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a tick that throws clears the in-flight state: a run ending afterward starts the next row, and Run now during a tick starts no second tick', async () => {
+  const world = await setup({ auto: { concurrency: 1 }, config: { maxConcurrentReviews: 3 } })
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    assert.ok(line.length >= 2)
+    const first = running(world)[0]!
+    // Run now while a tick is in flight is refused with that tick's id
+    const release = holdBoard(world)
+    world.time.advance(15 * minute)
+    await waitFor(() => ticks(world).length === 2)
+    assert.deepEqual(world.server.scheduler.runNow(), { started: false, tick: ticks(world)[0]!.id })
+    assert.equal(ticks(world).length, 2)
+    // the board check throws rather than failing: the cache read after it is what breaks
+    const cache = world.server.cache
+    const original = cache.latestCycle.bind(cache)
+    cache.latestCycle = () => {
+      cache.latestCycle = original
+      throw new Error('cache unreadable')
+    }
+    world.gh.hold = null
+    release()
+    await world.server.scheduler.idle()
+    assert.equal(ticks(world)[0]?.state, 'skipped')
+    assert.equal(ticks(world)[0]?.skipReason, 'interrupted')
+    // nothing is left in flight and no trigger is left remembered: the next trigger is served by itself, once
+    const children = world.launch.children.length
+    await endWithoutIdle(world, first)
+    await world.server.scheduler.idle()
+    assert.deepEqual(running(world).map((run) => run.id), [line[0]!.id])
+    assert.equal(world.launch.children.length, children + 1)
+    assert.equal(world.server.scheduler.runNow()?.started, true)
+    await world.server.scheduler.idle()
+    assert.equal(ticks(world)[0]?.state, 'ran')
+    assert.equal(world.launch.children.length, children + 1, 'a completed tick left no pending pass')
+  } finally {
+    await world.cleanup()
+  }
+})
+
 test('the last statuses the scheduler keeps are bounded: ended rows are pruned past a limit and live ones are kept', async () => {
   const world = await setup({ auto: { enabled: false } })
   try {

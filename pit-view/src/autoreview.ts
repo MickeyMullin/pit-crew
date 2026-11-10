@@ -788,6 +788,11 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       const settings = config()
       const auto = settings.autoReview
       if (stopped || auto === undefined || !auto.enabled || settings.repo !== repo) break
+      // a tick that began while an earlier start was in progress has not yet checked the login, the clone, or the board, and this pass holds the open list from before it: it ends here, and the tick's own start step (or the pass after a tick that skips) covers it
+      if (ticking !== null && !startReached) {
+        kickWaiting = true
+        break
+      }
       // an earlier start may have taken a while, and the owner may have stopped this row meanwhile: it is read afresh, and anything no longer queued is passed over untouched
       const row = candidate.kind === 'run' ? cache.getRun(candidate.row.id) : cache.getSweep(candidate.row.id)
       if (row?.status !== 'queued') continue
@@ -829,13 +834,15 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       return draining
     }
     const job = (async (): Promise<boolean> => {
-      let limited = false
+      // the answer is that of the pass that began with the first request; a pass coalesced after it only starts rows, and finding the limit reached by the starts before it is not the first request's answer
+      let limited: boolean | null = null
       let want: { repo: string, exempt: boolean } | null = { repo, exempt }
       while (want !== null) {
-        limited = await startQueued(want.repo, want.exempt)
+        const reached = await startQueued(want.repo, want.exempt)
+        limited ??= reached
         want = stopped ? null : takeAgain()
       }
-      return limited
+      return limited === true
     })().finally(() => {
       draining = null
     })
