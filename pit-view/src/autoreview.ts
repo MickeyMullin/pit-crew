@@ -430,6 +430,8 @@ export type Scheduler = {
   // a run or a sweep started, stepped, or settled
   sessionChanged: (kind: WorktreeKind, session: Session) => void
   view: () => AutoReviewView | null
+  // how many sessions' last statuses it keeps, which stays bounded
+  tracked: () => number
   // resolves once no tick, sweep, or worktree removal is in progress
   idle: () => Promise<void>
   // clears the timer; a tick in progress starts nothing more
@@ -529,6 +531,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
   // the rows the start step is starting now, and the last status seen of each row, so only a row that ends is a reason to start the next
   const ownStarts = new Set<string>()
   const statuses = new Map<string, RunStatus>()
+  const statusLimit = 500
 
   const track = <T>(work: Promise<T>): Promise<T> => {
     const held = work.catch(() => {}).finally(() => pending.delete(held))
@@ -785,17 +788,20 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       const settings = config()
       const auto = settings.autoReview
       if (stopped || auto === undefined || !auto.enabled || settings.repo !== repo) break
+      // an earlier start may have taken a while, and the owner may have stopped this row meanwhile: it is read afresh, and anything no longer queued is passed over untouched
+      const row = candidate.kind === 'run' ? cache.getRun(candidate.row.id) : cache.getSweep(candidate.row.id)
+      if (row?.status !== 'queued') continue
       // a run in flight when the window closes finishes, and nothing new starts until it reopens; Run now is the one tick exempt
       if (!exempt && !isActiveAt(auto.activeHours, clock.now(), timeZone)) break
       if (budget(auto).count === 0) break
       // one whose opt-in has been turned off since it was queued cannot start, so it is ahead of no one: it stays queued in its place, and the next that can start goes
-      if (!optedIn(candidate.row.reason, auto)) continue
+      if (!optedIn(row.reason, auto)) continue
       // the row's own end is not a trigger for another pass: this one goes on, or stops, by itself
-      const key = `${candidate.kind}-${candidate.row.id}`
+      const key = `${candidate.kind}-${row.id}`
       ownStarts.add(key)
       let outcome: StartOutcome
       try {
-        outcome = candidate.kind === 'run' ? await startRun(candidate.row, settings, open) : await startSweep(candidate.row, settings, auto)
+        outcome = candidate.kind === 'run' ? await startRun(row as Run, settings, open) : await startSweep(row as Sweep, settings, auto)
       } finally {
         ownStarts.delete(key)
       }
@@ -837,12 +843,23 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     return job
   }
 
-  // the start step between ticks, for a scheduled run that ended, a save, or the cap's room opening: the same checks as a tick's, on the cache as the last board check left it, and nothing while the last tick found the login or the clone wrong, since that tick's checks are what says they are right. It runs a turn later, so the engine's own queue has taken the room it gives its waiting reviews first
+  // whether the tick in flight has reached its own start step, and whether a trigger arrived before it did
+  let startReached = false
+  let kickWaiting = false
+
+  // the start step between ticks, for a scheduled run that ended, a save, or the cap's room opening: the same checks as a tick's, on the cache as the last board check left it, and nothing while the last completed tick found the login or the clone wrong, since that tick's checks are what says they are right. While a tick is in flight it has not yet checked the login, the clone, or the board, so a trigger waits for it: its own start step covers the trigger, and a tick that skips before reaching that step leaves one pass for after it ends. It runs a turn later, so the engine's own queue has taken the room it gives its waiting reviews first
   const kick = (): void => {
     if (stopped) return
-    const settings = config()
-    if (settings.autoReview?.enabled !== true) return
+    if (config().autoReview?.enabled !== true) return
     void track(Promise.resolve().then(async () => {
+      const settings = config()
+      if (stopped || settings.autoReview?.enabled !== true) return
+      if (ticking !== null) {
+        // past its checks the tick's start step is shared with this one; before them the trigger waits
+        if (startReached) await drain(settings.repo, false)
+        else kickWaiting = true
+        return
+      }
       let last: Tick | null = null
       try {
         last = cache.latestTick(settings.repo)
@@ -924,6 +941,9 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     const queued = queueItems(queue.items, tick.id, settings, auto, clone, open)
     const counts: TickChanges = { cycle, qualified: queue.qualified, alreadyCurrent: queue.alreadyCurrent, queued }
     announce()
+    // the checks are done, so this step covers any trigger that waited for them
+    startReached = true
+    kickWaiting = false
     const limited = await drain(repo, exempt)
     if (limited) return skip('dailyLimit', counts)
     finish({ ...counts, state: 'ran' })
@@ -989,13 +1009,21 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     const tick = cache.createTick(config().repo)
     const entry = { id: tick.id, done: Promise.resolve() }
     ticking = entry
+    startReached = false
+    kickWaiting = false
     announce()
     entry.done = runTick(tick, exempt).catch((error: unknown) => {
       log(`auto-review: tick ${tick.id} failed: ${messageOf(error)}`)
       if (!stopped) cache.updateTick(tick.id, { finishedAt: now(), state: 'skipped', skipReason: 'interrupted' })
     }).finally(() => {
       ticking = null
+      startReached = false
       plan()
+      // a trigger that came in before the tick's checks and found no start step to cover it gets its pass now, on what the tick recorded
+      if (kickWaiting) {
+        kickWaiting = false
+        kick()
+      }
     })
     return tick.id
   }
@@ -1043,7 +1071,15 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     // a session that has just ended frees its place under the concurrency and the cap, and the queue goes on without waiting for a tick
     const key = `${kind}-${session.id}`
     const before = statuses.get(key)
+    statuses.delete(key)
     statuses.set(key, session.status)
+    if (statuses.size > statusLimit) {
+      // the oldest ended rows go first; a row that is still live keeps its place, since its end is what the map is for
+      for (const [old, status] of statuses) {
+        if (statuses.size <= statusLimit) break
+        if (status !== 'queued' && status !== 'running') statuses.delete(old)
+      }
+    }
     if (!isLive(session) && (before === undefined || before === 'queued' || before === 'running') && !ownStarts.has(key)) kick()
   }
 
@@ -1063,6 +1099,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     },
     sessionChanged,
     view,
+    tracked: () => statuses.size,
     idle: async () => {
       while (ticking !== null || pending.size > 0) await Promise.all([ticking?.done, ...pending])
     },

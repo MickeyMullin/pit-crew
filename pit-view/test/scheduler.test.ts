@@ -90,7 +90,7 @@ type World = {
   time: FakeTime
   launch: FakeLaunch
   git: ReturnType<typeof fakeGit>
-  gh: { login: string | null, failCycle: boolean, hold: Promise<void> | null, calls: string[][] }
+  gh: { login: string | null, failCycle: boolean, hold: Promise<void> | null, holdUser: Promise<void> | null, calls: string[][] }
   home: string
   clone: string
   worktrees: string
@@ -126,9 +126,10 @@ const setup = async ({ auto = {}, config = {}, now = insideHours, noKey = false,
   const launch = fakeLaunch()
   launch.deps.git = git.runner
   const base = fixtureRunner()
-  const gh = { login: scenario.viewer as string | null, failCycle: false, hold: null as Promise<void> | null, calls: [] as string[][] }
+  const gh = { login: scenario.viewer as string | null, failCycle: false, hold: null as Promise<void> | null, holdUser: null as Promise<void> | null, calls: [] as string[][] }
   const runner: Runner = async (args, options) => {
     gh.calls.push(args)
+    if (args[0] === 'api' && args[1] === 'user' && gh.holdUser !== null) await gh.holdUser
     if (args[0] === 'api' && args[1] === 'user') return gh.login === null ? failed('gh: not logged in') : ok(`${gh.login}\n`)
     if (args[0] === 'api' && args[1] === 'graphql' && gh.hold !== null) await gh.hold
     if (args[0] === 'api' && args[1] === 'graphql' && gh.failCycle) return failed('HTTP 502: Bad Gateway')
@@ -2367,6 +2368,162 @@ test('the tick keeps its job: it still fetches, qualifies, and queues, and a tic
     assert.equal(world.git.verbs('worktree', 'add').length, 2)
     assert.equal(running(world).length, 1)
     assert.equal(ticks(world)[0]?.state, 'ran')
+  } finally {
+    await world.cleanup()
+  }
+})
+
+// a tick in flight owns the start step: nothing between ticks starts a row before that tick has checked the login, the clone, and the board (section 10, The start step)
+
+const holdUserCheck = (world: World): (() => void) => {
+  let release = (): void => {}
+  world.gh.holdUser = new Promise<void>((resume) => {
+    release = resume
+  })
+  return release
+}
+
+const holdBoard = (world: World): (() => void) => {
+  let release = (): void => {}
+  world.gh.hold = new Promise<void>((resume) => {
+    release = resume
+  })
+  return release
+}
+
+test('a run ending and a config save during a tick start nothing until that tick reaches its own start step, which covers both', async () => {
+  const world = await setup({ auto: { concurrency: 1 }, config: { maxConcurrentReviews: 3 } })
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    assert.ok(line.length >= 2)
+    const first = running(world)[0]!
+    const release = holdBoard(world)
+    world.time.advance(15 * minute)
+    await waitFor(() => ticks(world).length === 2)
+    const children = world.launch.children.length
+    await endWithoutIdle(world, first)
+    await saveAuto(world, { concurrency: 2 })
+    for (let turn = 0; turn < 20; turn += 1) await new Promise<void>((resume) => setImmediate(resume))
+    assert.equal(world.launch.children.length, children, 'nothing started while the tick was still fetching')
+    assert.equal(world.git.verbs('worktree', 'add').length, children)
+    assert.equal(running(world).length, 0)
+    world.gh.hold = null
+    release()
+    await world.server.scheduler.idle()
+    assert.deepEqual(running(world).map((run) => run.id), [line[0]!.id, line[1]!.id])
+    assert.equal(world.launch.children.length, children + 2, 'each row started once')
+    assert.equal(ticks(world)[0]?.state, 'ran')
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('after a tick that skipped as identityMismatch or noClone, and a trigger that arrived during it, a run ending starts nothing', async () => {
+  for (const reason of ['identityMismatch', 'noClone'] as const) {
+    const world = await setup({ auto: { concurrency: 1 }, config: { maxConcurrentReviews: 3 } })
+    try {
+      await tick(world)
+      const line = queuedAuto(world)
+      assert.ok(line.length >= 2)
+      const first = running(world)[0]!
+      if (reason === 'identityMismatch') world.gh.login = 'somebody-else'
+      else world.git.state.remotes = null
+      const release = holdUserCheck(world)
+      world.time.advance(15 * minute)
+      await waitFor(() => ticks(world).length === 2)
+      const children = world.launch.children.length
+      // the run ends while the tick has not yet checked the login: the pending trigger must not start the row before the tick says why it skipped
+      await endWithoutIdle(world, first)
+      for (let turn = 0; turn < 20; turn += 1) await new Promise<void>((resume) => setImmediate(resume))
+      assert.equal(world.launch.children.length, children)
+      world.gh.holdUser = null
+      release()
+      await world.server.scheduler.idle()
+      assert.equal(ticks(world)[0]?.skipReason, reason)
+      assert.equal(world.launch.children.length, children, `the pending trigger started nothing after a ${reason} skip`)
+      assert.equal(running(world).length, 0)
+      for (const run of line) assert.equal(world.server.cache.getRun(run.id)?.status, 'queued')
+      // the run that ended wrote no report, so it alone is failed
+      assert.deepEqual(autoRuns(world).filter((run) => run.status === 'failed').map((run) => run.id), [first.id])
+      // a run ending after the skip starts nothing either
+      await saveAuto(world, { concurrency: 2 })
+      await world.server.scheduler.idle()
+      assert.equal(world.launch.children.length, children)
+    } finally {
+      await world.cleanup()
+    }
+  }
+})
+
+test('a trigger that arrives during a tick that then skips before its start step is not lost: one pass runs after the tick ends', async () => {
+  const world = await setup({ auto: { concurrency: 1 }, config: { maxConcurrentReviews: 3 } })
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    assert.ok(line.length >= 2)
+    const first = running(world)[0]!
+    world.gh.failCycle = true
+    const release = holdBoard(world)
+    world.time.advance(15 * minute)
+    await waitFor(() => ticks(world).length === 2)
+    await endWithoutIdle(world, first)
+    for (let turn = 0; turn < 20; turn += 1) await new Promise<void>((resume) => setImmediate(resume))
+    assert.equal(running(world).length, 0, 'held back while the tick was in flight')
+    world.gh.hold = null
+    release()
+    await world.server.scheduler.idle()
+    assert.equal(ticks(world)[0]?.skipReason, 'fetchFailed')
+    assert.deepEqual(running(world).map((run) => run.id), [line[0]!.id])
+    assert.equal(world.launch.children.length, 2)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a queued run the owner stops while an earlier start is in progress stays stopped, even with its PR missing from the open list: never started, never skipped', async () => {
+  const world = await setup({ auto: { concurrency: 2 }, config: { maxConcurrentReviews: 4 } })
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    assert.ok(line.length >= 3)
+    const [one, two] = running(world)
+    let release = (): void => {}
+    world.git.state.holdAdd = new Promise<void>((resume) => {
+      release = resume
+    })
+    // the PR is gone from the open list the pass will capture
+    const victim = line[1]!
+    world.server.cache.closePr(scenario.repo, victim.number)
+    await endWithoutIdle(world, one!)
+    await waitFor(() => world.git.verbs('worktree', 'add').length === 3)
+    // both places are free, so the pass in progress goes on to the second queued row once the first start returns
+    await endWithoutIdle(world, two!)
+    assert.equal(world.server.launcher.stop(victim.id).status, 'stopped')
+    const children = world.launch.children.length
+    release()
+    await world.server.scheduler.idle()
+    const after = world.server.cache.getRun(victim.id)
+    assert.equal(after?.status, 'stopped')
+    assert.notEqual(after?.note, 'closed')
+    assert.equal(world.launch.children.length, children + 2, 'the two rows around it started')
+    assert.equal(world.launch.children.some((child) => basename(child.request.cwd) === `run-${victim.id}`), false, 'it was never started')
+    assert.equal(world.server.cache.getRun(line[0]!.id)?.status, 'running')
+    assert.equal(world.server.cache.getRun(line[2]!.id)?.status, 'running')
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('the last statuses the scheduler keeps are bounded: ended rows are pruned past a limit and live ones are kept', async () => {
+  const world = await setup({ auto: { enabled: false } })
+  try {
+    const row = (id: number, status: Run['status']): Run => ({ ...world.server.cache.allRuns()[0], id, status, origin: 'manual', worktree: null } as unknown as Run)
+    world.server.scheduler.sessionChanged('run', row(100_000, 'running'))
+    for (let id = 1; id <= 1500; id += 1) world.server.scheduler.sessionChanged('run', row(id, 'done'))
+    const size = world.server.scheduler.tracked()
+    assert.ok(size < 1000, `bounded, kept ${size}`)
+    assert.ok(size >= 1, 'the live row is kept')
   } finally {
     await world.cleanup()
   }
