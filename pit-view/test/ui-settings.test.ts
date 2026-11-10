@@ -675,7 +675,7 @@ test('the Auto-review card is grouped as the owner decided: the Now line, the ma
   const at = (text: string): number => auto.indexOf(text)
   const order = ['id="auto-now"', 'Review PRs automatically', '>Schedule</legend>', '>What to review</legend>', '>Post auto-reviews?</legend>', '>Limits</span>', 'class="auto-foot"']
   assert.deepEqual(order.map(at).every((position, index, all) => position > (all[index - 1] ?? -1)), true, 'the groups are in the owner\'s order')
-  // the owner\'s texts, character for character
+  // the owner's texts, character for character
   for (const text of [
     'This setting only affects scheduler-driven auto-reviews. No effect on manually-launched reviews.',
     'Ready (non-draft) that request your review, plus pushes since your last review (automatic or manual).',
@@ -700,7 +700,7 @@ test('the Auto-review card is grouped as the owner decided: the Now line, the ma
   // Daily limit takes 0; Concurrent auto-reviews keeps 1
   assert.match(auto, /<input id="f-autoDailyLimit" class="input mono" type="number"[^>]*min="0" step="1"/)
   assert.match(auto, /<input id="f-autoConcurrency" class="input mono" type="number"[^>]*min="1" step="1"/)
-  // four Reset to Defaults buttons, named by section; none on the master switch, and Limits\' button is hidden until it opens
+  // four Reset to Defaults buttons, named by section; none on the master switch, and Limits' button is hidden until it opens
   assert.deepEqual([...auto.matchAll(/id="(reset-[a-z]+)"[^>]*aria-label="(Reset to Defaults: [^"]+)"/g)].map((match) => [match[1], match[2]]), [
     ['reset-schedule', 'Reset to Defaults: Schedule'], ['reset-what', 'Reset to Defaults: What to review'], ['reset-post', 'Reset to Defaults: Post auto-reviews?'], ['reset-limits', 'Reset to Defaults: Limits'],
   ])
@@ -712,7 +712,7 @@ test('the Auto-review card is grouped as the owner decided: the Now line, the ma
   for (const kind of ['others', 'dependabot']) assert.match(auto, new RegExp(`id="auto-post-ask-${kind}" class="post-ask" role="group" hidden`))
   assert.match(auto, /id="f-autoPostOthers-inert"/)
   assert.match(auto, /id="f-autoPostDependabot-notice" class="notice" role="status" hidden/)
-  // the login agent is a footer sentence outside the form\'s fields
+  // the login agent is a footer sentence outside the form's fields
   assert.match(auto, /Start at login: <strong id="login-agent-status">/)
   assert.doesNotMatch(auto, /id="f-loginAgent/)
   // the Now line is not a live region
@@ -1127,7 +1127,7 @@ test('the stylesheet styles the Auto-review card\'s groups, chips, Now line, not
   assert.match(css, /\.notice\[hidden\]/)
   assert.match(css, /\.limits-grid\[hidden\]/)
   assert.match(css, /@media \(max-width: 720px\) \{\s*\.schedule-row \{\s*flex-direction: column;/)
-  // tokens only: no color literal in the card\'s block
+  // tokens only: no color literal in the card's block
   const block = css.slice(css.indexOf('/* the Auto-review card: the Now line'))
   assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b|rgba?\(/)
 })
