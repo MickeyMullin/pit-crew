@@ -215,6 +215,15 @@ button {
   display: none;
 }
 
+/* the header's Sign out, a form so it posts without script; only a page served through the proxy shows it */
+.sign-out {
+  display: contents;
+}
+
+.sign-out[hidden] {
+  display: none;
+}
+
 /* while GitHub is out of reach: a word on wide screens, the no-signal glyph alone at phone width;
    the sync status beside the buttons says the same in words for screen readers */
 .offline-badge {

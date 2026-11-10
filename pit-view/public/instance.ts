@@ -29,3 +29,16 @@ export const showInstance = (info: InstanceInfo): void => {
   badge.textContent = info.name
   badge.hidden = info.name === ''
 }
+
+// the login a page served through the proxy was signed in as, from <meta name="pit-view-signed-in">; null on loopback, which needs no sign-in
+export const signedInAs = (doc: Document): string | null =>
+  doc.querySelector('meta[name="pit-view-signed-in"]')?.getAttribute('content') ?? null
+
+// the header's Sign out, shown only on a signed-in page
+export const showSignOut = (doc: Document): void => {
+  const login = signedInAs(doc)
+  const form = doc.getElementById('sign-out')
+  if (form === null || login === null) return
+  form.title = `Sign out ${login}`
+  form.hidden = false
+}

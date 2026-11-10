@@ -555,56 +555,22 @@ test('originAllowed accepts only the origin for the effective scheme, Host, and 
   assert.equal(originAllowed('http://localhost:4791', undefined, 'http'), false)
 })
 
-test('with allowedHosts set, a proxied host is served, its page may write, and the event stream is unbuffered with keepalives', async () => {
+// the signed-in proxy path, the stream's headers through the proxy included, is test/signin.test.ts's
+test('with allowedHosts set and no sign-in set up, the proxied host is accepted but closed: no page, no API answer, no write, and no event stream', async () => {
   const h = await setup({ config: { allowedHosts: ['pit.example.test'] } })
   try {
-    assert.equal((await raw(h.server.port, '/api/view', { Host: 'pit.example.test' })).status, 200)
+    assert.equal((await raw(h.server.port, '/', { Host: 'pit.example.test' })).status, 503)
+    assert.equal((await raw(h.server.port, '/api/view', { Host: 'pit.example.test' })).status, 401)
     assert.equal((await raw(h.server.port, '/api/view', { Host: 'other.example.test' })).status, 403)
     const write = (origin: string): Promise<{ status: number, type: string, body: string }> =>
       raw(h.server.port, '/api/refresh', { Host: 'pit.example.test', Origin: origin, 'X-Forwarded-Proto': 'https' }, 'POST')
     assert.equal((await write('http://attacker.test')).status, 403)
+    assert.equal((await write('https://pit.example.test')).status, 401)
     assert.equal(h.server.cache.latestCycle(scenario.repo), null)
-    assert.equal((await write('https://pit.example.test')).status, 200)
-    await h.server.poller.idle()
-
-    // a stream through the proxy's Host: headers that keep a proxy from buffering, then keepalives
-    const stream = await new Promise<{ headers: Record<string, unknown>, next: () => Promise<string>, close: () => void }>((resolve, reject) => {
-      const req = request({ host: '127.0.0.1', port: h.server.port, path: '/api/events?client=proxied&visible=false&paused=false', headers: { Host: 'pit.example.test' } }, (res) => {
-        res.setEncoding('utf8')
-        let buffer = ''
-        const waiting: ((text: string) => void)[] = []
-        const drain = (): void => {
-          for (let end = buffer.indexOf('\n\n'); end >= 0 && waiting.length > 0; end = buffer.indexOf('\n\n')) {
-            const text = buffer.slice(0, end)
-            buffer = buffer.slice(end + 2)
-            waiting.shift()!(text)
-          }
-        }
-        res.on('data', (chunk: string) => {
-          buffer += chunk
-          drain()
-        })
-        const next = (): Promise<string> => new Promise((resolveFrame) => {
-          waiting.push(resolveFrame)
-          drain()
-        })
-        resolve({ headers: res.headers, next, close: () => req.destroy() })
-      })
-      req.on('error', reject)
-      req.end()
-    })
-    assert.match(String(stream.headers['content-type']), /^text\/event-stream/)
-    assert.match(String(stream.headers['cache-control']), /no-cache/)
-    assert.match(String(stream.headers['cache-control']), /no-transform/)
-    assert.equal(stream.headers['x-accel-buffering'], 'no')
-    assert.equal(stream.headers['content-length'], undefined)
-    assert.equal(await stream.next(), ': connected')
-    await until(() => h.server.clients.size() === 1)
-    h.time.advance(30_000)
-    assert.equal(await stream.next(), ': keepalive')
-    h.time.advance(30_000)
-    assert.equal(await stream.next(), ': keepalive')
-    stream.close()
+    assert.equal((await raw(h.server.port, '/api/events?client=proxied&visible=true&paused=false', { Host: 'pit.example.test' })).status, 401)
+    assert.equal(h.server.clients.size(), 0)
+    // loopback stays open
+    assert.equal((await raw(h.server.port, '/api/view', { Host: `127.0.0.1:${h.server.port}` })).status, 200)
   } finally {
     await h.cleanup()
   }
@@ -621,7 +587,8 @@ test('allowedHosts saved through PUT /api/config apply at once, and a malformed 
     assert.match(String(bad.body.error), /allowedHosts/)
     assert.equal((await saveConfigAs(h.server, { ...stored, allowedHosts: ['Pit.Example.Test'] })).status, 200)
     assert.deepEqual(JSON.parse(await readFile(h.configPath, 'utf8')).allowedHosts, ['pit.example.test'])
-    assert.equal((await raw(h.server.port, '/api/view', { Host: 'pit.example.test' })).status, 200)
+    // the name is accepted now, so the answer asks for sign-in rather than refusing the host
+    assert.equal((await raw(h.server.port, '/api/view', { Host: 'pit.example.test' })).status, 401)
     await h.server.poller.idle()
   } finally {
     await h.cleanup()

@@ -14,7 +14,7 @@ import type { ClosedRangeKey, Controls, Filters } from './filters.ts'
 import { parseTimeFormat, setTimeFormat } from './format.ts'
 import { createHoverCard } from './hovercard.ts'
 import { createIdleTracker } from './idle.ts'
-import { loadInstance, showInstance } from './instance.ts'
+import { loadInstance, showInstance, showSignOut } from './instance.ts'
 import { createLive } from './live.ts'
 import { shownCounts, slashApplies } from './pagesearch.ts'
 import { createReportPanel } from './reportpanel.ts'
@@ -509,6 +509,7 @@ try {
 
 mountStickyHeader(byId('site-header'))
 mountThemeToggle(byId<HTMLButtonElement>('theme'))
+showSignOut(document)
 void loadInstance().then((info) => {
   if (info !== null) showInstance(info)
 })

@@ -9,7 +9,7 @@ import { tokenHeader } from './agent.ts'
 import { byId, h, setText, svg } from './dom.ts'
 import type { Shape } from './dom.ts'
 import { browserTimeZone, formatClock, parseTimeFormat, setTimeFormat } from './format.ts'
-import { loadInstance, loginAgentText, showInstance } from './instance.ts'
+import { loadInstance, loginAgentText, showInstance, showSignOut } from './instance.ts'
 import {
   atSectionDefaults, autoCapError, avatarChoices, changeKind, configChannel, configPathText, dayNames, densityChoices, errorId, fieldId, inertPostKinds, inertPostNote, instructionsLine, intervalLegacyNote, intervalOptions, isDirty,
   kindChoices, limitsSummary, needsRefresh, nowLine, nowUnsavedNote, opensLimits, postingAsLine, resetSection, scheduleSummary,
@@ -908,6 +908,7 @@ void loadInstance().then((info) => {
 mountStickyHeader(byId('site-header'))
 trackHeight(byId('save-bar'), '--save-bar-height')
 mountThemeToggle(byId<HTMLButtonElement>('theme'))
+showSignOut(document)
 bindStatic()
 
 byId('settings-form').addEventListener('submit', (event) => {

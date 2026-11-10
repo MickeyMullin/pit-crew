@@ -7,7 +7,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { stripTypeScriptTypes } from 'node:module'
 import type { AddressInfo } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
-import { extname, join, resolve, sep } from 'node:path'
+import { dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ActionError, createActions, createUpdateWatch } from './actions.ts'
 import type { ActionErrorCode } from './actions.ts'
@@ -31,6 +31,8 @@ import { createPoller, systemTimers } from './poller.ts'
 import type { Patch, Poller, Timers } from './poller.ts'
 import { listPrReports, readReport, ReportReadError } from './reports.ts'
 import type { ReportReadErrorCode } from './reports.ts'
+import { clearCookie, createSignIn, githubEndpoints, loopbackNames, openLoopback, sessionCookieName, stateCookieName } from './signin.ts'
+import type { OAuthEndpoints } from './signin.ts'
 import { createSweepMemory, sweepRequest, sweepView } from './sweeps.ts'
 import type { SweepMemory } from './sweeps.ts'
 import type { Sweep } from './cache.ts'
@@ -87,6 +89,8 @@ export type ServerOptions = {
   pageSize?: number
   // the post path's deadlines on gh, for tests to shorten; the named constants in actions.ts when absent
   postDeadlines?: WriteLimits
+  // where sign-in through the proxy asks GitHub: github.com and api.github.com when absent, a fake in tests
+  oauthEndpoints?: OAuthEndpoints
 }
 
 export type PitServer = {
@@ -161,7 +165,7 @@ const noBody = async (req: IncomingMessage): Promise<void> => {
 }
 
 // a page reached through another name (DNS rebinding) is refused, whatever its address
-const loopbackHosts = (port: number): Set<string> => new Set([`${host}:${port}`, `localhost:${port}`, `[::1]:${port}`])
+const loopbackHosts = (port: number): Set<string> => new Set(loopbackNames.map((name) => `${name}:${port}`))
 
 // the Host header names the server: a loopback name with the server's port, or a host in
 // config.allowedHosts (the name a reverse proxy passes through) with any port or none
@@ -200,11 +204,49 @@ export const tokenMatches = (sent: string | string[] | undefined, token: string)
   return a.length === b.length && timingSafeEqual(a, b)
 }
 
-// the token goes into each served page at serve time and is never written to disk
-export const injectToken = (html: string, token: string): string => {
-  const tag = `<meta name="${tokenMeta}" content="${token}">\n`
+const escapeHtml = (text: string): string => text.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`)
+
+const injectMeta = (html: string, name: string, content: string): string => {
+  const tag = `<meta name="${name}" content="${escapeHtml(content)}">\n`
   const at = html.search(/<\/head>/i)
   return at < 0 ? html : `${html.slice(0, at)}${tag}${html.slice(at)}`
+}
+
+// the token goes into each served page at serve time and is never written to disk
+export const injectToken = (html: string, token: string): string => injectMeta(html, tokenMeta, token)
+
+// a page served through the proxy names who signed in, so it can offer Sign out
+export const signedInMeta = 'pit-view-signed-in'
+
+// the sign-in pages are the server's own: no script, no outside request, no token, and no referrer, since the callback's address holds GitHub's code
+const authPage = (res: ServerResponse, status: number, title: string, message: string, { cookies = [], refresh = false, signInLink = true }: { cookies?: string[], refresh?: boolean, signInLink?: boolean } = {}): void => {
+  const html = [
+    '<!doctype html>',
+    '<html lang="en">',
+    '<head>',
+    '<meta charset="utf-8">',
+    '<meta name="color-scheme" content="light dark">',
+    ...(refresh ? ['<meta http-equiv="refresh" content="0; url=/">'] : []),
+    `<title>${escapeHtml(title)} · Pit View</title>`,
+    '</head>',
+    '<body>',
+    `<h1>${escapeHtml(title)}</h1>`,
+    `<p>${escapeHtml(message)}</p>`,
+    ...(refresh ? ['<p><a href="/">Open the dashboard</a></p>'] : signInLink ? ['<p><a href="/auth/sign-in">Sign in with GitHub</a></p>'] : []),
+    '</body>',
+    '</html>',
+    '',
+  ].join('\n')
+  res.writeHead(status, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': Buffer.byteLength(html),
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    ...(cookies.length === 0 ? {} : { 'Set-Cookie': cookies }),
+  })
+  res.end(html)
 }
 
 // why a start or stop was refused, as an HTTP status
@@ -306,7 +348,8 @@ const listen = (server: ReturnType<typeof createServer>, port: number): Promise<
     server.listen(port, host)
   })
 
-type Route = { method: string, pattern: RegExp, handle: (req: IncomingMessage, res: ServerResponse, url: URL, match: RegExpExecArray) => Promise<void> | void }
+// signedIn is the login of the request's session through the proxy, and null on open loopback, which has none
+type Route = { method: string, pattern: RegExp, handle: (req: IncomingMessage, res: ServerResponse, url: URL, match: RegExpExecArray, signedIn: string | null) => Promise<void> | void }
 
 export const startServer = async (options: ServerOptions): Promise<PitServer> => {
   const { home, runner, clock, timers, log } = options
@@ -319,6 +362,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   let stored = await readConfig(options.configPath)
   let ghLogin = stored.viewer === '' ? await localLogin(runner) : ''
   const effective = (): Config => ({ ...stored, viewer: stored.viewer === '' ? ghLogin : stored.viewer })
+  // sign-in through the proxy reads its two files from the config file's own folder, at every use
+  const signIn = createSignIn({ dir: dirname(options.configPath), home, clock, endpoints: options.oauthEndpoints ?? githubEndpoints, log })
 
   // the port comes first: a second server must exit before it touches the running one's cache
   let dispatch: ((req: IncomingMessage, res: ServerResponse) => void) | null = null
@@ -341,6 +386,16 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   }
   const clients = createClients()
   const streams = new Set<ServerResponse>()
+  // the streams opened through the proxy, with the cookies they were opened with: each ends once its session is no longer good
+  const signedStreams = new Map<ServerResponse, string | undefined>()
+  const recheckStreams = async (): Promise<void> => {
+    for (const [stream, cookie] of signedStreams) {
+      if (await signIn.session(cookie, effective().viewer) === null) {
+        signedStreams.delete(stream)
+        stream.end()
+      }
+    }
+  }
 
   const broadcast = (patch: Patch): void => {
     const frame = `event: patch\ndata: ${JSON.stringify(patch)}\n\n`
@@ -481,12 +536,18 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   schedulerRef = scheduler
   // once those runs have their outcomes recorded: a sweep, whether or not auto-review is on, and the one timer; no GitHub call
   scheduler.start()
+  // a proxied host says at once whether it can sign anyone in, and the signing key is made on this first start; local only
+  if (stored.allowedHosts.length > 0) await signIn.state()
 
   // one keepalive timer while any stream is open; local only, never a GitHub call
   let keepaliveTimer: unknown = null
   const keepalive = (): void => {
     for (const stream of streams) stream.write(': keepalive\n\n')
     keepaliveTimer = timers.set(keepalive, keepaliveMs)
+    // a stream through the proxy outlives its session by one keepalive at most
+    if (signedStreams.size > 0) {
+      recheckStreams().catch((error: unknown) => log(`sign-in: checking the open streams failed: ${messageOf(error)}`))
+    }
   }
   const syncKeepalive = (): void => {
     if (streams.size > 0 && keepaliveTimer === null) keepaliveTimer = timers.set(keepalive, keepaliveMs)
@@ -496,7 +557,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     }
   }
 
-  const events = (req: IncomingMessage, res: ServerResponse, url: URL): void => {
+  const events = (req: IncomingMessage, res: ServerResponse, url: URL, signedIn: string | null): void => {
     const id = url.searchParams.get('client') ?? ''
     if (!clientIdPattern.test(id)) throw new HttpError(400, 'client must be an id of letters, digits, - and _')
     const state: ClientState = {
@@ -518,14 +579,22 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     // the first bytes flush the headers, so the page's EventSource opens before it fetches the view
     res.write(': connected\n\n')
     streams.add(res)
+    if (signedIn !== null) signedStreams.set(res, req.headers.cookie)
     syncKeepalive()
     const { connection, change } = clients.connect(id, state)
-    req.on('close', () => {
+    // the page closing the stream, or the server ending it when its session ends
+    let gone = false
+    const leave = (): void => {
+      if (gone) return
+      gone = true
       streams.delete(res)
+      signedStreams.delete(res)
       syncKeepalive()
       const left = clients.disconnect(id, connection)
       if (left !== null) poller.setActive(left.activeCount, false)
-    })
+    }
+    req.on('close', leave)
+    res.on('close', leave)
     // a reload within the interval keeps the schedule rather than refreshing on arrival
     const keep = keepsSchedule(lastUpdate, clock.now(), effective().refreshSeconds)
     poller.setActive(change.activeCount, change.becameActive && !keep)
@@ -803,6 +872,11 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     // the lookup below can leave the viewer unresolved for as long as it takes, and can end on the login the viewer had before, so the change is noted before it
     poller.identityChanged()
     if (stored.viewer === '' && ghLogin === '') ghLogin = await localLogin(runner)
+    // a new viewer ends every session through the proxy, and a change back does not bring them back
+    if (before.viewer.toLowerCase() !== effective().viewer.toLowerCase()) {
+      await signIn.rotate('the viewer changed')
+      await recheckStreams()
+    }
     await poller.configChanged(before)
     // a raised cap on concurrent reviews starts what waits, and a review or a sweep queued for another repository or viewer fails now rather than later
     launcher.drain()
@@ -877,7 +951,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   // public/*.ts goes out as JavaScript through type stripping, kept per file until it changes
   const stripped = new Map<string, { mtimeMs: number, code: string }>()
 
-  const serveStatic = async (res: ServerResponse, pathname: string): Promise<void> => {
+  const serveStatic = async (res: ServerResponse, pathname: string, signedIn: string | null): Promise<void> => {
     let decoded: string
     try {
       decoded = decodeURIComponent(pathname)
@@ -900,7 +974,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     const extension = extname(file).toLowerCase()
     let body: Buffer | string
     if (extension === '.html') {
-      body = injectToken(await readFile(file, 'utf8'), token)
+      // through the proxy a page is served only to a session, so the token reaches signed-in pages alone
+      const page = injectToken(await readFile(file, 'utf8'), token)
+      body = signedIn === null ? page : injectMeta(page, signedInMeta, signedIn)
     } else if (extension === '.ts') {
       const hit = stripped.get(file)
       if (hit !== undefined && hit.mtimeMs === info.mtimeMs) {
@@ -929,7 +1005,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
 
   const routes: Route[] = [
     { method: 'GET', pattern: /^\/api\/view$/, handle: async (_req, res) => json(res, 200, await poller.view()) },
-    { method: 'GET', pattern: /^\/api\/events$/, handle: (req, res, url) => events(req, res, url) },
+    { method: 'GET', pattern: /^\/api\/events$/, handle: (req, res, url, _match, signedIn) => events(req, res, url, signedIn) },
     { method: 'POST', pattern: /^\/api\/clients\/([^/]+)$/, handle: (req, res, _url, match) => updateClient(req, res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/refresh$/, handle: (_req, res) => json(res, 200, poller.refresh('manual')) },
     { method: 'POST', pattern: /^\/api\/prs\/([^/]+)\/refresh$/, handle: (req, res, _url, match) => refreshPr(req, res, match[1] ?? '') },
@@ -951,8 +1027,64 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'PUT', pattern: /^\/api\/config$/, handle: (req, res) => putConfig(req, res) },
     { method: 'GET', pattern: /^\/api\/people\/suggestions$/, handle: (_req, res) => json(res, 200, suggestions()) },
     { method: 'GET', pattern: /^\/api\/avatar\/([^/]+)$/, handle: (_req, res, _url, match) => avatar(res, match[1] ?? '') },
-    { method: 'GET', pattern: /^\/(?!api(?:\/|$))/, handle: (_req, res, url) => serveStatic(res, url.pathname) },
+    { method: 'GET', pattern: /^\/(?!api(?:\/|$))/, handle: (_req, res, url, _match, signedIn) => serveStatic(res, url.pathname, signedIn) },
   ]
+
+  // the callback GitHub returns to: the proxied host's own name, which must be an allowedHosts entry, never a loopback name
+  const callbackUri = (req: IncomingMessage): string => {
+    const header = (req.headers.host ?? '').toLowerCase()
+    const name = /^([a-z0-9.-]+)(?::\d{1,5})?$/.exec(header)?.[1] ?? ''
+    if (!stored.allowedHosts.includes(name)) throw new HttpError(403, 'sign in through the proxy, at a host name in allowedHosts')
+    return `https://${header}/auth/callback`
+  }
+
+  // GET /auth/sign-in: off to GitHub with a fresh state; it takes no return address, so there is nothing to redirect elsewhere
+  const startSignIn = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const begun = await signIn.begin(callbackUri(req))
+    if ('reason' in begun) return authPage(res, 503, 'Sign-in is not available', `${begun.reason}.`, { signInLink: false })
+    res.writeHead(302, { Location: begun.location, 'Set-Cookie': begun.cookie, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'Content-Length': 0 })
+    res.end()
+  }
+
+  // GET /auth/callback: GitHub's return; a session only for the viewer, and the state cookie spent whatever happens
+  const finishSignIn = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> => {
+    const outcome = await signIn.finish(req.headers.cookie, url.searchParams, callbackUri(req), effective().viewer)
+    const spent = clearCookie(stateCookieName, 'Lax')
+    if (outcome.kind === 'refused') return authPage(res, outcome.status, 'Not signed in', outcome.message, { cookies: [spent], signInLink: outcome.status !== 503 })
+    // a page that moves on by itself: a redirect would still be part of GitHub's cross-site navigation, which leaves the Strict cookie off the next request
+    authPage(res, 200, 'Signed in', `Signed in as ${outcome.login}.`, { cookies: [spent, outcome.cookie], refresh: true })
+  }
+
+  // POST /auth/sign-out, from the page's own origin only: a new signing key ends every session, this one and any copy of it, and the open streams with them
+  const signOut = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    requireOrigin(req)
+    // a form's body carries nothing this needs
+    for await (const _chunk of req as AsyncIterable<Buffer>) { /* drained */ }
+    // someone with no session cannot end the owner's
+    if (await signIn.session(req.headers.cookie, effective().viewer) !== null) {
+      await signIn.rotate('a sign-out')
+      await recheckStreams()
+    }
+    authPage(res, 200, 'Signed out', 'You are signed out of Pit View.', { cookies: [clearCookie(sessionCookieName, 'Strict')] })
+  }
+
+  const authRoutes: ReadonlyMap<string, { method: string, handle: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<void> }> = new Map([
+    ['/auth/sign-in', { method: 'GET', handle: startSignIn }],
+    ['/auth/callback', { method: 'GET', handle: finishSignIn }],
+    ['/auth/sign-out', { method: 'POST', handle: signOut }],
+  ])
+
+  // a request through the proxy with no good session: a page goes to sign-in, or says why there is none; anything else is 401
+  const signedOut = async (res: ServerResponse, url: URL, method: string): Promise<void> => {
+    const page = method === 'GET' && !url.pathname.startsWith('/api/') && (url.pathname.endsWith('/') || url.pathname.endsWith('.html'))
+    const now = await signIn.state()
+    if (page && !now.open) return authPage(res, 503, 'Sign-in is not available', `Pit View is closed on this host until sign-in is set up: ${now.reason}.`, { signInLink: false })
+    if (page) {
+      res.writeHead(302, { Location: '/auth/sign-in', 'Cache-Control': 'no-store', 'Content-Length': 0 })
+      return void res.end()
+    }
+    json(res, 401, { error: now.open ? 'sign in first: open the dashboard on this host, which leads to GitHub' : `sign-in is not available: ${now.reason}` })
+  }
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const allowed = stored.allowedHosts
@@ -966,6 +1098,22 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       throw new HttpError(403, 'cross-origin request refused')
     }
     const url = new URL(req.url ?? '/', `http://${host}:${port}`)
+    // the sign-in check reads the same path the routes do, and only these exact paths are reachable without a session
+    const open = openLoopback(req.headers, port)
+    const auth = authRoutes.get(url.pathname)
+    if (auth !== undefined) {
+      if (open) throw new HttpError(404, 'not found: loopback needs no sign-in')
+      if (method !== auth.method) {
+        res.setHeader('Allow', auth.method)
+        throw new HttpError(405, 'method not allowed')
+      }
+      return auth.handle(req, res, url)
+    }
+    let signedIn: string | null = null
+    if (!open) {
+      signedIn = await signIn.session(req.headers.cookie, effective().viewer)
+      if (signedIn === null) return signedOut(res, url, method)
+    }
     const matching = routes.filter((route) => route.pattern.test(url.pathname))
     if (matching.length === 0) throw new HttpError(404, 'not found')
     const route = matching.find((candidate) => candidate.method === method)
@@ -973,13 +1121,14 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       res.setHeader('Allow', matching.map((candidate) => candidate.method).join(', '))
       throw new HttpError(405, 'method not allowed')
     }
-    await route.handle(req, res, url, route.pattern.exec(url.pathname) as RegExpExecArray)
+    await route.handle(req, res, url, route.pattern.exec(url.pathname) as RegExpExecArray, signedIn)
   }
 
   dispatch = (req, res) => {
     handle(req, res).catch((error: unknown) => {
       const status = error instanceof HttpError ? error.status : 500
-      if (status === 500) log(`${req.method} ${req.url}: ${messageOf(error)}`)
+      // the path alone: a query can hold GitHub's sign-in code
+      if (status === 500) log(`${req.method} ${(req.url ?? '').split('?')[0]}: ${messageOf(error)}`)
       if (res.headersSent) {
         res.end()
       } else {

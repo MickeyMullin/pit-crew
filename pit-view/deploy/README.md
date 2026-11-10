@@ -44,7 +44,7 @@ Register it in `~/app/service-registry.yaml`, writing each `~` as the absolute h
     runtime: node-typescript
     database: ~/.local/state/pit-view/cache.sqlite
     launchd_label: com.mickey.pit-view
-    notes: "PR dashboard. Runs from the pit-view/ folder of a full pit-crew clone. Binds loopback only; Caddy terminates HTTPS for the LAN name and proxies to 127.0.0.1:4791, and the name is in the app config's allowedHosts. No sign-in, so the route must stay LAN-only. The development checkout runs beside it with pnpm dev on 4792, with its own ~/.config/pit-view-dev and ~/.local/state/pit-view-dev, so the two can run at once."
+    notes: "PR dashboard. Runs from the pit-view/ folder of a full pit-crew clone. Binds loopback only; Caddy terminates HTTPS for the LAN name and proxies to 127.0.0.1:4791, and the name is in the app config's allowedHosts. Through the proxy only the viewer, signed in with GitHub, is served (oauth.json beside config.json, mode 0600); the route still stays LAN-only. The development checkout runs beside it with pnpm dev on 4792, with its own ~/.config/pit-view-dev and ~/.local/state/pit-view-dev, so the two can run at once."
 ```
 
 ### Seeding the app's config
@@ -107,7 +107,40 @@ pit.example.test {
 
 Do not add `encode` to this site: compressing would hold back the event stream. The stream's own headers (`Cache-Control: no-cache, no-store, no-transform`, `X-Accel-Buffering: no`) and its 30-second keepalives keep other proxies from buffering it or timing it out.
 
-Pit View has no sign-in. Anyone who can reach the proxy can use the whole app, Refresh and Settings writes included, and a Settings write can change the repository, the reports folder and `allowedHosts` itself. Limit the proxy to the LAN (for example with a `remote_ip` matcher for the local subnet) and never publish it beyond the network.
+Leave the headers Caddy adds (`X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host`) in place, and keep passing the `Host` header through. Pit View treats a request as local, and open without sign-in, only when its `Host` is a loopback name and it carries no `X-Forwarded-*`, `Via`, or `Forwarded` header; everything else needs sign-in.
+
+Limit the proxy to the LAN (for example with a `remote_ip` matcher for the local subnet) and never publish it beyond the network.
+
+### Setting up sign-in
+
+Through the proxy, Pit View serves only the viewer, signed in with GitHub: every page, asset, API route, and the event stream. A signed-out page goes to sign-in, and anything else is 401. Loopback (http://127.0.0.1:4791 on this machine) stays open. Until the steps below are done, the proxied host is closed: its pages say why, and everything else is 401.
+
+1. Register a GitHub OAuth app (GitHub, Settings, Developer settings, OAuth Apps, New OAuth App) with the real proxy name in both URLs: the homepage URL `https://pit.example.test/` and the authorization callback URL `https://pit.example.test/auth/callback`. It needs no scopes, and Pit View asks for none. Generate a client secret.
+1. Create the file with mode 0600 first, then put the ID and secret in it with an editor that keeps the file's mode, such as `nano` or `vi` (not TextEdit, which can replace the file when it saves). For the dev instance the folder is `~/.config/pit-view-dev/`.
+
+   ```bash
+   install -m 600 /dev/null ~/.config/pit-view/oauth.json
+   nano ~/.config/pit-view/oauth.json
+   stat -f %Lp ~/.config/pit-view/oauth.json    # 600
+   ```
+
+   The file holds exactly these two keys and nothing else:
+
+   ```json
+   { "clientId": "<the OAuth app's client ID>", "clientSecret": "<the client secret>" }
+   ```
+
+   No restart is needed: Pit View reads the file at every request through the proxy, refuses it while its mode is looser than 0600 (0400 is fine), and makes its cookie-signing key the first time, as `session.key` beside it with mode 0600. Neither file belongs in the repository or in `config.json`, and neither is ever logged. When the proxied host stays closed, `~/.local/state/pit-view/server.log` says why.
+1. Keep the proxy LAN-only, and check both ways through it before relying on sign-in. Signed out, the proxied host refuses:
+
+   ```bash
+   curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://pit.example.test/            # 302 https://pit.example.test/auth/sign-in
+   curl -s -o /dev/null -w '%{http_code}\n' https://pit.example.test/api/view                    # 401
+   ```
+
+   Signed in: in a private window, https://pit.example.test/ leads to GitHub's sign-in and back to the dashboard, which shows a Sign out button in its header. Signing in to GitHub as any account but the viewer is refused.
+
+A session lasts seven days. Sign out in the header ends every session, in every browser. Changing the viewer in Settings, or deleting `session.key`, ends every session too.
 
 ## Checks after the first deployment
 
