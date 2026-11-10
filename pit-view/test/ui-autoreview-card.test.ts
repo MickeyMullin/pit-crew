@@ -111,6 +111,39 @@ test('clicking the checkbox again while its posting question is open dismisses i
   }
 })
 
+// a click on a label, as far as the fake document can tell it: it loads each element of settings.html flat, so it has no label to click and no activation behavior. The markup is proved from the HTML text (the box sits inside its label, so a click on the label is a click on the box), and what a browser then does (a click fires on the control, which toggles it and fires change) is written out here; only the page's own handlers are the real code under test
+const clickLabelOf = (box: FakeElement): void => {
+  box.dispatch('click')
+  tick(box)
+}
+
+test('clicking the LABEL of an open posting question\'s checkbox dismisses it exactly as Cancel does, for both switches, and never confirms', async () => {
+  assert.match(settingsHtml, /<label class="check"><input id="f-autoPostOthers" type="checkbox"/)
+  assert.match(settingsHtml, /<label class="check"><input id="f-autoPostDependabot" type="checkbox"/)
+  for (const [kind, id] of [['others', 'f-autoPostOthers'], ['dependabot', 'f-autoPostDependabot']] as const) {
+    // the reference: what Cancel leaves behind
+    let afterCancel: unknown = null
+    await withCard(config(), async (page) => {
+      tick(page.by(id))
+      press(buttonsIn(page.by(`auto-post-ask-${kind}`))[1] as FakeElement)
+      await page.save()
+      afterCancel = { hidden: page.by(`auto-post-ask-${kind}`).hidden, checked: page.by(id).checked, focused: page.focused(), status: page.by('save-status').textContent, puts: page.puts.length }
+    })
+    await withCard(config(), async (page) => {
+      const box = page.by(id)
+      const slot = page.by(`auto-post-ask-${kind}`)
+      clickLabelOf(box)
+      assert.equal(slot.hidden, false, `${kind}: the first label click opens the question`)
+      clickLabelOf(box)
+      await page.save()
+      assert.notEqual(afterCancel, null)
+      assert.deepEqual({ hidden: slot.hidden, checked: box.checked, focused: page.focused(), status: page.by('save-status').textContent, puts: page.puts.length }, afterCancel)
+      assert.equal(slot.querySelectorAll('button').length, 0)
+      assert.equal(page.puts.length, 0, 'nothing was confirmed or saved')
+    })
+  }
+})
+
 test('Cancel and the confirm button behave as before, and a click on the box after confirming turns the switch off without a question', async () => {
   await withCard(config(), async (page) => {
     const box = page.by('f-autoPostOthers')
@@ -145,7 +178,7 @@ test('a dismissed question leaves no confirmed login behind: the login changing 
     tick(others)
     typeInto(page.by('f-viewer'), 'ines-hale')
     assert.equal(page.by('f-autoPostOthers-notice').hidden, true, 'no login-changed notice for a switch never confirmed')
-    // one question is open at a time: opening the other switch\'s question replaces the first, as before
+    // one question is open at a time: opening the other switch's question replaces the first, as before
     tick(others)
     tick(page.by('f-autoPostDependabot'))
     assert.equal(page.by('auto-post-ask-others').hidden, true)
