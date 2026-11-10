@@ -2846,3 +2846,28 @@ test('a tick queues no row for a PR whose post is in flight and still finishes a
     await world.cleanup()
   }
 })
+
+test('a queued row held back by a post in flight starts when that post lets go, without waiting for a tick', async () => {
+  const world = await setup({ auto: { concurrency: 1 }, config: { maxConcurrentReviews: 3 } })
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    assert.ok(line.length >= 2)
+    const first = running(world)[0]!
+    const held = line[0]!
+    const release = world.server.posts.hold(scenario.repo, held.number)!
+    await endWithoutIdle(world, first)
+    await world.server.scheduler.idle()
+    for (let turn = 0; turn < 20; turn += 1) await new Promise<void>((resume) => setImmediate(resume))
+    assert.equal(running(world).some((run) => run.id === held.id), false, 'the held row did not start while its post stood')
+    assert.equal(world.server.cache.getRun(held.id)?.status, 'queued')
+    const children = world.launch.children.length
+    release()
+    await waitFor(() => world.server.cache.getRun(held.id)?.status === 'running')
+    await world.server.scheduler.idle()
+    assert.equal(world.launch.children.length, children + 1, 'the row started once, with no tick')
+    assert.equal(ticks(world).length, 1)
+  } finally {
+    await world.cleanup()
+  }
+})

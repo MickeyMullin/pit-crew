@@ -1,9 +1,13 @@
 // test/github.test.ts
 import assert from 'node:assert/strict'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 import {
   closedPrsQuery, closedSearchQuery, commandRunner, createGh, fetchClosedPrs, fetchOpenPrs, fetchViewerLogin,
-  GhError, openPrsQuery, searchTime, singlePrQuery, WriteIdentityError,
+  GhError, GhTimeoutError, openPrsQuery, searchTime, singlePrQuery, WriteIdentityError,
 } from '../src/github.ts'
 import type { OpenPage, RawClosedResponse, RawOpenPr, RawOpenResponse } from '../src/github.ts'
 import { closedCases, openCases, scenario } from './fixtures/scenario.ts'
@@ -375,4 +379,171 @@ test('a write does not retry when gh fails to start, either', async () => {
   })
   await assert.rejects(gh.write(['pr', 'merge', '7'], 'vera-quill'), /cannot run gh/)
   assert.equal(writes, 1)
+})
+
+// the post path's deadlines (section 8, Launching runs, A post in flight): a write run with limits stops waiting for a gh that does not answer, kills it, and never goes on from a late answer
+
+const limits = { readMs: 100, writeMs: 200 }
+const forever = (): Promise<never> => new Promise<never>(() => {})
+const tokenFor = (args: string[]): boolean => args[0] === 'auth' && args[1] === 'token'
+
+type Hang = { name: string, matches: (args: string[]) => boolean, phase: 'read' | 'write' }
+const hangs: Hang[] = [
+  { name: 'the token read', matches: tokenFor, phase: 'read' },
+  { name: 'the account lookup', matches: (args) => args[0] === 'api' && args[1] === 'user', phase: 'read' },
+  { name: 'a read before the write', matches: (args) => args[0] === 'api' && args[1] === 'repos/o/r/pulls/1', phase: 'read' },
+  { name: 'the write', matches: (args) => args[0] === 'pr', phase: 'write' },
+]
+
+const hangingWorld = (hang: Hang, late?: Promise<void>) => {
+  const seen: { args: string[], signal: AbortSignal | undefined }[] = []
+  const events: string[] = []
+  const gh = createGh(async (args, options) => {
+    seen.push({ args, signal: options?.signal })
+    if (hang.matches(args)) {
+      if (late === undefined) await forever()
+      await late
+    }
+    if (tokenFor(args)) return ok('tok\n')
+    if (args[0] === 'api' && args[1] === 'user') return ok('me\n')
+    return ok('done\n')
+  })
+  const write = (): Promise<string> => gh.write(['pr', 'comment', '1'], 'me', async (read) => {
+    events.push('check')
+    await read(['api', 'repos/o/r/pulls/1'])
+    events.push('checked')
+  }, limits)
+  return { gh, seen, events, write }
+}
+
+for (const hang of hangs) {
+  test(`a write with limits stops waiting for ${hang.name}: a ${hang.phase} timeout, the child told to stop, and nothing after it runs`, async () => {
+    const world = hangingWorld(hang)
+    const started = Date.now()
+    const error = await world.write().then(() => null, (failure: unknown) => failure)
+    assert.ok(error instanceof GhTimeoutError, String(error))
+    assert.equal(error.kind, 'timeout')
+    assert.equal(error.phase, hang.phase)
+    assert.ok(Date.now() - started < 2000)
+    const hung = world.seen.filter((call) => hang.matches(call.args))
+    assert.equal(hung.length, 1)
+    assert.equal(hung[0]?.signal?.aborted, true, 'the runner was told to stop the child')
+    // nothing went on from the hung step
+    if (hang.phase === 'read') assert.equal(world.seen.some((call) => call.args[0] === 'pr'), false, 'no write was made')
+    const names = world.seen.map((call) => call.args[0])
+    assert.equal(names.at(-1), hang.phase === 'write' ? 'pr' : hung[0]?.args[0])
+  })
+
+  test(`${hang.name} that finishes after its timeout changes nothing: no check, no write, and no second failure`, async () => {
+    let release: () => void = () => {}
+    const late = new Promise<void>((resolve) => { release = resolve })
+    const world = hangingWorld(hang, late)
+    const error = await world.write().then(() => null, (failure: unknown) => failure)
+    assert.ok(error instanceof GhTimeoutError)
+    const before = { calls: world.seen.length, events: [...world.events] }
+    release()
+    await delay(300)
+    assert.equal(world.seen.length, before.calls, 'no further gh call after the late answer')
+    assert.deepEqual(world.events, before.events)
+  })
+}
+
+test('a token read that timed out is not kept: the next write asks gh for the token again', async () => {
+  let reads = 0
+  const gh = createGh(async (args) => {
+    if (tokenFor(args)) {
+      reads += 1
+      if (reads === 1) await forever()
+      return ok('tok\n')
+    }
+    if (args[0] === 'api' && args[1] === 'user') return ok('me\n')
+    return ok('done\n')
+  })
+  await assert.rejects(() => gh.write(['pr', 'comment', '1'], 'me', undefined, limits), GhTimeoutError)
+  assert.equal(await gh.write(['pr', 'comment', '1'], 'me', undefined, limits), 'done\n')
+  assert.equal(reads, 2)
+})
+
+test('a write without limits is unchanged: it waits for gh and passes no signal', async () => {
+  const seen: (AbortSignal | undefined)[] = []
+  const gh = createGh(async (args, options) => {
+    seen.push(options?.signal)
+    if (tokenFor(args)) return ok('tok\n')
+    if (args[0] === 'api' && args[1] === 'user') return ok('me\n')
+    await delay(120)
+    return ok('done\n')
+  })
+  assert.equal(await gh.write(['pr', 'comment', '1'], 'me'), 'done\n')
+  assert.deepEqual(seen, [undefined, undefined, undefined])
+})
+
+// a stand-in gh that ignores SIGTERM, to see that the real runner kills it anyway
+
+const stubborn = async (): Promise<{ script: string, pidFile: string, cleanup: () => Promise<void> }> => {
+  const dir = await mkdtemp(join(tmpdir(), 'pit-view-stubborn-'))
+  const script = join(dir, 'gh')
+  const pidFile = join(dir, 'pid')
+  await writeFile(script, `#!/bin/sh\ntrap '' TERM\necho $$ > "${pidFile}"\nwhile :; do sleep 0.05; done\n`, { mode: 0o755 })
+  return { script, pidFile, cleanup: () => rm(dir, { recursive: true, force: true }) }
+}
+
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+test('the real runner stops a child that ignores SIGTERM: told to stop, it gets SIGKILL after the grace and its result arrives', async () => {
+  const fake = await stubborn()
+  try {
+    const controller = new AbortController()
+    const running = commandRunner(fake.script, 1500)(['pr', 'comment'], { signal: controller.signal })
+    for (let turn = 0; turn < 100; turn += 1) {
+      if ((await readFile(fake.pidFile, 'utf8').catch(() => '')).trim() !== '') break
+      await delay(20)
+    }
+    const pid = Number((await readFile(fake.pidFile, 'utf8')).trim())
+    assert.ok(alive(pid))
+    controller.abort()
+    await delay(200)
+    assert.ok(alive(pid), 'SIGTERM alone does not stop it')
+    const result = await running
+    assert.notEqual(result.code, 0)
+    assert.equal(alive(pid), false, 'SIGKILL did')
+  } finally {
+    await fake.cleanup()
+  }
+})
+
+test('a signal already aborted starts no child', async () => {
+  const fake = await stubborn()
+  try {
+    const controller = new AbortController()
+    controller.abort()
+    const result = await commandRunner(fake.script, 150)(['pr'], { signal: controller.signal })
+    assert.notEqual(result.code, 0)
+    assert.equal((await readFile(fake.pidFile, 'utf8').catch(() => '')).trim(), '')
+  } finally {
+    await fake.cleanup()
+  }
+})
+
+test('with the real runner, a write whose child ignores SIGTERM times out at its deadline, without waiting for the kill', async () => {
+  const fake = await stubborn()
+  try {
+    const real = commandRunner(fake.script, 3000)
+    const gh = createGh(async (args, options) => (tokenFor(args) ? ok('tok\n') : real(args, options)))
+    const started = Date.now()
+    const error = await gh.write(['pr', 'comment', '1'], 'me', undefined, { readMs: 300, writeMs: 300 }).then(() => null, (failure: unknown) => failure)
+    assert.ok(error instanceof GhTimeoutError)
+    assert.ok(Date.now() - started < 2500, 'settled at the deadline, not after the grace')
+    const pid = Number((await readFile(fake.pidFile, 'utf8')).trim())
+    for (let turn = 0; turn < 400 && alive(pid); turn += 1) await delay(20)
+    assert.equal(alive(pid), false)
+  } finally {
+    await fake.cleanup()
+  }
 })

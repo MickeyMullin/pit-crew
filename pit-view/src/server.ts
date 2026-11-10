@@ -20,7 +20,7 @@ import type { ClientState, Clients } from './clients.ts'
 import { autoConcurrencyProblem, cacheFile, ConfigError, configFile, expandHome, extraInstructionsProblem, readConfig, runnerNames, saveConfig, stateDir, tildePath, validateConfig } from './config.ts'
 import type { Clock, Config, RunnerName } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
-import type { Runner } from './github.ts'
+import type { Runner, WriteLimits } from './github.ts'
 import { latestReviewsOf, markedStack } from './derive.ts'
 import { chooseExtraInstructions, createLauncher, createPostGuard, createReviewLine, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest, withExtraInstructions } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, PostGuard, Procs, Queueing, Spawn, StartKind } from './launcher.ts'
@@ -85,6 +85,8 @@ export type ServerOptions = {
   instance?: string
   keepaliveMs?: number
   pageSize?: number
+  // the post path's deadlines on gh, for tests to shorten; the named constants in actions.ts when absent
+  postDeadlines?: WriteLimits
 }
 
 export type PitServer = {
@@ -380,7 +382,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   // the one slot count and the one queue under the review cap, which reviews and sweeps share
   const line = createReviewLine({ config: effective, timers, log, onQueueing: () => poller.queueingChanged() })
   // the posts in flight: the post path holds a PR, and the launcher admits no run of a held PR
-  const posts = createPostGuard()
+  const posts = createPostGuard(() => schedulerRef?.released())
   const launcher = createLauncher({
     cache,
     posts,
@@ -640,6 +642,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     cache,
     posts,
     gh,
+    ...(options.postDeadlines === undefined ? {} : { postDeadlines: options.postDeadlines }),
     config: effective,
     refreshPr: (repo, number) => poller.refreshPrAfterWrite(repo, number),
     startUpdate: async (repo, number, headSha, action) => runView(await launcher.start(updateRequest(repo, number, headSha, action))),

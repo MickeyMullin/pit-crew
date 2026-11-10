@@ -427,6 +427,8 @@ export type Scheduler = {
   runNow: () => { started: boolean, tick: number } | null
   // a saved config may have moved the next tick
   configChanged: () => void
+  // a post in flight let go of its PR; goes on with the queue
+  released: () => void
   // a run or a sweep started, stepped, or settled
   sessionChanged: (kind: WorktreeKind, session: Session) => void
   view: () => AutoReviewView | null
@@ -1133,6 +1135,8 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       plan()
       kick()
     },
+    // a post in flight let go of its PR: a queued row it held back can start now
+    released: kick,
     sessionChanged,
     view,
     tracked: () => statuses.size,

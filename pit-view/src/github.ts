@@ -246,10 +246,11 @@ export type ClosedResult = {
 // the command runner every gh call goes through; tests pass a fake that replays fixtures
 
 export type RunResult = { code: number, stdout: string, stderr: string }
-export type RunOptions = { env?: Record<string, string> }
+// signal: when it aborts, the runner stops the child it spawned (SIGTERM, then SIGKILL after a short grace); the caller has stopped waiting by then and the child's late result is dropped
+export type RunOptions = { env?: Record<string, string>, signal?: AbortSignal }
 export type Runner = (args: string[], options?: RunOptions) => Promise<RunResult>
 
-export type GhErrorKind = 'auth' | 'network' | 'rateLimit' | 'graphql' | 'command' | 'parse'
+export type GhErrorKind = 'auth' | 'network' | 'rateLimit' | 'graphql' | 'command' | 'parse' | 'timeout'
 
 export class GhError extends Error {
   override name = 'GhError'
@@ -261,6 +262,19 @@ export class GhError extends Error {
     this.stderr = stderr
   }
 }
+
+// gh did not answer within its deadline and was told to stop. phase says which kind of step it was: a read (the token, the account lookup, a read before the write) has changed nothing on GitHub, while a write that timed out may or may not have landed
+export class GhTimeoutError extends GhError {
+  override name = 'GhTimeoutError'
+  phase: 'read' | 'write'
+  constructor (phase: 'read' | 'write', message: string) {
+    super('timeout', message)
+    this.phase = phase
+  }
+}
+
+// the deadlines of one write: readMs bounds the token read, the account lookup, and each read before the write; writeMs bounds the write itself
+export type WriteLimits = { readMs: number, writeMs: number }
 
 // a write that did not run because the account gh would write as could not be confirmed as the expected one: login is the account gh reported, or null when it could not be read at all
 export class WriteIdentityError extends Error {
@@ -274,23 +288,41 @@ export class WriteIdentityError extends Error {
   }
 }
 
-// spawns the real command; resolves with its exit code rather than rejecting on failure
-export const commandRunner = (command: string): Runner => (args, options = {}) =>
+// how long a child that was told to stop gets before it is killed outright
+export const killGraceMs = 2000
+
+// spawns the real command; resolves with its exit code rather than rejecting on failure. An aborted signal sends the child SIGTERM and, if it is still there after the grace, SIGKILL, so a child that ignores SIGTERM does not outlive the deadline that gave up on it
+export const commandRunner = (command: string, grace = killGraceMs): Runner => (args, options = {}) =>
   new Promise((resolve, reject) => {
+    const { signal } = options
+    if (signal?.aborted === true) {
+      resolve({ code: 1, stdout: '', stderr: 'not started: stopped before it began' })
+      return
+    }
     const child = spawn(command, args, {
       env: { ...process.env, GH_PROMPT_DISABLED: '1', NO_COLOR: '1', ...options.env },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     const out: Buffer[] = []
     const err: Buffer[] = []
+    let killer: ReturnType<typeof setTimeout> | null = null
+    const stop = (): void => {
+      child.kill('SIGTERM')
+      killer = setTimeout(() => child.kill('SIGKILL'), grace)
+    }
+    signal?.addEventListener('abort', stop, { once: true })
     child.stdout.on('data', (chunk: Buffer) => out.push(chunk))
     child.stderr.on('data', (chunk: Buffer) => err.push(chunk))
     child.on('error', reject)
-    child.on('close', (code) => resolve({
-      code: code ?? 1,
-      stdout: Buffer.concat(out).toString('utf8'),
-      stderr: Buffer.concat(err).toString('utf8'),
-    }))
+    child.on('close', (code) => {
+      signal?.removeEventListener('abort', stop)
+      if (killer !== null) clearTimeout(killer)
+      resolve({
+        code: code ?? 1,
+        stdout: Buffer.concat(out).toString('utf8'),
+        stderr: Buffer.concat(err).toString('utf8'),
+      })
+    })
   })
 
 const reviewerFields = '__typename ... on User { login } ... on Bot { login } ... on Mannequin { login } ... on Team { name }'
@@ -398,8 +430,8 @@ export type Gh = {
   // runs gh with the cached token, refreshing it once on a 401
   run: (args: string[]) => Promise<string>
   graphql: <T>(query: string, variables: Record<string, string | number | null>) => Promise<T>
-  // a GitHub write as the expected account: reads one token, confirms with it that gh is signed in as that account, then runs the write with the same token. It runs at most once: a failure of the lookup or the write, a 401 included, is never retried and never meets another token. A mismatch or an unreadable account throws WriteIdentityError before anything is written. The optional check runs after the account is confirmed and before the write, reading through the same token; if it throws, nothing is written and its error propagates unchanged
-  write: (args: string[], expected: string, check?: (read: (args: string[]) => Promise<string>) => Promise<void>) => Promise<string>
+  // a GitHub write as the expected account: reads one token, confirms with it that gh is signed in as that account, then runs the write with the same token. It runs at most once: a failure of the lookup or the write, a 401 included, is never retried and never meets another token. With limits, every step is bounded: one that does not answer in time is told to stop and the write fails with GhTimeoutError (phase read before the write, write for the write itself), and a late answer from it is dropped, so nothing after it runs. A mismatch or an unreadable account throws WriteIdentityError before anything is written. The optional check runs after the account is confirmed and before the write, reading through the same token; if it throws, nothing is written and its error propagates unchanged
+  write: (args: string[], expected: string, check?: (read: (args: string[]) => Promise<string>) => Promise<void>, limits?: WriteLimits) => Promise<string>
 }
 
 // holds the token in memory only; it is read once and again after any 401
@@ -416,8 +448,32 @@ export const createGh = (runner: Runner): Gh => {
     }
   }
 
-  const readToken = async (): Promise<string> => {
-    const result = await spawnSafe(['auth', 'token'])
+  // stops waiting for a promise after ms: rejects with GhTimeoutError and aborts the signal the work was given. The first outcome settles the result; whatever the work does afterward is dropped, and a rejection after the deadline is swallowed so it is never unhandled
+  const within = <T>(ms: number, phase: 'read' | 'write', what: string, start: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+    const controller = new AbortController()
+    const work = start(controller.signal)
+    work.catch(() => {})
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        controller.abort()
+        reject(new GhTimeoutError(phase, `${what} did not answer within ${Math.round(ms / 1000)} seconds`))
+      }, ms)
+      work.then((value) => {
+        clearTimeout(timer)
+        resolve(value)
+      }, (error: unknown) => {
+        clearTimeout(timer)
+        reject(error)
+      })
+    })
+  }
+
+  // one gh call under a deadline, or none
+  const bounded = (args: string[], options: RunOptions, limit: { ms: number, phase: 'read' | 'write' } | undefined): Promise<RunResult> =>
+    limit === undefined ? spawnSafe(args, options) : within(limit.ms, limit.phase, `gh ${args[0]}`, (signal) => spawnSafe(args, { ...options, signal }))
+
+  const readToken = async (signal?: AbortSignal): Promise<string> => {
+    const result = await spawnSafe(['auth', 'token'], signal === undefined ? undefined : { signal })
     const value = result.stdout.trim()
     if (result.code !== 0 || value === '') {
       throw new GhError('auth', `gh auth token failed: ${firstLine(result.stderr) || 'no token'}`, result.stderr)
@@ -455,13 +511,18 @@ export const createGh = (runner: Runner): Gh => {
     return result.stdout
   }
 
-  const write = async (args: string[], expected: string, check?: (read: (args: string[]) => Promise<string>) => Promise<void>): Promise<string> => {
-    const reading = token ??= readToken()
+  const write = async (args: string[], expected: string, check?: (read: (args: string[]) => Promise<string>) => Promise<void>, limits?: WriteLimits): Promise<string> => {
+    const readLimit = limits === undefined ? undefined : { ms: limits.readMs, phase: 'read' as const }
+    const writeLimit = limits === undefined ? undefined : { ms: limits.writeMs, phase: 'write' as const }
+    const own = token === null
+    const reading = token ??= limits === undefined ? readToken() : within(limits.readMs, 'read', 'gh auth token', (signal) => readToken(signal))
     let value: string
     try {
-      value = await reading
+      // a token read some other call began is shared, so it is waited for under the deadline but not stopped
+      value = await (limits === undefined || own ? reading : within(limits.readMs, 'read', 'gh auth token', () => reading))
     } catch (error) {
       if (token === reading) token = null
+      if (error instanceof GhTimeoutError) throw error
       throw new WriteIdentityError(`cannot confirm which account gh uses: ${(error as Error).message}`, null, error instanceof GhError ? error.kind : null)
     }
     const forget = (result: RunResult): void => {
@@ -471,8 +532,9 @@ export const createGh = (runner: Runner): Gh => {
     const env = { GH_TOKEN: value }
     let lookup: RunResult
     try {
-      lookup = await spawnSafe(['api', 'user', '--jq', '.login'], { env })
+      lookup = await bounded(['api', 'user', '--jq', '.login'], { env }, readLimit)
     } catch (error) {
+      if (error instanceof GhTimeoutError) throw error
       throw new WriteIdentityError(`cannot confirm which account gh uses: ${(error as Error).message}`, null, error instanceof GhError ? error.kind : null)
     }
     forget(lookup)
@@ -486,13 +548,13 @@ export const createGh = (runner: Runner): Gh => {
     if (check !== undefined) {
       // read-only, with the token that was just verified; a 401 here is not retried either
       await check(async (readArgs) => {
-        const read = await spawnSafe(readArgs, { env })
+        const read = await bounded(readArgs, { env }, readLimit)
         forget(read)
         if (read.code !== 0) throw new GhError(classify(read.stderr), `gh ${readArgs[0]} failed: ${firstLine(read.stderr)}`, read.stderr)
         return read.stdout
       })
     }
-    const result = await spawnSafe(args, { env })
+    const result = await bounded(args, { env }, writeLimit)
     forget(result)
     if (result.code !== 0) {
       throw new GhError(classify(result.stderr), `gh ${args[0]} failed: ${firstLine(result.stderr)}`, result.stderr)

@@ -5,7 +5,7 @@ import { request } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { ghArgs, orList, parseAction } from '../src/actions.ts'
+import { ghArgs, orList, parseAction, postReadDeadlineMs, postWriteDeadlineMs } from '../src/actions.ts'
 import { isPrimaryBase } from '../src/derive.ts'
 import { LaunchError } from '../src/launcher.ts'
 import type { Config } from '../src/config.ts'
@@ -20,7 +20,7 @@ import type { Call, FakeLaunch, FakeRunner } from './helpers.ts'
 
 // every GitHub write below goes to a fake gh; nothing here can reach a real PR
 
-type Harness = { server: PitServer, runner: FakeRunner, launch: FakeLaunch, base: string, home: string, removeHome: () => Promise<void>, cleanup: () => Promise<void> }
+type Harness = { server: PitServer, runner: FakeRunner, launch: FakeLaunch, base: string, home: string, logs: string[], removeHome: () => Promise<void>, cleanup: () => Promise<void> }
 
 const people = [
   { login: 'alex-mendez', alias: 'Alex', initials: 'AM', color: '#0F766E', avatar: 'github' },
@@ -125,7 +125,8 @@ const ghWorld = (behavior: Behavior = {}): FakeRunner => {
   })
 }
 
-const setup = async ({ config = {}, runner = ghWorld(), restarting }: { config?: Partial<Config>, runner?: FakeRunner, restarting?: Harness } = {}): Promise<Harness> => {
+const setup = async ({ config = {}, runner = ghWorld(), restarting, deadlines }: { config?: Partial<Config>, runner?: FakeRunner, restarting?: Harness, deadlines?: { readMs: number, writeMs: number } } = {}): Promise<Harness> => {
+  const logs: string[] = []
   const { dir: home, cleanup: removeHome } = restarting === undefined ? await tempDir() : { dir: restarting.home, cleanup: restarting.removeHome }
   const configPath = join(home, '.config', 'pit-view', 'config.json')
   await mkdir(join(configPath, '..'), { recursive: true })
@@ -144,14 +145,15 @@ const setup = async ({ config = {}, runner = ghWorld(), restarting }: { config?:
     stateDir: join(home, '.local', 'state', 'pit-view'),
     publicDir: join(home, 'public'),
     launch: launch.deps,
-    log: () => {},
+    log: (line) => { logs.push(line) },
     pageSize: scenario.pageSize,
+    ...(deadlines === undefined ? {} : { postDeadlines: deadlines }),
   })
   const cleanup = async (): Promise<void> => {
     await server.close()
     await removeHome()
   }
-  return { server, runner, launch, base: server.url, home, removeHome, cleanup }
+  return { server, runner, launch, base: server.url, home, logs, removeHome, cleanup }
 }
 
 const filled = async (h: Harness): Promise<void> => {
@@ -2722,3 +2724,151 @@ test('a queued scheduler row whose start is refused for a post in flight stays q
     await h.cleanup()
   }
 })
+
+// the post's deadlines (section 8, Launching runs, A post in flight): a gh that does not answer cannot hold a PR for good. A step before the write that times out is a plain failure and the report stays postable; the write that times out has an unknown outcome and is treated as one
+
+const quickDeadlines = { readMs: 150, writeMs: 300 }
+const readTimedOut = /GitHub did not answer in time; nothing was posted/
+const writeTimedOut = /The post to GitHub timed out and may or may not have gone through\. Check the pull request before posting again\./
+const never = (): Promise<never> => new Promise<never>(() => {})
+
+// the post as the page sends it, but a server that never answers fails the test instead of hanging it
+const postBounded = async (h: Harness, id: number, body: unknown): Promise<{ status: number, body: Record<string, unknown> }> => {
+  const response = await fetch(`${h.base}/api/runs/${id}/post`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: h.base, 'X-Pit-View-Token': h.server.token },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5000),
+  })
+  return { status: response.status, body: await response.json() as Record<string, unknown> }
+}
+
+const deadlineHarness = async (behavior: Behavior): Promise<Harness> => setup({ config: withClone, runner: ghWorld(behavior), deadlines: quickDeadlines })
+
+const readHangs = postSteps.filter((step) => ['the account verification', 'the live read of the PR', 'the live read of the reviews'].includes(step.name))
+const writeHang = postSteps.find((step) => step.name === 'the write itself')!
+
+// holds the first gh call that matches for good, or until late is released
+const hangAt = (h: Harness, behavior: Behavior, matches: (args: string[]) => boolean, late?: Promise<void>): { hung: () => Call | undefined } => {
+  let armed = true
+  let call: Call | undefined
+  behavior.onCall = async (args) => {
+    if (!armed || !matches(args)) return
+    armed = false
+    call = h.runner.calls.findLast((entry) => entry.args === args)
+    await (late ?? never())
+  }
+  return { hung: () => call }
+}
+
+test('the deadlines are named, the read shorter than the write, at the values the design gives', () => {
+  assert.equal(postReadDeadlineMs, 30_000)
+  assert.equal(postWriteDeadlineMs, 60_000)
+  assert.ok(postReadDeadlineMs < postWriteDeadlineMs)
+})
+
+for (const kind of postKinds) {
+  for (const step of readHangs) {
+    test(`${kind.name}: gh not answering ${step.name} is a plain failure after the deadline: the child is told to stop, nothing is written, the hold is released, and the report posts on the next try`, async () => {
+      const behavior: Behavior = { bodies: [] }
+      const h = await deadlineHarness(behavior)
+      try {
+        const { id, body } = await kind.prepare(h)
+        const hang = hangAt(h, behavior, step.matches)
+        const started = Date.now()
+        const answer = await postBounded(h, id, body)
+        assert.equal(answer.status, 502)
+        assert.match(String(answer.body.error), readTimedOut)
+        assert.doesNotMatch(String(answer.body.error), /may have/)
+        assert.ok(Date.now() - started < 3000)
+        assert.equal(hang.hung()?.options?.signal?.aborted, true, 'the runner was told to stop the child')
+        assert.equal(postsOf(h.runner).length, 0)
+        assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null, 'no mark: the failure is a definite one')
+        assert.equal(h.server.posts.holds(scenario.repo, 106), false)
+        if (kind.name === 'Post it') assert.equal((await rowOf(h, 106))?.agent?.postOffer?.runId, id)
+        // the same report posts on the next try, once
+        const again = await postBounded(h, id, body)
+        assert.equal(again.status, 200)
+        assert.equal(postsOf(h.runner).length, 1)
+        assert.match(behavior.bodies?.[0]?.text ?? '', /No actionable findings/)
+        // and the hold is clear: a review of the PR can start
+        assert.equal((await startDefault(h)).status, 200)
+      } finally {
+        await h.cleanup()
+      }
+    })
+
+    test(`${kind.name}: ${step.name} answering after its timeout calls nothing, records nothing, and says nothing more`, async () => {
+      const behavior: Behavior = { bodies: [] }
+      const h = await deadlineHarness(behavior)
+      try {
+        const { id, body } = await kind.prepare(h)
+        let release: () => void = () => {}
+        const late = new Promise<void>((resolve) => { release = resolve })
+        hangAt(h, behavior, step.matches, late)
+        const answer = await postBounded(h, id, body)
+        assert.equal(answer.status, 502)
+        const before = { calls: h.runner.calls.length, logs: [...h.logs], run: JSON.stringify(h.server.cache.getRun(id)) }
+        release()
+        await delay(400)
+        assert.equal(h.runner.calls.length, before.calls, 'no gh call after the late answer')
+        assert.deepEqual(h.logs, before.logs, 'no second message')
+        assert.equal(JSON.stringify(h.server.cache.getRun(id)), before.run, 'no late write of state')
+        assert.equal(postsOf(h.runner).length, 0)
+        assert.equal(h.server.posts.holds(scenario.repo, 106), false)
+      } finally {
+        await h.cleanup()
+      }
+    })
+  }
+
+  test(`${kind.name}: the write not answering is an unknown outcome: the child is told to stop, the guard is released, the offer is withdrawn, and a click again is refused with no gh call`, async () => {
+    const behavior: Behavior = { bodies: [] }
+    const h = await deadlineHarness(behavior)
+    try {
+      const { id, body } = await kind.prepare(h)
+      const hang = hangAt(h, behavior, writeHang.matches)
+      const answer = await postBounded(h, id, body)
+      assert.equal(answer.status, 502)
+      assert.match(String(answer.body.error), writeTimedOut)
+      assert.equal(hang.hung()?.options?.signal?.aborted, true, 'the runner was told to stop the child')
+      assert.equal(postsOf(h.runner).length, 1, 'the write was spawned once')
+      assert.notEqual(h.server.cache.getRun(id)?.postAttemptedAt, null, 'the mark stays: a blind retry could post twice')
+      assert.equal(h.server.posts.holds(scenario.repo, 106), false)
+      const agent = (await rowOf(h, 106))?.agent
+      assert.equal(agent?.postOffer, null)
+      assert.equal(agent?.text, kind.name === 'Post it' ? 'Clean · post failed' : agent?.text)
+      const calls = h.runner.calls.length
+      const retry = await postBounded(h, id, body)
+      assert.equal(retry.status, 422)
+      assert.match(String(retry.body.error), /already begun its post/)
+      assert.equal(h.runner.calls.length, calls, 'the retry made no gh call')
+      // the guard is clear, so a review of the PR is not held
+      assert.equal((await startDefault(h)).status, 200)
+    } finally {
+      await h.cleanup()
+    }
+  })
+
+  test(`${kind.name}: a write answering after its timeout records nothing and says nothing more, even when it posted`, async () => {
+    const behavior: Behavior = { bodies: [], postOutput: 'https://example.invalid/comment/1' }
+    const h = await deadlineHarness(behavior)
+    try {
+      const { id, body } = await kind.prepare(h)
+      let release: () => void = () => {}
+      const late = new Promise<void>((resolve) => { release = resolve })
+      hangAt(h, behavior, writeHang.matches, late)
+      const answer = await postBounded(h, id, body)
+      assert.equal(answer.status, 502)
+      const before = { calls: h.runner.calls.length, logs: [...h.logs], run: JSON.stringify(h.server.cache.getRun(id)) }
+      release()
+      await delay(400)
+      assert.equal(h.runner.calls.length, before.calls)
+      assert.deepEqual(h.logs, before.logs, 'no "posted" line and no second failure')
+      assert.equal(JSON.stringify(h.server.cache.getRun(id)), before.run, 'recordPost was not called')
+      assert.equal(h.server.posts.holds(scenario.repo, 106), false)
+    } finally {
+      await h.cleanup()
+    }
+  })
+}

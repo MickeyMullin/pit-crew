@@ -2047,7 +2047,8 @@ export type PostGuard = {
   holds: (repo: string, number: number) => boolean
 }
 
-export const createPostGuard = (): PostGuard => {
+// onRelease runs after a hold has been cleared, so whatever a hold kept waiting can be asked to go on
+export const createPostGuard = (onRelease: () => void = () => {}): PostGuard => {
   const held = new Map<string, symbol>()
   const keyOf = (repo: string, number: number): string => `${repo}#${number}`
   return {
@@ -2057,7 +2058,9 @@ export const createPostGuard = (): PostGuard => {
       const mine = Symbol(key)
       held.set(key, mine)
       return () => {
-        if (held.get(key) === mine) held.delete(key)
+        if (held.get(key) !== mine) return
+        held.delete(key)
+        onRelease()
       }
     },
     holds: (repo, number) => held.has(keyOf(repo, number)),

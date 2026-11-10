@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import type { Cache, Run } from './cache.ts'
 import type { Config } from './config.ts'
 import { deriveIssues, deriveMerge, isPrimaryBase, offersMerge } from './derive.ts'
-import { GhError, WriteIdentityError } from './github.ts'
-import type { Gh, GhErrorKind, RawOpenPr } from './github.ts'
+import { GhError, GhTimeoutError, WriteIdentityError } from './github.ts'
+import type { Gh, GhErrorKind, RawOpenPr, WriteLimits } from './github.ts'
 import { currentOffers, isHttpUrl, offersFix, postArgs, stackRunCover } from './launcher.ts'
 import type { Posted, PostForm, PostGuard, RunView, UpdateAction } from './launcher.ts'
 import { parseReviewedCommit, readReport, reportHash, ReportReadError } from './reports.ts'
@@ -166,9 +166,18 @@ export const reviewedHead = (lines: string, viewer: string, headSha: string): bo
 const refusedByGitHub = (error: unknown): boolean =>
   error instanceof GhError && error.kind !== 'network' && (error.kind === 'auth' || error.kind === 'rateLimit' || /HTTP 4\d\d|GraphQL:/.test(error.stderr))
 
+// how long the post path waits for gh: a read (the token, the account lookup, a read before the write) and the write itself. Applied to the post only; every other gh call keeps the runner's own behavior
+export const postReadDeadlineMs = 30_000
+export const postWriteDeadlineMs = 60_000
+
+const readTimedOutMessage = 'GitHub did not answer in time; nothing was posted'
+const writeTimedOutMessage = 'The post to GitHub timed out and may or may not have gone through. Check the pull request before posting again.'
+
 export type ActionsOptions = {
   cache: Cache
   gh: Gh
+  // the post's deadlines, for tests to shorten; the named constants when absent
+  postDeadlines?: WriteLimits
   // the config in effect, read afresh at every action
   config: () => Config
   // starts the targeted refresh of one PR, in the repository the write used, that is certain to start after the write (the poller's refreshPrAfterWrite); not awaited
@@ -425,8 +434,18 @@ export const createActions = (options: ActionsOptions): Actions => {
       })
       let printed: string
       try {
-        printed = await gh.write(postArgs(repo, number, form, copy.path), viewer, check)
+        printed = await gh.write(postArgs(repo, number, form, copy.path), viewer, check, options.postDeadlines ?? { readMs: postReadDeadlineMs, writeMs: postWriteDeadlineMs })
       } catch (error) {
+        if (error instanceof GhTimeoutError) {
+          refresh(repo, number)
+          // a step before the write changed nothing and left no mark, so the report stays postable. The write is different: gh was told to stop, but a post that had already reached GitHub may land, and a stopped gh cannot say. The mark taken before the write stays, so the offer is withdrawn exactly as for any write whose outcome is unknown
+          if (error.phase === 'write') {
+            log(`PR #${number}: the post of run ${id} timed out, and its outcome is unknown`)
+            throw new ActionError('ghFailed', writeTimedOutMessage, 'timeout')
+          }
+          log(`PR #${number}: the post of run ${id} was refused: ${error.message}`)
+          throw new ActionError('ghFailed', readTimedOutMessage, 'timeout')
+        }
         if (error instanceof ActionError) {
           refresh(repo, number)
           throw error
