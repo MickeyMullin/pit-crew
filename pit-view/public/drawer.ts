@@ -147,7 +147,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
 
   const errorLine = (): HTMLParagraphElement => h('p', { id: 'drawer-error', class: 'confirm-error', role: 'alert' })
 
-  const confirmActions = (goText: string, tone: 'primary' | 'danger' | 'caution', onGo: () => void, fresh: { text: string, disabled: boolean } | null = null): HTMLDivElement => {
+  const confirmActions = (goText: string, tone: 'primary' | 'danger' | 'caution', onGo: () => void, fresh: { text: string, disabled: boolean, reason: string | null } | null = null): HTMLElement => {
     const cancel = h('button', { type: 'button', class: 'button', 'data-focus-key': 'confirm-cancel' }, 'Cancel')
     const go = h('button', { type: 'button', class: `button button-${tone}`, 'data-focus-key': 'confirm-go', 'aria-describedby': 'drawer-error' }, goText)
     cancel.addEventListener('click', () => {
@@ -157,9 +157,12 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       if (!busy) onGo()
     })
     // a moved head's third button, after the two, that starts a review instead of posting
-    const third = fresh === null ? null : h('button', { type: 'button', class: 'button', disabled: fresh.disabled, 'data-focus-key': 'confirm-fresh' }, fresh.text)
+    // a start that cannot run says why, on the button and in a line under the buttons, as the drawer's own start buttons do
+    const why = fresh?.disabled === true ? fresh.reason : null
+    const third = fresh === null ? null : h('button', { type: 'button', class: 'button', disabled: fresh.disabled, title: why, 'aria-describedby': why === null ? null : 'drawer-fresh-reason', 'data-focus-key': 'confirm-fresh' }, fresh.text)
     third?.addEventListener('click', () => askFreshReview())
-    return h('div', { class: 'confirm-actions' }, cancel, go, third)
+    const actions = h('div', { class: 'confirm-actions' }, cancel, go, third)
+    return why === null ? actions : h('div', {}, actions, h('p', { id: 'drawer-fresh-reason', class: 'drawer-reason' }, why))
   }
 
   // the Self-review's box: a choice for this one start, kept in the confirmation as the runner is

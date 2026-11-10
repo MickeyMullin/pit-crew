@@ -383,7 +383,8 @@ export const storedAskModel = (row: Pick<OpenRow, 'number' | 'title'>, cell: Age
   if (offer == null || !open || !confirmHolds(ask, cell, open)) return null
   const words = postedWords[ask.form] ?? ask.form
   const moved = offer.reviewedSha !== offer.headSha
-  const start = startsModel(cell, open, row.number).buttons[0]
+  const starts = startsModel(cell, open, row.number)
+  const start = starts.buttons[0]
   return {
     runId: offer.runId,
     heading: `Post the stored report on #${row.number} as ${words}?`,
@@ -396,7 +397,7 @@ export const storedAskModel = (row: Pick<OpenRow, 'number' | 'title'>, cell: Age
     bound: `For the head ${shortSha(offer.headSha)} in ${offer.repo}, as ${offer.viewer}${moved ? `, the report reviewing ${shortSha(offer.reviewedSha)}` : ''}.`,
     confirm: moved ? 'Post anyway' : 'Post',
     busy: 'Posting…',
-    fresh: !moved || start === undefined ? null : { kind: start.kind, text: 'Start a new review', disabled: start.disabled, reason: start.reason },
+    fresh: !moved || start === undefined ? null : { kind: start.kind, text: 'Start a new review', disabled: start.disabled, reason: start.reason ?? starts.shared },
   }
 }
 

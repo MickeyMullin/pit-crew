@@ -2277,3 +2277,161 @@ test('the post button\'s request holds the same origin and token rules as Post i
     await h.cleanup()
   }
 })
+
+// a stale confirmation (section 10, Posting, Which buttons show): the server derives the offer again from the PR's latest run, and a run that is not it posts nothing and makes no gh call
+
+const notLatest = /no longer the latest for this PR; nothing was posted/
+
+// a newer run of the PR, started and left running with no result and no report written yet
+const newerRun = async (h: Harness, { number = 106, command = 'review-pr' }: { number?: number, command?: string } = {}): Promise<{ id: number, finish: (text: string, patch?: Record<string, unknown>) => Promise<void> }> => {
+  const tick = h.server.cache.createTick(scenario.repo)
+  const cwd = join(h.home, 'dev', 'orbit')
+  const request = { repo: scenario.repo, number, command, args: [String(number), '--no-post'], label: 'Review' }
+  const queued = h.server.launcher.queueScheduled(request, cwd, { tick: tick.id, reason: 'requested', headOid: 'abcdef0', posting: false })
+  await h.server.launcher.startScheduled(queued.id, request, { args: request.args, posting: false }, async () => cwd)
+  const child = h.launch.children.at(-1)!
+  return {
+    id: queued.id,
+    finish: async (text, patch = {}) => {
+      await writeFile(join(h.home, 'agents', 'output', `PR-${number}.md`), text)
+      const { sha } = await listed(number)
+      await child.result({
+        schema: 'pit-crew/review-result@1', command, status: 'done', target: { repo: scenario.repo, pr: number }, reviewed: { kind: 'commit', sha }, verdict: 'clean', recommendation: null,
+        findings: [], ci: 'green', fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: `~/agents/output/PR-${number}.md`, question: null, error: null, ...patch,
+      })
+      child.exit(0)
+      await h.server.launcher.settled(queued.id)
+    },
+  }
+}
+
+test('a newer run that has started leaves the older run\'s stored report unposted, with no gh call, while its report is still on disk', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(h)
+    assert.equal((await rowOf(h, 106))?.agent?.storedOffer?.runId, id)
+    const newer = await newerRun(h)
+    // the drawer's offer is gone, and the server agrees
+    assert.equal((await rowOf(h, 106))?.agent?.storedOffer, null)
+    const before = h.runner.calls.length
+    const answer = await postIt(h, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(answer.status, 409)
+    assert.match(String(answer.body.error), notLatest)
+    assert.equal(h.runner.calls.length, before, 'no gh call of any kind')
+    assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null)
+    // the newer run has no report to post either
+    assert.equal((await postIt(h, newer.id, storedBody(106, sha, sha, 'approve'))).status, 422)
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a newer run that finished with a different report: only the newer run posts, and the older one is refused before any gh call', async () => {
+  const behavior: Behavior = { bodies: [] }
+  const h = await blockedHarness(behavior)
+  try {
+    const { id, sha } = await storedRun(h)
+    const newer = await newerRun(h)
+    await newer.finish(`# Review\n\nReviewed commit: \`fix/x\` @ \`${sha.slice(0, 7)}\`\n\nA different report.\n`)
+    assert.equal((await rowOf(h, 106))?.agent?.storedOffer?.runId, newer.id)
+    const before = h.runner.calls.length
+    const old = await postIt(h, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(old.status, 409)
+    assert.match(String(old.body.error), notLatest)
+    assert.equal(h.runner.calls.length, before)
+    const answer = await postIt(h, newer.id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(answer.status, 200)
+    assert.equal(postsOf(h.runner).length, 1)
+    assert.match(behavior.bodies?.[0]?.text ?? '', /A different report/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a run already posted by another tab or click is refused the second time with no second gh call', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(h)
+    assert.equal((await postIt(h, id, storedBody(106, sha, sha, 'comment'))).status, 200)
+    const before = h.runner.calls.length
+    const again = await postIt(h, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(again.status, 422)
+    assert.equal(h.runner.calls.length, before)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('stack coverage that began after the confirmation was shown refuses the layer\'s stored report with no gh call', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(h, { number: 111 })
+    assert.equal((await rowOf(h, 111))?.agent?.storedOffer?.runId, id)
+    // a stack review started from the top layer covers 111
+    await newerRun(h, { number: 112, command: 'review-stack' })
+    const agent = (await rowOf(h, 111))?.agent
+    assert.equal(agent?.stackRun?.from, 112)
+    assert.equal(agent?.storedOffer, null)
+    const before = h.runner.calls.length
+    const answer = await postIt(h, id, { repo: scenario.repo, viewer: scenario.viewer, number: 111, headSha: sha, reviewedSha: sha, form: 'approve' })
+    assert.equal(answer.status, 409)
+    assert.match(String(answer.body.error), notLatest)
+    assert.equal(h.runner.calls.length, before)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a blocked post is judged the same way: a newer run of the PR takes Post it away from the older run', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await blockedRun(h)
+    assert.equal((await rowOf(h, 106))?.agent?.postOffer?.runId, id)
+    await newerRun(h)
+    assert.equal((await rowOf(h, 106))?.agent?.postOffer, null)
+    const before = h.runner.calls.length
+    const answer = await postIt(h, id, postBody(sha, 'approve'))
+    assert.equal(answer.status, 409)
+    assert.match(String(answer.body.error), notLatest)
+    assert.equal(h.runner.calls.length, before)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a viewer changed since the confirmation, or a head that moved again after it, posts nothing; the server needs the confirmed head to be the head, and the offer then names the new one', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(h, { reviewed: otherSha })
+    const before = h.runner.calls.length
+    const viewer = await postIt(h, id, { ...storedBody(106, sha, otherSha, 'approve'), viewer: 'someone-else' })
+    assert.equal(viewer.status, 409)
+    assert.match(String(viewer.body.error), /the viewer is now/)
+    assert.equal(h.runner.calls.length, before)
+    // the confirmation named a head that is no longer the PR's: nothing is written, and the message says the button asks again
+    const moved = await postIt(h, id, storedBody(106, otherSha, otherSha, 'approve'))
+    assert.equal(moved.status, 409)
+    assert.match(String(moved.body.error), /has new commits since the confirmation was shown; nothing was posted\. The post button will ask again/)
+    assert.deepEqual(postsOf(h.runner), [])
+    assert.equal((await rowOf(h, 106))?.agent?.storedOffer?.headSha, sha)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a PR that closed or merged since the confirmation posts nothing', async () => {
+  for (const live of [{ state: 'closed' }, { state: 'closed', merged: true }]) {
+    const h = await blockedHarness({ live: () => live })
+    try {
+      const { id, sha } = await storedRun(h)
+      const answer = await postIt(h, id, storedBody(106, sha, sha, 'approve'))
+      assert.equal(answer.status, 422)
+      assert.match(String(answer.body.error), /no longer open/)
+      assert.deepEqual(postsOf(h.runner), [])
+    } finally {
+      await h.cleanup()
+    }
+  }
+})

@@ -6,7 +6,7 @@ import type { Config } from './config.ts'
 import { deriveIssues, deriveMerge, isPrimaryBase, offersMerge } from './derive.ts'
 import { GhError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr } from './github.ts'
-import { isHttpUrl, offersFix, postArgs, postOffer, storedOffer } from './launcher.ts'
+import { currentOffers, isHttpUrl, offersFix, postArgs, stackRunCover } from './launcher.ts'
 import type { Posted, PostForm, RunView, UpdateAction } from './launcher.ts'
 import { parseReviewedCommit, readReport, reportHash, ReportReadError } from './reports.ts'
 
@@ -338,11 +338,18 @@ export const createActions = (options: ActionsOptions): Actions => {
     const run = cache.getRun(id)
     if (run === null) throw new ActionError('unknownRun', `run ${id} does not exist`)
     if (run.repo !== repo || run.number !== number) throw new ActionError('stale', `run ${id} is not a run of #${number} in ${repo}; the confirmation was for #${number}, so nothing was posted`)
-    const row = cache.readView(repo).open.find((entry) => entry.number === number)
+    const cached = cache.readView(repo)
+    const row = cached.open.find((entry) => entry.number === number)
     if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched; nothing was posted`)
+    // the offer is derived again, the way the drawer derives it: from the PR's latest run and the stack run that covers it, as they are now. The requested run must be the run that offer is about, so a run another has superseded, or a stack run now covers, posts nothing, whatever report is still on disk
+    const latest = cache.latestRuns(repo)
+    const offers = currentOffers(row.pr, config, latest.get(number), stackRunCover(latest.values(), cached.open.map((entry) => entry.pr)).get(number))
+    if (offers.runId !== id) throw new ActionError('stale', 'This report is no longer the latest for this PR; nothing was posted. Reload the PR to see its current state')
     if (request.headSha !== row.pr.headRefOid.toLowerCase()) {
       refresh(repo, number)
-      throw new ActionError('stale', `#${number} has new commits since you saw it; nothing was posted. Start a new review for the current head`)
+      throw new ActionError('stale', request.reviewedSha === undefined
+        ? `#${number} has new commits since you saw it; nothing was posted. Start a new review for the current head`
+        : `#${number} has new commits since the confirmation was shown; nothing was posted. The post button will ask again for the current head`)
     }
     // before the mark and the offer, which a post in flight has already changed
     const key = `${repo}#${number}`
@@ -352,13 +359,13 @@ export const createActions = (options: ActionsOptions): Actions => {
     let offer: { report: string, reportPath: string }
     let reviewedAt: string
     if (request.reviewedSha === undefined) {
-      const blocked = postOffer(row.pr, config, run)
+      const blocked = offers.postOffer
       if (blocked === null) throw new ActionError('notAllowed', `run ${id} has no report waiting to be posted on #${number}; nothing was posted`)
       if (blocked.form !== form) throw new ActionError('stale', `this report would now post as ${blocked.form}, not ${form}; nothing was posted. Reload its confirmation to see the current state`)
       offer = blocked
       reviewedAt = headSha
     } else {
-      const stored = storedOffer(row.pr, config, run)
+      const stored = offers.storedOffer
       if (stored === null) throw new ActionError('notAllowed', `run ${id} has no stored report waiting to be posted on #${number}; nothing was posted`)
       if (stored.reviewedSha !== request.reviewedSha) throw new ActionError('stale', `this report reviewed ${stored.reviewedSha.slice(0, 7)}, not ${request.reviewedSha.slice(0, 7)}; nothing was posted. Reload its confirmation to see the current state`)
       if (!stored.forms.includes(form)) throw new ActionError('stale', `this report offers ${orList(stored.forms.map((offered) => formWords[offered]))}, not ${formWords[form]}; nothing was posted. Reload its confirmation to see the current state`)

@@ -13,7 +13,7 @@ import type { OpenRow } from '../src/derive.ts'
 import { createGh } from '../src/github.ts'
 import type { RawOpenPr, Runner } from '../src/github.ts'
 import {
-  agentCell, childEnv, claudeInvocation, codexInvocation, codexNote, createLauncher, createReviewLine, defaultRun, descendantGroups, doneText, emptyStream, gitConfigEnv,
+  agentCell, childEnv, currentOffers, claudeInvocation, codexInvocation, codexNote, createLauncher, createReviewLine, defaultRun, descendantGroups, doneText, emptyStream, gitConfigEnv,
   emptySteps, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, procsFrom, remoteNamesRepo,
   modelLabels, noteKind, requestText, reviewFits, runners, runView, shellPath, startOptions, stepsOf, systemFs, updateRequest,
   codexSandboxArgs,

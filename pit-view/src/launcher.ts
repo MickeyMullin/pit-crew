@@ -1117,6 +1117,18 @@ export const stackRunCover = (runs: Iterable<Run>, prs: readonly RawOpenPr[]): M
 // whether a finished review put its post on GitHub; a fix or an update, and a run that ended with no result, posted nothing
 const posted = (result: RunResultJson | null): boolean => result?.schema === 'pit-crew/review-result@1' && result.posted !== null
 
+// the run the PR's Agent cell is about: the newer of the PR's own latest run and the stack run that covers it
+export const cellRunOf = (ownRun: Run | undefined, cover: Run | undefined): { run: Run | undefined, covered: boolean } => {
+  const covered = cover !== undefined && cover.id > (ownRun?.id ?? 0)
+  return { run: covered ? cover : ownRun, covered }
+}
+
+// the post offers a PR has now, from the run its cell is about and nothing else. The drawer's offers and the server's check at post time both come from this one function, so a click is judged by the same derivation that showed the button: a run that is no longer the PR's latest, or that a stack run now covers, offers nothing and is not the run named here
+export const currentOffers = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, cover: Run | undefined): { runId: number | null, postOffer: PostOffer | null, storedOffer: StoredOffer | null } => {
+  const { run } = cellRunOf(ownRun, cover)
+  return { runId: run?.id ?? null, postOffer: postOffer(pr, config, run), storedOffer: storedOffer(pr, config, run) }
+}
+
 export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null, cover: Run | undefined = undefined): AgentCell => {
   const mine = isMine(pr, config)
   const plan = defaultRun(pr, config)
@@ -1131,10 +1143,9 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     steps: emptySteps(), tandem: false, commit: null,
     finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,
   }
-  // the newer of the PR's own latest run and the stack run that covers it
-  const covered = cover !== undefined && cover.id > (ownRun?.id ?? 0)
-  const run = covered ? cover : ownRun
+  const { run, covered } = cellRunOf(ownRun, cover)
   if (run === undefined) return idle
+  const offers = currentOffers(pr, config, ownRun, cover)
   const shas = standingShas(run)
   const head = pr.headRefOid.toLowerCase()
   let state: AgentCell['state'] = 'done'
@@ -1172,8 +1183,8 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     origin: run.origin,
     queuedAt: run.queuedAt,
     posted: ended === null ? null : posted(withPostFate(run).result),
-    postOffer: postOffer(pr, config, run),
-    storedOffer: storedOffer(pr, config, run),
+    postOffer: offers.postOffer,
+    storedOffer: offers.storedOffer,
   }
 }
 

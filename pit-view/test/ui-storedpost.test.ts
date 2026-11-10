@@ -325,3 +325,44 @@ test('the confirmation holds only while the offer is the one it showed, CI inclu
     assert.equal(confirmHolds(confirm, cellOf(offerOf(patch)), true), false, JSON.stringify(patch))
   }
 })
+
+test('the third button, when a new review cannot start, shows the server\'s reason on the button and as a visible line under the buttons', async () => {
+  const unavailable = 'A review of #101 is already running.'
+  const cell = cellOf(offerOf({ reviewedSha: earlier }))
+  const starts = (cell as unknown as { starts: { unavailable: string | null }[] }).starts
+  starts[0]!.unavailable = unavailable
+  await withPage(cell, [runOf()], async (page) => {
+    press(page.button('Approve'))
+    const third = page.button('Start a new review')
+    assert.equal(third.disabled, true)
+    assert.equal(third.title, unavailable)
+    assert.equal(third.getAttribute('aria-describedby'), 'drawer-fresh-reason')
+    assert.equal(page.root.querySelector('#drawer-fresh-reason')?.textContent, unavailable)
+    // a click on the disabled button starts nothing
+    press(third)
+    assert.deepEqual(page.writes(), [])
+  })
+  // available: no reason is shown and the button works
+  await withPage(cellOf(offerOf({ reviewedSha: earlier })), [runOf()], async (page) => {
+    press(page.button('Approve'))
+    const third = page.button('Start a new review')
+    assert.equal(third.disabled, false)
+    assert.equal(third.title, '')
+    assert.equal(page.root.querySelector('#drawer-fresh-reason'), null)
+  })
+})
+
+test('a refusal because the report is no longer the latest stays in the confirmation in the server\'s words, and the offer going away closes the confirmation', async () => {
+  const words = 'This report is no longer the latest for this PR; nothing was posted. Reload the PR to see its current state'
+  await withPage(cellOf(offerOf()), [runOf()], async (page) => {
+    press(page.button('Approve'))
+    press(page.button('Post'))
+    await settle()
+    assert.equal(page.posts().length, 1)
+    assert.equal(page.error(), `${words}.`)
+    assert.match(page.text(), /Post the stored report/)
+  }, { post: answer(409, { error: words }) })
+  // the same cell with the offer gone (the next patch) holds no confirmation and no button
+  const gone = cellOf(null)
+  assert.equal(confirmHolds({ type: 'storedPost', runId: 7, repo, viewer: 'viewer', headSha: head, reviewedSha: head, form: 'approve', ci: 'green' } as unknown as Confirm, gone, true), false)
+})
