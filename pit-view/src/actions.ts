@@ -7,7 +7,7 @@ import { deriveIssues, deriveMerge, isPrimaryBase, offersMerge } from './derive.
 import { GhError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr } from './github.ts'
 import { currentOffers, isHttpUrl, offersFix, postArgs, stackRunCover } from './launcher.ts'
-import type { Posted, PostForm, RunView, UpdateAction } from './launcher.ts'
+import type { Posted, PostForm, PostGuard, RunView, UpdateAction } from './launcher.ts'
 import { parseReviewedCommit, readReport, reportHash, ReportReadError } from './reports.ts'
 
 // direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs, each through gh with the viewer's own token. This module decides whether an action is allowed and what gh is asked; it never trusts the page, so every rule is checked here again. merge is always a squash into the repository's primary branch; the method is fixed, not a setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused. update writes nothing itself: it starts an agent session through the launcher, which brings the PR's branch up to date with the primary branch and pushes it. resolveConflicts is that same session, asked for on a PR the cache holds as conflicting
@@ -183,6 +183,8 @@ export type ActionsOptions = {
   markPost: (id: number, posting: boolean) => void
   // records a post on its run; a failure here is logged, since the post has landed by then, and the mark keeps it from being made twice
   recordPost: (id: number, posted: Posted) => RunView
+  // the posts in flight, shared with the launcher: held from before a post's first asynchronous step until its write has settled and been recorded or has failed, during which the launcher admits no run of the PR and no stack run covering it
+  posts: PostGuard
   log: (line: string) => void
 }
 
@@ -338,40 +340,45 @@ export const createActions = (options: ActionsOptions): Actions => {
     const run = cache.getRun(id)
     if (run === null) throw new ActionError('unknownRun', `run ${id} does not exist`)
     if (run.repo !== repo || run.number !== number) throw new ActionError('stale', `run ${id} is not a run of #${number} in ${repo}; the confirmation was for #${number}, so nothing was posted`)
-    const cached = cache.readView(repo)
-    const row = cached.open.find((entry) => entry.number === number)
-    if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched; nothing was posted`)
-    // the offer is derived again, the way the drawer derives it: from the PR's latest run and the stack run that covers it, as they are now. The requested run must be the run that offer is about, so a run another has superseded, or a stack run now covers, posts nothing, whatever report is still on disk
-    const latest = cache.latestRuns(repo)
-    const offers = currentOffers(row.pr, config, latest.get(number), stackRunCover(latest.values(), cached.open.map((entry) => entry.pr)).get(number))
-    if (offers.runId !== id) throw new ActionError('stale', 'This report is no longer the latest for this PR; nothing was posted. Reload the PR to see its current state')
-    if (request.headSha !== row.pr.headRefOid.toLowerCase()) {
-      refresh(repo, number)
-      throw new ActionError('stale', request.reviewedSha === undefined
-        ? `#${number} has new commits since you saw it; nothing was posted. Start a new review for the current head`
-        : `#${number} has new commits since the confirmation was shown; nothing was posted. The post button will ask again for the current head`)
+    // the offer as the cache has it at this moment, derived the way the drawer derives it: from the PR's latest run and the stack run that covers it. The requested run must be the run that offer is about, so a run another has superseded, or a stack run now covers, posts nothing, whatever report is still on disk. Everything here is synchronous, so what it answers is true until the caller next awaits
+    const current = (): ReturnType<typeof currentOffers> => {
+      const cached = cache.readView(repo)
+      const row = cached.open.find((entry) => entry.number === number)
+      if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched; nothing was posted`)
+      const latest = cache.latestRuns(repo)
+      const offers = currentOffers(row.pr, config, latest.get(number), stackRunCover(latest.values(), cached.open.map((entry) => entry.pr)).get(number))
+      if (offers.runId !== id) throw new ActionError('stale', 'This report is no longer the latest for this PR; nothing was posted. Reload the PR to see its current state')
+      if (headSha !== row.pr.headRefOid.toLowerCase()) {
+        refresh(repo, number)
+        throw new ActionError('stale', request.reviewedSha === undefined
+          ? `#${number} has new commits since you saw it; nothing was posted. Start a new review for the current head`
+          : `#${number} has new commits since the confirmation was shown; nothing was posted. The post button will ask again for the current head`)
+      }
+      return offers
     }
-    // before the mark and the offer, which a post in flight has already changed
-    const key = `${repo}#${number}`
-    if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
-    if (run.postAttemptedAt !== null) throw new ActionError('notAllowed', `run ${id} has already begun its post, which may have landed; nothing was posted. Check #${number} on GitHub`)
     // Post it (a blocked post, reviewed at the head) and the post button (a stored report, which may have been reviewed at an earlier head) are told apart by the request: only the button sends reviewedSha
-    let offer: { report: string, reportPath: string }
-    let reviewedAt: string
-    if (request.reviewedSha === undefined) {
-      const blocked = offers.postOffer
-      if (blocked === null) throw new ActionError('notAllowed', `run ${id} has no report waiting to be posted on #${number}; nothing was posted`)
-      if (blocked.form !== form) throw new ActionError('stale', `this report would now post as ${blocked.form}, not ${form}; nothing was posted. Reload its confirmation to see the current state`)
-      offer = blocked
-      reviewedAt = headSha
-    } else {
+    const offeredBy = (offers: ReturnType<typeof currentOffers>): { offer: { report: string, reportPath: string }, reviewedAt: string } => {
+      if (request.reviewedSha === undefined) {
+        const blocked = offers.postOffer
+        if (blocked === null) throw new ActionError('notAllowed', `run ${id} has no report waiting to be posted on #${number}; nothing was posted`)
+        if (blocked.form !== form) throw new ActionError('stale', `this report would now post as ${blocked.form}, not ${form}; nothing was posted. Reload its confirmation to see the current state`)
+        return { offer: blocked, reviewedAt: headSha }
+      }
       const stored = offers.storedOffer
       if (stored === null) throw new ActionError('notAllowed', `run ${id} has no stored report waiting to be posted on #${number}; nothing was posted`)
       if (stored.reviewedSha !== request.reviewedSha) throw new ActionError('stale', `this report reviewed ${stored.reviewedSha.slice(0, 7)}, not ${request.reviewedSha.slice(0, 7)}; nothing was posted. Reload its confirmation to see the current state`)
       if (!stored.forms.includes(form)) throw new ActionError('stale', `this report offers ${orList(stored.forms.map((offered) => formWords[offered]))}, not ${formWords[form]}; nothing was posted. Reload its confirmation to see the current state`)
-      offer = stored
-      reviewedAt = stored.reviewedSha
+      return { offer: stored, reviewedAt: stored.reviewedSha }
     }
+    const offers = current()
+    // before the mark and the offer, which a post in flight has already changed
+    const key = `${repo}#${number}`
+    if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
+    if (run.postAttemptedAt !== null) throw new ActionError('notAllowed', `run ${id} has already begun its post, which may have landed; nothing was posted. Check #${number} on GitHub`)
+    const { offer, reviewedAt } = offeredBy(offers)
+    // the hold is taken in the same synchronous block as the check above, ahead of every asynchronous step: from here the launcher admits no run of this PR and no stack run covering it, until the finally below. A run admitted before this point has its row in the cache the check just read, and a start with no row yet is refused where it makes one
+    const release = options.posts.hold(repo, number)
+    if (release === null) throw new ActionError('busy', `a post for #${number} is already in progress`)
     inFlight.add(key)
     try {
       // the report on disk must be the one this run finished with: a later run of the PR writes the same name. One read: the text checked here is the text posted
@@ -401,6 +408,9 @@ export const createActions = (options: ActionsOptions): Actions => {
         if (live.state !== 'open' || live.merged === true) throw new ActionError('notAllowed', `#${number} is no longer open; nothing was posted`)
         if (live.head?.sha?.toLowerCase() !== headSha) throw new ActionError('notAllowed', `#${number} has new commits since you saw it; nothing was posted`)
         if (reviewedHead(reviews, viewer, headSha)) throw new ActionError('notAllowed', `you have already reviewed this commit of #${number}; nothing was posted`)
+        // the offer derived once more from the cache as it is now, with nothing awaited between this reading and the mark below: a run that got in by a path the hold does not cover is seen here, and the hold refuses every run after it
+        const again = offeredBy(current())
+        if (again.offer.report !== offer.report || again.reviewedAt !== reviewedAt) throw new ActionError('stale', 'This report is no longer the one offered for this PR; nothing was posted. Reload the PR to see its current state')
         // the last step before the write, so a restart can never offer a post that may have landed
         try {
           options.markPost(id, true)
@@ -456,6 +466,7 @@ export const createActions = (options: ActionsOptions): Actions => {
       return { number, runId: id, posted, run: recorded }
     } finally {
       inFlight.delete(key)
+      release()
     }
   }
 

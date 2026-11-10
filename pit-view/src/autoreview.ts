@@ -7,7 +7,7 @@ import { attentionOrder, isMine, selfReviewOf } from './derive.ts'
 import type { OpenRow, OtherRow } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
 import type { Gh, RawOpenPr, Runner } from './github.ts'
-import { chooseExtraInstructions, defaultRun, gitConfigEnv, isDependabot, mayPost, parseResult, remoteNamesRepo, stepsOf, withExtraInstructions } from './launcher.ts'
+import { chooseExtraInstructions, defaultRun, gitConfigEnv, isDependabot, LaunchError, mayPost, parseResult, remoteNamesRepo, stepsOf, withExtraInstructions } from './launcher.ts'
 import type { Launcher, LauncherFs, StartRequest } from './launcher.ts'
 import type { Poller, Timers } from './poller.ts'
 import { scanReports } from './reports.ts'
@@ -701,6 +701,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     withExtraInstructions(request, chooseExtraInstructions(undefined, settings.extraReviewInstructions))
 
   const queueItems = (items: readonly QueueItem[], tick: number, settings: Config, auto: AutoReviewSettings, clone: string, open: readonly RawOpenPr[]): number => {
+    let refused = 0
     for (const item of items) {
       if (item.kind === 'dependabot') {
         const args = sweepArgsNow(settings.repo, auto)
@@ -711,9 +712,16 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       if (pr === undefined) continue
       const args = runArgs(pr, item.number, item.reason, settings)
       const request = underStandingText({ repo: settings.repo, number: item.number, command: 'review-pr', args, label: defaultRun(pr, settings).label }, settings)
-      launcher.queueScheduled(request, clone, { tick, reason: item.reason, headOid: item.headSha, posting: mayPost('review-pr', args) })
+      // a post in flight for the PR refuses the row; nothing is lost, since the next tick derives what to queue from the board again and finds the PR as it then stands
+      try {
+        launcher.queueScheduled(request, clone, { tick, reason: item.reason, headOid: item.headSha, posting: mayPost('review-pr', args) })
+      } catch (error) {
+        if (!(error instanceof LaunchError) || error.code !== 'busy') throw error
+        refused += 1
+        log(`auto-review: #${item.number} not queued: ${error.message}`)
+      }
     }
-    return items.length
+    return items.length - refused
   }
 
   // the note a PR left for the owner carries, on its newest failed run, ahead of how that run failed; written once

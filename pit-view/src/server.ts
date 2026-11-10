@@ -22,8 +22,8 @@ import type { Clock, Config, RunnerName } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner } from './github.ts'
 import { latestReviewsOf, markedStack } from './derive.ts'
-import { chooseExtraInstructions, createLauncher, createReviewLine, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest, withExtraInstructions } from './launcher.ts'
-import type { Kill, Launcher, LaunchErrorCode, LauncherFs, Procs, Queueing, Spawn, StartKind } from './launcher.ts'
+import { chooseExtraInstructions, createLauncher, createPostGuard, createReviewLine, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest, withExtraInstructions } from './launcher.ts'
+import type { Kill, Launcher, LaunchErrorCode, LauncherFs, PostGuard, Procs, Queueing, Spawn, StartKind } from './launcher.ts'
 import { renderMarkdown } from './markdown.ts'
 import { createNotifier, noDeliver, systemDeliver, systemExec } from './notify.ts'
 import type { Deliver } from './notify.ts'
@@ -94,6 +94,8 @@ export type PitServer = {
   clients: Clients
   cache: Cache
   launcher: Launcher
+  // the posts in flight, shared by the post path and the launcher
+  posts: PostGuard
   // sweeps are their own concept: a launcher over the sweeps table and the sweeps held in memory
   sweepLauncher: Launcher<Sweep>
   sweeps: SweepMemory
@@ -377,8 +379,11 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   const updates = createUpdateWatch((repo, number) => poller.refreshPrAfterWrite(repo, number), log)
   // the one slot count and the one queue under the review cap, which reviews and sweeps share
   const line = createReviewLine({ config: effective, timers, log, onQueueing: () => poller.queueingChanged() })
+  // the posts in flight: the post path holds a PR, and the launcher admits no run of a held PR
+  const posts = createPostGuard()
   const launcher = createLauncher({
     cache,
+    posts,
     gh,
     git: options.launch.git,
     spawn: options.launch.spawn,
@@ -633,6 +638,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
 
   const actions = createActions({
     cache,
+    posts,
     gh,
     config: effective,
     refreshPr: (repo, number) => poller.refreshPrAfterWrite(repo, number),
@@ -994,7 +1000,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     cache.close()
   }
 
-  return { port, url: `http://${host}:${port}`, poller, clients, cache, launcher, sweepLauncher, sweeps, scheduler, token, close }
+  return { port, url: `http://${host}:${port}`, poller, clients, cache, launcher, posts, sweepLauncher, sweeps, scheduler, token, close }
 }
 
 export type Runtime = { instance: string, port: number, configPath: string, cachePath: string, stateDir: string }

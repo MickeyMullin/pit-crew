@@ -2823,3 +2823,26 @@ test('the last statuses the scheduler keeps are bounded: ended rows are pruned p
     await world.cleanup()
   }
 })
+
+// a post in flight (section 8, Launching runs, A post in flight): the tick queues nothing for a PR whose post is in flight, is not failed by it, and finds the PR again on the next tick
+
+test('a tick queues no row for a PR whose post is in flight and still finishes as ran; once the post has settled the next tick queues it', async () => {
+  const world = await setup()
+  try {
+    await world.server.poller.refresh('manual')
+    await world.server.poller.idle()
+    const open = world.server.cache.readView(scenario.repo).open.map((entry) => entry.number)
+    assert.ok(open.length > 1)
+    const releases = open.map((number) => world.server.posts.hold(scenario.repo, number)!)
+    await tick(world)
+    assert.equal(autoRuns(world).length, 0, 'no PR held by a post was queued')
+    assert.equal(ticks(world)[0]?.state, 'ran')
+    assert.equal(ticks(world)[0]?.queued, 0)
+    for (const release of releases) release()
+    await tick(world)
+    assert.ok(autoRuns(world).length > 1, 'the PRs are queued once their posts have settled')
+    assert.equal(ticks(world)[0]?.state, 'ran')
+  } finally {
+    await world.cleanup()
+  }
+})

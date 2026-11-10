@@ -2040,6 +2040,30 @@ export const createReviewLine = (options: ReviewLineOptions): ReviewLine => {
   }
 }
 
+// the posts in flight (section 8, Launching runs, A post in flight): one structure, shared by the post path and the launcher. A PR is held from before its post's first asynchronous step until the write has settled and been recorded or has failed; the launcher admits no run of a held PR, and no stack run covering one
+export type PostGuard = {
+  // holds the PR and answers the release, or null when a post for it already holds it. A release clears only the hold it came from, and clears it once
+  hold: (repo: string, number: number) => (() => void) | null
+  holds: (repo: string, number: number) => boolean
+}
+
+export const createPostGuard = (): PostGuard => {
+  const held = new Map<string, symbol>()
+  const keyOf = (repo: string, number: number): string => `${repo}#${number}`
+  return {
+    hold: (repo, number) => {
+      const key = keyOf(repo, number)
+      if (held.has(key)) return null
+      const mine = Symbol(key)
+      held.set(key, mine)
+      return () => {
+        if (held.get(key) === mine) held.delete(key)
+      }
+    },
+    holds: (repo, number) => held.has(keyOf(repo, number)),
+  }
+}
+
 // the launcher
 
 export type LaunchErrorCode =
@@ -2189,6 +2213,8 @@ export type LauncherOptions<T extends Session = Run> = {
   line: ReviewLine
   // rows the cache pruned, called as soon as they are gone from the table and before their folders are removed, so what holds the rows in memory can drop them too
   onPruned?: (gone: T[]) => void
+  // the posts in flight, shared with the post path; the sweep launcher is given none, since a sweep is not a run of any PR
+  posts?: PostGuard
   log?: (line: string) => void
   // how often a run's files are read when the folder cannot be watched, and the safety
   // net when it can; a recovered run's liveness is checked as often
@@ -2331,6 +2357,17 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const launching = new Map<number, boolean>()
   // starts between their checks and their row
   const starting = new Set<string>()
+  // why a run of this request may not be admitted now, or null: a post is in flight for its PR, or for a PR the stack run it asks for covers. Only runs are held; the post is the viewer's explicit write of a finished report, and a newer run would supersede that report between the last check and the write
+  const postHeld = (request: StartRequest): string | null => {
+    const posts = options.posts
+    if (posts === undefined || store.noun !== 'run') return null
+    if (posts.holds(request.repo, request.number)) return 'A post for this PR is in flight'
+    if (request.command === 'review-stack') {
+      const members = markedStackMembers(options.cache.readView(request.repo).open.map((row) => row.pr), request.number)
+      if ([...members].some((number) => posts.holds(request.repo, number))) return 'A post for a PR in this stack is in flight'
+    }
+    return null
+  }
   // runs that ended here whose ending could not be written, each as it ended, for whoever awaits it; the row still reads queued or running until a Stop records it or the next server start settles it
   const unrecorded = new Map<number, T>()
   let closed = false
@@ -2734,6 +2771,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   }
 
   const newRow = (request: StartRequest, config: Config, cwd: string, status: 'running' | 'queued', scheduled: ScheduledFields | null = null): T => {
+    // every new row is made here, so a start that passed its first test before a post began is refused where it would make its row
+    const held = postHeld(request)
+    if (held !== null) throw new LaunchError('busy', held)
     const runner = request.runner ?? config.agent.runner
     const sessionId = runner === 'claude' ? options.newSessionId() : null
     return store.create(request, {
@@ -2941,6 +2981,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (starting.has(key) || store.inFlight(request)) {
       throw new LaunchError('busy', store.busyText(request))
     }
+    const held = postHeld(request)
+    if (held !== null) throw new LaunchError('busy', held)
     starting.add(key)
     // reviews and sweeps stand in the one line; a fix or update session waits for nothing
     const turn = store.counted(request.command) ? line.takeTurn() : null
@@ -3290,6 +3332,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (queued === null || queued.status !== 'queued') return queued
     const key = store.key(request)
     if (starting.has(key)) return queued
+    // the row waits, unchanged, for a later pass: the post in flight is the viewer's, and settles by itself
+    if (postHeld(request) !== null) return queued
     starting.add(key)
     const turn = line.takeTurn()
     try {
@@ -3315,7 +3359,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       const fresh = store.get(id)
       if (fresh === null || fresh.status !== 'queued' || closed) return fresh
       line.admit()
-      if (waited || line.waits('review', current) || unbound(request.repo, config.viewer, current) !== null) return fresh
+      if (waited || line.waits('review', current) || unbound(request.repo, config.viewer, current) !== null || postHeld(request) !== null) return fresh
       const attempt = line.reserve('review')
       line.opened(1)
       turn.decided()

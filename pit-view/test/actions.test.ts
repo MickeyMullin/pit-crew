@@ -7,6 +7,7 @@ import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { ghArgs, orList, parseAction } from '../src/actions.ts'
 import { isPrimaryBase } from '../src/derive.ts'
+import { LaunchError } from '../src/launcher.ts'
 import type { Config } from '../src/config.ts'
 import type { OpenRow } from '../src/derive.ts'
 import type { RawOpenResponse } from '../src/github.ts'
@@ -53,6 +54,8 @@ type Behavior = {
   bodies?: { path: string, text: string, mode: number }[]
   // runs when the reviews are read live: after the report is checked and before gh writes
   onReviews?: () => Promise<void>
+  // runs first on every gh call, before it is answered, so a test can hold the post at any step or do something in between
+  onCall?: (args: string[]) => Promise<void>
 }
 
 const isWrite = (args: string[]): boolean =>
@@ -84,6 +87,7 @@ const placeholderMerge = { action: 'merge', headSha: 'a'.repeat(40), base: 'main
 const ghWorld = (behavior: Behavior = {}): FakeRunner => {
   const base = fixtureRunner()
   return fakeRunner(async (args) => {
+    await behavior.onCall?.(args)
     if (isLiveRead(args)) {
       const number = Number(args[1]!.split('/').pop())
       const { sha, base: ref } = await listed(number)
@@ -2433,5 +2437,288 @@ test('a PR that closed or merged since the confirmation posts nothing', async ()
     } finally {
       await h.cleanup()
     }
+  }
+})
+
+// a post in flight and run admission (section 8, Launching runs, A post in flight): from before the post's first asynchronous step until its write has settled and been recorded, the launcher admits no run of that PR and no stack run covering it, and the post derives its offer once more with nothing awaited between that check and the mark that precedes the write
+
+const inFlightRefusal = /A post for this PR is in flight/
+
+type PostKind = { name: string, prepare: (h: Harness) => Promise<{ id: number, sha: string, body: Record<string, unknown> }> }
+
+const postKinds: PostKind[] = [
+  { name: 'the post button', prepare: async (h) => { const run = await storedRun(h); return { id: run.id, sha: run.sha, body: storedBody(106, run.sha, run.sha, 'approve') } } },
+  { name: 'Post it', prepare: async (h) => { const run = await blockedRun(h); return { id: run.id, sha: run.sha, body: postBody(run.sha) } } },
+]
+
+// the steps of a post that a fake gh can hold open; the report read and the private copy come before the first of them and are covered by the same hold, which is taken in the synchronous block ahead of both
+const postSteps: { name: string, matches: (args: string[]) => boolean }[] = [
+  { name: 'the first gh call, after the report was read and copied', matches: () => true },
+  { name: 'the account verification', matches: (args) => args[0] === 'api' && args[1] === 'user' },
+  { name: 'the live read of the PR', matches: isLiveRead },
+  { name: 'the live read of the reviews', matches: isReviewsRead },
+  { name: 'the write itself', matches: isWrite },
+]
+
+const startDefault = async (h: Harness, number = 106): Promise<{ status: number, body: Record<string, unknown> }> => {
+  const response = await fetch(`${h.base}/api/prs/${number}/runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: h.base, 'X-Pit-View-Token': h.server.token },
+    body: JSON.stringify({ kind: 'default', runner: 'claude', repo: scenario.repo, viewer: scenario.viewer }),
+  })
+  return { status: response.status, body: await response.json() as Record<string, unknown> }
+}
+
+const attempt = async (work: () => Promise<unknown> | unknown): Promise<{ error: unknown }> => {
+  try {
+    await work()
+    return { error: null }
+  } catch (error) {
+    return { error }
+  }
+}
+
+const scheduledRequest = (number: number, command = 'review-pr') => ({ repo: scenario.repo, number, command, args: [String(number), '--no-post'], label: 'Review' })
+
+for (const kind of postKinds) {
+  for (const step of postSteps) {
+    test(`${kind.name}: a newer run asked for at ${step.name} is refused, never both starting and posting the old report`, async () => {
+      const behavior: Behavior = { bodies: [] }
+      const h = await blockedHarness(behavior)
+      try {
+        const { id, body } = await kind.prepare(h)
+        const intruders: { start?: { status: number, body: Record<string, unknown> }, scheduled?: { error: unknown } } = {}
+        let armed = true
+        behavior.onCall = async (args) => {
+          if (!armed || !step.matches(args)) return
+          armed = false
+          intruders.start = await startDefault(h)
+          intruders.scheduled = await attempt(() => h.server.launcher.queueScheduled(scheduledRequest(106), join(h.home, 'dev', 'orbit'), { tick: h.server.cache.createTick(scenario.repo).id, reason: 'requested', headOid: 'abcdef0', posting: false }))
+        }
+        const answer = await postIt(h, id, body)
+        assert.equal(armed, false, 'the step was reached')
+        assert.equal(intruders.start?.status, 409)
+        assert.match(String(intruders.start?.body.error), inFlightRefusal)
+        assert.ok(intruders.scheduled?.error instanceof LaunchError && intruders.scheduled.error.code === 'busy', 'a queued row is refused too')
+        assert.equal(answer.status, 200)
+        assert.equal(postsOf(h.runner).length, 1)
+        assert.match(behavior.bodies?.[0]?.text ?? '', /No actionable findings/)
+        // nothing newer was admitted while the post was in flight
+        assert.equal(h.server.cache.latestRuns(scenario.repo).get(106)?.id, id)
+        assert.equal(h.server.posts.holds(scenario.repo, 106), false)
+      } finally {
+        await h.cleanup()
+      }
+    })
+  }
+
+  test(`${kind.name}: a start already past its checks when the post begins is refused where it would make its row, and the post goes on`, async () => {
+    const behavior: Behavior = { bodies: [] }
+    const h = await blockedHarness(behavior)
+    let releaseWrite: () => void = () => {}
+    let posting: Promise<unknown> | undefined
+    try {
+      const { id, body } = await kind.prepare(h)
+      // the start's own identity check is held; it has passed the launcher's first test and has no row yet
+      let releaseStart: () => void = () => {}
+      const startHeld = new Promise<void>((resolve) => { releaseStart = resolve })
+      let startReached: () => void = () => {}
+      const reached = new Promise<void>((resolve) => { startReached = resolve })
+      const writeHeld = new Promise<void>((resolve) => { releaseWrite = resolve })
+      let writeReached: () => void = () => {}
+      const writing = new Promise<void>((resolve) => { writeReached = resolve })
+      let startsHeld = true
+      behavior.onCall = async (args) => {
+        if (startsHeld && args[0] === 'api' && args[1] === 'user') {
+          startsHeld = false
+          startReached()
+          await startHeld
+        } else if (isWrite(args)) {
+          writeReached()
+          await writeHeld
+        }
+      }
+      const starting = startDefault(h)
+      await reached
+      posting = postIt(h, id, body)
+      await writing
+      releaseStart()
+      const start = await starting
+      assert.equal(start.status, 409)
+      assert.match(String(start.body.error), inFlightRefusal)
+      assert.equal(h.server.cache.latestRuns(scenario.repo).get(106)?.id, id)
+      releaseWrite()
+      assert.equal(((await posting) as { status: number }).status, 200)
+      assert.equal(postsOf(h.runner).length, 1)
+      // the hold is gone, and the same start now goes through
+      assert.equal((await startDefault(h)).status, 200)
+    } finally {
+      releaseWrite()
+      await posting?.catch(() => {})
+      await h.cleanup()
+    }
+  })
+
+  test(`${kind.name}: a newer run that got in by a path that bypassed the hold is caught by the last check, which makes no write and no mark`, async () => {
+    const behavior: Behavior = {}
+    const h = await blockedHarness(behavior)
+    try {
+      const { id, body } = await kind.prepare(h)
+      let armed = true
+      behavior.onCall = async (args) => {
+        if (!armed || !isReviewsRead(args)) return
+        armed = false
+        // straight into the cache, as no launcher path does
+        const { id: _id, dir: _dir, steps: _steps, resolvedByHand: _resolved, firstNote: _first, reportHash: _hash, postAttemptedAt: _attempted, ...rest } = h.server.cache.getRun(id)!
+        h.server.cache.createRun({ ...rest, status: 'running', result: null, finishedAt: null, note: null }, (n) => `~/runs/${n}`)
+      }
+      const answer = await postIt(h, id, body)
+      assert.equal(armed, false)
+      assert.equal(answer.status, 409)
+      assert.match(String(answer.body.error), notLatest)
+      assert.deepEqual(postsOf(h.runner), [])
+      assert.equal(writesOf(h.runner).length, 0)
+      assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null)
+      assert.equal(h.server.posts.holds(scenario.repo, 106), false)
+    } finally {
+      await h.cleanup()
+    }
+  })
+
+  test(`${kind.name}: the hold clears after a success, a refusal, and a failure, so a start goes through each time`, async () => {
+    // a success
+    const done = await blockedHarness()
+    try {
+      const { id, body } = await kind.prepare(done)
+      assert.equal((await postIt(done, id, body)).status, 200)
+      assert.equal(done.server.posts.holds(scenario.repo, 106), false)
+      assert.equal((await startDefault(done)).status, 200)
+    } finally {
+      await done.cleanup()
+    }
+    // a refusal after the hold was taken: the report changed on disk
+    const refused = await blockedHarness()
+    try {
+      const { id, body } = await kind.prepare(refused)
+      await writeFile(reportOf(refused), '# Review\n\nChanged on disk.\n')
+      assert.equal((await postIt(refused, id, body)).status, 422)
+      assert.equal(refused.server.posts.holds(scenario.repo, 106), false)
+      assert.equal((await startDefault(refused)).status, 200)
+    } finally {
+      await refused.cleanup()
+    }
+    // a failure of the write itself
+    const failing = await blockedHarness({ writeError: 'HTTP 502: bad gateway' })
+    try {
+      const { id, body } = await kind.prepare(failing)
+      assert.equal((await postIt(failing, id, body)).status, 502)
+      assert.equal(failing.server.posts.holds(scenario.repo, 106), false)
+      assert.equal((await startDefault(failing)).status, 200)
+    } finally {
+      await failing.cleanup()
+    }
+  })
+
+  test(`${kind.name}: two posts for one PR at once make one gh write, and the second is refused without a gh call`, async () => {
+    const behavior: Behavior = {}
+    const h = await blockedHarness(behavior)
+    let releaseWrite: () => void = () => {}
+    let first: Promise<unknown> | undefined
+    try {
+      const { id, body } = await kind.prepare(h)
+      const writeHeld = new Promise<void>((resolve) => { releaseWrite = resolve })
+      let writeReached: () => void = () => {}
+      const writing = new Promise<void>((resolve) => { writeReached = resolve })
+      behavior.onCall = async (args) => {
+        if (!isWrite(args)) return
+        writeReached()
+        await writeHeld
+      }
+      first = postIt(h, id, body)
+      await writing
+      const before = h.runner.calls.length
+      const second = await postIt(h, id, body)
+      assert.equal(second.status, 409)
+      assert.equal(h.runner.calls.length, before, 'no gh call for the second')
+      releaseWrite()
+      assert.equal(((await first) as { status: number }).status, 200)
+      assert.equal(postsOf(h.runner).length, 1)
+    } finally {
+      releaseWrite()
+      await first?.catch(() => {})
+      await h.cleanup()
+    }
+  })
+}
+
+test('a post in flight for a layer refuses a stack run covering it and a stack run started from another layer of the stack, and not a start for an unrelated PR', async () => {
+  const h = await blockedHarness()
+  try {
+    await storedRun(h, { number: 111 })
+    const release = h.server.posts.hold(scenario.repo, 111)
+    assert.notEqual(release, null)
+    const stack = await attempt(() => h.server.launcher.start(scheduledRequest(112, 'review-stack')))
+    assert.ok(stack.error instanceof LaunchError && stack.error.code === 'busy')
+    assert.match((stack.error as Error).message, /A post for a PR in this stack is in flight/)
+    const other = await startDefault(h, 106)
+    assert.equal(other.status, 200, 'an unrelated PR is not held')
+    release!()
+    const after = await attempt(() => h.server.launcher.start(scheduledRequest(112, 'review-stack')))
+    assert.equal(after.error, null)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a second hold on a PR is refused while the first stands, and a release clears it once', async () => {
+  const h = await blockedHarness()
+  try {
+    const first = h.server.posts.hold(scenario.repo, 106)
+    assert.notEqual(first, null)
+    assert.equal(h.server.posts.hold(scenario.repo, 106), null)
+    assert.equal(h.server.posts.holds(scenario.repo, 106), true)
+    first!()
+    first!()
+    assert.equal(h.server.posts.holds(scenario.repo, 106), false)
+    const again = h.server.posts.hold(scenario.repo, 106)
+    assert.notEqual(again, null)
+    // a release from the earlier hold must not clear this one
+    first!()
+    assert.equal(h.server.posts.holds(scenario.repo, 106), true)
+    again!()
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a queued scheduler row whose start is refused for a post in flight stays queued, spawns nothing, and starts when the post has settled', async () => {
+  const h = await blockedHarness()
+  try {
+    await filled(h)
+    const cwd = join(h.home, 'dev', 'orbit')
+    const request = scheduledRequest(106)
+    const tick = h.server.cache.createTick(scenario.repo)
+    const queued = h.server.launcher.queueScheduled(request, cwd, { tick: tick.id, reason: 'requested', headOid: 'abcdef0', posting: false })
+    const children = h.launch.children.length
+    let prepared = 0
+    const prepare = async (): Promise<string> => {
+      prepared += 1
+      return cwd
+    }
+    const release = h.server.posts.hold(scenario.repo, 106)!
+    const refused = await h.server.launcher.startScheduled(queued.id, request, { args: request.args, posting: false }, prepare)
+    assert.equal(refused?.status, 'queued')
+    assert.equal(prepared, 0, 'no worktree was made')
+    assert.equal(h.launch.children.length, children, 'nothing was spawned')
+    // asked again while the post stands, it waits again; nothing loops by itself
+    assert.equal((await h.server.launcher.startScheduled(queued.id, request, { args: request.args, posting: false }, prepare))?.status, 'queued')
+    assert.equal(prepared, 0)
+    release()
+    const started = await h.server.launcher.startScheduled(queued.id, request, { args: request.args, posting: false }, prepare)
+    assert.equal(started?.status, 'running')
+    assert.equal(prepared, 1)
+    assert.equal(h.launch.children.length, children + 1)
+  } finally {
+    await h.cleanup()
   }
 })
