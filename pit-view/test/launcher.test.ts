@@ -5837,3 +5837,29 @@ test('nothing but a finished --no-post auto-review of this PR, with its report o
   const commented: RawOpenPr = { ...pr, latestReviews: { nodes: [{ author: { login: scenario.viewer }, state: 'COMMENTED', submittedAt: '2026-10-20T10:00:00Z', commit: { oid: pr.headRefOid } }] } } as unknown as RawOpenPr
   assert.ok(agentCell(commented, config, row, undefined).storedOffer !== null)
 })
+
+test('the offers a PR has now come from one derivation that the cell and the server share: only the run its cell is about is named, so an older run, or one a newer stack run covers, offers nothing', async () => {
+  const config = baseConfig()
+  const { pr, row } = await storedRow()
+  const same = currentOffers(pr, config, row, undefined)
+  const cell = agentCell(pr, config, row, undefined)
+  assert.equal(same.runId, 7)
+  assert.deepEqual(same.storedOffer, cell.storedOffer)
+  assert.deepEqual(same.postOffer, cell.postOffer)
+  assert.ok(same.storedOffer !== null)
+  // a newer run of the same PR with no report yet takes the offer from the older run, which the cell and the derivation agree on
+  const newer = runRow({ id: 8, number: 106, args: ['106', '--no-post'], status: 'running', origin: 'auto' })
+  const current = currentOffers(pr, config, newer, undefined)
+  assert.deepEqual([current.runId, current.storedOffer, current.postOffer], [8, null, null])
+  assert.equal(agentCell(pr, config, newer, undefined).storedOffer, null)
+  // a stack run that covers the PR and is newer than its own run is the run the cell is about
+  const stack = runRow({ id: 9, number: 112, command: 'review-stack', args: ['112'], status: 'running' })
+  const covered = currentOffers(pr, config, row, stack)
+  assert.deepEqual([covered.runId, covered.storedOffer], [9, null])
+  assert.equal(agentCell(pr, config, row, undefined, null, null, stack).storedOffer, null)
+  // a stack run older than the PR's own latest run covers nothing
+  assert.deepEqual(currentOffers(pr, config, row, runRow({ id: 3, number: 112, command: 'review-stack', args: ['112'], status: 'running' })).storedOffer, same.storedOffer)
+  // your own PR is offered nothing, however fresh the run
+  const mine = await storedRow({}, {}, 104)
+  assert.equal(currentOffers(mine.pr, config, mine.row, undefined).storedOffer, null)
+})
