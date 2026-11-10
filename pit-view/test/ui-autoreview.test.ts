@@ -170,6 +170,19 @@ test('DESIGN.md does not say the clone folder is missing from the Settings page,
   assert.notEqual(row, '')
   assert.doesNotMatch(row, /Not on the Settings page/)
   assert.doesNotMatch(row, /carries it over unchanged/)
-  assert.match(row, /Edited in the Auto-review section of the Settings page/)
+  // the field moved to the Agent card (task 1110)
+  assert.match(row, /Edited in the Agent card of the Settings page, after Concurrent reviews/)
+  assert.doesNotMatch(row, /Auto-review section/)
   assert.match(row, /is checked at every start, not on save/)
+})
+
+test('the header says nothing about the daily limit while runs start under a limit of 0: the count of runs started today is never shown, and no tick skips for it', () => {
+  // the view carries runs started today but not the limit, so the indicator and the popover read the same at any count
+  assert.deepEqual(indicator(view({ startedToday: 500 }), reading), { text: 'Auto-review · next 2:45 PM', tone: 'normal' })
+  assert.deepEqual(indicator(view({ startedToday: 0 }), reading), indicator(view({ startedToday: 500 }), reading))
+  const model = popoverModel(view({ startedToday: 500 }), [], [], [], reading)
+  assert.deepEqual(model.ticks, [])
+  assert.equal(model.hold, null)
+  // the one daily-limit wording stays for a limit that is set, and nothing else in the header names a limit
+  assert.equal(skipWords.dailyLimit, 'daily limit reached')
 })
