@@ -1086,10 +1086,10 @@ export const storedOffer = (pr: RawOpenPr, config: Config, run: Run | undefined)
   }
 }
 
-// a blocked post that was begun and is not on record may or may not have landed, which is what ghFailed says, so the run reads that way; the row keeps what its result said
+// a post that was begun and is not on record may or may not have landed, which is what ghFailed says, so the run reads that way whether its result said the post was blocked (Post it) or that the run was told not to post (the stored report's button); the row keeps what its result said. ownPr and awaitingAnswer are never rewritten: no post is offered on one's own PR and none on a run that waits for an answer, so neither can carry a mark
 const withPostFate = (run: Run): Run => {
   const result = run.result
-  return run.postAttemptedAt !== null && result?.schema === 'pit-crew/review-result@1' && result.notPostedReason === 'postBlocked' ? { ...run, result: { ...result, notPostedReason: 'ghFailed' } } : run
+  return run.postAttemptedAt !== null && result?.schema === 'pit-crew/review-result@1' && (result.notPostedReason === 'postBlocked' || result.notPostedReason === 'noPost') ? { ...run, result: { ...result, notPostedReason: 'ghFailed' } } : run
 }
 
 // the layers a review-stack run covers: the run's own target stack once a result names one, otherwise the stack GitHub marks for the PR it started from. A number GitHub does not mark is left out either way, since a PR only based on another PR's branch gets nothing from a stack run

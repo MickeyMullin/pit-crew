@@ -8,6 +8,9 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { ghArgs, orList, parseAction, postReadDeadlineMs, postWriteDeadlineMs } from '../src/actions.ts'
 import { isPrimaryBase } from '../src/derive.ts'
 import { LaunchError } from '../src/launcher.ts'
+import { doneTone } from '../public/agent.ts'
+import type { RunView } from '../public/agent.ts'
+import { autoRunRows, drawerModel } from '../public/drawerview.ts'
 import type { Config } from '../src/config.ts'
 import type { OpenRow } from '../src/derive.ts'
 import type { RawOpenResponse } from '../src/github.ts'
@@ -2872,3 +2875,62 @@ for (const kind of postKinds) {
     }
   })
 }
+
+// the fate of a post whose outcome is unknown (section 8, Launching runs, The post's deadlines): every view of the run says the post failed and may have landed, whichever reason the result carried, and a run with no mark still reads as not posted
+
+const runsOf = async (h: Harness): Promise<RunView[]> => await (await fetch(`${h.base}/api/prs/106/runs`)).json() as RunView[]
+
+for (const kind of postKinds) {
+  test(`${kind.name}: after a write that timed out, the cell, the run view, and the drawer all say the post failed and none says not posted`, async () => {
+    const behavior: Behavior = { bodies: [] }
+    const h = await deadlineHarness(behavior)
+    try {
+      const { id, body } = await kind.prepare(h)
+      hangAt(h, behavior, writeHang.matches)
+      assert.equal((await postBounded(h, id, body)).status, 502)
+      const row = (await rowOf(h, 106))!
+      const agent = row.agent!
+      assert.equal(agent.text, 'Clean · post failed')
+      assert.equal(doneTone(agent as never), 'amber')
+      assert.equal(agent.result?.kind === 'review' && agent.result.notPostedReason, 'ghFailed')
+      assert.equal(agent.posted, false)
+      const runs = await runsOf(h)
+      const run = runs.find((entry) => entry.id === id)!
+      assert.equal(run.result?.schema === 'pit-crew/review-result@1' && run.result.notPostedReason, 'ghFailed')
+      if (kind.name === 'the post button') assert.equal(autoRunRows(runs).find((entry) => entry.id === id)?.posted, 'Post failed')
+      const model = JSON.stringify(drawerModel({ row, open: true, runs: { state: 'ready', items: runs }, reports: { state: 'ready', items: [] }, confirm: null }))
+      assert.match(model, /unknown: the post failed and may have landed/)
+      assert.doesNotMatch(model, /not posted|Not posted|told not to post|set to not post/)
+      assert.doesNotMatch(JSON.stringify(agent), /not posted/)
+    } finally {
+      await h.cleanup()
+    }
+  })
+}
+
+test('a stored report with no mark still reads as not posted and keeps its post buttons', async () => {
+  const h = await deadlineHarness({ bodies: [] })
+  try {
+    const { id } = await storedRun(h)
+    const agent = (await rowOf(h, 106))!.agent!
+    assert.equal(agent.text, 'Clean · not posted')
+    assert.equal(agent.result?.kind === 'review' && agent.result.notPostedReason, 'noPost')
+    assert.equal(agent.storedOffer?.runId, id)
+    assert.equal(autoRunRows(await runsOf(h)).find((entry) => entry.id === id)?.posted, 'Not posted: set to not post')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a stored report whose mark is set is not offered again and reads as a post that failed', async () => {
+  const h = await deadlineHarness({ bodies: [] })
+  try {
+    const { id } = await storedRun(h)
+    h.server.cache.updateRun(id, { postAttemptedAt: '2026-10-26T14:04:00Z' })
+    const agent = (await rowOf(h, 106))!.agent!
+    assert.equal(agent.storedOffer, null)
+    assert.equal(agent.text, 'Clean · post failed')
+  } finally {
+    await h.cleanup()
+  }
+})
