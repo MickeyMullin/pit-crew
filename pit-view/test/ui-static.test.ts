@@ -95,6 +95,8 @@ const textPairs: [string, string][] = [
   ['ink', 'blue-bg'], ['muted', 'blue-bg'], ['amber-fg', 'ground'],
   // the header's auto-review button (muted, or amber for a skipped tick) and its popover on surface, with the Settings link
   ['muted', 'surface'], ['amber-fg', 'surface'], ['ink', 'surface'], ['blue-fg', 'surface'],
+  // the Settings Auto-review card: the Now line's label, meta, and text on ground, its amber skip on amber-bg, a checked day chip, and the amber notes on surface
+  ['muted', 'ground'], ['ink', 'ground'], ['amber-fg', 'amber-bg'], ['ink', 'amber-bg'], ['blue-fg', 'blue-bg'], ['amber-fg', 'surface'],
 ]
 
 test('text meets 4.5:1 contrast in both color schemes', async () => {

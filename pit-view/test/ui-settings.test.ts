@@ -1110,3 +1110,24 @@ test('the Now line follows the time format like every clock time', () => {
     setTimeFormat('12h')
   }
 })
+
+test('the stylesheet styles the Auto-review card\'s groups, chips, Now line, notes, and disclosure, and keeps the hidden ones hidden', async () => {
+  const css = await readFile(new URL('../public/styles.css', import.meta.url), 'utf8')
+  // the page builds the day chips and the footer's warning, so its source counts as the card too
+  const html = cardOf(await settingsHtml(), 'auto-review') + await readFile(new URL('../public/settings.ts', import.meta.url), 'utf8')
+  for (const name of ['auto-now', 'auto-now-label', 'auto-master', 'check-strong', 'auto-group', 'group-title', 'reset-defaults', 'group-body', 'schedule-row', 'subfield', 'day-chips', 'day-chip', 'time-range', 'options', 'option', 'notice', 'posting-as', 'hint-lines', 'auto-group-head', 'auto-disclosure', 'limits-grid', 'auto-foot', 'warn-text']) {
+    assert.ok(html.includes(name), `${name} is used by the card`)
+    assert.match(css, new RegExp(`\\.${name}[\\s{,.:>\\[]`), `${name} has a rule`)
+  }
+  // the chip state, the amber tones, the narrow layout, and the hidden states
+  assert.match(css, /\.day-chip:has\(input:checked\)/)
+  assert.match(css, /\.day-chip:has\(input:focus-visible\)/)
+  assert.match(css, /\.auto-now\[data-tone='warn'\]/)
+  assert.match(css, /\.notice\[data-tone='warn'\]/)
+  assert.match(css, /\.notice\[hidden\]/)
+  assert.match(css, /\.limits-grid\[hidden\]/)
+  assert.match(css, /@media \(max-width: 720px\) \{\s*\.schedule-row \{\s*flex-direction: column;/)
+  // tokens only: no color literal in the card\'s block
+  const block = css.slice(css.indexOf('/* the Auto-review card: the Now line'))
+  assert.doesNotMatch(block, /#[0-9a-fA-F]{3,8}\b|rgba?\(/)
+})
