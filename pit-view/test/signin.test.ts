@@ -783,6 +783,14 @@ test('both pages carry a hidden sign-out form, which a signed-in page shows', as
     querySelector: (selector: string) => selector === 'meta[name="pit-view-signed-in"]' && content !== null ? { getAttribute: (name: string) => name === 'content' ? content : null } : null,
     getElementById: (id: string) => id === 'sign-out' ? form : null,
   })
+  // each page shows it at load, and the stylesheet's display for the form gives way to hidden
+  for (const name of ['app.ts', 'settings.ts']) {
+    const source = await readFile(join(import.meta.dirname, '..', 'public', name), 'utf8')
+    assert.match(source, /import \{[^}]*\bshowSignOut\b[^}]*\} from '\.\/instance\.ts'/, name)
+    assert.match(source, /^showSignOut\(document\)$/m, name)
+  }
+  const css = await readFile(join(import.meta.dirname, '..', 'public', 'styles.css'), 'utf8')
+  assert.match(css, /\.sign-out\[hidden\] \{\s*display: none;\s*\}/)
   assert.equal(signedInAs(doc(null) as unknown as Document), null)
   showSignOut(doc(null) as unknown as Document)
   assert.equal(form.hidden, true)
