@@ -238,11 +238,14 @@ test('Reset to Defaults in Post auto-reviews? turns both switches off without a 
     assert.equal(page.by('reset-post').disabled, true)
     assert.equal(page.focused(), 'f-autoPostOthers')
     assert.equal(page.by('save-status').textContent, 'Unsaved changes')
-    // with a question open, Reset closes it and still leaves the switch off
-    tick(page.by('f-autoPostDependabot'))
-    assert.equal(page.by('auto-post-ask-dependabot').hidden, false)
-    press(page.by('reset-schedule').disabled ? page.by('reset-post') : page.by('reset-post'))
-    assert.equal(page.by('auto-post-ask-dependabot').hidden, true)
+  })
+  // with a question open for one switch and the other saved on, Reset closes the question and leaves both off
+  await withCard(config({}, auto({ post: { others: false, dependabot: true } })), async (page) => {
+    tick(page.by('f-autoPostOthers'))
+    assert.equal(page.by('auto-post-ask-others').hidden, false)
+    assert.equal(page.by('reset-post').disabled, false)
+    press(page.by('reset-post'))
+    assert.equal(page.by('auto-post-ask-others').hidden, true)
     assert.deepEqual([page.by('f-autoPostOthers').checked, page.by('f-autoPostDependabot').checked], [false, false])
   })
   // a form at the defaults has nothing to reset in any section
