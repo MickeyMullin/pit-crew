@@ -2561,6 +2561,138 @@ test('a between-ticks drain already under way when a tick begins starts no secon
   }
 })
 
+// real time for the worktree preparation and the tick's file reads, which a count of microtask turns does not cover
+const pause = async (ms = 80): Promise<void> => {
+  await new Promise<void>((resume) => setTimeout(resume, ms))
+}
+
+test('a between-ticks drain suspended in a start does not act on its older open list after a tick has begun, even when that tick has since finished its board check: a PR the tick found closed is dropped by the tick\'s pass and never started', async () => {
+  const world = await setup({ auto: { concurrency: 2 }, config: { maxConcurrentReviews: 5 } })
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    assert.ok(line.length >= 3)
+    const [one, two] = running(world)
+    let releaseAdd = (): void => {}
+    world.git.state.holdAdd = new Promise<void>((resume) => {
+      releaseAdd = resume
+    })
+    // both places free: the drain's first start waits on its worktree, holding the open list from before the tick
+    await endWithoutIdle(world, one!)
+    await endWithoutIdle(world, two!)
+    await waitFor(() => world.git.verbs('worktree', 'add').length === 3)
+    const releaseBoard = holdBoard(world)
+    world.time.advance(15 * minute)
+    await waitFor(() => ticks(world).length === 2)
+    // the tick's board check finds the next queued row's PR closed
+    const victim = line[1]!
+    const cache = world.server.cache
+    const original = cache.latestCycle.bind(cache)
+    let checked = false
+    cache.latestCycle = (...args) => {
+      cache.latestCycle = original
+      cache.closePr(scenario.repo, victim.number)
+      checked = true
+      return original(...args)
+    }
+    world.gh.hold = null
+    releaseBoard()
+    await waitFor(() => checked)
+    // the tick is past its board check and at its start step, while the old start still waits
+    await pause()
+    const children = world.launch.children.length
+    world.git.state.holdAdd = null
+    releaseAdd()
+    await world.server.scheduler.idle()
+    const after = world.server.cache.getRun(victim.id)
+    assert.equal(world.launch.children.some((child) => basename(child.request.cwd) === `run-${victim.id}`), false, 'the closed PR was never started')
+    assert.equal(after?.status, 'skipped')
+    assert.equal(after?.note, 'closed')
+    assert.equal(ticks(world)[0]?.state, 'ran')
+    assert.deepEqual(running(world).map((run) => run.id), [line[0]!.id, line[2]!.id])
+    assert.equal(world.launch.children.length, children + 2, 'the first start finished and the tick\'s pass started the row behind the closed one')
+    assert.equal(new Set(world.launch.children.map((child) => child.request.cwd)).size, world.launch.children.length, 'each row started once')
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a between-ticks drain that finds a tick has begun and already ended without a start step asks for one more pass on a fresh snapshot: nothing is lost and no stale open list is acted on', async () => {
+  const world = await setup({ auto: { concurrency: 2 }, config: { maxConcurrentReviews: 5 } })
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    assert.ok(line.length >= 3)
+    const [one, two] = running(world)
+    let releaseAdd = (): void => {}
+    world.git.state.holdAdd = new Promise<void>((resume) => {
+      releaseAdd = resume
+    })
+    await endWithoutIdle(world, one!)
+    await endWithoutIdle(world, two!)
+    await waitFor(() => world.git.verbs('worktree', 'add').length === 3)
+    // a tick begins and skips before its start step, while the old start still waits
+    world.gh.failCycle = true
+    world.time.advance(15 * minute)
+    await waitFor(() => ticks(world).length === 2 && ticks(world)[0]?.finishedAt !== null)
+    assert.equal(ticks(world)[0]?.skipReason, 'fetchFailed')
+    world.gh.failCycle = false
+    // the cache moved on after the old pass took its snapshot
+    const victim = line[1]!
+    world.server.cache.closePr(scenario.repo, victim.number)
+    world.git.state.holdAdd = null
+    releaseAdd()
+    await world.server.scheduler.idle()
+    assert.equal(world.launch.children.some((child) => basename(child.request.cwd) === `run-${victim.id}`), false, 'the stale snapshot was not acted on')
+    assert.equal(world.server.cache.getRun(victim.id)?.note, 'closed')
+    assert.deepEqual(running(world).map((run) => run.id), [line[0]!.id, line[2]!.id], 'the pass after it covered the rest')
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a tick that joins a drain already under way takes its answer from a pass that began after its board check: the earlier pass starts the last permitted review, and the tick is skipped as dailyLimit', async () => {
+  const world = await setup({ auto: { concurrency: 2, dailyLimit: 3 }, config: { maxConcurrentReviews: 5 } })
+  try {
+    await tick(world)
+    const line = queuedAuto(world)
+    assert.ok(line.length >= 2)
+    assert.equal(world.server.scheduler.view()?.startedToday, 2)
+    const [one] = running(world)
+    let releaseAdd = (): void => {}
+    world.git.state.holdAdd = new Promise<void>((resume) => {
+      releaseAdd = resume
+    })
+    // one place frees: the drain's start of the last permitted review waits on its worktree
+    await endWithoutIdle(world, one!)
+    await waitFor(() => world.git.verbs('worktree', 'add').length === 3)
+    const releaseBoard = holdBoard(world)
+    world.time.advance(15 * minute)
+    await waitFor(() => ticks(world).length === 2)
+    const cache = world.server.cache
+    const original = cache.latestCycle.bind(cache)
+    let checked = false
+    cache.latestCycle = (...args) => {
+      cache.latestCycle = original
+      checked = true
+      return original(...args)
+    }
+    world.gh.hold = null
+    releaseBoard()
+    await waitFor(() => checked)
+    await pause()
+    world.git.state.holdAdd = null
+    releaseAdd()
+    await world.server.scheduler.idle()
+    assert.equal(world.server.scheduler.view()?.startedToday, 3)
+    assert.equal(world.server.cache.getRun(line[0]!.id)?.status, 'running')
+    assert.equal(ticks(world)[0]?.state, 'skipped')
+    assert.equal(ticks(world)[0]?.skipReason, 'dailyLimit')
+  } finally {
+    await world.cleanup()
+  }
+})
+
 test('a save arriving during the tick\'s own start pass cannot turn a tick that started the last permitted review into a dailyLimit skip, and the next tick skips', async () => {
   const world = await setup({ auto: { concurrency: 1, dailyLimit: 1 }, config: { maxConcurrentReviews: 3 } })
   try {

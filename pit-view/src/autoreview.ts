@@ -519,6 +519,8 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
   let stopped = false
   let armed: { at: number, handle: unknown } | null = null
   let ticking: { id: number, done: Promise<void> } | null = null
+  // counts the ticks that have begun: a pass records it with the snapshot it takes, and a pass never acts on a snapshot older than the latest tick's beginning
+  let tickEpoch = 0
   // what the last sweep found in the folder that git no longer lists
   let unlisted: string[] = []
   // waiting or failed sessions the last read of their folders found to have ended
@@ -779,6 +781,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     const cached = cache.readView(repo)
     if (cached.lastSuccessAt === null) return false
     const open = cached.open.map((row) => row.pr)
+    const epoch = tickEpoch
     const candidates: ({ kind: 'run', row: Run } | { kind: 'sweep', row: Sweep })[] = [
       ...cache.queuedRuns().filter((run) => run.origin === 'auto' && run.repo === repo).map((row) => ({ kind: 'run' as const, row })),
       ...cache.queuedSweeps().filter((sweep) => sweep.origin === 'auto' && sweep.repo === repo).map((row) => ({ kind: 'sweep' as const, row })),
@@ -788,7 +791,13 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       const settings = config()
       const auto = settings.autoReview
       if (stopped || auto === undefined || !auto.enabled || settings.repo !== repo) break
-      // a tick that began while an earlier start was in progress has not yet checked the login, the clone, or the board, and this pass holds the open list from before it: it ends here, and the tick's own start step (or the pass after a tick that skips) covers it
+      // a tick began since this pass took its open list and candidates, so they are older than that tick's board check, whether or not the tick has since reached its start step, and the pass ends here. A tick still before its start step covers the rest with its own pass, or with the pass after it when it skips (the remembered trigger). A tick at its start step is waiting for this pass to end and then runs a fresh one. A tick that has ended leaves nothing waiting, so one more pass is asked for on a fresh snapshot
+      if (tickEpoch !== epoch) {
+        if (ticking === null) again = { repo, exempt: exempt || again?.exempt === true }
+        else if (!startReached) kickWaiting = true
+        break
+      }
+      // a pass that began while a tick is in flight but before its start step has not yet seen the login, the clone, or the board checked, and ends the same way
       if (ticking !== null && !startReached) {
         kickWaiting = true
         break
@@ -819,7 +828,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     return false
   }
 
-  // the one start step at a time: a trigger that arrives while it works does not run beside it but asks for one more pass after it, so two triggers (a tick and a run's end) never try the same row together. A tick's answer is its own request's pass
+  // the one start step at a time: a trigger that arrives while it works does not run beside it but asks for one more pass after it, so two triggers (a tick and a run's end) never try the same row together. A tick never takes its answer from a pass that began before it: it waits for the drain under way to end and runs its own, so its answer is that of a pass that began after its board check
   let draining: Promise<boolean> | null = null
   let again: { repo: string, exempt: boolean } | null = null
   const takeAgain = (): { repo: string, exempt: boolean } | null => {
@@ -848,6 +857,11 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     })
     draining = job
     return job
+  }
+
+  const drainForTick = async (repo: string, exempt: boolean): Promise<boolean> => {
+    while (draining !== null) await draining.catch(() => false)
+    return await drain(repo, exempt)
   }
 
   // whether the tick in flight has reached its own start step, and whether a trigger arrived before it did
@@ -951,7 +965,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     // the checks are done, so this step covers any trigger that waited for them
     startReached = true
     kickWaiting = false
-    const limited = await drain(repo, exempt)
+    const limited = await drainForTick(repo, exempt)
     if (limited) return skip('dailyLimit', counts)
     finish({ ...counts, state: 'ran' })
   }
@@ -1016,6 +1030,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     const tick = cache.createTick(config().repo)
     const entry = { id: tick.id, done: Promise.resolve() }
     ticking = entry
+    tickEpoch += 1
     startReached = false
     kickWaiting = false
     announce()
