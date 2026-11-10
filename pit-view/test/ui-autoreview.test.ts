@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import type { AutoReviewView } from '../src/autoreview.ts'
 import type { Tick } from '../src/cache.ts'
 import { setTimeFormat } from '../public/format.ts'
+import { nowLine } from '../public/settings-form.ts'
 import { indicator, popoverFocus, runLinkKey, popoverModel, runNowRequest, runNowResult, skipWords } from '../public/autoreviewbar.ts'
 
 setTimeFormat('12h')
@@ -185,4 +186,24 @@ test('the header says nothing about the daily limit while runs start under a lim
   assert.equal(model.hold, null)
   // the one daily-limit wording stays for a limit that is set, and nothing else in the header names a limit
   assert.equal(skipWords.dailyLimit, 'daily limit reached')
+})
+
+test('after a dailyLimit skip whose limit no longer blocks, the header and the Now line read as for any idle scheduler while the popover still lists the recorded tick', () => {
+  // the view the scheduler gives once a limit of 0 (or a raised limit) is saved: idle, with no last tick, though the skip is still the newest recorded row
+  const unblocked = view({ startedToday: 10 })
+  assert.deepEqual(indicator(unblocked, reading), { text: 'Auto-review · next 2:45 PM', tone: 'normal' })
+  const saved = { dailyLimit: 0, post: { others: false, dependabot: false } } as Parameters<typeof nowLine>[0]['saved']
+  const line = nowLine({ saved, view: unblocked, viewer: 'octocat', reading })
+  assert.equal(line.text, 'On · next 2:45 PM')
+  assert.equal(line.tone, 'normal')
+  assert.equal(line.fix, null)
+  assert.equal(line.meta.startsWith('10 runs started today · no daily limit · posting off'), true)
+  const recorded = tick({ id: 7, state: 'skipped', skipReason: 'dailyLimit', qualified: 4, alreadyCurrent: 1, queued: 0 })
+  assert.deepEqual(popoverModel(unblocked, [recorded], [], [], reading).ticks, [{ id: 7, text: '2:30 PM · skipped: daily limit reached', tone: 'warn' }])
+  // the opposite: a limit that still blocks keeps the skip in the header and the explanation in the Now line
+  const blocked = view({ state: 'blocked', startedToday: 10, nextTickAt: null, lastTick: { at: '2026-10-30T14:30:00Z', state: 'skipped', skipReason: 'dailyLimit', queued: 0 } })
+  assert.deepEqual(indicator(blocked, reading), { text: 'Auto-review · skipped: daily limit reached', tone: 'warn' })
+  const stuck = nowLine({ saved: { dailyLimit: 10, post: { others: false, dependabot: false } } as Parameters<typeof nowLine>[0]['saved'], view: blocked, viewer: 'octocat', reading })
+  assert.equal(stuck.text, 'Skipped: daily limit reached')
+  assert.equal(stuck.fix, 'Runs started today have reached the daily limit; it starts over tomorrow.')
 })

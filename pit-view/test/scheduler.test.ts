@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { test } from 'node:test'
+import { indicatorWords } from '../public/autoreviewbar.ts'
+import { nowLine } from '../public/settings-form.ts'
 import { defaultAutoReview, toAutoRun, toAutoSweep } from '../src/autoreview.ts'
 import type { AutoReviewSettings } from '../src/autoreview.ts'
 import type { Run, Sweep } from '../src/cache.ts'
@@ -1337,6 +1339,111 @@ test('the daily limit stops new starts, leaves what waits queued, skips ticks as
     await world.server.scheduler.idle()
     assert.equal(ticks(world)[0]?.state, 'ran')
     assert.equal(world.launch.children.length, 2)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+// the header's words and the Settings Now line, read from the scheduler's own view as the page reads them
+const pageWords = async (world: World): Promise<{ header: string | undefined, now: string, fix: string | null }> => {
+  const stored = await (await fetch(`${world.server.url}/api/config`)).json() as Config
+  const reading = { nowMs: world.time.clock.now(), timeZone: scenario.timeZone }
+  const view = world.server.scheduler.view()
+  const line = nowLine({ saved: stored.autoReview, view, viewer: 'octocat', reading })
+  return { header: indicatorWords(view, reading)?.body, now: line.text, fix: line.fix }
+}
+
+// the view's answer once a tick has skipped as dailyLimit and the saved limit changes before the next tick
+const skippedAtLimit = async (world: World): Promise<void> => {
+  await tick(world)
+  while (running(world).length > 0) await finish(world, running(world)[0]!)
+  await tick(world)
+  assert.equal(ticks(world)[0]?.skipReason, 'dailyLimit')
+  assert.equal(world.server.scheduler.view()?.state, 'blocked')
+  assert.equal(world.server.scheduler.view()?.lastTick?.skipReason, 'dailyLimit')
+}
+
+test('a daily limit saved as 0 after a dailyLimit skip stops that skip counting as the status: the view is idle and carries no lastTick, the page gets the patch, and the recorded tick stays as it was', async () => {
+  const world = await setup({ auto: { dailyLimit: 1, concurrency: 1 } })
+  const patches: Patch[] = []
+  const controller = new AbortController()
+  try {
+    const stream = await fetch(`${world.server.url}/api/events?client=limit-test`, { signal: controller.signal })
+    const decoder = new TextDecoder()
+    void (async () => {
+      let buffer = ''
+      for await (const chunk of stream.body as unknown as AsyncIterable<Uint8Array>) {
+        buffer += decoder.decode(chunk, { stream: true })
+        for (;;) {
+          const at = buffer.indexOf('\n\n')
+          if (at < 0) break
+          const frame = buffer.slice(0, at)
+          buffer = buffer.slice(at + 2)
+          if (frame.startsWith('event: patch\n')) patches.push(JSON.parse(frame.slice(frame.indexOf('data: ') + 6)) as Patch)
+        }
+      }
+    })().catch(() => {})
+    await waitFor(() => world.server.clients.activeCount() === 1)
+    await skippedAtLimit(world)
+    const recorded = ticks(world)[0]
+    patches.length = 0
+    await saveAuto(world, { dailyLimit: 0 })
+    const view = world.server.scheduler.view()
+    assert.equal(view?.state, 'idle')
+    assert.equal(view?.lastTick, null)
+    assert.equal(view?.startedToday, 1)
+    assert.notEqual(view?.nextTickAt, null)
+    const words = await pageWords(world)
+    assert.equal(words.header?.includes('daily limit'), false)
+    assert.equal(words.now.includes('daily limit'), false)
+    assert.equal(words.fix, null)
+    // the open page is told in the same step as the save, not at the next tick
+    await waitFor(() => patches.some((patch) => patch.autoReview?.state === 'idle'))
+    assert.equal(patches.find((patch) => patch.autoReview?.state === 'idle')?.autoReview?.lastTick, null)
+    // nothing recorded is rewritten or removed
+    assert.deepEqual(ticks(world)[0], recorded)
+  } finally {
+    controller.abort()
+    await world.cleanup()
+  }
+})
+
+test('a daily limit raised above the runs started today stops a dailyLimit skip counting too, and the next tick records its own state', async () => {
+  const world = await setup({ auto: { dailyLimit: 1, concurrency: 1 } })
+  try {
+    await skippedAtLimit(world)
+    await saveAuto(world, { dailyLimit: 2 })
+    assert.equal(world.server.scheduler.view()?.startedToday, 1)
+    assert.equal(world.server.scheduler.view()?.state, 'idle')
+    assert.equal(world.server.scheduler.view()?.lastTick, null)
+    const words = await pageWords(world)
+    assert.equal(words.header?.includes('daily limit'), false)
+    assert.equal(words.now.includes('daily limit'), false)
+    assert.equal(words.fix, null)
+    await tick(world)
+    assert.equal(ticks(world)[0]?.state, 'ran')
+    assert.equal(world.server.scheduler.view()?.lastTick?.state, 'ran')
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a daily limit that is lowered or left as it was while still reached keeps the dailyLimit skip as the status: blocked, with the skip as the last tick', async () => {
+  const world = await setup({ auto: { dailyLimit: 2, concurrency: 2 } })
+  try {
+    await skippedAtLimit(world)
+    assert.equal(world.server.scheduler.view()?.startedToday, 2)
+    await saveAuto(world, { concurrency: 1 })
+    assert.equal(world.server.scheduler.view()?.state, 'blocked')
+    assert.equal(world.server.scheduler.view()?.lastTick?.skipReason, 'dailyLimit')
+    await saveAuto(world, { dailyLimit: 1 })
+    assert.equal(world.server.scheduler.view()?.state, 'blocked')
+    assert.equal(world.server.scheduler.view()?.lastTick?.skipReason, 'dailyLimit')
+    assert.equal(world.server.scheduler.view()?.lastTick?.state, 'skipped')
+    const words = await pageWords(world)
+    assert.equal(words.header, 'skipped: daily limit reached')
+    assert.equal(words.now, 'Skipped: daily limit reached')
+    assert.equal(words.fix, 'Runs started today have reached the daily limit; it starts over tomorrow.')
   } finally {
     await world.cleanup()
   }

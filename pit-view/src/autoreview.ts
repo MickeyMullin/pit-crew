@@ -934,8 +934,11 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     const { runs, sweeps, autoRuns, autoSweeps } = records(settings.repo)
     const sessions: Session[] = [...runs, ...sweeps].filter((session) => session.origin === 'auto')
     const running = sessions.filter((session) => session.status === 'running').length
-    const last = cache.latestTick(settings.repo)
+    const recorded = cache.latestTick(settings.repo)
     const at = clock.now()
+    const started = startedToday(autoRuns, autoSweeps, at, timeZone)
+    // a dailyLimit skip speaks for the limit as it stood at that tick: once the saved limit no longer blocks (it is 0, or the runs started today are below it), the skip is neither blocking nor the current status, so the view carries no last tick until the next one records its own; the recorded row is left as it was
+    const last = recorded !== null && recorded.skipReason === 'dailyLimit' && (auto.dailyLimit === 0 || started < auto.dailyLimit) ? null : recorded
     let state: AutoReviewState = 'idle'
     if (!auto.enabled) state = 'off'
     else if (running > 0 || ticking !== null) state = 'running'
@@ -947,7 +950,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       nextTickAt: auto.enabled && armed !== null ? iso(armed.at) : null,
       running,
       queued: sessions.filter((session) => session.status === 'queued').length,
-      startedToday: startedToday(autoRuns, autoSweeps, at, timeZone),
+      startedToday: started,
       lastTick: last === null ? null : { at: last.startedAt, state: last.state, skipReason: last.skipReason, queued: last.queued },
       posting: auto.post,
       sweepHold: sweepHoldOf(autoSweeps),
