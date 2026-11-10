@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
 import { defaultAutoReview } from '../src/autoreview.ts'
+import { weekdayNames } from '../src/config.ts'
 import { ConfigError, defaultConfig, idleRange, validateConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import { deriveOpenRows, groupRows, personView } from '../src/derive.ts'
@@ -16,7 +17,11 @@ import {
   aliasOf, changeKind, colorFor, contrastWithWhite, errorId, fieldId, initialsOf, isDirty, kindDefaults, needsRefresh, newPerson, newTicket,
   idleLimits, notifyChoices, openSuggestions, parseBots, parseIdleMinutes, parseMaxReviews, previewPerson, refreshChoices, refreshKeys, sampleTextsFrom, timeFormatChoices, serverError, ticketSample, toConfig, toForm,
   validateForm, autoDefaults, postingAsk, postingLoginOf, postAskIsStale, postSwitchesToTurnOff, postingNeedsViewer, postViewerNeededText, weekdayChoices, wantsPostConfirm,
+  atSectionDefaults, autoCapError, inertPostKinds, inertPostNote, instructionsLine, intervalChoices, intervalLegacyNote, intervalOptions, limitsSummary, nowLine, nowNotSetUp,
+  nowUnsavedNote, opensLimits, postingAsLine, resetSection, scheduleSummary,
 } from '../public/settings-form.ts'
+import type { AutoReviewView } from '../src/autoreview.ts'
+import { setTimeFormat } from '../public/format.ts'
 import type { Form, TicketForm } from '../public/settings-form.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { fakeTime, openPage1, openPage2 } from './helpers.ts'
@@ -571,7 +576,13 @@ test('every auto-review option edits through the form and reaches the config as 
   // days saved out of week order are not unsaved changes
   const odd: Config = { ...saved, autoReview: { ...saved.autoReview!, activeHours: { days: ['fri', 'mon'], from: '09:00', to: '18:00' } } }
   assert.equal(isDirty(formOf(odd), odd), false)
-  assert.deepEqual(weekdayChoices.map((day) => day.value), ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'])
+  // Sunday first, the same order as weekdayNames in src/config.ts
+  assert.deepEqual(weekdayChoices.map((day) => day.value), ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'])
+  assert.deepEqual(weekdayChoices.map((day) => day.label), ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'])
+  assert.deepEqual(weekdayChoices.map((day) => day.value), [...weekdayNames])
+  // Sunday is written first, and a saved Monday-first list holding the same days is not an unsaved change
+  form.autoDays = ['sat', 'mon', 'sun']
+  assert.deepEqual(toConfig(form, saved).autoReview?.activeHours.days, ['sun', 'mon', 'sat'])
 })
 
 test('the checks refuse what the server refuses for auto-review, name the field, and use the same words on the page and from the server', () => {
@@ -583,9 +594,13 @@ test('the checks refuse what the server refuses for auto-review, name the field,
   }
   assert.deepEqual(problems({ autoInterval: '5' }), [])
   for (const bad of ['0', '', '1.5', '-1', 'ten', '99999999999999999999']) {
-    assert.deepEqual(problems({ autoDailyLimit: bad }), [['autoDailyLimit', 'Use a whole number of 1 or more.']], bad)
     assert.deepEqual(problems({ autoConcurrency: bad }), [['autoConcurrency', 'Use a whole number of 1 or more.']], bad)
   }
+  // the daily limit alone takes 0, which means no limit
+  for (const bad of ['', '1.5', '-1', 'ten', '99999999999999999999']) {
+    assert.deepEqual(problems({ autoDailyLimit: bad }), [['autoDailyLimit', 'Use a whole number of 0 or more.']], bad)
+  }
+  assert.deepEqual(problems({ autoDailyLimit: '0' }), [])
   assert.deepEqual(problems({ autoDailyLimit: '1' }), [])
   assert.deepEqual(problems({ autoDays: [] }), [['autoDays', 'Choose at least one day.']])
   assert.deepEqual(problems({ autoFrom: '9:00' }), [['autoFrom', 'Use a 24-hour time such as 09:00.']])
@@ -596,7 +611,7 @@ test('the checks refuse what the server refuses for auto-review, name the field,
   assert.deepEqual(problems({ cloneDir: '' }), [])
   // each refusal the page makes, the server makes too
   for (const [patch, key] of [
-    [{ intervalMinutes: 4 }, 'autoInterval'], [{ dailyLimit: 0 }, 'autoDailyLimit'], [{ concurrency: 0 }, 'autoConcurrency'], [{ dailyLimit: 1.5 }, 'autoDailyLimit'],
+    [{ intervalMinutes: 4 }, 'autoInterval'], [{ dailyLimit: -1 }, 'autoDailyLimit'], [{ concurrency: 0 }, 'autoConcurrency'], [{ dailyLimit: 1.5 }, 'autoDailyLimit'],
     [{ activeHours: { days: [], from: '09:00', to: '18:00' } }, 'autoDays'], [{ activeHours: { days: ['mon'], from: '18:00', to: '09:00' } }, 'autoFrom'],
     [{ activeHours: { days: ['mon'], from: '9am', to: '18:00' } }, 'autoFrom'],
   ] as const) {
@@ -805,4 +820,254 @@ test('the page records the login each posting switch was confirmed for, turns th
   const revert = source.slice(source.indexOf('const revert'), source.indexOf('// the view (for sample keys'))
   assert.match(revert, /page\.postConfirmed = \{\}/)
   assert.match(source, /postAsk: null,\s*postAskLogin: '',\s*postConfirmed: \{\}/)
+})
+
+// Auto-review card, revision 1: the dropdown, the cap rule, Reset to Defaults, and the words the card derives from the form
+
+const autoSaved = (patch: Partial<Config['autoReview'] & object> = {}): Config => ({ ...sample(), autoReview: { ...defaultAutoReview(), ...patch } })
+
+test('Check every offers exactly 5 minutes, 15 minutes (default), 30 minutes, and 1 hour, and a saved value outside them is offered once more, marked, in number order', () => {
+  assert.deepEqual(intervalChoices, [
+    { value: 5, label: '5 minutes' }, { value: 15, label: '15 minutes (default)' }, { value: 30, label: '30 minutes' }, { value: 60, label: '1 hour' },
+  ])
+  assert.deepEqual(intervalOptions('15'), intervalChoices)
+  assert.deepEqual(intervalOptions('60'), intervalChoices)
+  assert.deepEqual(intervalOptions('10'), [
+    { value: 5, label: '5 minutes' }, { value: 10, label: '10 minutes (saved, not a listed choice)' }, { value: 15, label: '15 minutes (default)' }, { value: 30, label: '30 minutes' }, { value: 60, label: '1 hour' },
+  ])
+  assert.deepEqual(intervalOptions('120').map((choice) => choice.label), ['5 minutes', '15 minutes (default)', '30 minutes', '1 hour', '120 minutes (saved, not a listed choice)'])
+  // a default of 15 matches the shipped default
+  assert.equal(intervalChoices.find((choice) => choice.label.endsWith('(default)'))?.value, autoDefaults.intervalMinutes)
+  // the note shows while the chosen value is not one of the four
+  assert.equal(intervalLegacyNote('10'), 'Saved as 10 minutes, which is not one of the choices. It keeps working as saved; pick a choice to change it.')
+  assert.equal(intervalLegacyNote('15'), null)
+  assert.equal(intervalLegacyNote('60'), null)
+})
+
+test('a saved check interval outside the four is shown as saved, is not an unsaved change, is not an error, and is written back unchanged', () => {
+  const saved = autoSaved({ intervalMinutes: 10 })
+  const form = formOf(saved)
+  assert.equal(form.autoInterval, '10')
+  assert.equal(isDirty(form, saved), false)
+  assert.deepEqual(validateForm(form), [])
+  assert.equal(toConfig(form, saved).autoReview?.intervalMinutes, 10)
+  assert.equal(validateConfig(toConfig(form, saved)).autoReview?.intervalMinutes, 10)
+})
+
+test('the cap rule: Concurrent auto-reviews must be no more than Concurrent reviews, named with the Agent value as typed, and only once both are whole numbers of 1 or more', () => {
+  const form = formOf(autoSaved())
+  form.maxConcurrentReviews = '2'
+  form.autoConcurrency = '3'
+  assert.deepEqual(autoCapError(form), { field: 'autoConcurrency', message: 'Must be no more than Concurrent reviews in Agent, which is now 2.' })
+  form.autoConcurrency = '2'
+  assert.equal(autoCapError(form), null)
+  form.autoConcurrency = '1'
+  assert.equal(autoCapError(form), null)
+  // either number moving brings the error back, with the Agent value as it is now typed
+  form.autoConcurrency = '3'
+  form.maxConcurrentReviews = ' 4 '
+  assert.equal(autoCapError(form), null)
+  form.maxConcurrentReviews = '1'
+  assert.deepEqual(autoCapError(form), { field: 'autoConcurrency', message: 'Must be no more than Concurrent reviews in Agent, which is now 1.' })
+  // the existing whole-number checks come first: nothing here while either is not a whole number of 1 or more
+  for (const [auto, agent] of [['', '2'], ['0', '2'], ['x', '2'], ['3', ''], ['3', '0'], ['3', '1.5'], ['2.5', '2']] as const) {
+    form.autoConcurrency = auto
+    form.maxConcurrentReviews = agent
+    assert.equal(autoCapError(form), null, `${auto} against ${agent}`)
+  }
+  // Save is refused with the usual field-named error
+  form.autoConcurrency = '3'
+  form.maxConcurrentReviews = '2'
+  assert.deepEqual(validateForm(form).map((error) => [error.field, error.message]), [['autoConcurrency', 'Must be no more than Concurrent reviews in Agent, which is now 2.']])
+  // a saved value above the cap loads with the error, is not an unsaved change, and is never lowered
+  const legacy: Config = { ...autoSaved({ concurrency: 3 }), maxConcurrentReviews: 2 }
+  const loaded = formOf(legacy)
+  assert.equal(loaded.autoConcurrency, '3')
+  assert.equal(autoCapError(loaded)?.field, 'autoConcurrency')
+  assert.equal(isDirty(loaded, legacy), false)
+  assert.equal(toConfig(loaded, legacy).autoReview?.concurrency, 3)
+  // the server's refusal of the same rule lands on the same field, with its own words
+  assert.deepEqual(serverError('autoReview.concurrency must be no more than maxConcurrentReviews (2)', loaded), { field: 'autoConcurrency', message: 'Must be no more than maxConcurrentReviews (2).' })
+  // every other cap keeps 1 or more
+  form.maxConcurrentReviews = '0'
+  assert.deepEqual(validateForm(form).map((error) => error.field), ['maxConcurrentReviews'])
+})
+
+test('the clone folder check lives in the general part of the form checks, keeps its words, and comes after Concurrent reviews', () => {
+  const form = formOf(autoSaved())
+  form.cloneDir = 'dev/orbit'
+  form.maxConcurrentReviews = '0'
+  assert.deepEqual(validateForm(form).map((error) => [error.field, error.message]), [
+    ['maxConcurrentReviews', 'Use a whole number of 1 or more.'],
+    ['cloneDir', 'Give an absolute path or a path under ~, such as ~/dev/orbit.'],
+  ])
+  for (const ok of ['', '~', '~/dev/orbit', '/srv/orbit']) assert.deepEqual(validateForm({ ...formOf(autoSaved()), cloneDir: ok }), [], ok)
+  assert.equal(serverError(refusal({ ...sample(), cloneDir: 'dev/orbit' }), form).field, 'cloneDir')
+})
+
+test('a daily limit of 0 is valid on the page, saves as 0, and Reset to Defaults in Limits sets 10', () => {
+  const saved = autoSaved({ dailyLimit: 0 })
+  const form = formOf(saved)
+  assert.equal(form.autoDailyLimit, '0')
+  assert.deepEqual(validateForm(form), [])
+  assert.equal(isDirty(form, saved), false)
+  assert.equal(toConfig(form, saved).autoReview?.dailyLimit, 0)
+  assert.equal(validateConfig(toConfig(form, saved)).autoReview?.dailyLimit, 0)
+  assert.equal(resetSection(form, 'limits').autoDailyLimit, '10')
+  // the server's refusal at a negative value reads 0 or more and lands on the field
+  assert.deepEqual(serverError('autoReview.dailyLimit must be a whole number of 0 or more', form), { field: 'autoDailyLimit', message: 'Must be a whole number of 0 or more.' })
+})
+
+test('Reset to Defaults sets only its own section\'s fields to the defaults and leaves every other field as it was', () => {
+  const away = formOf(autoSaved({
+    enabled: true, intervalMinutes: 30, activeHours: { days: ['sat', 'sun'], from: '07:30', to: '20:00' }, others: false, own: true, dependabot: true,
+    concurrency: 2, dailyLimit: 25, post: { others: true, dependabot: true },
+  }))
+  away.viewer = 'vera-quill'
+  const keys = ['autoEnabled', 'autoInterval', 'autoDays', 'autoFrom', 'autoTo', 'autoOthers', 'autoOwn', 'autoDependabot', 'autoConcurrency', 'autoDailyLimit', 'autoPostOthers', 'autoPostDependabot'] as const
+  const sections = {
+    schedule: ['autoInterval', 'autoDays', 'autoFrom', 'autoTo'],
+    what: ['autoOthers', 'autoOwn', 'autoDependabot'],
+    post: ['autoPostOthers', 'autoPostDependabot'],
+    limits: ['autoConcurrency', 'autoDailyLimit'],
+  } as const
+  const defaults = formOf({ ...sample(), autoReview: undefined })
+  for (const [name, own] of Object.entries(sections) as [keyof typeof sections, readonly (typeof keys[number])[]][]) {
+    const before = structuredClone(away)
+    const after = resetSection(away, name)
+    assert.deepEqual(away, before, 'the input form is not changed')
+    for (const key of keys) {
+      assert.deepEqual(after[key], own.includes(key) ? defaults[key] : away[key], `${name}: ${key}`)
+    }
+    assert.equal(after.viewer, 'vera-quill')
+    assert.equal(atSectionDefaults(after, name), true)
+    assert.equal(atSectionDefaults(away, name), false)
+  }
+  // the master switch is in no section, and the clone folder is not an auto-review field
+  const reset = (['schedule', 'what', 'post', 'limits'] as const).reduce((form, name) => resetSection(form, name), away)
+  assert.equal(reset.autoEnabled, true)
+  assert.equal(reset.cloneDir, away.cloneDir)
+  // a form at the defaults is at every section's defaults, whatever the days' order
+  assert.equal((['schedule', 'what', 'post', 'limits'] as const).every((name) => atSectionDefaults(defaults, name)), true)
+  assert.equal(atSectionDefaults({ ...defaults, autoDays: ['fri', 'mon', 'tue', 'wed', 'thu'] }, 'schedule'), true)
+  assert.equal(atSectionDefaults({ ...defaults, autoInterval: ' 15 ' }, 'schedule'), true)
+})
+
+test('Reset to Defaults in Post auto-reviews? can only turn posting off, never on', () => {
+  const on = formOf(autoSaved({ post: { others: true, dependabot: true } }))
+  assert.deepEqual([resetSection(on, 'post').autoPostOthers, resetSection(on, 'post').autoPostDependabot], [false, false])
+  const off = formOf(autoSaved())
+  assert.deepEqual([resetSection(off, 'post').autoPostOthers, resetSection(off, 'post').autoPostDependabot], [false, false])
+  // the shipped defaults have posting off, so no reset of any section can switch it on
+  assert.deepEqual(autoDefaults.post, { others: false, dependabot: false })
+  for (const name of ['schedule', 'what', 'post', 'limits'] as const) {
+    const after = resetSection(off, name)
+    assert.deepEqual([after.autoPostOthers, after.autoPostDependabot], [false, false], name)
+  }
+})
+
+test('the schedule summary names the interval, the days Sunday first, the hours, and the time zone, and asks for a fix while the schedule is invalid', () => {
+  const form = formOf(autoSaved())
+  const zone = 'Europe/Example'
+  assert.equal(scheduleSummary(form, zone), 'Checks every 15 minutes, Monday to Friday, from 09:00 until 18:00, in this computer\'s time zone (Europe/Example). The last check starts before 18:00.')
+  assert.equal(scheduleSummary({ ...form, autoInterval: '60' }, zone), 'Checks every hour, Monday to Friday, from 09:00 until 18:00, in this computer\'s time zone (Europe/Example). The last check starts before 18:00.')
+  assert.match(scheduleSummary({ ...form, autoDays: ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] }, zone), /^Checks every 15 minutes, every day, from/)
+  assert.match(scheduleSummary({ ...form, autoDays: ['sun', 'mon', 'tue', 'wed', 'thu', 'fri'] }, zone), /^Checks every 15 minutes, Sunday to Friday, from/)
+  assert.match(scheduleSummary({ ...form, autoDays: ['sat', 'sun'] }, zone), /^Checks every 15 minutes, Sunday and Saturday, from/)
+  assert.match(scheduleSummary({ ...form, autoDays: ['mon', 'wed', 'fri'] }, zone), /^Checks every 15 minutes, Monday, Wednesday, and Friday, from/)
+  assert.match(scheduleSummary({ ...form, autoDays: ['mon', 'tue', 'sat'] }, zone), /^Checks every 15 minutes, Monday, Tuesday, and Saturday, from/)
+  assert.match(scheduleSummary({ ...form, autoInterval: '10' }, zone), /^Checks every 10 minutes,/)
+  for (const bad of [{ autoDays: [] }, { autoFrom: '9:00' }, { autoTo: '08:00' }, { autoInterval: '3' }, { autoInterval: '' }]) {
+    assert.equal(scheduleSummary({ ...form, ...bad }, zone), 'Fix the schedule above to see when checks run.', JSON.stringify(bad))
+  }
+})
+
+test('the Limits summary reads the typed numbers, and reads no daily limit at 0', () => {
+  const form = formOf(autoSaved())
+  assert.equal(limitsSummary(form), '1 concurrent auto-review · 10 runs a day')
+  assert.equal(limitsSummary({ ...form, autoConcurrency: '2', autoDailyLimit: '1' }), '2 concurrent auto-reviews · 1 run a day')
+  assert.equal(limitsSummary({ ...form, autoDailyLimit: '0' }), '1 concurrent auto-review · no daily limit')
+  assert.equal(limitsSummary({ ...form, autoConcurrency: '3', autoDailyLimit: '0' }), '3 concurrent auto-reviews · no daily limit')
+  assert.equal(limitsSummary({ ...form, autoConcurrency: '', autoDailyLimit: 'x' }), '? concurrent auto-reviews · ? runs a day')
+  // the disclosure opens for an error on either of its two fields and no other
+  assert.deepEqual(['autoConcurrency', 'autoDailyLimit', 'autoInterval', 'cloneDir'].map(opensLimits), [true, true, false, false])
+})
+
+test('the Posts as line follows the viewer field as typed, the empty viewer reads as empty, and an on switch for an unticked kind is called inert', () => {
+  assert.deepEqual(postingAsLine('vera-quill'), { before: 'Posts as ', login: '@vera-quill', after: ', the Viewing as login above. ', link: 'Change' })
+  assert.deepEqual(postingAsLine('  vera-quill '), postingAsLine('vera-quill'))
+  assert.deepEqual(postingAsLine(''), { before: 'Posts as the Viewing as login, which is empty. ', login: '', after: '', link: 'Set Viewing as' })
+  assert.deepEqual(postingAsLine('   '), postingAsLine(''))
+  const form = formOf(autoSaved({ others: false, dependabot: false, post: { others: true, dependabot: true } }))
+  assert.deepEqual(inertPostKinds(form), ['others', 'dependabot'])
+  assert.deepEqual(inertPostKinds({ ...form, autoOthers: true }), ['dependabot'])
+  assert.deepEqual(inertPostKinds({ ...form, autoOthers: true, autoDependabot: true }), [])
+  assert.deepEqual(inertPostKinds({ ...form, autoPostOthers: false, autoPostDependabot: false }), [])
+  assert.equal(inertPostNote('others'), 'Other people\'s PRs is not ticked under What to review, so nothing posts until it is.')
+  assert.equal(inertPostNote('dependabot'), 'Dependabot PRs is not ticked under What to review, so no scheduled sweep runs to post.')
+})
+
+test('the instructions reference line names the extra review instructions, or says none are set, and the sweep never uses them', () => {
+  assert.equal(instructionsLine(''), 'Reviews of people\'s PRs use your extra review instructions: none set. The Dependabot sweep never does. ')
+  assert.equal(instructionsLine('  \n '), instructionsLine(''))
+  assert.equal(instructionsLine('Skip generated files.'), 'Reviews of people\'s PRs use your extra review instructions: \u201cSkip generated files.\u201d. The Dependabot sweep never does. ')
+  assert.match(instructionsLine('x'.repeat(80)), new RegExp(`\u201c${'x'.repeat(60)}\u2026\u201d`))
+})
+
+// the Now line reads the saved settings and the scheduler's view
+
+const nowView = (patch: Partial<AutoReviewView> = {}): AutoReviewView => ({
+  enabled: true, state: 'idle', nextTickAt: '2026-10-30T14:45:00Z', running: 0, queued: 0, startedToday: 3,
+  lastTick: null, posting: { others: false, dependabot: false }, sweepHold: null, worktrees: { kept: [], unlisted: [] }, ...patch,
+})
+const nowReading = { nowMs: Date.parse('2026-10-30T14:31:00Z'), timeZone: 'UTC' }
+
+test('the Now line reads the saved settings and the scheduler\'s view in the header indicator\'s words, with runs today, the posting summary, and the time', () => {
+  setTimeFormat('12h')
+  const saved = defaultAutoReview()
+  const line = (patch: Partial<AutoReviewView>, auto = { ...saved, enabled: true }, viewer = 'vera-quill') => nowLine({ saved: auto, view: nowView(patch), viewer, reading: nowReading })
+  assert.deepEqual(line({}), { tone: 'normal', text: 'On \u00b7 next 2:45 PM', meta: '3 of 10 runs started today \u00b7 posting off \u00b7 as of 2:31 PM', fix: null })
+  assert.equal(line({ state: 'running', running: 1 }).text, 'On \u00b7 1 running \u00b7 next 2:45 PM')
+  assert.equal(line({ state: 'running', running: 0, queued: 0, nextTickAt: null }).text, 'On \u00b7 checking PRs')
+  assert.equal(line({ state: 'outsideHours', nextTickAt: '2026-11-02T09:00:00Z' }).text, 'Outside hours \u00b7 next Mon 9:00 AM')
+  assert.deepEqual(nowLine({ saved: { ...saved, enabled: false }, view: nowView({ enabled: false, state: 'off', nextTickAt: null }), viewer: 'vera-quill', reading: nowReading }), {
+    tone: 'normal', text: 'Off', meta: 'Nothing runs and the scheduler makes no GitHub calls.', fix: null,
+  })
+  // posting is named from the saved switches, as the saved viewer, or as the account gh is signed in as when there is none
+  const posting = { ...saved, enabled: true, post: { others: true, dependabot: true } }
+  assert.equal(line({}, posting).meta, '3 of 10 runs started today \u00b7 posts other people\'s PRs and Dependabot sweeps as @vera-quill \u00b7 as of 2:31 PM')
+  assert.equal(line({}, { ...posting, post: { others: true, dependabot: false } }, '').meta, '3 of 10 runs started today \u00b7 posts other people\'s PRs as the account gh is signed in as \u00b7 as of 2:31 PM')
+  // a skip is amber and names what to fix
+  const skipped = (skipReason: 'identityMismatch' | 'noClone' | 'dailyLimit') => line({ state: 'blocked', lastTick: { at: '2026-10-30T14:30:00Z', state: 'skipped', skipReason, queued: null } })
+  assert.deepEqual(skipped('identityMismatch'), { tone: 'warn', text: 'Skipped: gh login differs from viewer', meta: '3 of 10 runs started today \u00b7 posting off \u00b7 as of 2:31 PM', fix: 'Every check skips until gh is signed in as @vera-quill.' })
+  assert.equal(skipped('noClone').text, 'Skipped: no usable clone folder')
+  assert.equal(skipped('noClone').fix, 'Set the Clone folder in Agent.')
+  assert.equal(skipped('dailyLimit').text, 'Skipped: daily limit reached')
+  assert.equal(skipped('dailyLimit').fix, 'Runs started today have reached the daily limit; it starts over tomorrow.')
+  // no autoReview key, and a view that cannot be read
+  assert.deepEqual(nowLine({ saved: undefined, view: null, viewer: '', reading: nowReading }), { tone: 'normal', text: 'Not set up', meta: nowNotSetUp, fix: null })
+  assert.equal(nowNotSetUp, 'These are the defaults; nothing is saved until you change one and save.')
+  assert.deepEqual(nowLine({ saved: { ...saved, enabled: true }, view: null, viewer: '', reading: nowReading }), { tone: 'normal', text: 'Status unavailable', meta: '', fix: null })
+  assert.equal(nowUnsavedNote, 'This line reads the saved settings. Your changes apply once you save.')
+})
+
+test('at a daily limit of 0 the Now line says no daily limit instead of N of 10, and never a daily-limit skip fix', () => {
+  setTimeFormat('12h')
+  const saved = { ...defaultAutoReview(), enabled: true, dailyLimit: 0 }
+  const line = nowLine({ saved, view: nowView({ startedToday: 3 }), viewer: 'vera-quill', reading: nowReading })
+  assert.equal(line.meta, '3 runs started today \u00b7 no daily limit \u00b7 posting off \u00b7 as of 2:31 PM')
+  assert.equal(nowLine({ saved, view: nowView({ startedToday: 1 }), viewer: 'vera-quill', reading: nowReading }).meta, '1 run started today \u00b7 no daily limit \u00b7 posting off \u00b7 as of 2:31 PM')
+  assert.doesNotMatch(line.meta, /\bof 0\b/)
+  assert.equal(nowLine({ saved: { ...saved, enabled: false }, view: nowView({ state: 'off' }), viewer: '', reading: nowReading }).text, 'Off')
+})
+
+test('the Now line follows the time format like every clock time', () => {
+  setTimeFormat('24h')
+  try {
+    const line = nowLine({ saved: { ...defaultAutoReview(), enabled: true }, view: nowView({ nextTickAt: '2026-10-30T14:45:00Z' }), viewer: 'v', reading: nowReading })
+    assert.equal(line.text, 'On \u00b7 next 14:45')
+    assert.match(line.meta, /as of 14:31$/)
+  } finally {
+    setTimeFormat('12h')
+  }
 })

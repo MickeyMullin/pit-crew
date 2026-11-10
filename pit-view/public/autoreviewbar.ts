@@ -25,21 +25,29 @@ const nextWords = (at: string, { nowMs, timeZone }: Reading): string => formatCa
 const counts = (auto: Pick<AutoReviewView, 'running' | 'queued'>): string =>
   [auto.running > 0 ? `${auto.running} running` : null, auto.queued > 0 ? `${auto.queued} queued` : null].filter((part) => part !== null).join(', ')
 
-// the text beside the sync status; null until the config has the autoReview key. A skipped last tick shows in amber while the scheduler is on and inside its hours, whether the reason persists (blocked) or not
-export const indicator = (auto: AutoReviewView | null, reading: Reading): Indicator | null => {
+export type IndicatorWords = { body: string, tone: 'normal' | 'warn', on: boolean }
+
+// the words after the header's "Auto-review · " prefix, shared with the Settings page's Now line; on is true while the scheduler is waiting or working, so the Now line can say "On"
+export const indicatorWords = (auto: AutoReviewView | null, reading: Reading): IndicatorWords | null => {
   if (auto === null) return null
   const next = auto.nextTickAt === null ? '' : ` · next ${nextWords(auto.nextTickAt, reading)}`
-  if (auto.state === 'off') return { text: 'Auto-review · off', tone: 'normal' }
-  if (auto.state === 'outsideHours') return { text: `Auto-review · outside hours${next}`, tone: 'normal' }
+  if (auto.state === 'off') return { body: 'off', tone: 'normal', on: false }
+  if (auto.state === 'outsideHours') return { body: `outside hours${next}`, tone: 'normal', on: false }
   const last = auto.lastTick
   if ((auto.state === 'blocked' || auto.state === 'idle') && last?.state === 'skipped' && last.skipReason !== null) {
-    return { text: `Auto-review · skipped: ${skipWords[last.skipReason]}${auto.state === 'blocked' ? '' : next}`, tone: 'warn' }
+    return { body: `skipped: ${skipWords[last.skipReason]}${auto.state === 'blocked' ? '' : next}`, tone: 'warn', on: false }
   }
   if (auto.state === 'running') {
     const busy = counts(auto)
-    return { text: `Auto-review · ${busy === '' ? 'checking PRs' : busy}${next}`, tone: 'normal' }
+    return { body: `${busy === '' ? 'checking PRs' : busy}${next}`, tone: 'normal', on: true }
   }
-  return { text: `Auto-review · next ${auto.nextTickAt === null ? 'tick not scheduled' : nextWords(auto.nextTickAt, reading)}`, tone: 'normal' }
+  return { body: `next ${auto.nextTickAt === null ? 'tick not scheduled' : nextWords(auto.nextTickAt, reading)}`, tone: 'normal', on: true }
+}
+
+// the text beside the sync status; null until the config has the autoReview key. A skipped last tick shows in amber while the scheduler is on and inside its hours, whether the reason persists (blocked) or not
+export const indicator = (auto: AutoReviewView | null, reading: Reading): Indicator | null => {
+  const words = indicatorWords(auto, reading)
+  return words === null ? null : { text: `Auto-review · ${words.body}`, tone: words.tone }
 }
 
 export type TickLine = { id: number, text: string, tone: 'normal' | 'warn' }

@@ -1,9 +1,13 @@
 // public/settings-form.ts
 // the Settings page's pure logic: config to form and back, the checks made before saving, the
 // server's refusals placed on their fields, people suggestions, and ticket samples
+import type { AutoReviewView } from '../src/autoreview.ts'
 import type { AutoReviewSettings, Config, Person, TicketSystem, WeekdayName } from '../src/config.ts'
 import type { NotificationKind } from '../src/notify.ts'
 import type { View } from '../src/poller.ts'
+import { indicatorWords } from './autoreviewbar.ts'
+import type { Reading } from './autoreviewbar.ts'
+import { formatClock } from './format.ts'
 
 // the page posts here after a save, so an open dashboard rereads density and the agent column
 export const configChannel = 'pit-view.config'
@@ -78,10 +82,10 @@ export const autoDefaults: AutoReviewSettings = {
   post: { others: false, dependabot: false },
 }
 
-// the days as the page lists and saves them, Monday first
+// the days as the page lists and saves them, Sunday first, the order of weekdayNames in src/config.ts
 export const weekdayChoices: readonly { value: WeekdayName, label: string }[] = [
-  { value: 'mon', label: 'Mon' }, { value: 'tue', label: 'Tue' }, { value: 'wed', label: 'Wed' }, { value: 'thu', label: 'Thu' },
-  { value: 'fri', label: 'Fri' }, { value: 'sat', label: 'Sat' }, { value: 'sun', label: 'Sun' },
+  { value: 'sun', label: 'Sun' }, { value: 'mon', label: 'Mon' }, { value: 'tue', label: 'Tue' }, { value: 'wed', label: 'Wed' },
+  { value: 'thu', label: 'Thu' }, { value: 'fri', label: 'Fri' }, { value: 'sat', label: 'Sat' },
 ]
 
 const inWeekOrder = (days: readonly WeekdayName[]): WeekdayName[] => weekdayChoices.map((day) => day.value).filter((day) => days.includes(day))
@@ -336,13 +340,28 @@ export const validateForm = (form: Form): FieldError[] => {
   // the same rule as isReviewCap in src/config.ts, which a test keeps in step
   const cap = parseMaxReviews(form.maxConcurrentReviews)
   if (!(Number.isSafeInteger(cap) && cap >= 1)) errors.push({ field: 'maxConcurrentReviews', message: 'Use a whole number of 1 or more.' })
+  // the same rule as toCloneDir in src/config.ts, which a test keeps in step; the field is in the Agent card
+  const clone = form.cloneDir.trim()
+  if (clone !== '' && clone !== '~' && !clone.startsWith('~/') && !clone.startsWith('/')) {
+    errors.push({ field: 'cloneDir', message: 'Give an absolute path or a path under ~, such as ~/dev/orbit.' })
+  }
   const extra = extraProblem(form.extraReviewInstructions)
   if (extra !== null) errors.push({ field: 'extraReviewInstructions', message: extra })
   errors.push(...autoErrors(form))
+  const overCap = autoCapError(form)
+  if (overCap !== null) errors.push(overCap)
   return errors
 }
 
-// the same rules as toAutoReview and toCloneDir in src/config.ts, which a test keeps in step
+// Concurrent auto-reviews share the review cap, so they may not exceed the Agent card's Concurrent reviews; checked whenever both are whole numbers of 1 or more, so the existing whole-number checks come first, and run as either number is typed. The server applies the same rule on save only
+export const autoCapError = (form: Pick<Form, 'autoConcurrency' | 'maxConcurrentReviews'>): FieldError | null => {
+  const cap = parseMaxReviews(form.maxConcurrentReviews)
+  const runs = parseWhole(form.autoConcurrency)
+  if (!(Number.isSafeInteger(cap) && cap >= 1 && Number.isSafeInteger(runs) && runs >= 1)) return null
+  return runs > cap ? { field: 'autoConcurrency', message: `Must be no more than Concurrent reviews in Agent, which is now ${form.maxConcurrentReviews.trim()}.` } : null
+}
+
+// the same rules as toAutoReview in src/config.ts, which a test keeps in step
 const clockPattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/
 
 const autoErrors = (form: Form): FieldError[] => {
@@ -356,14 +375,11 @@ const autoErrors = (form: Form): FieldError[] => {
   if (!clockPattern.test(to)) errors.push({ field: 'autoTo', message: 'Use a 24-hour time such as 09:00.' })
   // a window never crosses midnight
   else if (clockPattern.test(from) && from >= to) errors.push({ field: 'autoTo', message: 'Must be after the start time.' })
-  for (const [field, text] of [['autoConcurrency', form.autoConcurrency], ['autoDailyLimit', form.autoDailyLimit]] as const) {
-    const value = parseWhole(text)
-    if (!(Number.isSafeInteger(value) && value >= 1)) errors.push({ field, message: 'Use a whole number of 1 or more.' })
-  }
-  const clone = form.cloneDir.trim()
-  if (clone !== '' && clone !== '~' && !clone.startsWith('~/') && !clone.startsWith('/')) {
-    errors.push({ field: 'cloneDir', message: 'Give an absolute path or a path under ~, such as ~/dev/orbit.' })
-  }
+  // Concurrent auto-reviews are 1 or more, like every other cap; the daily limit alone takes 0, which means no limit
+  const concurrency = parseWhole(form.autoConcurrency)
+  if (!(Number.isSafeInteger(concurrency) && concurrency >= 1)) errors.push({ field: 'autoConcurrency', message: 'Use a whole number of 1 or more.' })
+  const daily = parseWhole(form.autoDailyLimit)
+  if (!(Number.isSafeInteger(daily) && daily >= 0)) errors.push({ field: 'autoDailyLimit', message: 'Use a whole number of 0 or more.' })
   return errors
 }
 
@@ -660,6 +676,30 @@ export const refreshChoices: Choice<Config['refreshSeconds']>[] = [
   { value: 300, label: '5 minutes (default)' },
 ]
 
+// Check every: four choices; any other whole number of 5 or more the server accepts stays valid, and is offered as one extra marked option while it is the saved value
+export const intervalChoices: Choice<number>[] = [
+  { value: 5, label: '5 minutes' },
+  { value: 15, label: '15 minutes (default)' },
+  { value: 30, label: '30 minutes' },
+  { value: 60, label: '1 hour' },
+]
+
+const isListedInterval = (value: string): boolean => intervalChoices.some((choice) => String(choice.value) === value.trim())
+
+export const intervalOptions = (saved: string): Choice<number>[] => {
+  const minutes = parseWhole(saved)
+  if (isListedInterval(saved) || !Number.isSafeInteger(minutes)) return intervalChoices
+  const at = intervalChoices.findIndex((choice) => choice.value > minutes)
+  const extra: Choice<number> = { value: minutes, label: `${minutes} minutes (saved, not a listed choice)` }
+  return at === -1 ? [...intervalChoices, extra] : [...intervalChoices.slice(0, at), extra, ...intervalChoices.slice(at)]
+}
+
+// the amber note while the chosen interval is not one of the four; it is not an error
+export const intervalLegacyNote = (interval: string): string | null =>
+  isListedInterval(interval) || !Number.isSafeInteger(parseWhole(interval))
+    ? null
+    : `Saved as ${parseWhole(interval)} minutes, which is not one of the choices. It keeps working as saved; pick a choice to change it.`
+
 export const todayChoices = (timeZone: string): Choice<Config['todayStartsAt']>[] => [
   { value: 'local', label: `Local midnight (${timeZone})` },
   { value: 'utc', label: 'UTC midnight' },
@@ -692,3 +732,137 @@ export const sourceChoices: Choice<TicketSystem['source']>[] = [
   { value: 'title-then-branch', label: 'Title, then branch' },
   { value: 'linked-issues', label: 'Issues the PR links' },
 ]
+
+// Reset to Defaults: the form fields each section holds, and a reset that sets only those to the defaults
+
+export type AutoSection = 'schedule' | 'what' | 'post' | 'limits'
+
+type AutoKey = keyof ReturnType<typeof autoForm>
+
+const sectionKeys: Readonly<Record<AutoSection, readonly AutoKey[]>> = {
+  schedule: ['autoDays', 'autoFrom', 'autoTo', 'autoInterval'],
+  what: ['autoOthers', 'autoOwn', 'autoDependabot'],
+  post: ['autoPostOthers', 'autoPostDependabot'],
+  limits: ['autoConcurrency', 'autoDailyLimit'],
+}
+
+// a copy with the section's fields at the defaults; nothing is saved, and the shipped defaults have posting off, so a reset can never turn it on
+export const resetSection = (form: Form, section: AutoSection): Form => {
+  const defaults = autoForm(autoDefaults)
+  const next: Form = { ...form, autoDays: [...form.autoDays] }
+  for (const key of sectionKeys[section]) Object.assign(next, { [key]: Array.isArray(defaults[key]) ? [...defaults[key]] : defaults[key] })
+  return next
+}
+
+const comparable = (form: Pick<Form, AutoKey>, key: AutoKey): string => {
+  const value = form[key]
+  return JSON.stringify(Array.isArray(value) ? inWeekOrder(value) : typeof value === 'string' ? value.trim() : value)
+}
+
+export const atSectionDefaults = (form: Form, section: AutoSection): boolean => {
+  const defaults = autoForm(autoDefaults)
+  return sectionKeys[section].every((key) => comparable(form, key) === comparable(defaults, key))
+}
+
+// the words the card derives from the form
+
+const listWords = (items: readonly string[]): string => items.length <= 2 ? items.join(' and ') : `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`
+
+const dayNames: Readonly<Record<WeekdayName, string>> = { sun: 'Sunday', mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday' }
+
+// "Monday to Friday" for a run of three or more neighbors in the Sunday-first week, the other days named one by one
+const dayWords = (days: readonly WeekdayName[]): string => {
+  const chosen = inWeekOrder(days)
+  if (chosen.length === 7) return 'every day'
+  const order = weekdayChoices.map((day) => day.value)
+  const runs: [number, number][] = []
+  for (const at of chosen.map((day) => order.indexOf(day))) {
+    const last = runs[runs.length - 1]
+    if (last !== undefined && at === last[1] + 1) last[1] = at
+    else runs.push([at, at])
+  }
+  return listWords(runs.flatMap(([from, to]) => to - from >= 2 ? [`${dayNames[order[from] as WeekdayName]} to ${dayNames[order[to] as WeekdayName]}`] : order.slice(from, to + 1).map((day) => dayNames[day])))
+}
+
+export const scheduleSummary = (form: Pick<Form, 'autoInterval' | 'autoDays' | 'autoFrom' | 'autoTo'>, timeZone: string): string => {
+  const minutes = parseWhole(form.autoInterval)
+  const from = form.autoFrom.trim()
+  const to = form.autoTo.trim()
+  if (form.autoDays.length === 0 || !clockPattern.test(from) || !clockPattern.test(to) || from >= to || !(Number.isSafeInteger(minutes) && minutes >= 5)) return 'Fix the schedule above to see when checks run.'
+  return `Checks ${minutes === 60 ? 'every hour' : `every ${minutes} minutes`}, ${dayWords(form.autoDays)}, from ${from} until ${to}, in this computer's time zone (${timeZone}). The last check starts before ${to}.`
+}
+
+export const limitsSummary = (form: Pick<Form, 'autoConcurrency' | 'autoDailyLimit'>): string => {
+  const runs = form.autoConcurrency.trim()
+  const daily = form.autoDailyLimit.trim()
+  const dailyWords = daily === '0' ? 'no daily limit' : `${daily === '' || !Number.isSafeInteger(parseWhole(daily)) ? '?' : daily} ${daily === '1' ? 'run' : 'runs'} a day`
+  return `${runs === '' || !Number.isSafeInteger(parseWhole(runs)) ? '?' : runs} concurrent auto-review${runs === '1' ? '' : 's'} \u00b7 ${dailyWords}`
+}
+
+// the Limits disclosure opens for an error on either of its fields
+export const opensLimits = (field: FieldKey | null): boolean => field === 'autoConcurrency' || field === 'autoDailyLimit'
+
+export type PostingAs = { before: string, login: string, after: string, link: string }
+
+// the line under Post auto-reviews? that follows the Viewing as field as typed; text only until its link is used
+export const postingAsLine = (viewer: string): PostingAs => {
+  const login = postingLoginOf(viewer)
+  return login === ''
+    ? { before: 'Posts as the Viewing as login, which is empty. ', login: '', after: '', link: 'Set Viewing as' }
+    : { before: 'Posts as ', login: `@${login}`, after: ', the Viewing as login above. ', link: 'Change' }
+}
+
+// a posting switch that is on while its kind is unticked has no effect, and says so
+export const inertPostKinds = (form: Pick<Form, 'autoPostOthers' | 'autoPostDependabot' | 'autoOthers' | 'autoDependabot'>): PostKind[] => [
+  ...(form.autoPostOthers && !form.autoOthers ? ['others' as const] : []),
+  ...(form.autoPostDependabot && !form.autoDependabot ? ['dependabot' as const] : []),
+]
+
+export const inertPostNote = (kind: PostKind): string => kind === 'others'
+  ? 'Other people\'s PRs is not ticked under What to review, so nothing posts until it is.'
+  : 'Dependabot PRs is not ticked under What to review, so no scheduled sweep runs to post.'
+
+// the line under What to review; its link ("Edit in Agent") follows
+export const instructionsLine = (extra: string): string => {
+  const text = normalizeExtra(extra)
+  const shown = [...text].length > 60 ? `${[...text].slice(0, 60).join('')}\u2026` : text
+  return `Reviews of people's PRs use your extra review instructions: ${text === '' ? 'none set' : `\u201c${shown}\u201d`}. The Dependabot sweep never does. `
+}
+
+// the Now line: the saved settings and the scheduler's view, in the header indicator's words without its prefix
+
+export const nowNotSetUp = 'These are the defaults; nothing is saved until you change one and save.'
+export const nowUnsavedNote = 'This line reads the saved settings. Your changes apply once you save.'
+
+export type NowLine = { tone: 'normal' | 'warn', text: string, meta: string, fix: string | null }
+
+export type NowInput = {
+  // the saved autoReview key; undefined while the config has none
+  saved: AutoReviewSettings | undefined
+  // the scheduler's view; null when it could not be read
+  view: AutoReviewView | null
+  // the saved viewer
+  viewer: string
+  reading: Reading
+}
+
+const sentenceCase = (text: string): string => text === '' ? text : `${text[0]!.toUpperCase()}${text.slice(1)}`
+
+export const nowLine = ({ saved, view, viewer, reading }: NowInput): NowLine => {
+  if (saved === undefined) return { tone: 'normal', text: 'Not set up', meta: nowNotSetUp, fix: null }
+  const words = indicatorWords(view, reading)
+  if (view === null || words === null) return { tone: 'normal', text: 'Status unavailable', meta: '', fix: null }
+  const text = words.on ? `On \u00b7 ${words.body}` : sentenceCase(words.body)
+  if (words.body === 'off') return { tone: 'normal', text, meta: 'Nothing runs and the scheduler makes no GitHub calls.', fix: null }
+  const started = view.startedToday
+  const today = saved.dailyLimit === 0 ? `${started} ${started === 1 ? 'run' : 'runs'} started today \u00b7 no daily limit` : `${started} of ${saved.dailyLimit} runs started today`
+  const kinds = [saved.post.others ? 'other people\'s PRs' : null, saved.post.dependabot ? 'Dependabot sweeps' : null].filter((kind) => kind !== null)
+  const login = viewer.trim()
+  const posting = kinds.length === 0 ? 'posting off' : `posts ${listWords(kinds)} as ${login === '' ? 'the account gh is signed in as' : `@${login}`}`
+  const last = view.lastTick
+  const fix = words.tone === 'warn' && last?.skipReason === 'identityMismatch' ? `Every check skips until gh is signed in as @${login}.`
+    : words.tone === 'warn' && last?.skipReason === 'noClone' ? 'Set the Clone folder in Agent.'
+      : words.tone === 'warn' && last?.skipReason === 'dailyLimit' ? 'Runs started today have reached the daily limit; it starts over tomorrow.'
+        : null
+  return { tone: words.tone, text, meta: `${today} \u00b7 ${posting} \u00b7 as of ${formatClock(reading.nowMs, false, reading.timeZone)}`, fix }
+}
