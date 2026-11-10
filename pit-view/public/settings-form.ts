@@ -768,7 +768,7 @@ export const atSectionDefaults = (form: Form, section: AutoSection): boolean => 
 
 const listWords = (items: readonly string[]): string => items.length <= 2 ? items.join(' and ') : `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`
 
-const dayNames: Readonly<Record<WeekdayName, string>> = { sun: 'Sunday', mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday' }
+export const dayNames: Readonly<Record<WeekdayName, string>> = { sun: 'Sunday', mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday' }
 
 // "Monday to Friday" for a run of three or more neighbors in the Sunday-first week, the other days named one by one
 const dayWords = (days: readonly WeekdayName[]): string => {

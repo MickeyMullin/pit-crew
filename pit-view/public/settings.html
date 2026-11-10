@@ -161,7 +161,7 @@
             <input id="f-showAgentColumn" type="checkbox" aria-describedby="f-showAgentColumn-hint">
             Show the Agent column
           </label>
-          <p id="f-showAgentColumn-hint" class="hint">Starts, follows and stops a review session for each open PR. A start asks first, and runs in the clone set as <code>cloneDir</code> in the config file.</p>
+          <p id="f-showAgentColumn-hint" class="hint">Starts, follows and stops a review session for each open PR. A start asks first, and runs in the Clone folder below.</p>
           <p id="f-showAgentColumn-error" class="field-error" hidden></p>
         </div>
         <div class="field">
@@ -169,6 +169,12 @@
           <input id="f-maxConcurrentReviews" class="input mono" type="number" inputmode="numeric" min="1" step="1" autocomplete="off" aria-describedby="f-maxConcurrentReviews-hint">
           <p id="f-maxConcurrentReviews-hint" class="hint">Review sessions that run at the same time; a tandem review counts as one, and so does a Dependabot sweep you start. More wait in a queue and start, in order, as earlier ones end. Fix and update sessions are not counted.</p>
           <p id="f-maxConcurrentReviews-error" class="field-error" hidden></p>
+        </div>
+        <div class="field">
+          <label for="f-cloneDir">Clone folder</label>
+          <input id="f-cloneDir" class="input mono" type="text" autocomplete="off" spellcheck="false" aria-describedby="f-cloneDir-hint">
+          <p id="f-cloneDir-hint" class="hint">Your local clone of the repository, as an absolute path or one under <code>~</code>. Reviews you start and Dependabot sweeps run in it; auto-review runs each use their own worktree of it, never the checkout itself. Empty means no run can start.</p>
+          <p id="f-cloneDir-error" class="field-error" hidden></p>
         </div>
         <div class="field">
           <span class="field-label">Self-review over limit</span>
@@ -189,105 +195,142 @@
     </section>
 
     <section id="auto-review" class="card settings-card" aria-labelledby="auto-review-heading">
-      <h2 id="auto-review-heading" class="card-title">Auto-review</h2>
-      <p class="hint">Starts review and re-review runs on its own, for new or updated PRs. Runs happen whenever Pit View is running, with or without a page open. It stays off until you turn it on.</p>
-      <div class="field-grid">
-        <div class="field">
-          <span class="field-label">Auto-review</span>
-          <label class="check">
-            <input id="f-autoEnabled" type="checkbox" aria-describedby="f-autoEnabled-hint">
-            Review PRs automatically
-          </label>
-          <p id="f-autoEnabled-hint" class="hint">The master switch. Off means no checks, no runs, and no GitHub calls from the scheduler.</p>
-          <p id="f-autoEnabled-error" class="field-error" hidden></p>
+      <div class="card-head">
+        <h2 id="auto-review-heading" class="card-title">Auto-review</h2>
+        <span class="card-sub">reviews new and updated PRs on a schedule, whenever Pit View is running, with or without a page open</span>
+      </div>
+
+      <div id="auto-now" class="auto-now" data-tone="normal">
+        <span class="auto-now-label">Now</span>
+        <span id="auto-now-text" class="auto-now-text"></span>
+        <span id="auto-now-meta" class="auto-now-meta"></span>
+        <p id="auto-now-fix" class="hint" hidden></p>
+        <p id="auto-now-unsaved" class="hint" hidden></p>
+      </div>
+
+      <div class="auto-master">
+        <label class="check check-strong">
+          <input id="f-autoEnabled" type="checkbox" aria-describedby="f-autoEnabled-hint">
+          Review PRs automatically
+        </label>
+        <p id="f-autoEnabled-hint" class="hint">This setting only affects scheduler-driven auto-reviews. No effect on manually-launched reviews.</p>
+        <p id="f-autoEnabled-error" class="field-error" hidden></p>
+      </div>
+
+      <fieldset id="group-schedule" class="auto-group" aria-describedby="schedule-summary">
+        <legend class="group-title">Schedule</legend>
+        <button id="reset-schedule" type="button" class="button button-small reset-defaults" aria-label="Reset to Defaults: Schedule">Reset to Defaults</button>
+        <div class="group-body">
+          <div class="schedule-row">
+            <fieldset id="f-autoDays" class="subfield">
+              <legend>Days</legend>
+              <div id="auto-days" class="day-chips"></div>
+              <p id="f-autoDays-error" class="field-error" hidden></p>
+            </fieldset>
+            <div class="subfield">
+              <span class="field-label" id="window-label">Hours</span>
+              <div class="time-range" role="group" aria-labelledby="window-label">
+                <span aria-hidden="true">from</span>
+                <label class="sr-only" for="f-autoFrom">Hours, from</label>
+                <input id="f-autoFrom" class="input mono" type="time" autocomplete="off">
+                <span aria-hidden="true">to</span>
+                <label class="sr-only" for="f-autoTo">Hours, until</label>
+                <input id="f-autoTo" class="input mono" type="time" autocomplete="off">
+              </div>
+              <p id="f-autoFrom-error" class="field-error" hidden></p>
+              <p id="f-autoTo-error" class="field-error" hidden></p>
+            </div>
+            <div class="subfield">
+              <label class="field-label" for="f-autoInterval">Check every</label>
+              <select id="f-autoInterval" class="input"></select>
+              <p id="f-autoInterval-legacy" class="notice" data-tone="warn" hidden></p>
+              <p id="f-autoInterval-error" class="field-error" hidden></p>
+            </div>
+          </div>
+          <p id="schedule-summary" class="hint"></p>
         </div>
-        <div class="field">
-          <label for="f-autoInterval">Check every (minutes)</label>
-          <input id="f-autoInterval" class="input mono" type="number" inputmode="numeric" min="5" step="1" autocomplete="off" aria-describedby="f-autoInterval-hint">
-          <p id="f-autoInterval-hint" class="hint">Minutes between checks during active hours: 5 or more. The default is 15.</p>
-          <p id="f-autoInterval-error" class="field-error" hidden></p>
+      </fieldset>
+
+      <fieldset id="group-what" class="auto-group">
+        <legend class="group-title">What to review</legend>
+        <button id="reset-what" type="button" class="button button-small reset-defaults" aria-label="Reset to Defaults: What to review">Reset to Defaults</button>
+        <div class="group-body">
+          <div class="options">
+            <div class="option">
+              <label class="check"><input id="f-autoOthers" type="checkbox" aria-describedby="f-autoOthers-hint"> Other people's PRs</label>
+              <p id="f-autoOthers-hint" class="hint">Ready (non-draft) that request your review, plus pushes since your last review (automatic or manual).</p>
+              <p id="f-autoOthers-error" class="field-error" hidden></p>
+            </div>
+            <div class="option">
+              <label class="check"><input id="f-autoOwn" type="checkbox" aria-describedby="f-autoOwn-hint"> My own PRs</label>
+              <p id="f-autoOwn-hint" class="hint">A self-review when the head moves. Never posts and never fixes anything.</p>
+              <p id="f-autoOwn-error" class="field-error" hidden></p>
+            </div>
+            <div class="option">
+              <label class="check"><input id="f-autoDependabot" type="checkbox" aria-describedby="f-autoDependabot-hint"> Dependabot PRs</label>
+              <p id="f-autoDependabot-hint" class="hint">The Dependabot sweep over the open bot PRs, one reviewer at a time.</p>
+              <p id="f-autoDependabot-error" class="field-error" hidden></p>
+            </div>
+          </div>
+          <p id="instructions-ref" class="hint"></p>
         </div>
-        <fieldset id="f-autoDays" class="field kinds" aria-describedby="f-autoDays-hint">
-          <legend class="field-label">Active days</legend>
-          <div id="auto-days" class="kinds-list"></div>
-          <p id="f-autoDays-hint" class="hint">Checks run only on these days, in this computer's time zone.</p>
-          <p id="f-autoDays-error" class="field-error" hidden></p>
-        </fieldset>
-        <div class="field">
-          <label for="f-autoFrom">Active from</label>
-          <input id="f-autoFrom" class="input mono" type="time" autocomplete="off" aria-describedby="f-autoFrom-hint">
-          <p id="f-autoFrom-hint" class="hint">The window opens at this time and never crosses midnight.</p>
-          <p id="f-autoFrom-error" class="field-error" hidden></p>
+      </fieldset>
+
+      <fieldset id="group-post" class="auto-group">
+        <legend class="group-title">Post auto-reviews?</legend>
+        <button id="reset-post" type="button" class="button button-small reset-defaults" aria-label="Reset to Defaults: Post auto-reviews?">Reset to Defaults</button>
+        <div class="group-body">
+          <p id="posting-as" class="posting-as"></p>
+          <div class="options">
+            <div class="option">
+              <label class="check"><input id="f-autoPostOthers" type="checkbox" aria-describedby="f-autoPostOthers-hint"> Other people's PRs</label>
+              <p id="f-autoPostOthers-hint" class="hint"><span class="hint-lines">Off (default): Report in the PR's drawer to review and post.</span><span class="hint-lines">On: Posts to GitHub as approval, request for changes, or comment.</span></p>
+              <p id="f-autoPostOthers-error" class="field-error" hidden></p>
+              <p id="f-autoPostOthers-inert" class="notice" data-tone="warn" hidden></p>
+              <p id="f-autoPostOthers-notice" class="notice" role="status" hidden></p>
+              <div id="auto-post-ask-others" class="post-ask" role="group" hidden></div>
+            </div>
+            <div class="option">
+              <label class="check"><input id="f-autoPostDependabot" type="checkbox" aria-describedby="f-autoPostDependabot-hint"> Scheduled Dependabot sweeps</label>
+              <p id="f-autoPostDependabot-hint" class="hint">Manually launched sweeps always post and approve/request. (Default off.)</p>
+              <p id="f-autoPostDependabot-error" class="field-error" hidden></p>
+              <p id="f-autoPostDependabot-inert" class="notice" data-tone="warn" hidden></p>
+              <p id="f-autoPostDependabot-notice" class="notice" role="status" hidden></p>
+              <div id="auto-post-ask-dependabot" class="post-ask" role="group" hidden></div>
+            </div>
+          </div>
+          <p class="hint">Your own PRs never post, whatever these say.</p>
         </div>
-        <div class="field">
-          <label for="f-autoTo">Active until</label>
-          <input id="f-autoTo" class="input mono" type="time" autocomplete="off" aria-describedby="f-autoTo-hint">
-          <p id="f-autoTo-hint" class="hint">The last check starts before this time. It must be after the start.</p>
-          <p id="f-autoTo-error" class="field-error" hidden></p>
+      </fieldset>
+
+      <div id="group-limits" class="auto-group">
+        <div class="auto-group-head">
+          <button id="limits-toggle" type="button" class="auto-disclosure" aria-expanded="false" aria-controls="limits-body">
+            <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"></path></svg>
+            <span class="group-name">Limits</span>
+            <span id="limits-summary" class="group-summary"></span>
+          </button>
+          <button id="reset-limits" type="button" class="button button-small" aria-label="Reset to Defaults: Limits" hidden>Reset to Defaults</button>
         </div>
-        <div class="field">
-          <span class="field-label">Which PRs</span>
-          <label class="check">
-            <input id="f-autoOthers" type="checkbox" aria-describedby="f-autoOthers-hint">
-            Other people's PRs
-          </label>
-          <p id="f-autoOthers-hint" class="hint">Review and re-review PRs that ask for your review, new ones, and ones pushed to since your review.</p>
-          <p id="f-autoOthers-error" class="field-error" hidden></p>
-          <label class="check">
-            <input id="f-autoOwn" type="checkbox" aria-describedby="f-autoOwn-hint">
-            My own PRs
-          </label>
-          <p id="f-autoOwn-hint" class="hint">Self-review your own PRs when their head moves. These runs never post and never fix anything.</p>
-          <p id="f-autoOwn-error" class="field-error" hidden></p>
-          <label class="check">
-            <input id="f-autoDependabot" type="checkbox" aria-describedby="f-autoDependabot-hint">
-            Dependabot PRs
-          </label>
-          <p id="f-autoDependabot-hint" class="hint">Run the Dependabot sweep over the open bot PRs, one reviewer at a time.</p>
-          <p id="f-autoDependabot-error" class="field-error" hidden></p>
+        <div id="limits-body" class="limits-grid" hidden>
+          <div class="field">
+            <label for="f-autoConcurrency">Concurrent auto-reviews</label>
+            <input id="f-autoConcurrency" class="input mono" type="number" inputmode="numeric" min="1" step="1" autocomplete="off" aria-describedby="f-autoConcurrency-hint">
+            <p id="f-autoConcurrency-hint" class="hint">Auto-reviews share the same concurrency pool as manually-launched agent reviews.</p>
+            <p id="f-autoConcurrency-error" class="field-error" hidden></p>
+          </div>
+          <div class="field">
+            <label for="f-autoDailyLimit">Daily limit</label>
+            <input id="f-autoDailyLimit" class="input mono" type="number" inputmode="numeric" min="0" step="1" autocomplete="off" aria-describedby="f-autoDailyLimit-hint">
+            <p id="f-autoDailyLimit-hint" class="hint">Auto-review runs per day, 10 by default. Manually-launched runs don't count. 0 means no limit.</p>
+            <p id="f-autoDailyLimit-error" class="field-error" hidden></p>
+          </div>
         </div>
-        <div class="field">
-          <label for="f-autoConcurrency">Runs at once</label>
-          <input id="f-autoConcurrency" class="input mono" type="number" inputmode="numeric" min="1" step="1" autocomplete="off" aria-describedby="f-autoConcurrency-hint">
-          <p id="f-autoConcurrency-hint" class="hint">Auto-review runs that go at the same time: a whole number of 1 or more. They also count against the concurrent reviews limit in Agent.</p>
-          <p id="f-autoConcurrency-error" class="field-error" hidden></p>
-        </div>
-        <div class="field">
-          <label for="f-autoDailyLimit">Daily limit</label>
-          <input id="f-autoDailyLimit" class="input mono" type="number" inputmode="numeric" min="1" step="1" autocomplete="off" aria-describedby="f-autoDailyLimit-hint">
-          <p id="f-autoDailyLimit-hint" class="hint">The most auto-review runs to start in a day: a whole number of 1 or more, 10 by default. It caps only auto-review runs; runs you start by hand never count.</p>
-          <p id="f-autoDailyLimit-error" class="field-error" hidden></p>
-        </div>
-        <div class="field">
-          <label for="f-cloneDir">Clone folder</label>
-          <input id="f-cloneDir" class="input mono" type="text" autocomplete="off" spellcheck="false" aria-describedby="f-cloneDir-hint">
-          <p id="f-cloneDir-hint" class="hint">An absolute path or one under <code>~</code>, such as <code>~/dev/orbit</code>. Each auto-review run uses its own worktree of this clone and never the checkout itself.</p>
-          <p id="f-cloneDir-error" class="field-error" hidden></p>
-        </div>
-        <div class="field">
-          <span class="field-label">Posting</span>
-          <label class="check">
-            <input id="f-autoPostOthers" type="checkbox" aria-describedby="f-autoPostOthers-hint">
-            Post auto-reviews of other people's PRs?
-          </label>
-          <p id="f-autoPostOthers-hint" class="hint">No by default. With no, the run does not post, and the PR's agent drawer shows the report. With yes, it posts to GitHub under your account. Turning it on asks first.</p>
-          <p id="f-autoPostOthers-error" class="field-error" hidden></p>
-          <p id="f-autoPostOthers-notice" class="hint" role="status" hidden></p>
-          <div id="auto-post-ask-others" class="post-ask" role="group" hidden></div>
-          <label class="check">
-            <input id="f-autoPostDependabot" type="checkbox" aria-describedby="f-autoPostDependabot-hint">
-            Post scheduled Dependabot sweeps?
-          </label>
-          <p id="f-autoPostDependabot-hint" class="hint">No by default. A sweep you start by hand always posts by the command's own rules, approving clean bumps. Turning this on asks first.</p>
-          <p id="f-autoPostDependabot-error" class="field-error" hidden></p>
-          <p id="f-autoPostDependabot-notice" class="hint" role="status" hidden></p>
-          <div id="auto-post-ask-dependabot" class="post-ask" role="group" hidden></div>
-        </div>
-        <div class="field">
-          <span class="field-label">Start at login (optional)</span>
-          <p id="login-agent-status" class="status-line" aria-describedby="login-agent-hint">Checking…</p>
-          <p id="login-agent-hint" class="hint">A convenience that starts Pit View when you log in; <code>pnpm service:install</code> sets it up. Auto-review does not need it: it runs whenever Pit View is running, and you can start Pit View by hand.</p>
-        </div>
+      </div>
+
+      <div class="auto-foot">
+        <p id="clone-ref" class="hint"></p>
+        <p class="hint">Start at login: <strong id="login-agent-status">Checking…</strong>. Optional: auto-review runs whenever Pit View is running, however it was started. <code>pnpm service:install</code> sets it up.</p>
       </div>
     </section>
 

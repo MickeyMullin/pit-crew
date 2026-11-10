@@ -1,6 +1,7 @@
 // public/settings.ts
 // the Settings page: loads the config, edits it in a form, checks it, and saves it through
 // PUT /api/config, which patches open dashboards and starts the refresh a change needs
+import type { AutoReviewView } from '../src/autoreview.ts'
 import type { Config } from '../src/config.ts'
 import type { View } from '../src/poller.ts'
 import { avatar } from './cells.ts'
@@ -10,11 +11,12 @@ import type { Shape } from './dom.ts'
 import { browserTimeZone, formatClock, parseTimeFormat, setTimeFormat } from './format.ts'
 import { loadInstance, loginAgentText, showInstance } from './instance.ts'
 import {
-  avatarChoices, changeKind, configChannel, configPathText, densityChoices, errorId, fieldId, isDirty, kindChoices, needsRefresh,
+  atSectionDefaults, autoCapError, avatarChoices, changeKind, configChannel, configPathText, dayNames, densityChoices, errorId, fieldId, inertPostKinds, inertPostNote, instructionsLine, intervalLegacyNote, intervalOptions, isDirty,
+  kindChoices, limitsSummary, needsRefresh, nowLine, nowUnsavedNote, opensLimits, postingAsLine, resetSection, scheduleSummary,
   newPerson, newTicket, notifyChoices, openSuggestions, previewPerson, refreshChoices, sampleTextsFrom, serverError, sourceChoices, ticketSample, timeFormatChoices,
   postAskIsStale, postSwitchesToTurnOff, postViewerNeededText, postingAsk, postingLoginOf, postingNeedsViewer, toConfig, todayChoices, toForm, validateForm, wantsPostConfirm, weekdayChoices,
 } from './settings-form.ts'
-import type { AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, PostConfirmed, PostKind, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
+import type { AutoSection, AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, PostConfirmed, PostKind, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
 import { readToken } from './runapi.ts'
 import { mountStickyHeader, trackHeight } from './sticky.ts'
 import { mountThemeToggle } from './theme.ts'
@@ -45,6 +47,10 @@ type PageState = {
   postAskLogin: string
   // the login each posting switch was confirmed for, until the form is saved or reloaded; a switch already saved on has none
   postConfirmed: PostConfirmed
+  // the scheduler's view for the Now line; null when it could not be read
+  autoView: AutoReviewView | null
+  // the Limits disclosure; not stored, and held open while an error stands in its fields
+  limitsOpen: boolean
 }
 
 let page: PageState | null = null
@@ -171,6 +177,11 @@ const renderPeople = (): void => {
 
 // a group of checkboxes (the active days) takes focus on its first box
 const focusField = (key: FieldKey): void => {
+  // a field inside the closed Limits disclosure opens it first
+  if (opensLimits(key) && page !== null && !page.limitsOpen) {
+    page.limitsOpen = true
+    showLimits()
+  }
   const field = document.getElementById(fieldId(key))
   const target = field instanceof HTMLFieldSetElement ? field.querySelector<HTMLElement>('input') : field
   target?.focus()
@@ -307,7 +318,7 @@ const removeTicket = (id: string): void => {
 
 // the fixed fields
 
-const staticText = ['repo', 'viewer', 'idleMinutes', 'bots', 'reportsDir', 'maxConcurrentReviews', 'extraReviewInstructions', 'cloneDir', 'autoInterval', 'autoFrom', 'autoTo', 'autoConcurrency', 'autoDailyLimit'] as const
+const staticText = ['repo', 'viewer', 'idleMinutes', 'bots', 'reportsDir', 'maxConcurrentReviews', 'extraReviewInstructions', 'cloneDir', 'autoFrom', 'autoTo', 'autoConcurrency', 'autoDailyLimit'] as const
 
 // the auto-review switches that need no question, by form key
 const autoSwitches = ['autoEnabled', 'autoOthers', 'autoOwn', 'autoDependabot'] as const
@@ -321,6 +332,8 @@ const fillStatic = (): void => {
   if (page === null) return
   const { form } = page
   for (const key of staticText) byId<HTMLInputElement>(fieldId(key)).value = form[key]
+  // the saved interval is offered even when it is not one of the four, until another value is saved
+  options(byId<HTMLSelectElement>(fieldId('autoInterval')), intervalOptions(String(page.saved.autoReview?.intervalMinutes ?? form.autoInterval)), Number(form.autoInterval.trim()))
   options(byId<HTMLSelectElement>(fieldId('refreshSeconds')), refreshChoices, form.refreshSeconds)
   options(byId<HTMLSelectElement>(fieldId('todayStartsAt')), todayChoices(browserTimeZone()), form.todayStartsAt)
   options(byId<HTMLSelectElement>(fieldId('density')), densityChoices, form.density)
@@ -339,7 +352,8 @@ const fillStatic = (): void => {
       page.form.autoDays = box.checked ? [...without, day.value] : without
       changed()
     })
-    return h('label', { class: 'check' }, box, day.label)
+    box.setAttribute('aria-label', dayNames[day.value])
+    return h('label', { class: 'day-chip' }, box, day.label)
   }))
   showPostAsk()
   byId('notify-kinds').replaceChildren(...notifyChoices.map((choice) => {
@@ -441,13 +455,17 @@ const bindStatic = (): void => {
     const box = byId<HTMLInputElement>(fieldId(key))
     box.addEventListener('change', () => {
       if (page === null) return
+      // the same box again while its question is open is Cancel: the question closes, the switch stays off, and nothing is confirmed
+      if (page.postAsk === kind) {
+        dismissPostAsk(kind, key)
+        return
+      }
       if (wantsPostConfirm(page.form, kind, box.checked)) {
         box.checked = false
         const notice = byId(`${fieldId(key)}-notice`)
         // the confirmation has to name an account, so an empty viewer field opens no question and the switch stays off; the notice does not take focus
         if (postingNeedsViewer(page.form.viewer)) {
-          setText(notice, postViewerNeededText)
-          notice.hidden = false
+          showViewerNotice(notice, postViewerNeededText)
           return
         }
         notice.hidden = true
@@ -478,6 +496,12 @@ const bindStatic = (): void => {
       changed()
     })
   }
+  const interval = byId<HTMLSelectElement>(fieldId('autoInterval'))
+  interval.addEventListener('change', () => {
+    if (page === null) return
+    page.form.autoInterval = interval.value
+    changed()
+  })
   const refresh = byId<HTMLSelectElement>(fieldId('refreshSeconds'))
   refresh.addEventListener('change', () => {
     if (page === null) return
@@ -522,11 +546,129 @@ const bindStatic = (): void => {
   })
 }
 
+// clicking the box of an open question again is Cancel: it closes the question, forgets any confirmation, leaves the switch off, and returns focus to the switch as Cancel does
+const dismissPostAsk = (kind: PostKind, key: 'autoPostOthers' | 'autoPostDependabot'): void => {
+  if (page === null) return
+  delete page.postConfirmed[kind]
+  page.postAsk = null
+  showPostAsk()
+  const box = byId<HTMLInputElement>(fieldId(key))
+  box.checked = false
+  box.focus()
+}
+
+// a link to the Viewing as field that moves focus only when it is used
+const viewerLink = (text: string): HTMLAnchorElement => {
+  const link = h('a', { href: `#${fieldId('viewer')}` }, text)
+  link.addEventListener('click', (event) => {
+    event.preventDefault()
+    byId(fieldId('viewer')).focus()
+  })
+  return link
+}
+
+// the empty-viewer notice: its sentence, then a link to the field; the notice itself takes no focus
+const showViewerNotice = (notice: HTMLElement, text: string): void => {
+  notice.replaceChildren(text, ' ', viewerLink('Go to Viewing as'))
+  notice.hidden = false
+}
+
+// the Limits disclosure and its Reset to Defaults button, which shows only while it is open
+const showLimits = (): void => {
+  if (page === null) return
+  byId('limits-toggle').setAttribute('aria-expanded', String(page.limitsOpen))
+  byId('limits-body').hidden = !page.limitsOpen
+  byId('reset-limits').hidden = !page.limitsOpen
+}
+
+const resetButtons: readonly { id: string, section: AutoSection, focus: string }[] = [
+  { id: 'reset-schedule', section: 'schedule', focus: fieldId('autoDay.sun') },
+  { id: 'reset-what', section: 'what', focus: fieldId('autoOthers') },
+  { id: 'reset-post', section: 'post', focus: fieldId('autoPostOthers') },
+  { id: 'reset-limits', section: 'limits', focus: fieldId('autoConcurrency') },
+]
+
+// Reset to Defaults sets one section's fields in the form and saves nothing; in the posting section it turns both switches off without asking, closes an open question, and clears the notices
+const resetAuto = (section: AutoSection, focus: string): void => {
+  if (page === null) return
+  page.form = resetSection(page.form, section)
+  if (section === 'post') {
+    page.postAsk = null
+    page.postConfirmed = {}
+    for (const { key } of postSwitches) byId(`${fieldId(key)}-notice`).hidden = true
+  }
+  fillStatic()
+  changed()
+  byId(focus).focus()
+}
+
+const link = (text: string, target: string): HTMLAnchorElement => {
+  const anchor = h('a', { href: `#${target}` }, text)
+  anchor.addEventListener('click', (event) => {
+    event.preventDefault()
+    byId(target).focus()
+  })
+  return anchor
+}
+
+// everything the card derives from the form and the saved settings: the Now line, the summaries, the notes, and the reference lines; text only, so it never moves focus
+const showAuto = (): void => {
+  if (page === null) return
+  const { form } = page
+  const now = nowLine({ saved: page.saved.autoReview, view: page.autoView, viewer: page.saved.viewer, reading: { nowMs: Date.now() } })
+  byId('auto-now').dataset.tone = now.tone
+  setText(byId('auto-now-text'), now.text)
+  setText(byId('auto-now-meta'), now.meta)
+  const fix = byId('auto-now-fix')
+  setText(fix, now.fix ?? '')
+  fix.hidden = now.fix === null
+  const unsaved = byId('auto-now-unsaved')
+  setText(unsaved, nowUnsavedNote)
+  unsaved.hidden = !isDirty(form, page.saved)
+  setText(byId('schedule-summary'), scheduleSummary(form, browserTimeZone()))
+  const select = byId<HTMLSelectElement>(fieldId('autoInterval'))
+  const legacy = byId('f-autoInterval-legacy')
+  const note = intervalLegacyNote(form.autoInterval)
+  setText(legacy, note ?? '')
+  legacy.hidden = note === null
+  if (select.getAttribute('aria-invalid') !== 'true') {
+    if (note === null) select.removeAttribute('aria-describedby')
+    else select.setAttribute('aria-describedby', 'f-autoInterval-legacy')
+  }
+  setText(byId('limits-summary'), limitsSummary(form))
+  const cap = Number(form.maxConcurrentReviews.trim())
+  const concurrency = byId<HTMLInputElement>(fieldId('autoConcurrency'))
+  if (Number.isSafeInteger(cap) && cap >= 1 && form.maxConcurrentReviews.trim() !== '') concurrency.setAttribute('max', String(cap))
+  else concurrency.removeAttribute('max')
+  for (const { id, section } of resetButtons) byId<HTMLButtonElement>(id).disabled = atSectionDefaults(form, section)
+  const as = postingAsLine(form.viewer)
+  const posting = byId('posting-as')
+  posting.replaceChildren(as.before, ...(as.login === '' ? [] : [h('strong', {}, as.login), as.after]), viewerLink(as.link))
+  const inert = inertPostKinds(form)
+  for (const { kind, key } of postSwitches) {
+    const slot = byId(`${fieldId(key)}-inert`)
+    setText(slot, inert.includes(kind) ? inertPostNote(kind) : '')
+    slot.hidden = !inert.includes(kind)
+  }
+  byId('instructions-ref').replaceChildren(instructionsLine(form.extraReviewInstructions), link('Edit in Agent', fieldId('extraReviewInstructions')))
+  const clone = form.cloneDir.trim()
+  byId('clone-ref').replaceChildren(...(clone === ''
+    ? [h('span', { class: 'warn-text' }, 'No clone folder is set, so no auto-review run can start.'), ' ', link('Set it in Agent', fieldId('cloneDir'))]
+    : ['Each run works in its own worktree of ', h('span', { class: 'mono' }, clone), ', never in the checkout itself. ', link('Change in Agent', fieldId('cloneDir'))]))
+  showLimits()
+}
+
+// the errors the form shows without a Save: only the cap rule, which follows either number as it is typed; every other check waits for the first Save
+const liveErrors = (form: Form): FieldError[] => {
+  const over = autoCapError(form)
+  return over === null ? [] : [over]
+}
+
 // errors: each on its field, through aria-invalid and aria-describedby, and listed above the form
 
 // a field's name in the summary: its label, with the row it sits in
 const fieldName = (key: FieldKey): string => {
-  const label = document.querySelector(`label[for="${fieldId(key)}"]`)?.textContent?.trim() ?? key
+  const label = document.querySelector(`label[for="${fieldId(key)}"]`)?.textContent?.trim() ?? document.getElementById(fieldId(key))?.querySelector('legend')?.textContent?.trim() ?? key
   const row = /^(people|tickets)\.(\d+)\./.exec(key)
   if (row === null) return label
   return `${row[1] === 'people' ? 'Person' : 'Ticket system'} ${Number(row[2]) + 1}, ${label.toLowerCase()}`
@@ -559,9 +701,15 @@ const showErrors = (): void => {
       control.setAttribute('aria-describedby', [hint, errorId(error.field)].filter((id) => id !== null).join(' '))
     }
   }
+  // a field with an error is never left inside the closed Limits disclosure
+  if (page.errors.some((error) => opensLimits(error.field)) && !page.limitsOpen) {
+    page.limitsOpen = true
+    showLimits()
+  }
+  // the cap rule shows on its field as the numbers change; the summary waits for a Save
   const summary = byId('form-errors')
-  summary.hidden = page.errors.length === 0
-  if (page.errors.length === 0) {
+  summary.hidden = !page.checking || page.errors.length === 0
+  if (summary.hidden) {
     summary.replaceChildren()
     return
   }
@@ -603,10 +751,11 @@ const showStatus = (): void => {
 // every edit: errors follow along once a save was refused, and the status line catches up
 const changed = (): void => {
   if (page === null) return
-  if (page.checking) page.errors = validateForm(page.form)
+  page.errors = page.checking ? validateForm(page.form) : liveErrors(page.form)
   // a message about the last save no longer describes the form
   page.status = null
   showErrors()
+  showAuto()
   renderSuggestions()
   showStatus()
 }
@@ -616,7 +765,9 @@ const renderAll = (): void => {
   fillStatic()
   renderPeople()
   renderTickets()
+  if (page !== null) page.errors = page.checking ? page.errors : liveErrors(page.form)
   showErrors()
+  showAuto()
   showStatus()
 }
 
@@ -702,8 +853,10 @@ const loadExtras = async (): Promise<void> => {
   if (page === null) return
   page.texts = sampleTextsFrom(view)
   page.suggestions = suggestions
+  page.autoView = view?.autoReview ?? null
   refreshSamples()
   renderSuggestions()
+  showAuto()
 }
 
 const load = async (): Promise<void> => {
@@ -732,6 +885,8 @@ const load = async (): Promise<void> => {
     postAsk: null,
     postAskLogin: '',
     postConfirmed: {},
+    autoView: null,
+    limitsOpen: false,
   }
   renderAll()
   state.hidden = true
@@ -760,6 +915,14 @@ byId('settings-form').addEventListener('submit', (event) => {
   void save()
 })
 byId('revert').addEventListener('click', revert)
+byId('limits-toggle').addEventListener('click', () => {
+  if (page === null) return
+  // it stays open while an error stands in its fields
+  if (page.limitsOpen && page.errors.some((error) => opensLimits(error.field))) return
+  page.limitsOpen = !page.limitsOpen
+  showLimits()
+})
+for (const { id, section, focus } of resetButtons) byId(id).addEventListener('click', () => resetAuto(section, focus))
 byId('add-person').addEventListener('click', () => addPerson())
 byId('add-ticket').addEventListener('click', () => {
   if (page === null) return

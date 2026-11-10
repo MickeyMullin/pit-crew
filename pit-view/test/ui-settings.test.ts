@@ -415,12 +415,19 @@ const cardOf = (html: string, id: string): string => {
 
 const fieldsIn = (card: string): string[] => [...card.matchAll(/id="f-([A-Za-z]+)"/g)].map((match) => match[1] as string).filter((name, at, all) => all.indexOf(name) === at)
 
-test('the Agent card holds the Agent column switch, then Concurrent reviews, then Self-review over limit, then Extra review instructions, and none of them stays in Behavior', async () => {
+test('the Agent card holds the Agent column switch, then Concurrent reviews, then the Clone folder, then Self-review over limit, then Extra review instructions, and none of them stays in Behavior', async () => {
   const html = await settingsHtml()
   const agent = cardOf(html, 'agent')
   assert.match(agent, /<h2 id="agent-heading" class="card-title">Agent<\/h2>/)
   assert.match(agent, /aria-labelledby="agent-heading"/)
-  assert.deepEqual(fieldsIn(agent), ['showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'extraReviewInstructions'])
+  // the Clone folder moved here from Auto-review, after Concurrent reviews
+  assert.deepEqual(fieldsIn(agent), ['showAgentColumn', 'maxConcurrentReviews', 'cloneDir', 'selfReviewOverCap', 'extraReviewInstructions'])
+  assert.match(agent, /<label for="f-cloneDir">Clone folder<\/label>/)
+  assert.match(agent, /id="f-cloneDir-error" class="field-error" hidden/)
+  assert.match(agent, /id="f-cloneDir-hint"/)
+  // the column hint points to the Clone folder and no longer tells people to edit the config file
+  assert.match(agent, /A start asks first, and runs in the Clone folder below\./)
+  assert.doesNotMatch(agent, /config file|<code>cloneDir<\/code>/)
   assert.match(agent, /Show the Agent column/)
   assert.match(agent, /<label for="f-maxConcurrentReviews">Concurrent reviews<\/label>/)
   assert.match(agent, /<span class="field-label">Self-review over limit<\/span>/)
@@ -653,31 +660,63 @@ test('turning a posting switch on asks first, naming what will post and under wh
   assert.equal(postingAsk('dependabot', 'ines-hale').confirm, 'Post as @ines-hale')
 })
 
-test('the Auto-review card holds every option in order, a labeled control and an error slot for each, the daily limit\'s note, the posting switches, and the login agent as a separate item', async () => {
+test('the Auto-review card is grouped as the owner decided: the Now line, the master switch, Schedule, What to review, Post auto-reviews?, Limits, and a footer, in the owner\'s words', async () => {
   const html = await settingsHtml()
   const auto = cardOf(html, 'auto-review')
   assert.match(auto, /<h2 id="auto-review-heading" class="card-title">Auto-review<\/h2>/)
   assert.match(auto, /aria-labelledby="auto-review-heading"/)
-  assert.deepEqual(fieldsIn(auto), ['autoEnabled', 'autoInterval', 'autoDays', 'autoFrom', 'autoTo', 'autoOthers', 'autoOwn', 'autoDependabot', 'autoConcurrency', 'autoDailyLimit', 'cloneDir', 'autoPostOthers', 'autoPostDependabot'])
-  for (const field of ['autoEnabled', 'autoInterval', 'autoDays', 'autoFrom', 'autoTo', 'autoOthers', 'autoOwn', 'autoDependabot', 'autoConcurrency', 'autoDailyLimit', 'cloneDir', 'autoPostOthers', 'autoPostDependabot']) {
+  // the field ids keep their names; the clone folder is no longer here, and the days are built by the page
+  assert.deepEqual(fieldsIn(auto), ['autoEnabled', 'autoDays', 'autoFrom', 'autoTo', 'autoInterval', 'autoOthers', 'autoOwn', 'autoDependabot', 'autoPostOthers', 'autoPostDependabot', 'autoConcurrency', 'autoDailyLimit'])
+  assert.doesNotMatch(auto, /f-cloneDir"/)
+  for (const field of ['autoEnabled', 'autoDays', 'autoFrom', 'autoTo', 'autoInterval', 'autoOthers', 'autoOwn', 'autoDependabot', 'autoConcurrency', 'autoDailyLimit', 'autoPostOthers', 'autoPostDependabot']) {
     assert.match(auto, new RegExp(`id="f-${field}-error" class="field-error" hidden`), field)
-    assert.match(auto, new RegExp(`id="f-${field}-hint"`), field)
   }
-  assert.match(auto, /<label for="f-autoDailyLimit">Daily limit<\/label>/)
-  assert.match(auto, /<input id="f-autoDailyLimit" class="input mono" type="number"[^>]*min="1" step="1"/)
-  assert.match(auto, /a whole number of 1 or more, 10 by default\. It caps only auto-review runs/)
-  assert.match(auto, /Each auto-review run uses its own worktree of this clone and never the checkout itself/)
-  assert.match(auto, /Runs happen whenever Pit View is running, with or without a page open/)
-  // the two posting questions in the owner\'s words, each with a confirmation slot of its own
-  assert.match(auto, /Post auto-reviews of other people's PRs\?/)
-  assert.match(auto, /Post scheduled Dependabot sweeps\?/)
-  assert.match(auto, /id="auto-post-ask-others" class="post-ask" role="group" hidden/)
-  assert.match(auto, /id="auto-post-ask-dependabot" class="post-ask" role="group" hidden/)
-  // the login agent is shown beside it, outside the form\'s fields, with the note that auto-review does not need it
-  assert.match(auto, /Start at login \(optional\)/)
-  assert.match(auto, /id="login-agent-status"/)
-  assert.match(auto, /Auto-review does not need it/)
+  // the order of the groups
+  const at = (text: string): number => auto.indexOf(text)
+  const order = ['id="auto-now"', 'Review PRs automatically', '>Schedule</legend>', '>What to review</legend>', '>Post auto-reviews?</legend>', '>Limits</span>', 'class="auto-foot"']
+  assert.deepEqual(order.map(at).every((position, index, all) => position > (all[index - 1] ?? -1)), true, 'the groups are in the owner\'s order')
+  // the owner\'s texts, character for character
+  for (const text of [
+    'This setting only affects scheduler-driven auto-reviews. No effect on manually-launched reviews.',
+    'Ready (non-draft) that request your review, plus pushes since your last review (automatic or manual).',
+    '<span class="hint-lines">Off (default): Report in the PR\'s drawer to review and post.</span><span class="hint-lines">On: Posts to GitHub as approval, request for changes, or comment.</span>',
+    'Manually launched sweeps always post and approve/request. (Default off.)',
+    'Auto-reviews share the same concurrency pool as manually-launched agent reviews.',
+    'Auto-review runs per day, 10 by default. Manually-launched runs don\'t count. 0 means no limit.',
+    '<legend class="group-title">Post auto-reviews?</legend>',
+    '<label for="f-autoConcurrency">Concurrent auto-reviews</label>',
+    '<label for="f-autoDailyLimit">Daily limit</label>',
+    'Other people\'s PRs</label>',
+    'Scheduled Dependabot sweeps</label>',
+    'Your own PRs never post, whatever these say.',
+  ]) assert.ok(auto.includes(text), text)
+  // the old labels and wording are gone
+  for (const gone of ['Runs at once', 'Post auto-reviews of other people', 'Post scheduled Dependabot sweeps?', 'Start at login (optional)', 'Check every (minutes)', 'Active days', 'Turning it on asks first', 'Runs happen whenever Pit View is running, with or without a page open. It stays off']) {
+    assert.ok(!auto.includes(gone), gone)
+  }
+  // Check every is a select with no number field and no hint of its own
+  assert.match(auto, /<select id="f-autoInterval" class="input"><\/select>/)
+  assert.doesNotMatch(auto, /id="f-autoInterval-hint"/)
+  // Daily limit takes 0; Concurrent auto-reviews keeps 1
+  assert.match(auto, /<input id="f-autoDailyLimit" class="input mono" type="number"[^>]*min="0" step="1"/)
+  assert.match(auto, /<input id="f-autoConcurrency" class="input mono" type="number"[^>]*min="1" step="1"/)
+  // four Reset to Defaults buttons, named by section; none on the master switch, and Limits\' button is hidden until it opens
+  assert.deepEqual([...auto.matchAll(/id="(reset-[a-z]+)"[^>]*aria-label="(Reset to Defaults: [^"]+)"/g)].map((match) => [match[1], match[2]]), [
+    ['reset-schedule', 'Reset to Defaults: Schedule'], ['reset-what', 'Reset to Defaults: What to review'], ['reset-post', 'Reset to Defaults: Post auto-reviews?'], ['reset-limits', 'Reset to Defaults: Limits'],
+  ])
+  assert.match(auto, /id="reset-limits"[^>]*hidden>Reset to Defaults</)
+  assert.equal([...auto.matchAll(/>Reset to Defaults</g)].length, 4)
+  // Limits is a closed disclosure with its summary; each posting switch has a slot for its question, notice, and inert note
+  assert.match(auto, /id="limits-toggle" type="button" class="auto-disclosure" aria-expanded="false" aria-controls="limits-body"/)
+  assert.match(auto, /id="limits-body" class="limits-grid" hidden/)
+  for (const kind of ['others', 'dependabot']) assert.match(auto, new RegExp(`id="auto-post-ask-${kind}" class="post-ask" role="group" hidden`))
+  assert.match(auto, /id="f-autoPostOthers-inert"/)
+  assert.match(auto, /id="f-autoPostDependabot-notice" class="notice" role="status" hidden/)
+  // the login agent is a footer sentence outside the form\'s fields
+  assert.match(auto, /Start at login: <strong id="login-agent-status">/)
   assert.doesNotMatch(auto, /id="f-loginAgent/)
+  // the Now line is not a live region
+  assert.doesNotMatch(auto.slice(at('id="auto-now"'), at('Review PRs automatically')), /aria-live|role="status"/)
 })
 
 test('the page asks before a posting switch turns on through an in-app confirmation, never a browser dialog, and keeps the switch off until it is confirmed', async () => {
