@@ -9,7 +9,7 @@ import type { ReportListing } from '../src/reports.ts'
 import { actionBound, actionDoneText, actionOffers, actionRefusalText, actionRequest } from './actionsview.ts'
 import type { ActionConfirmModel, ActionKind, PersonChoice } from './actionsview.ts'
 import { postRequest, refusalText, rereadRequest, startRequest, stopRequest } from './agent.ts'
-import type { AgentCell, RunView, StartKind } from './agent.ts'
+import type { AgentCell, PostForm, RunView, StartKind } from './agent.ts'
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
@@ -17,7 +17,7 @@ import {
   commentsCheckOn, confirmHolds, specialInstructionsSent, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
   rereadBound, resumeReadyText, returnSelector,
 } from './drawerview.ts'
-import type { Confirm, DrawerModel, ExtraLine, Loadable, Opener, StartConfirmModel, StopModel } from './drawerview.ts'
+import type { Confirm, DrawerModel, ExtraLine, Loadable, Opener, StartConfirmModel, StopModel, StoredAskModel, StoredButtonsModel } from './drawerview.ts'
 import { formatSince } from './format.ts'
 import type { ReportPanel } from './reportpanel.ts'
 import { getJson, sendRun } from './runapi.ts'
@@ -147,7 +147,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
 
   const errorLine = (): HTMLParagraphElement => h('p', { id: 'drawer-error', class: 'confirm-error', role: 'alert' })
 
-  const confirmActions = (goText: string, tone: 'primary' | 'danger' | 'caution', onGo: () => void): HTMLDivElement => {
+  const confirmActions = (goText: string, tone: 'primary' | 'danger' | 'caution', onGo: () => void, fresh: { text: string, disabled: boolean } | null = null): HTMLDivElement => {
     const cancel = h('button', { type: 'button', class: 'button', 'data-focus-key': 'confirm-cancel' }, 'Cancel')
     const go = h('button', { type: 'button', class: `button button-${tone}`, 'data-focus-key': 'confirm-go', 'aria-describedby': 'drawer-error' }, goText)
     cancel.addEventListener('click', () => {
@@ -156,7 +156,10 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     go.addEventListener('click', () => {
       if (!busy) onGo()
     })
-    return h('div', { class: 'confirm-actions' }, cancel, go)
+    // a moved head's third button, after the two, that starts a review instead of posting
+    const third = fresh === null ? null : h('button', { type: 'button', class: 'button', disabled: fresh.disabled, 'data-focus-key': 'confirm-fresh' }, fresh.text)
+    third?.addEventListener('click', () => askFreshReview())
+    return h('div', { class: 'confirm-actions' }, cancel, go, third)
   }
 
   // the Self-review's box: a choice for this one start, kept in the confirmation as the runner is
@@ -323,18 +326,22 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     const go = byKey('confirm-go') as HTMLButtonElement | null
     if (picker !== null) picker.disabled = busy || (model?.actionAsk?.reviewers?.length ?? 0) === 0
     if (cancel !== null) (cancel as HTMLButtonElement).disabled = busy
+    const fresh = byKey('confirm-fresh') as HTMLButtonElement | null
+    if (fresh !== null) fresh.disabled = busy || model?.storedAsk?.fresh?.disabled !== false
     if (go !== null) {
       go.disabled = busy || (confirm?.type === 'action' && model?.actionAsk?.canConfirm === false)
       const idleText = confirm?.type === 'stop' ? (model?.stop?.confirm ?? 'Stop run')
         : confirm?.type === 'action' ? (model?.actionAsk?.confirm ?? 'Confirm')
           : confirm?.type === 'reread' ? (model?.rereadAsk?.confirm ?? 'Re-read result')
             : confirm?.type === 'post' ? (model?.postAsk?.confirm ?? 'Post it')
-              : (model?.confirm?.confirm ?? 'Start')
+              : confirm?.type === 'storedPost' ? (model?.storedAsk?.confirm ?? 'Post')
+                : (model?.confirm?.confirm ?? 'Start')
       const busyText = confirm?.type === 'stop' ? (model?.stop?.busy ?? 'Stopping…')
         : confirm?.type === 'action' ? (model?.actionAsk?.busy ?? 'Working…')
           : confirm?.type === 'reread' ? (model?.rereadAsk?.busy ?? 'Reading…')
             : confirm?.type === 'post' ? (model?.postAsk?.busy ?? 'Posting…')
-              : (model?.confirm?.busy ?? 'Starting…')
+              : confirm?.type === 'storedPost' ? (model?.storedAsk?.busy ?? 'Posting…')
+                : (model?.confirm?.busy ?? 'Starting…')
       setText(go, busy ? busyText : idleText)
     }
   }
@@ -439,6 +446,25 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     byKey('confirm-cancel')?.focus({ preventScroll: true })
   }
 
+  // the post button on an auto-review run that did not post: one click opens the confirmation, which names the form, the report, the login, the CI state read now, and, when the head has moved, both heads. Nothing is sent until its own button is clicked, and what it shows now is what the request is bound to
+  const askStoredPost = (form: PostForm): void => {
+    const offer = latest()?.storedOffer
+    if (offer == null || !offer.forms.includes(form) || options.rowOf(number ?? 0) === undefined) return
+    confirm = { type: 'storedPost', runId: offer.runId, repo: offer.repo, viewer: offer.viewer, headSha: offer.headSha, reviewedSha: offer.reviewedSha, form, ci: offer.ci }
+    confirmFrom = `stored:${form}`
+    error = ''
+    render()
+    byKey('confirm-cancel')?.focus({ preventScroll: true })
+  }
+
+  // the third button of a moved head's confirmation: the post is dropped and the existing start confirmation opens, with its own Start; nothing is posted or started by this click
+  const askFreshReview = (): void => {
+    if (busy || confirm?.type !== 'storedPost') return
+    const start = current()?.storedAsk?.fresh
+    if (start == null || start.disabled) return
+    askStart(start.kind)
+  }
+
   const cancelConfirm = (): void => {
     const back = confirmFrom
     confirm = null
@@ -520,6 +546,32 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       options.say(`#${n}: report posted. The row is refreshing.`)
       render()
       // the row arrives as a patch and the card follows it; the heading holds focus meanwhile
+      focusKey(null)
+      void loadRuns()
+      return
+    }
+    error = refusalText('post', answer.status, answer.error)
+    paintConfirm()
+    byKey('confirm-go')?.focus({ preventScroll: true })
+  }
+
+  const doStoredPost = async (): Promise<void> => {
+    if (busy || confirm?.type !== 'storedPost' || number === null) return
+    const asked = confirm
+    const n = number
+    busy = true
+    error = ''
+    paintConfirm()
+    const answer = await sendRun(postRequest(asked.runId, { repo: asked.repo, viewer: asked.viewer, number: n, headSha: asked.headSha, reviewedSha: asked.reviewedSha, form: asked.form }, options.token))
+    busy = false
+    if (n !== number) return
+    if (answer.ok) {
+      confirm = null
+      confirmFrom = null
+      error = ''
+      options.say(`#${n}: report posted. The row is refreshing.`)
+      render()
+      // the row arrives as a patch and the list follows it; the heading holds focus meanwhile
       focusKey(null)
       void loadRuns()
       return
@@ -887,9 +939,28 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   })
 
   // the PR's auto-review runs (section 10, In the UI), under their own heading and only when there are some; each time is an age that moves in place
+  // the post button's confirmation, in the list under the run it is about: the form, the report, the login, the CI state, and, when the head has moved, the sentence naming both heads
+  const storedBlock = (ask: StoredAskModel): HTMLElement =>
+    h('div', { class: 'confirm', role: 'group', 'aria-labelledby': 'drawer-confirm-heading' },
+      h('h4', { id: 'drawer-confirm-heading', class: 'confirm-heading' }, ask.heading),
+      h('p', { class: 'confirm-title' }, ask.title),
+      ask.headMoved === null ? null : h('p', { class: 'confirm-moved', 'data-stored-moved': '' }, ask.headMoved),
+      facts([['Report', ask.report], ['Command', ask.command], ['On GitHub', ask.effect], ['CI', ask.ci], ['Bound to', ask.bound]]),
+      errorLine(),
+      confirmActions(ask.confirm, 'primary', () => void doStoredPost(), ask.fresh))
+
+  const storedButtons = (stored: StoredButtonsModel): HTMLElement =>
+    h('div', { class: 'drawer-run-actions' },
+      stored.buttons.map((button, index) => {
+        const element = h('button', { type: 'button', class: `button ${index === 0 ? 'button-primary' : ''}`.trim(), disabled: stored.disabled, 'data-stored-form': button.form, 'data-focus-key': `stored:${button.form}` }, button.text)
+        element.addEventListener('click', () => askStoredPost(button.form))
+        return element
+      }),
+      stored.reason === null ? null : h('p', { class: 'drawer-note' }, stored.reason))
+
   const autoRunsPart = (model: DrawerModel): Part => ({
     key: 'auto-runs',
-    sig: JSON.stringify(model.autoRuns),
+    sig: JSON.stringify([model.autoRuns, model.storedAsk]),
     build: () => section('auto-runs', 'Auto-review',
       h('ul', { class: 'drawer-list' },
         model.autoRuns.map((row) => h('li', { class: 'drawer-item', title: row.note },
@@ -902,7 +973,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
             row.startedAt === null ? null : ' · ',
             row.startedAt === null ? null : ageSpan(row.startedAt, 'started ', options.nowMs()),
             row.finishedAt === null ? null : ' · ',
-            row.finishedAt === null ? null : ageSpan(row.finishedAt, 'finished ', options.nowMs())))))),
+            row.finishedAt === null ? null : ageSpan(row.finishedAt, 'finished ', options.nowMs())),
+          row.stored === null ? null : model.storedAsk !== null && model.storedAsk.runId === row.stored.runId ? storedBlock(model.storedAsk) : storedButtons(row.stored))))),
   })
 
   const reportsPart = (model: DrawerModel): Part => ({

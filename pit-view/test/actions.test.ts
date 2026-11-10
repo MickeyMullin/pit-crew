@@ -1956,3 +1956,324 @@ test('a post whose fate gh cannot tell keeps its mark and is not offered again; 
     }
   }
 })
+
+// the post button (section 10, Posting): the stored report of an auto-review run that ran with --no-post, posted by the same server path as Post it
+
+const otherSha = '0123456789abcdef0123456789abcdef01234567'
+
+// an auto-review run of a PR that finished with its report on disk and posted nothing, as a run with --no-post does; reviewed names the commit the review read, which is the PR's head unless a test moves it
+const storedRun = async (h: Harness, { number = 106, reviewed, result = {}, report, command = 'review-pr', status = 'done' }: { number?: number, reviewed?: string, result?: Record<string, unknown>, report?: string | null, command?: string, status?: 'done' | 'failed' } = {}): Promise<{ id: number, sha: string, reviewed: string }> => {
+  await filled(h)
+  const { sha } = await listed(number)
+  const read = reviewed ?? sha
+  const reports = join(h.home, 'agents', 'output')
+  await mkdir(reports, { recursive: true })
+  if (report !== null) await writeFile(join(reports, `PR-${number}.md`), report ?? `# Review\n\nReviewed commit: \`fix/x\` @ \`${read.slice(0, 7)}\`\n\nNo actionable findings.\n`)
+  const tick = h.server.cache.createTick(scenario.repo)
+  const cwd = join(h.home, 'dev', 'orbit')
+  const request = { repo: scenario.repo, number, command, args: [String(number), '--no-post'], label: 'Review' }
+  const queued = h.server.launcher.queueScheduled(request, cwd, { tick: tick.id, reason: 'requested', headOid: read.slice(0, 7), posting: false })
+  await h.server.launcher.startScheduled(queued.id, request, { args: request.args, posting: false }, async () => cwd)
+  const child = h.launch.children.at(-1)!
+  if (status === 'failed') {
+    child.exit(1)
+  } else {
+    await child.result({
+      schema: 'pit-crew/review-result@1', command, status: 'done', target: { repo: scenario.repo, pr: number }, reviewed: { kind: 'commit', sha: read }, verdict: 'clean', recommendation: command === 'review-dependabot' ? 'approve' : null,
+      findings: [], ci: 'green', fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: `~/agents/output/PR-${number}.md`, question: null, error: null, ...result,
+    })
+    child.exit(0)
+  }
+  await h.server.launcher.settled(queued.id)
+  return { id: queued.id, sha, reviewed: read }
+}
+
+const storedBody = (number: number, sha: string, reviewed: string, form: string): Record<string, unknown> => ({ repo: scenario.repo, viewer: scenario.viewer, number, headSha: sha, reviewedSha: reviewed, form })
+
+test('a --no-post auto-review run offers the post button on its row: the recommended form and Comment, the report, the login, and the CI state; finishing posts nothing', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(h)
+    const agent = (await rowOf(h, 106))?.agent
+    assert.equal(agent?.status, 'done')
+    assert.equal(agent?.postOffer, null)
+    assert.equal(agent?.storedOffer?.runId, id)
+    assert.deepEqual(agent?.storedOffer?.forms, ['approve', 'comment'])
+    assert.equal(agent?.storedOffer?.reviewedSha, sha)
+    assert.equal(agent?.storedOffer?.headSha, sha)
+    assert.equal(agent?.storedOffer?.viewer, scenario.viewer)
+    assert.equal(agent?.storedOffer?.ci, 'green')
+    assert.equal(agent?.storedOffer?.reportPath, '~/agents/output/PR-106.md')
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the post button posts the stored report once as the form clicked, with the worker\'s gh command on a private copy, and starts no review', async () => {
+  const behavior: Behavior = { bodies: [] }
+  const h = await blockedHarness(behavior)
+  try {
+    const { id, sha } = await storedRun(h)
+    const runs = h.launch.children.length
+    const answer = await postIt(h, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(answer.status, 200)
+    assert.deepEqual(answer.body.posted, { form: 'approve', url: `https://github.com/${scenario.repo}/pull/106` })
+    const posts = postsOf(h.runner)
+    assert.equal(posts.length, 1)
+    assert.deepEqual(posts[0]?.args.slice(0, -1), ['pr', 'review', '106', '--repo', scenario.repo, '--approve', '--body-file'])
+    assert.match(behavior.bodies?.[0]?.text ?? '', /No actionable findings/)
+    assert.equal(behavior.bodies?.[0]?.mode, 0o600)
+    const order = h.runner.calls.map((call) => call.args)
+    const writeAt = order.findIndex((args) => args[0] === 'pr' && args[1] === 'review')
+    assert.ok(order.slice(0, writeAt).some((args) => args[0] === 'api' && args[1] === 'user'), 'the account was confirmed first')
+    assert.ok(order.slice(0, writeAt).some(isLiveRead) && order.slice(0, writeAt).some(isReviewsRead), 'the PR and its reviews were read live first')
+    // no new review started, and the row now reads as any posted review does
+    assert.equal(h.launch.children.length, runs)
+    const agent = (await rowOf(h, 106))?.agent
+    assert.equal(agent?.text, 'Approved')
+    assert.equal(agent?.storedOffer, null)
+    assert.deepEqual(agent?.result?.kind === 'review' && agent.result.posted, { form: 'approve', url: `https://github.com/${scenario.repo}/pull/106` })
+    assert.equal(h.server.cache.getRun(id)?.postAttemptedAt !== null, true)
+    // the offer is gone and a second click posts nothing
+    assert.equal((await postIt(h, id, storedBody(106, sha, sha, 'approve'))).status, 422)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('Comment posts through gh pr comment, and Request Changes posts for a report that recommends it', async () => {
+  const comment = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(comment)
+    const answer = await postIt(comment, id, storedBody(106, sha, sha, 'comment'))
+    assert.equal(answer.status, 200)
+    assert.deepEqual(postsOf(comment.runner)[0]?.args.slice(0, -1), ['pr', 'comment', '106', '--repo', scenario.repo, '--body-file'])
+  } finally {
+    await comment.cleanup()
+  }
+  const changes = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(changes, { result: { verdict: 'changesRequested' } })
+    assert.deepEqual((await rowOf(changes, 106))?.agent?.storedOffer?.forms, ['requestChanges', 'comment'])
+    assert.equal((await postIt(changes, id, storedBody(106, sha, sha, 'requestChanges'))).status, 200)
+    assert.deepEqual(postsOf(changes.runner)[0]?.args.slice(0, -1), ['pr', 'review', '106', '--repo', scenario.repo, '--request-changes', '--body-file'])
+  } finally {
+    await changes.cleanup()
+  }
+})
+
+test('a form the stored report does not offer posts nothing: Approve for a change request, and anything but Comment for a Dependabot hold', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(h, { result: { verdict: 'changesRequested' } })
+    const refused = await postIt(h, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(refused.status, 409)
+    assert.deepEqual(postsOf(h.runner), [])
+    assert.equal((await rowOf(h, 106))?.agent?.storedOffer?.runId, id)
+  } finally {
+    await h.cleanup()
+  }
+  const hold = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(hold, { number: 115, command: 'review-dependabot', result: { recommendation: 'hold' } })
+    assert.deepEqual((await rowOf(hold, 115))?.agent?.storedOffer?.forms, ['comment'])
+    assert.equal((await postIt(hold, id, { ...storedBody(115, sha, sha, 'approve') })).status, 409)
+    assert.deepEqual(postsOf(hold.runner), [])
+  } finally {
+    await hold.cleanup()
+  }
+})
+
+test('CI is shown and never a block: Approve posts with CI failed, and the offer says which', async () => {
+  const h = await blockedHarness()
+  try {
+    // 115 has only canceled checks in the fixture, which the cache reads as failed
+    const { id, sha } = await storedRun(h, { number: 115, command: 'review-dependabot' })
+    const offer = (await rowOf(h, 115))?.agent?.storedOffer
+    assert.equal(offer?.ci, 'failed')
+    assert.deepEqual(offer?.forms, ['approve', 'comment'])
+    assert.equal((await postIt(h, id, storedBody(115, sha, sha, 'approve'))).status, 200)
+    assert.deepEqual(postsOf(h.runner)[0]?.args.slice(0, 7), ['pr', 'review', '115', '--repo', scenario.repo, '--approve', '--body-file'])
+  } finally {
+    await h.cleanup()
+  }
+  const pending = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(pending, { number: 112 })
+    assert.equal((await rowOf(pending, 112))?.agent?.storedOffer?.ci, 'pending')
+    assert.equal((await postIt(pending, id, storedBody(112, sha, sha, 'approve'))).status, 200)
+  } finally {
+    await pending.cleanup()
+  }
+})
+
+test('a head that moved since the review: the offer carries both heads, and the post is bound to the current head the confirmation named and the reviewed one', async () => {
+  const behavior: Behavior = { bodies: [] }
+  const h = await blockedHarness(behavior)
+  try {
+    const { id, sha } = await storedRun(h, { reviewed: otherSha })
+    const offer = (await rowOf(h, 106))?.agent?.storedOffer
+    assert.equal(offer?.reviewedSha, otherSha)
+    assert.equal(offer?.headSha, sha)
+    // the head the confirmation named is not the cached head: nothing posts
+    assert.equal((await postIt(h, id, storedBody(106, otherSha, otherSha, 'approve'))).status, 409)
+    // the reviewed head it named is not the report's: nothing posts
+    assert.equal((await postIt(h, id, storedBody(106, sha, sha, 'approve'))).status, 409)
+    assert.deepEqual(postsOf(h.runner), [])
+    const answer = await postIt(h, id, storedBody(106, sha, otherSha, 'approve'))
+    assert.equal(answer.status, 200)
+    assert.equal(postsOf(h.runner).length, 1)
+    assert.match(behavior.bodies?.[0]?.text ?? '', /No actionable findings/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a head that moves after the confirmation, a report rewritten, or a viewer who already reviewed the head posts nothing', async () => {
+  const moved = await blockedHarness({ live: () => ({ head: { sha: otherSha } }) })
+  try {
+    const { id, sha } = await storedRun(moved)
+    const answer = await postIt(moved, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(answer.status, 422)
+    assert.match(String(answer.body.error), /new commits/)
+    assert.deepEqual(postsOf(moved.runner), [])
+  } finally {
+    await moved.cleanup()
+  }
+  const rewritten = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(rewritten)
+    await writeFile(join(rewritten.home, 'agents', 'output', 'PR-106.md'), reportText(sha, '- **P1**\n\n**[P1] A later run found this**'))
+    const answer = await postIt(rewritten, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(answer.status, 422)
+    assert.match(String(answer.body.error), /has changed since run \d+ finished/)
+    assert.deepEqual(postsOf(rewritten.runner), [])
+  } finally {
+    await rewritten.cleanup()
+  }
+  const behavior: Behavior = {}
+  const reviewed = await blockedHarness(behavior)
+  try {
+    const { id, sha } = await storedRun(reviewed)
+    // an owner who approved this head by hand since the cache was read
+    behavior.reviews = `${scenario.viewer}\t${sha}\tAPPROVED\n`
+    const answer = await postIt(reviewed, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(answer.status, 422)
+    assert.match(String(answer.body.error), /already reviewed/)
+    assert.deepEqual(postsOf(reviewed.runner), [])
+  } finally {
+    await reviewed.cleanup()
+  }
+})
+
+test('a post GitHub refuses leaves the report unposted and the button standing, and a post that may have landed takes it away', async () => {
+  const refused = await blockedHarness({ writeError: 'HTTP 403: Resource not accessible' })
+  try {
+    const { id, sha } = await storedRun(refused)
+    const answer = await postIt(refused, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(answer.status, 502)
+    assert.equal(refused.server.cache.getRun(id)?.postAttemptedAt, null)
+    const agent = (await rowOf(refused, 106))?.agent
+    assert.equal(agent?.storedOffer?.runId, id)
+    assert.equal(agent?.result?.kind === 'review' && agent.result.posted, null)
+    assert.equal(agent?.result?.kind === 'review' && agent.result.notPostedReason, 'noPost')
+  } finally {
+    await refused.cleanup()
+  }
+  const unknown = await blockedHarness({ writeError: 'connection reset by peer' })
+  try {
+    const { id, sha } = await storedRun(unknown)
+    assert.equal((await postIt(unknown, id, storedBody(106, sha, sha, 'approve'))).status, 502)
+    assert.equal((await rowOf(unknown, 106))?.agent?.storedOffer, null)
+  } finally {
+    await unknown.cleanup()
+  }
+})
+
+test('a wrong login posts nothing: the account check refuses before the write', async () => {
+  const behavior: Behavior = {}
+  const h = await blockedHarness(behavior)
+  try {
+    const { id, sha } = await storedRun(h)
+    behavior.account = 'sam-tran'
+    const answer = await postIt(h, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(answer.status, 422)
+    assert.deepEqual(postsOf(h.runner), [])
+    assert.equal((await rowOf(h, 106))?.agent?.storedOffer?.runId, id)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('no stored report is offered, and none posts, for a posted run, a run that failed before writing a report, your own PR, a manual run, or an allowed-to-post run', async () => {
+  const failedFirst = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(failedFirst, { status: 'failed' })
+    assert.equal((await rowOf(failedFirst, 106))?.agent?.storedOffer, null)
+    assert.equal((await postIt(failedFirst, id, storedBody(106, sha, sha, 'comment'))).status, 422)
+    assert.deepEqual(postsOf(failedFirst.runner), [])
+  } finally {
+    await failedFirst.cleanup()
+  }
+  const own = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(own, { number: 104, result: { notPostedReason: 'ownPr' } })
+    assert.equal((await rowOf(own, 104))?.agent?.storedOffer, null)
+    assert.equal((await postIt(own, id, { ...storedBody(104, sha, sha, 'comment') })).status, 422)
+    assert.deepEqual(postsOf(own.runner), [])
+  } finally {
+    await own.cleanup()
+  }
+  const posted = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(posted)
+    assert.equal((await postIt(posted, id, storedBody(106, sha, sha, 'comment'))).status, 200)
+    assert.equal((await postIt(posted, id, storedBody(106, sha, sha, 'comment'))).status, 422)
+    assert.equal(postsOf(posted.runner).length, 1)
+  } finally {
+    await posted.cleanup()
+  }
+  // a blocked Post it run takes no reviewedSha, and a stored run takes no body without one
+  const blocked = await blockedHarness()
+  try {
+    const { id, sha } = await blockedRun(blocked)
+    assert.equal((await postIt(blocked, id, storedBody(106, sha, sha, 'approve'))).status, 422)
+    assert.deepEqual(postsOf(blocked.runner), [])
+  } finally {
+    await blocked.cleanup()
+  }
+  const stored = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(stored)
+    assert.equal((await postIt(stored, id, postBody(sha, 'approve'))).status, 422)
+    assert.deepEqual(postsOf(stored.runner), [])
+  } finally {
+    await stored.cleanup()
+  }
+})
+
+test('the post button\'s request holds the same origin and token rules as Post it, and a malformed reviewedSha is a 400', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(h)
+    const body = storedBody(106, sha, sha, 'approve')
+    const noToken = await fetch(`${h.base}/api/runs/${id}/post`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: h.base }, body: JSON.stringify(body) })
+    assert.equal(noToken.status, 403)
+    const wrongToken = await postIt(h, id, body, { 'X-Pit-View-Token': 'nope' })
+    assert.equal(wrongToken.status, 403)
+    const noOrigin = await fetch(`${h.base}/api/runs/${id}/post`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pit-View-Token': h.server.token }, body: JSON.stringify(body) })
+    assert.equal(noOrigin.status, 403)
+    const foreign = await postIt(h, id, body, { Origin: 'http://evil.example' })
+    assert.equal(foreign.status, 403)
+    for (const bad of ['abc', 7, '', null, otherSha.toUpperCase().slice(0, 39)]) {
+      assert.equal((await postIt(h, id, { ...body, reviewedSha: bad })).status, 400, String(bad))
+    }
+    assert.equal((await postIt(h, id, { ...body, extra: 1 })).status, 400)
+    assert.deepEqual(postsOf(h.runner), [])
+    assert.equal((await rowOf(h, 106))?.agent?.storedOffer?.runId, id)
+  } finally {
+    await h.cleanup()
+  }
+})

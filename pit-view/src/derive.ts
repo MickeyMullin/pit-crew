@@ -339,6 +339,17 @@ const isCanceled = (context: RawCheckContext): boolean => context.__typename ===
 
 const contextsOf = (pr: RawOpenPr): RawCheckContext[] => pr.headCommit.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? []
 
+// the PR's CI as the cache holds it, for the post button's confirmation: failed when any check failed or, with none failing or running, any was canceled, since the head has not passed; pending while any still runs; none when no check has run; and green otherwise
+export type CiReading = 'green' | 'pending' | 'failed' | 'none'
+
+export const ciStateOf = (pr: RawOpenPr): CiReading => {
+  const contexts = contextsOf(pr)
+  if (contexts.length === 0) return 'none'
+  if (contexts.some(isFailing)) return 'failed'
+  if (contexts.some(isRunning)) return 'pending'
+  return contexts.some(isCanceled) ? 'failed' : 'green'
+}
+
 export const deriveIssues = (pr: RawOpenPr): Issue[] => {
   const issues: Issue[] = []
   if (pr.reviewDecision === 'CHANGES_REQUESTED') {

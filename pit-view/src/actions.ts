@@ -6,7 +6,7 @@ import type { Config } from './config.ts'
 import { deriveIssues, deriveMerge, isPrimaryBase, offersMerge } from './derive.ts'
 import { GhError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr } from './github.ts'
-import { isHttpUrl, offersFix, postArgs, postOffer } from './launcher.ts'
+import { isHttpUrl, offersFix, postArgs, postOffer, storedOffer } from './launcher.ts'
 import type { Posted, PostForm, RunView, UpdateAction } from './launcher.ts'
 import { parseReviewedCommit, readReport, reportHash, ReportReadError } from './reports.ts'
 
@@ -132,19 +132,24 @@ const refuseIfMoved = (number: number, live: LivePr, base: string, headSha: stri
 const sameLogin = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
 
 // Post it (section 8, Launching runs, Blocked post): everything its confirmation showed comes back, and nothing else is taken from the page
-export type PostRequest = { repo: string, viewer: string, number: number, headSha: string, form: PostForm }
+// reviewedSha is set only by the post button, for a stored report
+export type PostRequest = { repo: string, viewer: string, number: number, headSha: string, form: PostForm, reviewedSha?: string }
 export type PostResult = { number: number, runId: number, posted: Posted, run: RunView | null }
 
-const postUsage = 'send { "repo": "<owner/name shown>", "viewer": "<login shown>", "number": 106, "headSha": "<full head SHA shown>", "form": "approve" | "requestChanges" | "comment" }, all five as the confirmation showed them'
+const formWords: Readonly<Record<PostForm, string>> = { approve: 'an approval', requestChanges: 'a request for changes', comment: 'a comment' }
+
+const postUsage = 'send { "repo": "<owner/name shown>", "viewer": "<login shown>", "number": 106, "headSha": "<full head SHA shown>", "form": "approve" | "requestChanges" | "comment" } as the confirmation showed them, and for a stored report also "reviewedSha": "<full SHA of the commit the review read>"'
 
 export const parsePost = (body: unknown): PostRequest => {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ActionError('badRequest', postUsage)
-  const { repo, viewer, number, headSha, form, ...rest } = body as Record<string, unknown>
+  const { repo, viewer, number, headSha, form, reviewedSha, ...rest } = body as Record<string, unknown>
   const extra = Object.keys(rest)[0]
   if (extra !== undefined) throw new ActionError('badRequest', `unknown field ${extra}; ${postUsage}`)
   if (typeof repo !== 'string' || repo === '' || typeof viewer !== 'string' || viewer === '' || typeof number !== 'number' || !Number.isInteger(number) || number < 1 ||
     typeof headSha !== 'string' || !/^[0-9a-f]{40}$/i.test(headSha) || (form !== 'approve' && form !== 'requestChanges' && form !== 'comment')) throw new ActionError('badRequest', postUsage)
-  return { repo, viewer, number, headSha: headSha.toLowerCase(), form }
+  // present only on the post button's request, for a stored report: the full commit the report says it reviewed, which is the head only until the head moves
+  if ('reviewedSha' in (body as object) && (typeof reviewedSha !== 'string' || !/^[0-9a-f]{40}$/i.test(reviewedSha))) throw new ActionError('badRequest', postUsage)
+  return { repo, viewer, number, headSha: headSha.toLowerCase(), form, ...(typeof reviewedSha === 'string' ? { reviewedSha: reviewedSha.toLowerCase() } : {}) }
 }
 
 // the reviews on a PR, read live just before a post, one line each: login, commit, and state
@@ -343,9 +348,23 @@ export const createActions = (options: ActionsOptions): Actions => {
     const key = `${repo}#${number}`
     if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
     if (run.postAttemptedAt !== null) throw new ActionError('notAllowed', `run ${id} has already begun its post, which may have landed; nothing was posted. Check #${number} on GitHub`)
-    const offer = postOffer(row.pr, config, run)
-    if (offer === null) throw new ActionError('notAllowed', `run ${id} has no report waiting to be posted on #${number}; nothing was posted`)
-    if (offer.form !== form) throw new ActionError('stale', `this report would now post as ${offer.form}, not ${form}; nothing was posted. Reload its confirmation to see the current state`)
+    // Post it (a blocked post, reviewed at the head) and the post button (a stored report, which may have been reviewed at an earlier head) are told apart by the request: only the button sends reviewedSha
+    let offer: { report: string, reportPath: string }
+    let reviewedAt: string
+    if (request.reviewedSha === undefined) {
+      const blocked = postOffer(row.pr, config, run)
+      if (blocked === null) throw new ActionError('notAllowed', `run ${id} has no report waiting to be posted on #${number}; nothing was posted`)
+      if (blocked.form !== form) throw new ActionError('stale', `this report would now post as ${blocked.form}, not ${form}; nothing was posted. Reload its confirmation to see the current state`)
+      offer = blocked
+      reviewedAt = headSha
+    } else {
+      const stored = storedOffer(row.pr, config, run)
+      if (stored === null) throw new ActionError('notAllowed', `run ${id} has no stored report waiting to be posted on #${number}; nothing was posted`)
+      if (stored.reviewedSha !== request.reviewedSha) throw new ActionError('stale', `this report reviewed ${stored.reviewedSha.slice(0, 7)}, not ${request.reviewedSha.slice(0, 7)}; nothing was posted. Reload its confirmation to see the current state`)
+      if (!stored.forms.includes(form)) throw new ActionError('stale', `this report offers ${orList(stored.forms.map((offered) => formWords[offered]))}, not ${formWords[form]}; nothing was posted. Reload its confirmation to see the current state`)
+      offer = stored
+      reviewedAt = stored.reviewedSha
+    }
     inFlight.add(key)
     try {
       // the report on disk must be the one this run finished with: a later run of the PR writes the same name. One read: the text checked here is the text posted
@@ -358,9 +377,9 @@ export const createActions = (options: ActionsOptions): Actions => {
         throw error
       }
       if (reportHash(report) !== run.reportHash) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} has changed since run ${id} finished, so it is no longer that run's review; nothing was posted. Start a new review to post the report as it is now`)
-      const reviewedAt = parseReviewedCommit(report.split('\n').slice(0, 20))
-      if (reviewedAt === null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} does not say which commit it reviewed; nothing was posted`)
-      if (!headSha.startsWith(reviewedAt)) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} is about another commit (${reviewedAt}); nothing was posted`)
+      const named = parseReviewedCommit(report.split('\n').slice(0, 20))
+      if (named === null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} does not say which commit it reviewed; nothing was posted`)
+      if (!reviewedAt.startsWith(named)) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} is about another commit (${named}); nothing was posted`)
       let marked = false
       const check = async (read: (args: string[]) => Promise<string>): Promise<void> => {
         let live: LivePr

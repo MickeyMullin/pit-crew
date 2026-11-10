@@ -3,12 +3,12 @@
 // the per-start token, how a refusal reads, and what changes are announced; pure, with every
 // clock reading passed in. The drawer's own words are in drawerview.ts
 import type { RunnerName } from '../src/config.ts'
-import type { AgentCell, AgentResult, PostForm, RunnerModels, RunView, StartKind, StartOption, StepSlot } from '../src/launcher.ts'
+import type { AgentCell, AgentResult, PostForm, RunnerModels, RunView, StartKind, StartOption, StepSlot, StoredOffer } from '../src/launcher.ts'
 import type { OpenRow } from '../src/derive.ts'
 import { mergeOffered } from './mergeoffer.ts'
 import { formatDuration, formatSince } from './format.ts'
 
-export type { AgentCell, AgentResult, PostForm, RunnerModels, RunnerName, RunView, StartKind, StartOption, StepSlot }
+export type { AgentCell, AgentResult, PostForm, RunnerModels, RunnerName, RunView, StartKind, StartOption, StepSlot, StoredOffer }
 
 export const runnerNames: readonly RunnerName[] = ['claude', 'codex']
 
@@ -204,7 +204,8 @@ export const rereadRequest = (runId: number, ask: RereadAsk, token: string): Run
 })
 
 // what Post it's confirmation showed, which the request carries back whole: the server refuses with 409 and posts nothing when any of it differs from what is in effect now
-export type PostAsk = { repo: string, viewer: string, number: number, headSha: string, form: PostForm }
+// reviewedSha is sent only by the post button, for a stored report: the commit the report says it reviewed, which is the head only until the head moves
+export type PostAsk = { repo: string, viewer: string, number: number, headSha: string, form: PostForm, reviewedSha?: string }
 
 export const postRequest = (runId: number, ask: PostAsk, token: string): RunRequest => ({
   url: `/api/runs/${runId}/post`,

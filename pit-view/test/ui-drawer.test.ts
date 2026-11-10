@@ -62,7 +62,7 @@ const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
   runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
   steps: slots(), tandem: false, commit: null,
   extraInstructions: null, origin: null, queuedAt: null, posted: null,
-  finishedAt: null, text: null, result: null, question: null, note: null, firstNote: null, resolvedByHand: false, resume: null, costUsd: null, postOffer: null, stackRun: null,
+  finishedAt: null, text: null, result: null, question: null, note: null, firstNote: null, resolvedByHand: false, resume: null, costUsd: null, postOffer: null, storedOffer: null, stackRun: null,
   ...patch,
 })
 
@@ -1241,9 +1241,14 @@ test('the card holds nothing back once the post landed: the row\'s own patch car
 test('in drawer.ts Post it only asks, and the post is sent from one place, behind the confirmation', async () => {
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
   assert.match(source, /button\.addEventListener\('click', \(\) => askPost\(\)\)/)
-  assert.equal(source.split('postRequest(').length - 1, 1, 'one call builds the post request')
+  // two confirmations post: Post it's, and the post button's for a stored report, each from its own function behind its own button
+  assert.equal(source.split('postRequest(').length - 1, 2, 'two calls build a post request')
   const send = source.indexOf('postRequest(')
-  assert.ok(source.lastIndexOf('const doPost', send) > source.lastIndexOf('const askPost', send), 'it is inside doPost')
+  assert.ok(source.lastIndexOf('const doPost', send) > source.lastIndexOf('const askPost', send), 'the first is inside doPost')
+  const stored = source.indexOf('postRequest(', send + 1)
+  assert.ok(source.lastIndexOf('const doStoredPost', stored) > source.lastIndexOf('const askStoredPost', stored), 'the second is inside doStoredPost')
+  assert.match(source, /confirmActions\(ask\.confirm, 'primary', \(\) => void doStoredPost\(\), ask\.fresh\)/)
+  assert.match(source, /if \(busy \|\| confirm\?\.type !== 'storedPost' \|\| number === null\) return/)
   assert.match(source, /confirmActions\(ask\.confirm, 'primary', \(\) => void doPost\(\)\)/)
   assert.match(source, /if \(busy \|\| confirm\?\.type !== 'post' \|\| number === null\) return/)
   // what the confirmation shows is captured from the offer when it opens

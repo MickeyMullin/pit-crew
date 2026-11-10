@@ -1533,6 +1533,17 @@ button.agent:hover {
   overflow-wrap: anywhere;
 }
 
+.confirm-moved {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--amber-edge);
+  border-radius: 6px;
+  background: var(--amber-bg);
+  color: var(--amber-fg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 .confirm-facts {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);

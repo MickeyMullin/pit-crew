@@ -7,7 +7,7 @@ import type { ReportListing } from '../src/reports.ts'
 import { actionConfirmModel, actionOffers } from './actionsview.ts'
 import type { ActionConfirm, ActionConfirmModel, ActionOffer, PersonChoice } from './actionsview.ts'
 import { commandLine, doneTone, runnerLabels, sentence, stepTitle } from './agent.ts'
-import type { AgentCell, AgentResult, DoneTone, PostForm, RunnerModels, RunnerName, RunView, StartKind, StartOption, StepSlot } from './agent.ts'
+import type { AgentCell, AgentResult, DoneTone, PostForm, RunnerModels, RunnerName, RunView, StartKind, StartOption, StepSlot, StoredOffer } from './agent.ts'
 import { shortSha } from './format.ts'
 import { safeHref } from './safeurl.ts'
 
@@ -22,6 +22,8 @@ export type Confirm =
   | { type: 'reread', runId: number, repo: string, viewer: string, headSha: string, baseRef: string }
   // Post it's confirmation, with everything it showed
   | { type: 'post', runId: number, repo: string, viewer: string, headSha: string, form: PostForm }
+  // the post button's confirmation for a stored report: the form asked for, the commit the report reviewed, the head now, and the CI state it showed
+  | { type: 'storedPost', runId: number, repo: string, viewer: string, headSha: string, reviewedSha: string, form: PostForm, ci: StoredOffer['ci'] }
   | ActionConfirm
 
 // the control that opened the drawer, named by its data-focus-key, so focus can go back to it
@@ -332,6 +334,69 @@ export const postAskModel = (row: Pick<OpenRow, 'number' | 'title'>, offer: NonN
     bound: `For the head ${shortSha(offer.headSha)} in ${offer.repo}, as ${offer.viewer}.`,
     confirm: 'Post it',
     busy: 'Posting…',
+  }
+}
+
+// the post button on an auto-review run that did not post (section 10, Posting): one button per form the server offers, in its order, attached to the run in the Auto-review list that the offer is about
+const storedButtonText: Readonly<Record<PostForm, string>> = { approve: 'Approve', requestChanges: 'Request Changes', comment: 'Comment' }
+
+export type StoredButtonsModel = { runId: number, buttons: { form: PostForm, text: string }[], disabled: boolean, reason: string | null }
+
+export const storedButtonsModel = (cell: AgentCell | null, open: boolean, number: number): StoredButtonsModel | null => {
+  const offer = cell?.storedOffer
+  if (offer == null) return null
+  return {
+    runId: offer.runId,
+    buttons: offer.forms.map((form) => ({ form, text: storedButtonText[form] })),
+    disabled: !open,
+    reason: open ? null : `Posting is off: ${goneText(number)}.`,
+  }
+}
+
+const ciWords: Readonly<Record<StoredOffer['ci'], string>> = {
+  green: 'green',
+  pending: 'pending. Checks are still running. It does not block the post.',
+  failed: 'failed. It does not block the post.',
+  none: 'none. No checks have run. It does not block the post.',
+}
+
+// the confirmation: the form and the report, the login it posts as, the CI state read when the button was clicked, and, when the head has moved, the plain sentence naming both heads. A moved head offers Post anyway and a third button that starts a review instead
+export type StoredAskModel = {
+  runId: number
+  heading: string
+  title: string
+  report: string
+  command: string
+  effect: string
+  ci: string
+  // null while the head has not moved
+  headMoved: string | null
+  bound: string
+  confirm: string
+  busy: string
+  // the existing review start the third button opens, null when the head has not moved or nothing can start
+  fresh: { kind: StartKind, text: string, disabled: boolean, reason: string | null } | null
+}
+
+export const storedAskModel = (row: Pick<OpenRow, 'number' | 'title'>, cell: AgentCell, ask: Extract<Confirm, { type: 'storedPost' }>, open: boolean): StoredAskModel | null => {
+  const offer = cell.storedOffer
+  if (offer == null || !open || !confirmHolds(ask, cell, open)) return null
+  const words = postedWords[ask.form] ?? ask.form
+  const moved = offer.reviewedSha !== offer.headSha
+  const start = startsModel(cell, open, row.number).buttons[0]
+  return {
+    runId: offer.runId,
+    heading: `Post the stored report on #${row.number} as ${words}?`,
+    title: row.title,
+    report: offer.report,
+    command: offer.commands[ask.form] ?? '',
+    effect: `Posts the saved report ${offer.reportPath} to #${row.number} as ${words}, under your account (@${offer.viewer}), once. Pit View cannot undo it.`,
+    ci: `CI now: ${ciWords[ask.ci]}`,
+    headMoved: moved ? `New commits since this review: reviewed ${shortSha(offer.reviewedSha)}, now ${shortSha(offer.headSha)}. Post this report as @${offer.viewer} anyway?` : null,
+    bound: `For the head ${shortSha(offer.headSha)} in ${offer.repo}, as ${offer.viewer}${moved ? `, the report reviewing ${shortSha(offer.reviewedSha)}` : ''}.`,
+    confirm: moved ? 'Post anyway' : 'Post',
+    busy: 'Posting…',
+    fresh: !moved || start === undefined ? null : { kind: start.kind, text: 'Start a new review', disabled: start.disabled, reason: start.reason },
   }
 }
 
@@ -670,6 +735,8 @@ export type AutoRunRow = {
   text: string
   tone: Tone
   posted: string
+  // the post button, on the run it is about
+  stored: StoredButtonsModel | null
   note: string | null
   queuedAt: string | null
   startedAt: string | null
@@ -706,9 +773,10 @@ const autoPostedWords = (run: RunView): string => {
   return result.notPostedReason === null ? 'No' : unpostedWords[result.notPostedReason] ?? 'No'
 }
 
-export const autoRunRows = (runs: readonly RunView[]): AutoRunRow[] =>
+export const autoRunRows = (runs: readonly RunView[], stored: StoredButtonsModel | null = null): AutoRunRow[] =>
   runs.filter((run) => run.origin === 'auto').map((run) => ({
     id: run.id,
+    stored: stored !== null && stored.runId === run.id ? stored : null,
     reason: autoReasons[run.reason ?? ''] ?? 'Auto-review',
     sha: run.headOid === null ? null : shortSha(run.headOid),
     ...runText(run),
@@ -784,6 +852,8 @@ export type DrawerModel = {
   // the latest-run card's Post it, and its confirmation while asked
   postIt: PostOfferModel | null
   postAsk: PostAskModel | null
+  // the post button's confirmation for a stored report, while asked
+  storedAsk: StoredAskModel | null
   // false for a PR that left the open tables until its latest run has been read again: a
   // running card there may be stale, and Stop must not be offered on a guess
   stopsEnabled: boolean
@@ -817,6 +887,7 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
     rereadAsk: cell !== null && confirm?.type === 'reread' && (card === 'result' || card === 'waiting') && rereadOffer(cell, input.open, row.number)?.disabled === false ? rereadAskModel(row, cell, confirm) : null,
     postIt: cell !== null && card === 'result' ? postItOffer(cell, input.open, row.number) : null,
     postAsk: cell !== null && card === 'result' && confirm?.type === 'post' && input.open && cell.postOffer !== null ? postAskModel(row, cell.postOffer) : null,
+    storedAsk: cell !== null && confirm?.type === 'storedPost' ? storedAskModel(row, cell, confirm, input.open) : null,
     stopsEnabled: input.open || input.runs.state === 'ready',
     waiting: cell !== null && card === 'waiting' ? waitingModel(cell, row.number) : null,
     result: cell !== null && card === 'result' ? resultModel(cell, row.number, row.headOid, actionOffers(row, input.open)) : null,
@@ -825,7 +896,7 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
       message: runs.state === 'error' ? runs.message : null,
       rows: runs.state === 'ready' ? runRows(runs.items, cell?.runId ?? null) : [],
     },
-    autoRuns: runs.state === 'ready' ? autoRunRows(runs.items) : [],
+    autoRuns: runs.state === 'ready' ? autoRunRows(runs.items, storedButtonsModel(cell, input.open, row.number)) : [],
     reports: {
       state: reports.state,
       message: reports.state === 'error' ? reports.message : null,
@@ -917,6 +988,7 @@ export const cellFromRun = (cell: AgentCell, run: RunView): AgentCell => {
     extraInstructions: run.extraInstructions,
     // the server's offer is about one run, and a newer run on the list is not it
     postOffer: cell.runId === run.id ? cell.postOffer : null,
+    storedOffer: cell.runId === run.id ? cell.storedOffer : null,
   }
 }
 
@@ -942,6 +1014,11 @@ export const confirmHolds = (confirm: Confirm, cell: AgentCell | null, open: boo
   if (confirm.type === 'post') {
     const offer = cell.postOffer
     return open && offer !== null && offer.runId === confirm.runId && offer.form === confirm.form && offer.headSha === confirm.headSha && offer.repo === confirm.repo && offer.viewer === confirm.viewer
+  }
+  // a stored post is about what the confirmation showed: any change in the server's offer drops it, the CI state included
+  if (confirm.type === 'storedPost') {
+    const offer = cell.storedOffer
+    return open && offer != null && offer.runId === confirm.runId && offer.forms.includes(confirm.form) && offer.headSha === confirm.headSha && offer.reviewedSha === confirm.reviewedSha && offer.repo === confirm.repo && offer.viewer === confirm.viewer && offer.ci === confirm.ci
   }
   if (!open) return false
   const option = optionOf(cell, confirm.kind)

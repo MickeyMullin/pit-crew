@@ -6,7 +6,8 @@ import { join, resolve, sep } from 'node:path'
 import type { Cache, NewRun, NewSweep, Origin, QueueReason, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
 import { expandHome, normalizeExtraInstructions, tildePath } from './config.ts'
 import type { AgentSettings, Clock, Config, ExtraInstructions, RunnerName } from './config.ts'
-import { isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
+import { ciStateOf, isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
+import type { CiReading } from './derive.ts'
 import type { Stack } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
 import type { Gh, RawOpenPr, Runner } from './github.ts'
@@ -821,6 +822,8 @@ export type AgentCell = {
   posted: boolean | null
   // the post a blocked run's report may still get from the drawer's Post it; null for anything else
   postOffer: PostOffer | null
+  // the post button's offer for the stored report of an auto-review run that ran with --no-post; null for anything else (section 10, Posting)
+  storedOffer: StoredOffer | null
   // set while the run on show is a stack review started from another PR: that PR's number, and the status of this PR's own latest run behind it, null with none. Null on the PR it started from, and on every other cell
   stackRun: { from: number, ownStatus: RunStatus | null } | null
 }
@@ -1024,6 +1027,65 @@ export const postOffer = (pr: RawOpenPr, config: Config, run: Run | undefined): 
   return { runId: run.id, form, report, reportPath, headSha: head.toLowerCase(), repo: config.repo, viewer: config.viewer, command: `gh ${postArgs(config.repo, run.number, form, reportPath).join(' ')}` }
 }
 
+// what the post button would do for the stored report of an auto-review run that ran with --no-post (section 10, Posting); the server judges every click by this same function, against the cache as it is then
+export type StoredOffer = {
+  runId: number
+  // the report's recommendation first, then Comment; Comment alone when the recommendation is a comment
+  forms: PostForm[]
+  // the saved report's file name and its path written with ~
+  report: string
+  reportPath: string
+  // the full commit the review read, and the PR's full head now; they differ when the head has moved since the review
+  reviewedSha: string
+  headSha: string
+  repo: string
+  viewer: string
+  // the PR's CI as the cache holds it now, shown in the confirmation and never a block
+  ci: CiReading
+  // the command each form runs, as the confirmation shows it
+  commands: Partial<Record<PostForm, string>>
+}
+
+// the form a stored report recommends, from its own verdict and, for Dependabot, its recommendation. CI is shown and never decides, so a clean review recommends the approval whatever CI says. A Dependabot review recommends the approval only when it says approve and the PR is neither a draft nor conflicting; otherwise it recommends a comment, or a request for changes when the viewer's earlier approval stands, since a comment would leave that approval vouching for a version the report says not to merge
+export const recommendedFormOf = (result: ReviewResult, pr: RawOpenPr, config: Config): PostForm => {
+  if (result.verdict === 'changesRequested') return 'requestChanges'
+  if (result.command !== 'review-dependabot') return 'approve'
+  if (result.recommendation === 'approve' && !pr.isDraft && pr.mergeable !== 'CONFLICTING') return 'approve'
+  return result.recommendation !== null && result.recommendation !== 'approve' && viewerReview(pr, config)?.state === 'APPROVED' ? 'requestChanges' : 'comment'
+}
+
+// a stored report is offered only for an auto-review run of this PR that ran with --no-post and finished with its report on record, on someone else's open PR, with no post begun and no decided review of the head by the viewer. Unlike a blocked post it is offered after the head has moved: the confirmation says so, and the post goes on the PR's head as it is. The run's own origin and flags decide whether it was one; its result only names what there is to post, and each thing it names is checked against the run and the config
+export const storedOffer = (pr: RawOpenPr, config: Config, run: Run | undefined): StoredOffer | null => {
+  if (run === undefined || run.status !== 'done' || run.origin !== 'auto' || !['review-pr', 'review-dependabot'].includes(run.command) || !run.args.includes('--no-post') || isMine(pr, config)) return null
+  if (run.reportHash === null || run.postAttemptedAt !== null) return null
+  const result = run.result
+  if (result?.schema !== 'pit-crew/review-result@1' || result.notPostedReason !== 'noPost' || result.posted !== null || result.verdict === null) return null
+  const target = result.target
+  if (run.repo !== config.repo || run.number !== pr.number || target === null || !('pr' in target) || target.pr !== run.number || target.repo.toLowerCase() !== config.repo.toLowerCase()) return null
+  const report = prReportName(run.number)
+  const reportPath = `${config.reportsDir.replace(/\/$/, '')}/${report}`
+  if (result.report !== reportPath) return null
+  const reviewed = result.reviewed?.sha
+  if (!isFullSha(reviewed)) return null
+  const head = pr.headRefOid
+  const review = viewerReview(pr, config)
+  if (review?.commit?.oid === head && (review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED')) return null
+  const recommended = recommendedFormOf(result, pr, config)
+  const forms: PostForm[] = recommended === 'comment' ? ['comment'] : [recommended, 'comment']
+  return {
+    runId: run.id,
+    forms,
+    report,
+    reportPath,
+    reviewedSha: reviewed.toLowerCase(),
+    headSha: head.toLowerCase(),
+    repo: config.repo,
+    viewer: config.viewer,
+    ci: ciStateOf(pr),
+    commands: Object.fromEntries(forms.map((form) => [form, `gh ${postArgs(config.repo, run.number, form, reportPath).join(' ')}`])),
+  }
+}
+
 // a blocked post that was begun and is not on record may or may not have landed, which is what ghFailed says, so the run reads that way; the row keeps what its result said
 const withPostFate = (run: Run): Run => {
   const result = run.result
@@ -1067,7 +1129,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     state: 'idle', label: plan.label, action, models: modelLabels(config.agent), starts: startOptions(pr, config, stack, ownInFlight, queueing), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
-    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, origin: null, queuedAt: null, posted: null, postOffer: null, stackRun: null,
+    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,
   }
   // the newer of the PR's own latest run and the stack run that covers it
   const covered = cover !== undefined && cover.id > (ownRun?.id ?? 0)
@@ -1111,6 +1173,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     queuedAt: run.queuedAt,
     posted: ended === null ? null : posted(withPostFate(run).result),
     postOffer: postOffer(pr, config, run),
+    storedOffer: storedOffer(pr, config, run),
   }
 }
 

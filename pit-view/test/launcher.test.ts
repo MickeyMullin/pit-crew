@@ -8,6 +8,7 @@ import { openCache } from '../src/cache.ts'
 import type { Run, RunChanges } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
+import { ciStateOf } from '../src/derive.ts'
 import type { OpenRow } from '../src/derive.ts'
 import { createGh } from '../src/github.ts'
 import type { RawOpenPr, Runner } from '../src/github.ts'
@@ -5720,4 +5721,119 @@ test('a Codex sandbox takes the git roots a worktree run names, in place of <cwd
   const roots = (args: string[]): string[] => args.flatMap((arg, index) => args[index - 1] === '--add-dir' ? [arg] : [])
   assert.deepEqual(roots(codexSandboxArgs(spec)), ['/w/run-1/.git', '/r/1', '/o', '/t'])
   assert.deepEqual(roots(codexSandboxArgs({ ...spec, gitRoots: ['/c/.git', '/c/.git/worktrees/run-1'] })), ['/c/.git', '/c/.git/worktrees/run-1', '/r/1', '/o', '/t'])
+})
+
+// the stored report of an auto-review run that ran with --no-post (section 10, Posting): the post button's offer, from an invented run
+
+const storedRow = async (patch: Record<string, unknown> = {}, run: Partial<Run> = {}, number = 106): Promise<{ pr: RawOpenPr, row: Run }> => {
+  const pr = await prOf(number)
+  const result = reviewResult({
+    target: { repo: scenario.repo, pr: number }, reviewed: { kind: 'commit', sha: pr.headRefOid }, verdict: 'clean', findings: [], ci: 'green', posted: null, notPostedReason: 'noPost', report: `~/agents/output/PR-${number}.md`, ...patch,
+  }) as unknown as RunResultJson
+  return { pr, row: runRow({ number, args: [String(number), '--no-post'], status: 'done', finishedAt: '2026-10-26T14:03:00Z', result, reportHash: 'c'.repeat(64), origin: 'auto', posting: false, ...run }) }
+}
+
+test('the cell offers a stored report\'s buttons by its recommendation: the recommended form then Comment, and Comment alone for a comment, whatever CI says', async () => {
+  const config = baseConfig()
+  const forms = async (patch: Record<string, unknown>, run: Partial<Run> = {}): Promise<unknown> => {
+    const { pr, row } = await storedRow(patch, run)
+    return agentCell(pr, config, row, undefined).storedOffer?.forms
+  }
+  assert.deepEqual(await forms({}), ['approve', 'comment'])
+  assert.deepEqual(await forms({ verdict: 'changesRequested' }), ['requestChanges', 'comment'])
+  // CI is shown, never a block: a red, pending, or unknown CI still offers the approval the report recommends
+  assert.deepEqual(await forms({ ci: 'failed' }), ['approve', 'comment'])
+  assert.deepEqual(await forms({ ci: 'pending' }), ['approve', 'comment'])
+  assert.deepEqual(await forms({ ci: null }), ['approve', 'comment'])
+  assert.deepEqual(await forms({ verdict: 'changesRequested', ci: 'failed' }), ['requestChanges', 'comment'])
+  const dependabot = { command: 'review-dependabot' }
+  assert.deepEqual(await forms({ command: 'review-dependabot', recommendation: 'approve' }, dependabot), ['approve', 'comment'])
+  assert.deepEqual(await forms({ command: 'review-dependabot', recommendation: 'approve', ci: 'failed' }, dependabot), ['approve', 'comment'])
+  assert.deepEqual(await forms({ command: 'review-dependabot', recommendation: 'hold' }, dependabot), ['comment'])
+  assert.deepEqual(await forms({ command: 'review-dependabot', recommendation: 'doNotMerge' }, dependabot), ['comment'])
+  assert.deepEqual(await forms({ command: 'review-dependabot', verdict: 'changesRequested', recommendation: 'fixBeforeMerge' }, dependabot), ['requestChanges', 'comment'])
+  const { pr, row } = await storedRow()
+  assert.deepEqual(agentCell(pr, config, row, undefined).storedOffer, {
+    runId: 7, forms: ['approve', 'comment'], report: 'PR-106.md', reportPath: '~/agents/output/PR-106.md', reviewedSha: pr.headRefOid, headSha: pr.headRefOid, repo: scenario.repo, viewer: scenario.viewer,
+    ci: 'green',
+    commands: {
+      approve: `gh pr review 106 --repo ${scenario.repo} --approve --body-file ~/agents/output/PR-106.md`,
+      comment: `gh pr comment 106 --repo ${scenario.repo} --body-file ~/agents/output/PR-106.md`,
+    },
+  })
+  // a stored report is not a blocked post, and a blocked post is not a stored report
+  assert.equal(agentCell(pr, config, row, undefined).postOffer, null)
+  const blocked = await blockedRow()
+  assert.equal(agentCell(blocked.pr, config, blocked.row, undefined).storedOffer, null)
+})
+
+test('a Dependabot hold would leave an earlier approval standing, so the stored report recommends requesting changes, as the prompt does', async () => {
+  const config = baseConfig()
+  const { pr, row } = await storedRow({ command: 'review-dependabot', recommendation: 'hold' }, { command: 'review-dependabot' })
+  const approvedEarlier: RawOpenPr = { ...pr, latestReviews: { nodes: [{ author: { login: scenario.viewer }, state: 'APPROVED', submittedAt: '2026-10-20T10:00:00Z', commit: { oid: '0'.repeat(40) } }] } } as unknown as RawOpenPr
+  assert.deepEqual(agentCell(approvedEarlier, config, row, undefined).storedOffer?.forms, ['requestChanges', 'comment'])
+})
+
+test('the stored offer names the PR\'s current CI state from the cache: green, pending, failed, or none', async () => {
+  const config = baseConfig()
+  // the same reading the offer uses, on fixture PRs that exercise each state; 115 has only canceled checks, which are not a pass
+  assert.equal(ciStateOf(await prOf(112)), 'pending')
+  assert.equal(ciStateOf(await prOf(109)), 'failed')
+  assert.equal(ciStateOf(await prOf(115)), 'failed')
+  assert.equal(ciStateOf(await prOf(108)), 'none')
+  assert.equal(ciStateOf(await prOf(106)), 'green')
+  for (const [number, ci] of [[112, 'pending'], [106, 'green']] as const) {
+    const { pr, row } = await storedRow({}, {}, number)
+    assert.equal(agentCell(pr, config, row, undefined).storedOffer?.ci, ci)
+  }
+})
+
+test('nothing but a finished --no-post auto-review of this PR, with its report on record, is offered the post button', async () => {
+  const config = baseConfig()
+  const offer = async (patch: Record<string, unknown>, run: Partial<Run> = {}, number = 106): Promise<unknown> => {
+    const { pr, row } = await storedRow(patch, run, number)
+    return agentCell(pr, config, row, undefined).storedOffer
+  }
+  assert.ok((await offer({})) !== null)
+  // a head that moved is still offered: the page confirms it
+  const moved = await offer({ reviewed: { kind: 'commit', sha: '0123456789abcdef0123456789abcdef01234567' } }) as { reviewedSha: string, headSha: string } | null
+  assert.equal(moved?.reviewedSha, '0123456789abcdef0123456789abcdef01234567')
+  assert.notEqual(moved?.headSha, moved?.reviewedSha)
+  const cases: [string, Record<string, unknown>, Partial<Run>][] = [
+    ['a manual run', {}, { origin: 'manual' }],
+    ['a run that was allowed to post', {}, { args: ['106'] }],
+    ['a posted run', { posted: { form: 'approve', url: 'https://example.test/r/1' }, notPostedReason: null }, {}],
+    ['a refused post, which Post it owns', { notPostedReason: 'postBlocked' }, {}],
+    ['a failed gh', { notPostedReason: 'ghFailed' }, {}],
+    ['a run waiting for an answer', { notPostedReason: 'awaitingAnswer' }, { status: 'needsInput' }],
+    ['a run still going', {}, { status: 'running' }],
+    ['a run that failed before writing a report', { verdict: null, report: null, reviewed: null }, { status: 'failed', note: 'noResult' }],
+    ['a failed run that kept a result', {}, { status: 'failed' }],
+    ['a stopped run', {}, { status: 'stopped' }],
+    ['a stack review', { command: 'review-stack' }, { command: 'review-stack' }],
+    ['a sweep', { command: 'review-dependabot-sweep' }, { command: 'review-dependabot-sweep' }],
+    ['another PR\'s result', { target: { repo: scenario.repo, pr: 107 } }, {}],
+    ['another repository\'s result', { target: { repo: 'other-org/other-repo', pr: 106 } }, {}],
+    ['a run of another repository', {}, { repo: 'other-org/other-repo' }],
+    ['no target', { target: null }, {}],
+    ['a report with another name', { report: '~/agents/output/PR-1060.md' }, {}],
+    ['a report out of the folder', { report: '~/.ssh/PR-106.md' }, {}],
+    ['a review with no verdict', { verdict: null }, {}],
+    ['a short SHA', { reviewed: { kind: 'commit', sha: 'f00dfac' } }, {}],
+    ['no reviewed commit', { reviewed: null }, {}],
+    ['a run that recorded no report of its own', {}, { reportHash: null }],
+    ['a post already begun', {}, { postAttemptedAt: '2026-10-26T14:04:00Z' }],
+  ]
+  for (const [name, patch, run] of cases) assert.equal(await offer(patch, run), null, name)
+  // the viewer's own PR never posts, whatever the result says
+  assert.equal(await offer({}, {}, 104), null)
+  assert.equal(await offer({ notPostedReason: 'ownPr' }, {}, 104), null)
+  const { pr, row } = await storedRow()
+  // a head the viewer has already approved or requested changes on needs no second post
+  const reviewed: RawOpenPr = { ...pr, latestReviews: { nodes: [{ author: { login: scenario.viewer }, state: 'APPROVED', submittedAt: '2026-10-20T10:00:00Z', commit: { oid: pr.headRefOid } }] } } as unknown as RawOpenPr
+  assert.equal(agentCell(reviewed, config, row, undefined).storedOffer, null)
+  assert.equal(agentCell(pr, config, undefined, undefined).storedOffer, null)
+  // a run that only commented leaves the head open to a post
+  const commented: RawOpenPr = { ...pr, latestReviews: { nodes: [{ author: { login: scenario.viewer }, state: 'COMMENTED', submittedAt: '2026-10-20T10:00:00Z', commit: { oid: pr.headRefOid } }] } } as unknown as RawOpenPr
+  assert.ok(agentCell(commented, config, row, undefined).storedOffer !== null)
 })

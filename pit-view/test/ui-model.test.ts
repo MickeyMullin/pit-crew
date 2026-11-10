@@ -37,7 +37,7 @@ const cellOf = (models: RunnerModels): AgentCell => {
     ],
     models, lastReviewAt: null, runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: [], tandem: false, commit: null, finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null,
-    resume: null, costUsd: null, postOffer: null, stackRun: null,
+    resume: null, costUsd: null, postOffer: null, storedOffer: null, stackRun: null,
   } as AgentCell
 }
 
