@@ -756,6 +756,17 @@ test('the start budget is the smallest of concurrency room, the limit left, and 
   assert.deepEqual(startBudget({ ...base, startedToday: 12 }), { count: 0, skip: 'dailyLimit' })
 })
 
+test('a daily limit of 0 means no limit: the start budget never skips for it, and concurrency and cap room still bound the count', () => {
+  const none = { concurrency: 3, inFlight: 0, dailyLimit: 0, startedToday: 0, capRoom: 5 }
+  assert.deepEqual(startBudget(none), { count: 3, skip: null })
+  // however many started today, the day never closes
+  assert.deepEqual(startBudget({ ...none, startedToday: 500 }), { count: 3, skip: null })
+  assert.deepEqual(startBudget({ ...none, startedToday: 500, inFlight: 1 }), { count: 2, skip: null })
+  assert.deepEqual(startBudget({ ...none, startedToday: 500, capRoom: 1 }), { count: 1, skip: null })
+  assert.deepEqual(startBudget({ ...none, startedToday: 500, capRoom: 0 }), { count: 0, skip: null })
+  assert.deepEqual(startBudget({ ...none, startedToday: 500, inFlight: 3 }), { count: 0, skip: null })
+})
+
 // the check before a queued run starts
 
 test('before it starts, a closed PR is dropped and a moved head is recorded', () => {

@@ -17,7 +17,7 @@ import { openCache } from './cache.ts'
 import type { Cache } from './cache.ts'
 import { createClients, keepsSchedule } from './clients.ts'
 import type { ClientState, Clients } from './clients.ts'
-import { cacheFile, ConfigError, configFile, expandHome, extraInstructionsProblem, readConfig, runnerNames, saveConfig, stateDir, tildePath, validateConfig } from './config.ts'
+import { autoConcurrencyProblem, cacheFile, ConfigError, configFile, expandHome, extraInstructionsProblem, readConfig, runnerNames, saveConfig, stateDir, tildePath, validateConfig } from './config.ts'
 import type { Clock, Config, RunnerName } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner } from './github.ts'
@@ -780,7 +780,11 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     const body = await readJson(req)
     let saved: Config
     try {
-      saved = await saveConfig(options.configPath, validateConfig(body))
+      const checked = validateConfig(body)
+      // a save refuses what a read tolerates: Concurrent auto-reviews above the review cap
+      const over = autoConcurrencyProblem(checked)
+      if (over !== null) throw new ConfigError(over)
+      saved = await saveConfig(options.configPath, checked)
     } catch (error) {
       if (error instanceof ConfigError) return json(res, 400, { error: error.message })
       throw error

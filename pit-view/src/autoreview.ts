@@ -301,10 +301,11 @@ export type StartBudgetInput = {
   capRoom: number
 }
 
-// how many queued runs may start now; at the daily limit the tick skips as dailyLimit
+// how many queued runs may start now; at the daily limit the tick skips as dailyLimit. A daily limit of 0 means no limit: no daily bound, and no skip, while concurrency and the cap's room still apply
 export const startBudget = (input: StartBudgetInput): { count: number, skip: 'dailyLimit' | null } => {
-  if (input.startedToday >= input.dailyLimit) return { count: 0, skip: 'dailyLimit' }
-  return { count: Math.max(0, Math.min(input.concurrency - input.inFlight, input.dailyLimit - input.startedToday, input.capRoom)), skip: null }
+  const unlimited = input.dailyLimit === 0
+  if (!unlimited && input.startedToday >= input.dailyLimit) return { count: 0, skip: 'dailyLimit' }
+  return { count: Math.max(0, Math.min(input.concurrency - input.inFlight, unlimited ? Infinity : input.dailyLimit - input.startedToday, input.capRoom)), skip: null }
 }
 
 // the worktree sweep (section 10, Worktrees)

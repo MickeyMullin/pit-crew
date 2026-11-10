@@ -5,6 +5,7 @@ import { request } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
+import { defaultAutoReview } from '../src/autoreview.ts'
 import { openCache } from '../src/cache.ts'
 import type { Config } from '../src/config.ts'
 import type { Notice } from '../src/notify.ts'
@@ -436,6 +437,35 @@ test('GET and PUT /api/config read, validate and save the config, and a change t
     assert.equal((await saveConfigAs(h.server, { ...next, density: 'compact' })).status, 200)
     await h.server.poller.idle()
     assert.equal(h.server.cache.latestCycle(scenario.repo)?.id, cycles)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('PUT /api/config refuses Concurrent auto-reviews above Concurrent reviews on the autoReview.concurrency path, saves it at or below, and accepts a daily limit of 0', async () => {
+  const h = await setup()
+  try {
+    const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
+    const base = { ...stored, maxConcurrentReviews: 2 }
+    const auto = defaultAutoReview()
+    const over = await saveConfigAs(h.server, { ...base, autoReview: { ...auto, concurrency: 3 } })
+    assert.equal(over.status, 400)
+    assert.equal(over.body.error, 'autoReview.concurrency must be no more than maxConcurrentReviews (2)')
+    const equal = await saveConfigAs(h.server, { ...base, autoReview: { ...auto, concurrency: 2 } })
+    assert.equal(equal.status, 200)
+    // nothing was written by the refused save
+    assert.equal((await getJson<Config>(`${h.base}/api/config`)).body.autoReview?.concurrency, 2)
+    // lowering the cap below a saved Concurrent auto-reviews is refused the same way
+    const lower = await saveConfigAs(h.server, { ...base, maxConcurrentReviews: 1, autoReview: { ...auto, concurrency: 2 } })
+    assert.equal(lower.status, 400)
+    assert.equal(lower.body.error, 'autoReview.concurrency must be no more than maxConcurrentReviews (1)')
+    // a daily limit of 0 saves, and a negative one is refused with 0 or more
+    const none = await saveConfigAs(h.server, { ...base, autoReview: { ...auto, dailyLimit: 0 } })
+    assert.equal(none.status, 200)
+    assert.equal((await getJson<Config>(`${h.base}/api/config`)).body.autoReview?.dailyLimit, 0)
+    const negative = await saveConfigAs(h.server, { ...base, autoReview: { ...auto, dailyLimit: -1 } })
+    assert.equal(negative.status, 400)
+    assert.equal(negative.body.error, 'autoReview.dailyLimit must be a whole number of 0 or more')
   } finally {
     await h.cleanup()
   }

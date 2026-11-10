@@ -4,7 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import {
-  cacheFile, ConfigError, configFile, defaultConfig, expandHome, loadConfig, readConfig, saveConfig, validateConfig,
+  autoConcurrencyProblem, cacheFile, ConfigError, configFile, defaultConfig, expandHome, isDailyLimit, isReviewCap, loadConfig, readConfig, saveConfig, validateConfig,
 } from '../src/config.ts'
 import { defaultAutoReview } from '../src/autoreview.ts'
 import { tempDir } from './helpers.ts'
@@ -343,10 +343,12 @@ test('autoReview is optional: absent means off, and a present one carries every 
   }
   for (const value of [4, 5.5, '15', undefined]) refused({ intervalMinutes: value }, /autoReview\.intervalMinutes must be a whole number of 5 or more/)
   assert.equal(validateConfig({ ...base, autoReview: { ...auto, intervalMinutes: 5 } }).autoReview?.intervalMinutes, 5)
-  for (const key of ['concurrency', 'dailyLimit'] as const) {
-    for (const value of [0, 1.5, '1', 9007199254740992]) refused({ [key]: value }, new RegExp(`autoReview\\.${key} must be a whole number of 1 or more`))
-    assert.equal(validateConfig({ ...base, autoReview: { ...auto, [key]: 9007199254740991 } }).autoReview?.[key], 9007199254740991)
-  }
+  // concurrency keeps 1 or more; dailyLimit alone takes 0, which means no daily limit
+  for (const value of [0, 1.5, '1', 9007199254740992]) refused({ concurrency: value }, /autoReview\.concurrency must be a whole number of 1 or more/)
+  assert.equal(validateConfig({ ...base, autoReview: { ...auto, concurrency: 9007199254740991 } }).autoReview?.concurrency, 9007199254740991)
+  for (const value of [-1, 1.5, '1', '0', null, 9007199254740992]) refused({ dailyLimit: value }, /autoReview\.dailyLimit must be a whole number of 0 or more/)
+  assert.equal(validateConfig({ ...base, autoReview: { ...auto, dailyLimit: 0 } }).autoReview?.dailyLimit, 0)
+  assert.equal(validateConfig({ ...base, autoReview: { ...auto, dailyLimit: 9007199254740991 } }).autoReview?.dailyLimit, 9007199254740991)
   const hours = auto.activeHours
   refused({ activeHours: 'always' }, /autoReview\.activeHours must be an object/)
   refused({ activeHours: { ...hours, extra: 1 } }, /autoReview\.activeHours\.extra is not a known setting/)
@@ -368,6 +370,34 @@ test('readConfig keeps a stored autoReview key through a save', async () => {
     const file = join(dir, 'config.json')
     await saveConfig(file, { ...defaultConfig(), autoReview: { ...defaultAutoReview(), enabled: true } })
     assert.equal((await readConfig(file)).autoReview?.enabled, true)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a daily limit is a whole number of 0 or more, where every other cap stays at 1 or more', () => {
+  assert.equal(isDailyLimit(0), true)
+  assert.equal(isDailyLimit(10), true)
+  assert.equal(isDailyLimit(9007199254740991), true)
+  for (const value of [-1, 0.5, '0', null, undefined, Number.NaN, 9007199254740992]) assert.equal(isDailyLimit(value), false, String(value))
+  assert.equal(isReviewCap(0), false)
+  assert.equal(isReviewCap(1), true)
+})
+
+test('Concurrent auto-reviews may not exceed maxConcurrentReviews when a config is saved, and a file already over the cap still reads', async () => {
+  const base = { ...defaultConfig(), maxConcurrentReviews: 2 }
+  const over = { ...base, autoReview: { ...defaultAutoReview(), concurrency: 3 } }
+  assert.equal(autoConcurrencyProblem(over), 'autoReview.concurrency must be no more than maxConcurrentReviews (2)')
+  assert.equal(autoConcurrencyProblem({ ...base, autoReview: { ...defaultAutoReview(), concurrency: 2 } }), null)
+  assert.equal(autoConcurrencyProblem({ ...base, autoReview: { ...defaultAutoReview(), concurrency: 1 } }), null)
+  assert.equal(autoConcurrencyProblem(base), null)
+  // validateConfig, which runs on every read, does not apply the rule
+  assert.equal(validateConfig(over).autoReview?.concurrency, 3)
+  const { dir, cleanup } = await tempDir()
+  try {
+    const file = join(dir, 'config.json')
+    await writeFile(file, JSON.stringify(over))
+    assert.equal((await readConfig(file)).autoReview?.concurrency, 3)
   } finally {
     await cleanup()
   }

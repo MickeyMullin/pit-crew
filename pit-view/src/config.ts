@@ -211,6 +211,9 @@ const idleMinutes = (obj: Record<string, unknown>, where: string): number =>
 // a whole number of 1 or more that a JSON number holds exactly, so the Settings page, which shows it in digits, can save back every cap kept here
 export const isReviewCap = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 1
 
+// the auto-review daily limit alone may be 0, which means no limit; every other cap stays at 1 or more
+export const isDailyLimit = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0
+
 const extraReviewInstructions = (obj: Record<string, unknown>, where: string): string => {
   const text = obj.extraReviewInstructions
   if (typeof text !== 'string') return fail(`${where}.extraReviewInstructions must be a string`)
@@ -375,7 +378,7 @@ const toAutoReview = (value: unknown): AutoReviewSettings => {
   const interval = value.intervalMinutes
   if (!Number.isSafeInteger(interval) || (interval as number) < 5) fail(`${where}.intervalMinutes must be a whole number of 5 or more`)
   if (!isReviewCap(value.concurrency)) fail(`${where}.concurrency must be a whole number of 1 or more`)
-  if (!isReviewCap(value.dailyLimit)) fail(`${where}.dailyLimit must be a whole number of 1 or more`)
+  if (!isDailyLimit(value.dailyLimit)) fail(`${where}.dailyLimit must be a whole number of 0 or more`)
   return {
     enabled: bool(value, 'enabled', where),
     intervalMinutes: interval as number,
@@ -388,6 +391,12 @@ const toAutoReview = (value: unknown): AutoReviewSettings => {
     post: { others: bool(value.post, 'others', `${where}.post`), dependabot: bool(value.post, 'dependabot', `${where}.post`) },
   }
 }
+
+// the rule a save applies and a read does not: Concurrent auto-reviews share the review cap, so they may not exceed maxConcurrentReviews. validateConfig runs on every file read and must not apply it, or a file already over the cap would stop loading
+export const autoConcurrencyProblem = (config: Pick<Config, 'autoReview' | 'maxConcurrentReviews'>): string | null =>
+  config.autoReview !== undefined && config.autoReview.concurrency > config.maxConcurrentReviews
+    ? `autoReview.concurrency must be no more than maxConcurrentReviews (${config.maxConcurrentReviews})`
+    : null
 
 // checks a whole config (as PUT /api/config sends it) and returns a clean copy
 export const validateConfig = (input: unknown): Config => {

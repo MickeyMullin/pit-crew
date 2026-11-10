@@ -1342,6 +1342,25 @@ test('the daily limit stops new starts, leaves what waits queued, skips ticks as
   }
 })
 
+test('a daily limit of 0 never skips a tick as dailyLimit and never leaves a run queued for it, while concurrency still bounds the starts', async () => {
+  const world = await setup({ auto: { dailyLimit: 0, concurrency: 1 } })
+  try {
+    await tick(world)
+    assert.equal(ticks(world)[0]?.state, 'ran')
+    assert.equal(world.launch.children.length, 1)
+    assert.equal(world.server.scheduler.view()?.startedToday, 1)
+    await finish(world, running(world)[0]!)
+    // one started today and the limit is 0: the next tick still runs and starts the next, where a limit of 1 would have skipped
+    await tick(world)
+    assert.equal(ticks(world)[0]?.state, 'ran')
+    assert.notEqual(ticks(world)[0]?.skipReason, 'dailyLimit')
+    assert.equal(world.launch.children.length, 2)
+    assert.equal(world.server.scheduler.view()?.state === 'blocked', false)
+  } finally {
+    await world.cleanup()
+  }
+})
+
 test('a run still queued when the window closes starts only when it reopens, and one in flight finishes', async () => {
   const world = await setup({ now: '2026-10-26T21:40:00Z' })
   try {
