@@ -763,6 +763,17 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
   const optedIn = (reason: QueueReason | null, auto: AutoReviewSettings): boolean =>
     reason === 'dependabot' ? auto.dependabot : reason === 'selfReview' ? auto.own : auto.others
 
+  // whether the last tick's record forbids starting: it skipped as identityMismatch or noClone, so nothing since has vouched for the login or the clone. A tick in flight has no skip recorded yet, so its own start step passes. A record that cannot be read does not block, as it does not keep the clock from going
+  const blockedByLastTick = (repo: string): boolean => {
+    try {
+      const reason = cache.latestTick(repo)?.skipReason
+      return reason === 'identityMismatch' || reason === 'noClone'
+    } catch (error) {
+      log(`auto-review: cannot read the last tick: ${messageOf(error)}`)
+      return false
+    }
+  }
+
   // the start step, run by a tick (as its last step) and by whatever frees room between ticks: as many as fit, one at a time, oldest first, each read afresh, since a save, the cap, and the clock may all move meanwhile. Answers whether the day's limit had been reached before any started
   const startQueued = async (repo: string, exempt: boolean): Promise<boolean> => {
     const budget = (auto: AutoReviewSettings): ReturnType<typeof startBudget> => {
@@ -797,6 +808,8 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
         else if (!startReached) kickWaiting = true
         break
       }
+      // the one place the last tick's finding is checked, before every start whatever started the pass: while the last tick skipped as identityMismatch or noClone, the login and the clone are unvouched for and nothing starts, and only the next tick clears the skip. A tick's own pass is not held by it, since the tick's own record has no skip until the tick ends
+      if (blockedByLastTick(repo)) break
       // a pass that began while a tick is in flight but before its start step has not yet seen the login, the clone, or the board checked, and ends the same way
       if (ticking !== null && !startReached) {
         kickWaiting = true
@@ -881,13 +894,6 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
         else kickWaiting = true
         return
       }
-      let last: Tick | null = null
-      try {
-        last = cache.latestTick(settings.repo)
-      } catch (error) {
-        log(`auto-review: cannot read the last tick: ${messageOf(error)}`)
-      }
-      if (last?.skipReason === 'identityMismatch' || last?.skipReason === 'noClone') return
       await drain(settings.repo, false)
     }).catch((error: unknown) => log(`auto-review: cannot start the queue: ${messageOf(error)}`)))
   }

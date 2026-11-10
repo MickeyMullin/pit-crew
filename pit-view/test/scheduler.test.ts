@@ -2651,6 +2651,54 @@ test('a between-ticks drain that finds a tick has begun and already ended withou
   }
 })
 
+test('a between-ticks drain suspended in a start, when a tick begins and skips as identityMismatch or noClone and the problem then clears, starts no further row: only a successful tick lifts the block', async () => {
+  for (const reason of ['identityMismatch', 'noClone'] as const) {
+    const world = await setup({ auto: { concurrency: 2 }, config: { maxConcurrentReviews: 5 } })
+    try {
+      await tick(world)
+      const line = queuedAuto(world)
+      assert.ok(line.length >= 3)
+      const [one, two] = running(world)
+      let releaseAdd = (): void => {}
+      world.git.state.holdAdd = new Promise<void>((resume) => {
+        releaseAdd = resume
+      })
+      // both places free: the drain's first start waits on its worktree
+      await endWithoutIdle(world, one!)
+      await endWithoutIdle(world, two!)
+      await waitFor(() => world.git.verbs('worktree', 'add').length === 3)
+      // a tick begins while the start waits, and records the blocking skip
+      const remotes = world.git.state.remotes
+      if (reason === 'identityMismatch') world.gh.login = 'somebody-else'
+      else world.git.state.remotes = null
+      world.time.advance(15 * minute)
+      await waitFor(() => ticks(world).length === 2 && ticks(world)[0]?.finishedAt !== null)
+      assert.equal(ticks(world)[0]?.skipReason, reason)
+      // the problem was transient: the launcher's own checks would now succeed
+      world.gh.login = scenario.viewer
+      world.git.state.remotes = remotes
+      const children = world.launch.children.length
+      world.git.state.holdAdd = null
+      releaseAdd()
+      await world.server.scheduler.idle()
+      assert.equal(world.launch.children.length, children + 1, `${reason}: only the start already under way finished`)
+      assert.deepEqual(running(world).map((run) => run.id), [line[0]!.id])
+      for (const run of line.slice(1)) assert.equal(world.server.cache.getRun(run.id)?.status, 'queued', `${reason}: the rest stay queued`)
+      // a run ending or a save starts nothing either, until a tick succeeds
+      await saveAuto(world, { concurrency: 3 })
+      await world.server.scheduler.idle()
+      assert.equal(world.launch.children.length, children + 1)
+      world.time.advance(15 * minute)
+      await waitFor(() => ticks(world).length === 3)
+      await world.server.scheduler.idle()
+      assert.equal(ticks(world)[0]?.state, 'ran')
+      assert.equal(world.launch.children.length, children + 3, 'the next successful tick drains the queue')
+    } finally {
+      await world.cleanup()
+    }
+  }
+})
+
 test('a tick that joins a drain already under way takes its answer from a pass that began after its board check: the earlier pass starts the last permitted review, and the tick is skipped as dailyLimit', async () => {
   const world = await setup({ auto: { concurrency: 2, dailyLimit: 3 }, config: { maxConcurrentReviews: 5 } })
   try {
