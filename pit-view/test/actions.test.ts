@@ -1572,38 +1572,70 @@ test('the form follows the findings and CI, and a comment keeps the URL gh print
   }
 })
 
-// before any post, the text is scanned for every registry id and full slug (section 8 of DESIGN.md, Launching runs, Posted reports carry no names)
+// before any post, the text is scanned for every mention of AI involvement (section 8 of DESIGN.md, Launching runs, Posted reports carry no names)
 const reportAt = (sha: string, body: string): string => `# Review\n\nReviewed commit: \`fix/x\` @ \`${sha.slice(0, 7)}\`\n\n${body}\n`
 
-test('a report that names a registry id or a full slug is refused with the name in the reason, posts nothing, and leaves no mark', async () => {
-  for (const [name, body] of [
-    ['gpt-6.1-terra', 'No actionable findings. Reviewed with gpt-6.1-terra.'],
-    ['moonshotai/kimi-k2.7-code', 'No actionable findings. Second opinion from MoonshotAI/Kimi-K2.7-Code.'],
-    ['qwen-coder-flash', 'No actionable findings.\n\n- qwen-coder-flash agreed'],
-  ] as const) {
-    const h = await blockedHarness()
-    try {
-      const { sha } = await listed(106)
-      const { id } = await blockedRun(h, {}, reportAt(sha, body))
-      const answer = await postIt(h, id, postBody(sha))
-      assert.equal(answer.status, 422, name)
-      assert.match(String(answer.body.error), new RegExp(`names a model \\(${name.replace(/[./]/g, '\\$&')}\\)`, 'i'))
-      assert.match(String(answer.body.error), /nothing was posted/)
-      assert.deepEqual(postsOf(h.runner), [], name)
-      // refused before gh was asked anything about the PR, so no mark was taken and the report stays postable once the text is fixed
-      assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null)
-      assert.notEqual((await rowOf(h, 106))?.agent?.postOffer, null)
-    } finally {
-      await h.cleanup()
-    }
-  }
-})
-
-test('a report with a bare word such as opus or sonnet in ordinary prose posts', async () => {
+const refusedPost = async (body: string, term: string): Promise<void> => {
   const h = await blockedHarness()
   try {
     const { sha } = await listed(106)
-    const { id } = await blockedRun(h, {}, reportAt(sha, 'No actionable findings. The retry helper is a magnum opus of a sonnet; the code is clean, and the flash of insight is mine.'))
+    const { id } = await blockedRun(h, {}, reportAt(sha, body))
+    const answer = await postIt(h, id, postBody(sha))
+    assert.equal(answer.status, 422, term)
+    const reason = String(answer.body.error)
+    assert.ok(reason.includes(`"${term}"`), `${term}: ${reason}`)
+    assert.match(reason, /nothing was posted/)
+    // the quoted text around the match is there, and the whole report is not
+    assert.ok(reason.length < 600, term)
+    assert.deepEqual(postsOf(h.runner), [], term)
+    // refused before gh was asked anything about the PR, so no mark was taken and the report stays postable once the text is fixed
+    assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null)
+    assert.notEqual((await rowOf(h, 106))?.agent?.postOffer, null)
+  } finally {
+    await h.cleanup()
+  }
+}
+
+test('a report that names a registry id, a full slug, or a plain model word is refused with the term in the reason, posts nothing, and leaves no mark', async () => {
+  await refusedPost('No actionable findings. Reviewed with gpt-6.1-terra.', 'gpt-6.1-terra')
+  await refusedPost('No actionable findings. Second opinion from MoonshotAI/Kimi-K2.7-Code.', 'moonshotai/kimi-k2.7-code')
+  await refusedPost('No actionable findings.\n\n- qwen-coder-flash agreed', 'qwen-coder-flash')
+  await refusedPost('No actionable findings. A careful opus pass.', 'opus')
+  await refusedPost('No actionable findings. Sonnet found nothing.', 'sonnet')
+})
+
+test('a report that names a vendor, model family, runner, or provider is refused', async () => {
+  await refusedPost('No actionable findings. Checked by Claude.', 'claude')
+  await refusedPost('No actionable findings. Sent through OpenRouter.', 'openrouter')
+  await refusedPost('No actionable findings. Hermes ran it.', 'hermes')
+  await refusedPost('No actionable findings. GPT-5 agrees.', 'gpt')
+})
+
+test('a report that uses the terms for AI is refused', async () => {
+  await refusedPost('No actionable findings. An LLM read it.', 'llm')
+  await refusedPost('No actionable findings. This is an A.I. review.', 'a.i.')
+  await refusedPost('No actionable findings. A language model read it.', 'language model')
+  await refusedPost('No actionable findings. Artificial intelligence was used.', 'artificial intelligence')
+})
+
+test('a report with a phrase that credits a tool or model is refused', async () => {
+  await refusedPost('No actionable findings. This text was AI-generated.', 'ai-generated')
+  await refusedPost('No actionable findings. Written by a script.', 'written by')
+  await refusedPost('No actionable findings. An autonomous pass.', 'autonomous')
+  await refusedPost('No actionable findings. The assistant agreed.', 'assistant')
+})
+
+test('a report with a review-mode word is refused', async () => {
+  await refusedPost('No actionable findings. Tandem review agreed.', 'tandem review')
+  await refusedPost('No actionable findings. The review is degraded.', 'degraded')
+  await refusedPost('No actionable findings. The consolidator merged it.', 'consolidator')
+})
+
+test('a clean report and a report with only near misses posts, and so does a bare Copilot or agent', async () => {
+  const h = await blockedHarness()
+  try {
+    const { sha } = await listed(106)
+    const { id } = await blockedRun(h, {}, reportAt(sha, 'No actionable findings. Claudette said it was paid again; the agent retries, the opusculum is short, and a GitHub Copilot review of the other PR raised the same naming point.'))
     const answer = await postIt(h, id, postBody(sha))
     assert.equal(answer.status, 200)
     assert.equal(postsOf(h.runner).length, 1)
@@ -1620,7 +1652,7 @@ test('the scan reads the owner\'s registry too, and a model the owner removed fr
     const { id } = await blockedRun(custom, {}, reportAt(sha, 'Second pass by vendor/house-x1.'))
     const answer = await postIt(custom, id, postBody(sha))
     assert.equal(answer.status, 422)
-    assert.match(String(answer.body.error), /names a model \(vendor\/house-x1\)/)
+    assert.match(String(answer.body.error), /"vendor\/house-x1"/)
     assert.deepEqual(postsOf(custom.runner), [])
   } finally {
     await custom.cleanup()

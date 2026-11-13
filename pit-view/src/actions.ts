@@ -401,9 +401,9 @@ export const createActions = (options: ActionsOptions): Actions => {
         throw error
       }
       if (reportHash(report) !== run.reportHash) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} has changed since run ${id} finished, so it is no longer that run's review; nothing was posted. Start a new review to post the report as it is now`)
-      // a posted report never names a model: every registry id and full slug, the owner's registry and the built-in table both, is looked for in the very text that gets posted, and one found refuses the post before gh is asked anything
-      const model = nameInText(resolveModels(config.models), report)
-      if (model !== null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} names a model (${model}), and a posted report never names a model, runner, or provider; nothing was posted. Edit the name out of the report, or start a new review`)
+      // a posted report never mentions AI involvement: every registry id and full slug, every vendor, runner, and provider name, every term for AI, every phrase that credits a tool, and the review-mode words (postedTextTerms) are looked for in the very text that gets posted, and one found refuses the post before gh is asked anything. The Post it path and the post button both come through here
+      const hit = nameInText(resolveModels(config.models), report)
+      if (hit !== null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} contains "${hit.term}" (${hit.context}), and a posted report never mentions the involvement of AI, a model, a runner, or a provider; nothing was posted. Edit that text out of the report, or start a new review`)
       const named = parseReviewedCommit(report.split('\n').slice(0, 20))
       if (named === null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} does not say which commit it reviewed; nothing was posted`)
       if (!reviewedAt.startsWith(named)) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} is about another commit (${named}); nothing was posted`)

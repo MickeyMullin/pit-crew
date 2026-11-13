@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { ConfigError, defaultConfig, validateConfig } from '../src/config.ts'
-import { builtInFallbackId, builtInRegistry, modelsSaveProblem, nameInText, resolveModels, resolveSlot, slotNames } from '../src/models.ts'
+import { builtInFallbackId, builtInRegistry, modelsSaveProblem, nameInText, postedTextTerms, resolveModels, resolveSlot, slotNames } from '../src/models.ts'
 
 const ids = (entries: readonly { id: string }[]): string[] => entries.map((entry) => entry.id)
 
@@ -131,25 +131,50 @@ test('the models key is carried through validateConfig whole, and a bad one neve
   assert.throws(() => validateConfig({ ...base, notAKey: 1 }), ConfigError)
 })
 
-test('nameInText finds a full id or slug and never a bare word', () => {
+test('nameInText finds a full id or slug and the plain model words, and where it is', () => {
   const resolved = resolveModels(undefined)
-  assert.equal(nameInText(resolved, 'Reviewed with gpt-6.1-terra today.'), 'gpt-6.1-terra')
-  assert.equal(nameInText(resolved, 'run on MOONSHOTAI/KIMI-K2.7-CODE'), 'moonshotai/kimi-k2.7-code')
-  assert.equal(nameInText(resolved, 'via ~deepseek/deepseek-flash-latest'), '~deepseek/deepseek-flash-latest')
-  assert.equal(nameInText(resolved, 'via deepseek/deepseek-flash-latest'), 'deepseek/deepseek-flash-latest')
-  assert.equal(nameInText(resolved, 'the qwen-coder-flash pass'), 'qwen-coder-flash')
-  assert.equal(nameInText(resolved, 'a deepseek-flash note'), 'deepseek-flash')
-  assert.equal(nameInText(resolved, 'kimi-code said so'), 'kimi-code')
-  // bare words are ordinary prose
-  assert.equal(nameInText(resolved, 'A magnum opus of a sonnet, nothing else.'), null)
-  assert.equal(nameInText(resolved, 'The code is clean and the flash of insight is mine.'), null)
-  assert.equal(nameInText(resolved, ''), null)
+  const found = (text: string): string | null => nameInText(resolved, text)?.term ?? null
+  assert.equal(found('Reviewed with gpt-6.1-terra today.'), 'gpt-6.1-terra')
+  assert.equal(found('run on MOONSHOTAI/KIMI-K2.7-CODE'), 'moonshotai/kimi-k2.7-code')
+  assert.equal(found('via ~deepseek/deepseek-flash-latest'), '~deepseek/deepseek-flash-latest')
+  assert.equal(found('via deepseek/deepseek-flash-latest'), 'deepseek/deepseek-flash-latest')
+  assert.equal(found('the qwen-coder-flash pass'), 'qwen-coder-flash')
+  assert.equal(found('a deepseek-flash note'), 'deepseek-flash')
+  assert.equal(found('kimi-code said so'), 'kimi-code')
+  // the plain words are model names too
+  assert.equal(found('A magnum opus of a pass.'), 'opus')
+  assert.equal(found('Sonnet agreed.'), 'sonnet')
+  assert.equal(found('The code is clean and the flash of insight is mine.'), null)
+  assert.equal(found(''), null)
+  // the first match in the text wins, and the context is the text around it, at most 60 characters
+  const long = `${'x '.repeat(100)}then Claude said ${'y '.repeat(100)}`
+  const hit = nameInText(resolved, long)
+  assert.equal(hit?.term, 'claude')
+  assert.ok(hit !== null && hit.context.includes('Claude') && hit.context.replace(/…/g, '').length <= 60)
+  assert.equal(nameInText(resolved, 'opus then claude')?.term, 'opus')
+})
+
+test('every entry of the exported term list is matched, and every near miss passes', () => {
+  const resolved = resolveModels(undefined)
+  assert.ok(postedTextTerms.length > 30)
+  for (const entry of postedTextTerms) {
+    const hit = nameInText(resolved, `Some prose, then ${entry.term}, then more prose.`)
+    assert.equal(hit?.term, entry.term, entry.term)
+    // case and surrounding punctuation do not matter
+    assert.equal(nameInText(resolved, `(${entry.term.toUpperCase()}).`)?.term, entry.term, entry.term)
+  }
+  for (const text of ['claudette', 'okimi', 'opusculum', 'AIM', 'said', 'paid', 'again', 'hermeslike', 'the agent retried', 'a GitHub Copilot review of the other PR', 'Copilot suggests a rename', 'maintain', 'geminis', 'grokking', 'degrade', 'consolidated', 'reassistant', 'autonomy']) {
+    assert.equal(nameInText(resolved, text), null, text)
+  }
+  for (const [text, term] of [['written by hand', 'written by'], ['GPT-5.2 wrote it', 'gpt'], ['gpt4 did', 'gpt'], ['an A.I. tool', 'a.i.'], ['the LLMs', 'llms'], ['a language model', 'language model'], ['Language   Model', 'language model']] as const) {
+    assert.equal(nameInText(resolved, text)?.term, term, text)
+  }
 })
 
 test('nameInText scans a custom registry and the built-in table both', () => {
   const resolved = resolveModels({ registry: [{ id: 'house-model', runner: 'hermes', provider: 'openrouter', model: 'vendor/house-x1' }] })
-  assert.equal(nameInText(resolved, 'by house-model'), 'house-model')
-  assert.equal(nameInText(resolved, 'by vendor/house-x1'), 'vendor/house-x1')
+  assert.equal(nameInText(resolved, 'by house-model')?.term, 'house-model')
+  assert.equal(nameInText(resolved, 'by vendor/house-x1')?.term, 'vendor/house-x1')
   // a name the owner removed from the registry is still a name Pit View knows, so it is never posted
-  assert.equal(nameInText(resolved, 'by gpt-6.1-sol'), 'gpt-6.1-sol')
+  assert.equal(nameInText(resolved, 'by gpt-6.1-sol')?.term, 'gpt-6.1-sol')
 })

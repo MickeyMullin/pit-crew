@@ -857,7 +857,7 @@ const showModels = (view: ModelsView | null): void => {
   }
   warnings.replaceChildren(...view.warnings.map((warning) => h('li', { class: 'warn-text' }, warning)))
   const slot = (value: string | string[]): string => Array.isArray(value) ? value.join(' + ') : value
-  effective.textContent = `In effect: review ${slot(view.slots.review)}; stack ${slot(view.slots.stack)}; sweep ${slot(view.slots.sweep)}; auto-review of people ${slot(view.slots.autoReviewHuman)}; auto-review of bots ${slot(view.slots.autoReviewBot)}; pinned fallback ${view.fallback.id}.`
+  effective.textContent = `Slots as read (a start does not use them yet): review ${slot(view.slots.review)}; stack ${slot(view.slots.stack)}; sweep ${slot(view.slots.sweep)}; auto-review of people ${slot(view.slots.autoReviewHuman)}; auto-review of bots ${slot(view.slots.autoReviewBot)}; pinned fallback ${view.fallback.id}.`
 }
 
 const loadExtras = async (): Promise<void> => {
