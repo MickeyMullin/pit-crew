@@ -184,6 +184,8 @@ export type SignInDeps = {
   stateDir: string
   // how a new signing key is written; only a test replaces it
   writeKey?: (path: string) => Promise<void>
+  // how the revocation marker is removed; only a test replaces it
+  removeMarker?: (path: string) => Promise<void>
   home: string
   clock: Clock
   endpoints: OAuthEndpoints
@@ -222,10 +224,18 @@ export const createSignIn = (deps: SignInDeps): SignIn => {
   let lastReason: string | null = null
   const markerPath = join(deps.stateDir, revokedFileName)
   const makeKey = deps.writeKey ?? writeKey
+  const takeMarker = deps.removeMarker ?? unlink
   // set when a new key could not be written, which would otherwise leave the sessions it was to end in force; the marker file carries it across a restart, and this covers a marker that could not be written
   let owed = false
-  // one recovery at a time
-  let recovering: Promise<string | null> | null = null
+  // how many rotations have failed; a marker is removed only when none failed since the key write that justified removing it
+  let failures = 0
+  // every step that writes the key or the marker, or changes `owed`, joins this one queue, so no step of one operation falls between the steps of another
+  let queue: Promise<unknown> = Promise.resolve()
+  const serialized = <T>(step: () => Promise<T>): Promise<T> => {
+    const run = queue.then(step)
+    queue = run.catch(() => {})
+    return run
+  }
 
   const closed = (reason: string): SignInState => {
     if (reason !== lastReason) deps.log(`sign-in: the proxied host is closed: ${reason}`)
@@ -238,12 +248,18 @@ export const createSignIn = (deps: SignInDeps): SignIn => {
       const read = await readGuarded(keyPath, shown(keyPath))
       if ('problem' in read) return read.problem
       if ('text' in read) return parseKey(read.text) ?? `${shown(keyPath)} does not hold a key; delete it, and Pit View makes a new one`
-      try {
-        await makeKey(keyPath)
-        deps.log(`sign-in: made a new signing key in ${shown(keyPath)}`)
-      } catch (error) {
-        return `${shown(keyPath)} cannot be written (${(error as NodeJS.ErrnoException).code ?? 'error'})`
-      }
+      // in the queue, and looked at again there: a rotation or a recovery ahead of this one may have written the key already
+      const made = await serialized(async (): Promise<string | null> => {
+        if (!('missing' in await readGuarded(keyPath, shown(keyPath)))) return null
+        try {
+          await makeKey(keyPath)
+          deps.log(`sign-in: made a new signing key in ${shown(keyPath)}`)
+          return null
+        } catch (error) {
+          return `${shown(keyPath)} cannot be written (${(error as NodeJS.ErrnoException).code ?? 'error'})`
+        }
+      })
+      if (made !== null) return made
     }
     return `${shown(keyPath)} cannot be read`
   }
@@ -270,34 +286,37 @@ export const createSignIn = (deps: SignInDeps): SignIn => {
 
   const keyProblem = (error: unknown): string => `a new signing key could not be written to ${shown(keyPath)} (${(error as NodeJS.ErrnoException).code ?? 'error'})`
 
-  // a new key, written and then the marker removed; the reason when either fails
+  // a new key, written and then the marker removed; the reason when either fails; only inside the queue
   const replaceKey = async (): Promise<string | null> => {
+    const before = failures
     try {
       await makeKey(keyPath)
     } catch (error) {
       return keyProblem(error)
     }
+    // the queue already keeps a failed rotation from falling between the key write and here; this keeps a marker that a later failure wrote from being removed if that ever changes
+    if (failures !== before) return null
     owed = false
     try {
-      await unlink(markerPath)
+      await takeMarker(markerPath)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return `the revocation marker ${shown(markerPath)} could not be removed (${(error as NodeJS.ErrnoException).code ?? 'error'})`
     }
     return null
   }
 
-  // while a new key is owed, every use tries to write it, so the host opens as soon as it can
-  const recover = async (): Promise<string | null> => {
+  // while a new key is owed, every use tries to write it, so the host opens as soon as it can; what is owed is looked at again inside the queue, where an operation ahead of this one may have settled it
+  const recover = (): Promise<string | null> => serialized(async () => {
+    if (!owed && !await markerPresent()) return null
     const problem = await replaceKey()
     if (problem !== null) return `${problem}, so sign-in stays closed until one can be, and no session made before then works`
     deps.log('sign-in: wrote the owed signing key, which ends every earlier session')
     return null
-  }
+  })
 
   const state = async (): Promise<SignInState> => {
     if (owed || await markerPresent()) {
-      recovering ??= recover().finally(() => { recovering = null })
-      const problem = await recovering
+      const problem = await recover()
       if (problem !== null) return closed(problem)
     }
     const read = await readGuarded(oauthPath, shown(oauthPath))
@@ -389,22 +408,22 @@ export const createSignIn = (deps: SignInDeps): SignIn => {
     return { kind: 'signedIn', login, cookie: setCookie(sessionCookieName, mintSession(now.files.key, login, deps.clock.now()), SESSION_LIFETIME_MS, 'Strict') }
   }
 
-  const rotate = async (why: string): Promise<{ ok: true } | { ok: false, reason: string }> => {
+  // the whole rotation is one step of the queue: behind every operation that began before it, and ahead of every one that begins after
+  const rotate = (why: string): Promise<{ ok: true } | { ok: false, reason: string }> => serialized(async () => {
     // with no key and nothing owed there is no session to end
-    if ('missing' in await readGuarded(keyPath, shown(keyPath)) && !owed && !await markerPresent()) return { ok: true }
-    // behind recovery, never beside it, so two new keys are not written at once
-    while (recovering !== null) await recovering
+    if ('missing' in await readGuarded(keyPath, shown(keyPath)) && !owed && !await markerPresent()) return { ok: true as const }
     const problem = await replaceKey()
     if (problem === null) {
       deps.log(`sign-in: made a new signing key, which ends every session (${why})`)
-      return { ok: true }
+      return { ok: true as const }
     }
     const reason = `${problem} after ${why}, so no session was ended and sign-in stays closed until one can be`
+    failures += 1
     owed = true
     await writeMarker()
     closed(reason)
-    return { ok: false, reason }
-  }
+    return { ok: false as const, reason }
+  })
 
   return { state, session, begin, finish, rotate }
 }

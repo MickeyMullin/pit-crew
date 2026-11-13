@@ -93,6 +93,8 @@ export type ServerOptions = {
   oauthEndpoints?: OAuthEndpoints
   // how sign-in writes a new signing key; a test replaces it to make the write fail
   writeSigningKey?: (path: string) => Promise<void>
+  // how sign-in removes the revocation marker; a test replaces it to pause or fail the removal
+  removeRevocationMarker?: (path: string) => Promise<void>
 }
 
 export type PitServer = {
@@ -365,7 +367,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   let ghLogin = stored.viewer === '' ? await localLogin(runner) : ''
   const effective = (): Config => ({ ...stored, viewer: stored.viewer === '' ? ghLogin : stored.viewer })
   // sign-in through the proxy reads its two files from the config file's own folder, at every use
-  const signIn = createSignIn({ dir: dirname(options.configPath), stateDir: options.stateDir, ...(options.writeSigningKey === undefined ? {} : { writeKey: options.writeSigningKey }), home, clock, endpoints: options.oauthEndpoints ?? githubEndpoints, log })
+  const signIn = createSignIn({ dir: dirname(options.configPath), stateDir: options.stateDir, ...(options.writeSigningKey === undefined ? {} : { writeKey: options.writeSigningKey }), ...(options.removeRevocationMarker === undefined ? {} : { removeMarker: options.removeRevocationMarker }), home, clock, endpoints: options.oauthEndpoints ?? githubEndpoints, log })
 
   // the port comes first: a second server must exit before it touches the running one's cache
   let dispatch: ((req: IncomingMessage, res: ServerResponse) => void) | null = null

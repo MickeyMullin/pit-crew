@@ -1,7 +1,7 @@
 // test/signin.test.ts
 // sign-in through the reverse proxy (section 3 of DESIGN.md, Hosting, Sign-in behind the proxy), over the real HTTP server with a fake GitHub OAuth endpoint, an injected clock, and a config folder under the test's own temp home
 import assert from 'node:assert/strict'
-import { chmod, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { createServer, request } from 'node:http'
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -11,7 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { Config } from '../src/config.ts'
 import { startServer } from '../src/server.ts'
 import type { PitServer, ServerOptions } from '../src/server.ts'
-import { keyFileName, oauthFileName, openLoopback, revokedFileName, writeKey, SESSION_LIFETIME_MS, sessionCookieName, STATE_LIFETIME_MS, stateCookieName } from '../src/signin.ts'
+import { keyFileName, mintSession, oauthFileName, openLoopback, revokedFileName, writeKey, SESSION_LIFETIME_MS, sessionCookieName, STATE_LIFETIME_MS, stateCookieName } from '../src/signin.ts'
 import { signedInAs, showSignOut } from '../public/instance.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { fakeLaunch, fakeTime, fixtureRunner, tempDir } from './helpers.ts'
@@ -64,11 +64,24 @@ type Rig = {
   configPath: string
   github: Awaited<ReturnType<typeof fakeGitHub>>
   logs: string[]
-  // while fail is set, every write of the signing key fails as a read-only folder would make it
-  keyWrite: { fail: boolean }
+  // while fail is set, every write of the signing key fails as a read-only folder would make it; a gate set in `gate` pauses the next write (once) before it touches the file; `most` is the most writes ever under way at one time
+  keyWrite: { fail: boolean, gate?: Gate, active: number, most: number, count: number }
+  // the marker's removal: fail makes it fail with EACCES; a gate pauses the next removal (once)
+  markerRemoval: { fail: boolean, gate?: Gate }
   // a restart over the same folders: the server closes and a new one starts, with a new port and token
   restart: () => Promise<void>
   cleanup: () => Promise<void>
+}
+
+// a pause a test places inside a step, to say when the step has been reached and to let it go on
+type Gate = { reached: Promise<void>, release: () => void, reach: () => void, passed: Promise<void> }
+
+const makeGate = (): Gate => {
+  let release!: () => void
+  let reach!: () => void
+  const passed = new Promise<void>((resolve) => { release = resolve })
+  const reached = new Promise<void>((resolve) => { reach = resolve })
+  return { reached, release, reach, passed }
 }
 
 const validOAuth = JSON.stringify({ clientId, clientSecret })
@@ -93,12 +106,36 @@ const setup = async ({ oauth = validOAuth as string | null, mode = 0o600, config
   const github = await fakeGitHub({ 'code-viewer': scenario.viewer, ...logins })
   const time = fakeTime()
   const logs: string[] = []
-  const keyWrite = { fail: false }
+  const keyWrite: Rig['keyWrite'] = { fail: false, active: 0, most: 0, count: 0 }
+  const markerRemoval: Rig['markerRemoval'] = { fail: false }
   const serverOptions: ServerOptions = {
     home,
     writeSigningKey: async (path: string): Promise<void> => {
       if (keyWrite.fail) throw Object.assign(new Error('injected'), { code: 'EACCES' })
-      await writeKey(path)
+      keyWrite.active += 1
+      keyWrite.most = Math.max(keyWrite.most, keyWrite.active)
+      keyWrite.count += 1
+      try {
+        const gate = keyWrite.gate
+        keyWrite.gate = undefined
+        if (gate !== undefined) {
+          gate.reach()
+          await gate.passed
+        }
+        await writeKey(path)
+      } finally {
+        keyWrite.active -= 1
+      }
+    },
+    removeRevocationMarker: async (path: string): Promise<void> => {
+      const gate = markerRemoval.gate
+      markerRemoval.gate = undefined
+      if (gate !== undefined) {
+        gate.reach()
+        await gate.passed
+      }
+      if (markerRemoval.fail) throw Object.assign(new Error('injected'), { code: 'EACCES' })
+      await unlink(path)
     },
     port: 0,
     runner: fixtureRunner().runner,
@@ -122,7 +159,7 @@ const setup = async ({ oauth = validOAuth as string | null, mode = 0o600, config
   await writeFile(join(home, 'public', 'app.ts'), '// public/app.ts\nexport const answer: number = 42\n')
   await writeFile(join(home, 'public', 'styles.css'), '/* public/styles.css */\n')
   const rig: Rig = {
-    server, time, home, dir, configPath, github, logs, keyWrite,
+    server, time, home, dir, configPath, github, logs, keyWrite, markerRemoval,
     restart: async () => {
       await rig.server.close()
       rig.server = await startServer(serverOptions)
@@ -791,6 +828,164 @@ test('a sign-out with the config folder really read-only fails the same way, and
     const fresh = await signIn(rig)
     assert.equal((await proxied(rig, '/api/view', { Cookie: fresh })).status, 200)
     assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
+  } finally {
+    await rig.cleanup()
+  }
+})
+
+// a session cookie for the login, signed with the key that is on disk now: what a browser holds after signing in under that key
+const sessionUnderCurrentKey = async (rig: Rig, login: string): Promise<string> => {
+  const text = await readFile(join(rig.dir, keyFileName), 'utf8')
+  return `${sessionCookieName}=${mintSession(Buffer.from(text.trim(), 'base64url'), login, rig.time.clock.now())}`
+}
+
+const exists = (path: string): Promise<boolean> => stat(path).then(() => true, () => false)
+
+test('a rotation that fails while an earlier rotation is between writing its key and removing the marker leaves the marker in place, so the earlier key is refused after a restart', async () => {
+  const rig = await setup()
+  try {
+    const old = await signIn(rig)
+    // a failed sign-out leaves the marker, and the old key still on disk
+    rig.keyWrite.fail = true
+    assert.equal((await signOut(rig, old)).status, 503)
+    rig.keyWrite.fail = false
+    // rotation A writes its key and stops before it removes the marker
+    const removal = makeGate()
+    rig.markerRemoval.gate = removal
+    const a = saveViewer(rig, 'sam-tran')
+    await removal.reached
+    const underA = await sessionUnderCurrentKey(rig, 'sam-tran')
+    // rotation B cannot write its key
+    rig.keyWrite.fail = true
+    const b = saveViewer(rig, scenario.viewer)
+    // long enough for B to have tried its write, if nothing holds it behind A
+    await delay(150)
+    removal.release()
+    assert.deepEqual(await Promise.all([a, b]), [200, 200])
+    assert.ok(await exists(markerPath(rig)), 'the failed rotation B left its marker, and the removal for A must not have taken it')
+    assert.equal((await proxied(rig, '/')).status, 503)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: underA })).status, 401)
+    await rig.restart()
+    assert.ok(await exists(markerPath(rig)))
+    assert.equal((await proxied(rig, '/')).status, 503)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: underA })).status, 401)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: old })).status, 401)
+    // once a key can be written the host opens, and neither earlier session comes back
+    rig.keyWrite.fail = false
+    const fresh = await signIn(rig)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: fresh })).status, 200)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: underA })).status, 401)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: old })).status, 401)
+    await rig.server.poller.idle()
+  } finally {
+    await rig.cleanup()
+  }
+})
+
+test('two sign-outs at once write one key at a time, and both end the session', async () => {
+  const rig = await setup()
+  try {
+    const session = await signIn(rig)
+    const writing = makeGate()
+    rig.keyWrite.gate = writing
+    rig.keyWrite.most = 0
+    rig.keyWrite.count = 0
+    const first = signOut(rig, session)
+    await writing.reached
+    const second = signOut(rig, session)
+    // the second has had time to reach its own write if nothing held it back
+    await delay(50)
+    writing.release()
+    const [one, two] = await Promise.all([first, second])
+    assert.equal(one.status, 200)
+    assert.equal(two.status, 200)
+    assert.equal(rig.keyWrite.most, 1)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: await signIn(rig) })).status, 200)
+  } finally {
+    await rig.cleanup()
+  }
+})
+
+test('a viewer change that arrives while a recovery is writing the owed key waits for it, then rotates once more, and the host ends open with no marker', async () => {
+  const rig = await setup()
+  try {
+    const old = await signIn(rig)
+    rig.keyWrite.fail = true
+    assert.equal((await signOut(rig, old)).status, 503)
+    rig.keyWrite.fail = false
+    rig.keyWrite.most = 0
+    rig.keyWrite.count = 0
+    const writing = makeGate()
+    rig.keyWrite.gate = writing
+    const recovery = proxied(rig, '/api/view', { Cookie: old })
+    await writing.reached
+    const change = saveViewer(rig, 'sam-tran')
+    await delay(50)
+    writing.release()
+    assert.equal((await recovery).status, 401)
+    assert.equal(await change, 200)
+    assert.equal(rig.keyWrite.most, 1)
+    assert.equal(rig.keyWrite.count, 2)
+    assert.equal(await exists(markerPath(rig)), false)
+    assert.equal(await saveViewer(rig, scenario.viewer), 200)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: await signIn(rig) })).status, 200)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: old })).status, 401)
+    await rig.server.poller.idle()
+  } finally {
+    await rig.cleanup()
+  }
+})
+
+test('the host does not reopen while a failed rotation is the latest outcome, whichever step of an earlier recovery it fell behind', async () => {
+  const rig = await setup()
+  try {
+    const old = await signIn(rig)
+    rig.keyWrite.fail = true
+    assert.equal((await signOut(rig, old)).status, 503)
+    rig.keyWrite.fail = false
+    // a recovery writes the owed key and stops before it removes the marker
+    const removal = makeGate()
+    rig.markerRemoval.gate = removal
+    const recovery = proxied(rig, '/')
+    await removal.reached
+    const underRecovery = await sessionUnderCurrentKey(rig, scenario.viewer)
+    // a rotation that fails is now the latest outcome
+    rig.keyWrite.fail = true
+    const change = saveViewer(rig, 'sam-tran')
+    await delay(150)
+    removal.release()
+    await Promise.all([recovery, change])
+    for (const path of ['/', '/api/view']) assert.equal((await proxied(rig, path, { Cookie: underRecovery })).status, path === '/' ? 503 : 401)
+    assert.ok(await exists(markerPath(rig)))
+    await rig.restart()
+    assert.equal((await proxied(rig, '/api/view', { Cookie: underRecovery })).status, 401)
+    assert.equal((await proxied(rig, '/')).status, 503)
+    assert.equal((await proxied(rig, '/auth/sign-in')).status, 503)
+  } finally {
+    await rig.cleanup()
+  }
+})
+
+test('a marker that cannot be removed after the key was written keeps the host closed and says so, and the next use removes it and opens the host', async () => {
+  const rig = await setup()
+  try {
+    const old = await signIn(rig)
+    rig.keyWrite.fail = true
+    assert.equal((await signOut(rig, old)).status, 503)
+    rig.keyWrite.fail = false
+    rig.markerRemoval.fail = true
+    const closedPage = await proxied(rig, '/')
+    assert.equal(closedPage.status, 503)
+    assert.match(closedPage.body, /could not be removed/)
+    assert.ok(await exists(markerPath(rig)))
+    await rig.restart()
+    assert.equal((await proxied(rig, '/')).status, 503)
+    rig.markerRemoval.fail = false
+    const fresh = await signIn(rig)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: fresh })).status, 200)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: old })).status, 401)
+    assert.equal(await exists(markerPath(rig)), false)
   } finally {
     await rig.cleanup()
   }
