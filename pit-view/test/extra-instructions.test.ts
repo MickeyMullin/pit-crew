@@ -420,7 +420,7 @@ test('a cache from before version 15 gains the column and keeps its runs, which 
     try {
       assert.equal(again.getRun(made.id)?.extraInstructions, null)
       assert.deepEqual(again.updateRun(made.id, { extraInstructions: { text: 'x', source: 'box' } }).extraInstructions, { text: 'x', source: 'box' })
-      assert.equal(again.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, '15')
+      assert.equal(again.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, '16')
     } finally {
       again.close()
     }

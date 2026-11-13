@@ -1206,7 +1206,7 @@ test('a version 8 cache gains runs.first_note in place: its runs stay with no fi
   }
 })
 
-test('version 14 keeps the GitHub tables and adds the ticks table and the auto-review columns to the rows it keeps', async () => {
+test('a cache from version 13 gains the ticks table and the auto-review columns on the runs and sweeps it keeps, and its GitHub tables are rebuilt for version 16', async () => {
   const { dir, cleanup } = await tempDir()
   try {
     const path = join(dir, 'cache.sqlite')
@@ -1221,10 +1221,11 @@ test('version 14 keeps the GitHub tables and adds the ticks table and the auto-r
     for (const column of ['origin', 'tick', 'reason', 'queued_at', 'posting', 'worktree']) old.exec(`ALTER TABLE sweeps DROP COLUMN ${column}`)
     old.exec('UPDATE meta SET value = \'13\' WHERE key = \'schemaVersion\'')
     old.close()
-    assert.equal(schemaVersion, 15)
-    assert.equal(githubTablesVersion, 13)
+    assert.equal(schemaVersion, 16)
+    assert.equal(githubTablesVersion, 16)
     const cache = openCache({ path, clock: handClock().clock })
-    assert.equal(count(cache, 'prs'), 1)
+    // version 16 changed what the GitHub tables hold, so a cache from version 13 refetches its PRs
+    assert.equal(count(cache, 'prs'), 0)
     const run = cache.getRun(created.id)
     assert.equal(run?.origin, 'manual')
     assert.equal(run?.tick, null)
@@ -1237,6 +1238,29 @@ test('version 14 keeps the GitHub tables and adds the ticks table and the auto-r
     assert.equal(kept?.origin, 'manual')
     assert.equal(kept?.worktree, null)
     assert.deepEqual(cache.ticksFor(scenario.repo), [])
+    cache.close()
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a cache from version 15 drops its cached PRs, whose check runs lack the workflow run\'s identity, and keeps every run and sweep', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const created = first.createRun(newRun(106), (id) => `~/runs/${id}`)
+    const sweep = first.createSweep(newSweep(), (id) => `~/sweeps/${id}`)
+    first.close()
+    const old = new DatabaseSync(path)
+    old.exec('INSERT INTO prs (repo, number, state, updated_at, head_oid, fetched_at, cycle, last_seen_at, data) VALUES (\'octo-example/orbit\', 106, \'open\', \'2026-10-26T12:00:00Z\', \'abc\', \'2026-10-26T12:00:00Z\', 1, \'2026-10-26T12:00:00Z\', \'{"number":106}\')')
+    old.exec('UPDATE meta SET value = \'15\' WHERE key = \'schemaVersion\'')
+    old.close()
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.equal(count(cache, 'prs'), 0)
+    assert.equal(cache.getRun(created.id)?.id, created.id)
+    assert.equal(cache.getSweep(sweep.id)?.id, sweep.id)
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, '16')
     cache.close()
   } finally {
     await cleanup()

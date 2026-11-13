@@ -337,9 +337,45 @@ const isRunning = (context: RawCheckContext): boolean => context.__typename === 
 
 const isCanceled = (context: RawCheckContext): boolean => context.__typename === 'CheckRun' && context.conclusion === 'CANCELLED'
 
-const contextsOf = (pr: RawOpenPr): RawCheckContext[] => pr.headCommit.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? []
+// the run identity of a check run GitHub Actions created; null for a commit status, a check run from anything else, and a check run cached before the query asked for the run's id
+type RunIdentity = { workflow: string, run: number, createdAt: string, attempt: number }
 
-// the PR's CI as the cache holds it, for the post button's confirmation: failed when any check failed or, with none failing or running, any was canceled, since the head has not passed; pending while any still runs; none when no check has run; and green otherwise
+const runIdentityOf = (context: RawCheckContext): RunIdentity | null => {
+  if (context.__typename !== 'CheckRun') return null
+  const run = context.checkSuite?.workflowRun
+  if (run === null || run === undefined || typeof run.databaseId !== 'number') return null
+  const workflow = typeof run.workflow.databaseId === 'number' ? `id:${run.workflow.databaseId}` : `name:${run.workflow.name}`
+  return { workflow, run: run.databaseId, createdAt: run.createdAt ?? '', attempt: run.runAttempt ?? 1 }
+}
+
+// positive when a is a newer run than b: the higher run id, then the later creation time, then the later attempt
+const compareRuns = (a: RunIdentity, b: RunIdentity): number => {
+  if (a.run !== b.run) return a.run - b.run
+  const created = (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0)
+  if (created !== 0) return created
+  return a.attempt - b.attempt
+}
+
+// the head commit's checks as Pit View reads them: GitHub's rollup keeps the check runs of a superseded run of a workflow beside those of the run that replaced it (a push or a concurrency group cancels the old run on the same head), so of the runs of one workflow only the newest one's check runs count. Newest is by run identity, never by order in the list. A commit status, a check run that GitHub Actions did not create, and a check run without a run id (cached before the query asked for it) are kept as they are, the last counting as the newest of its workflow. Every CI reading (the CI chips and the failing chip's link, ciStateOf, and through the chips Ready to merge and Waiting on author) goes through this list
+export const currentContexts = (contexts: readonly RawCheckContext[]): RawCheckContext[] => {
+  const newest = new Map<string, RunIdentity>()
+  for (const context of contexts) {
+    const identity = runIdentityOf(context)
+    if (identity === null) continue
+    const seen = newest.get(identity.workflow)
+    if (seen === undefined || compareRuns(identity, seen) > 0) newest.set(identity.workflow, identity)
+  }
+  return contexts.filter((context) => {
+    const identity = runIdentityOf(context)
+    if (identity === null) return true
+    const kept = newest.get(identity.workflow)
+    return kept !== undefined && compareRuns(identity, kept) === 0
+  })
+}
+
+const contextsOf = (pr: RawOpenPr): RawCheckContext[] => currentContexts(pr.headCommit.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? [])
+
+// the PR's CI as the cache holds it, read from the current runs only, for the post button's confirmation: failed when any check failed or, with none failing or running, any was canceled, since the head has not passed; pending while any still runs; none when no check has run; and green otherwise
 export type CiReading = 'green' | 'pending' | 'failed' | 'none'
 
 export const ciStateOf = (pr: RawOpenPr): CiReading => {

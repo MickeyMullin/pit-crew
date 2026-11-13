@@ -48,7 +48,15 @@ export type RawCheckRun = {
   status: RawCheckStatus
   detailsUrl: string | null
   // workflowRun is null for checks not created by GitHub Actions
-  checkSuite: { workflowRun: { workflow: { name: string } } | null } | null
+  checkSuite: { workflowRun: RawWorkflowRun | null } | null
+}
+
+// the run of a workflow a check run belongs to: databaseId only grows, so the highest is the newest run of its workflow; runAttempt is the run's latest attempt, the same on every check run of the run. The identity fields are optional because a row cached before they were asked for lacks them
+export type RawWorkflowRun = {
+  databaseId?: number
+  createdAt?: string
+  runAttempt?: number
+  workflow: { databaseId?: number, name: string }
 }
 
 export type RawStatusState = 'ERROR' | 'EXPECTED' | 'FAILURE' | 'PENDING' | 'SUCCESS'
@@ -349,7 +357,7 @@ headCommit: commits(last: 1) {
           totalCount
           nodes {
             __typename
-            ... on CheckRun { name conclusion status detailsUrl checkSuite { workflowRun { workflow { name } } } }
+            ... on CheckRun { name conclusion status detailsUrl checkSuite { workflowRun { databaseId createdAt runAttempt workflow { databaseId name } } } }
             ... on StatusContext { context state targetUrl }
           }
         }
