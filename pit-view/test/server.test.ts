@@ -471,6 +471,50 @@ test('PUT /api/config refuses Concurrent auto-reviews above Concurrent reviews o
   }
 })
 
+test('PUT /api/config refuses a model slug with a space or a leading dash, saves a sound registry and an unknown slot id, and GET reads the setting back', async () => {
+  const h = await setup()
+  try {
+    const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
+    const entry = { id: 'mine', runner: 'hermes', provider: 'openrouter', model: 'vendor/model-x' }
+    const spaced = await saveConfigAs(h.server, { ...stored, models: { registry: [{ ...entry, model: 'vendor/model x' }] } })
+    assert.equal(spaced.status, 400)
+    assert.match(String(spaced.body.error), /models\.registry\[0\] \(mine\): model must have no spaces/)
+    const dashed = await saveConfigAs(h.server, { ...stored, models: { registry: [{ ...entry, model: '--force' }] } })
+    assert.equal(dashed.status, 400)
+    assert.match(String(dashed.body.error), /must not start with a dash/)
+    // nothing was written by a refused save
+    assert.equal((await getJson<Config>(`${h.base}/api/config`)).body.models, undefined)
+    // an unknown slot id is a warning in Settings, not a refusal
+    const models = { registry: [entry], slots: { stack: 'ghost' } }
+    assert.equal((await saveConfigAs(h.server, { ...stored, models })).status, 200)
+    assert.deepEqual((await getJson<Config>(`${h.base}/api/config`)).body.models, models)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('GET /api/models serves the effective registry, the pinned fallback, each slot by id, and the warnings, and never a key or a spend figure', async () => {
+  const h = await setup()
+  try {
+    const first = await getJson<{ registry: { id: string }[], fallback: { id: string }, slots: Record<string, string | string[]>, warnings: string[] }>(`${h.base}/api/models`)
+    assert.equal(first.status, 200)
+    assert.deepEqual(first.body.registry.map((entry) => entry.id), ['sonnet', 'opus', 'gpt-6.1-terra', 'gpt-6.1-sol', 'deepseek-flash', 'kimi-code', 'qwen-coder-flash'])
+    assert.equal(first.body.fallback.id, 'kimi-code')
+    assert.deepEqual(first.body.slots, { review: ['sonnet', 'gpt-6.1-terra'], stack: 'sonnet', sweep: 'sonnet', autoReviewHuman: ['sonnet', 'gpt-6.1-terra'], autoReviewBot: 'sonnet' })
+    assert.deepEqual(first.body.warnings, [])
+    const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
+    assert.equal((await saveConfigAs(h.server, { ...stored, models: { slots: { stack: 'ghost', review: ['opus', 'gpt-6.1-sol'] } } })).status, 200)
+    const next = await getJson<{ slots: Record<string, string | string[]>, warnings: string[] }>(`${h.base}/api/models`)
+    assert.deepEqual(next.body.slots.review, ['opus', 'gpt-6.1-sol'])
+    assert.equal(next.body.slots.stack, 'sonnet')
+    assert.equal(next.body.warnings.length, 1)
+    assert.match(next.body.warnings[0] ?? '', /stack.*ghost/)
+    assert.doesNotMatch(JSON.stringify(next.body), /key|spend|cost/i)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('static files come from public/, with .ts served as JavaScript and nothing outside the folder', async () => {
   const h = await setup({
     files: {

@@ -8,6 +8,7 @@ import { GhError, GhTimeoutError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr, WriteLimits } from './github.ts'
 import { currentOffers, isHttpUrl, offersFix, postArgs, stackRunCover } from './launcher.ts'
 import type { Posted, PostForm, PostGuard, RunView, UpdateAction } from './launcher.ts'
+import { nameInText, resolveModels } from './models.ts'
 import { parseReviewedCommit, readReport, reportHash, ReportReadError } from './reports.ts'
 
 // direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs, each through gh with the viewer's own token. This module decides whether an action is allowed and what gh is asked; it never trusts the page, so every rule is checked here again. merge is always a squash into the repository's primary branch; the method is fixed, not a setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused. update writes nothing itself: it starts an agent session through the launcher, which brings the PR's branch up to date with the primary branch and pushes it. resolveConflicts is that same session, asked for on a PR the cache holds as conflicting
@@ -400,6 +401,9 @@ export const createActions = (options: ActionsOptions): Actions => {
         throw error
       }
       if (reportHash(report) !== run.reportHash) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} has changed since run ${id} finished, so it is no longer that run's review; nothing was posted. Start a new review to post the report as it is now`)
+      // a posted report never names a model: every registry id and full slug, the owner's registry and the built-in table both, is looked for in the very text that gets posted, and one found refuses the post before gh is asked anything
+      const model = nameInText(resolveModels(config.models), report)
+      if (model !== null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} names a model (${model}), and a posted report never names a model, runner, or provider; nothing was posted. Edit the name out of the report, or start a new review`)
       const named = parseReviewedCommit(report.split('\n').slice(0, 20))
       if (named === null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} does not say which commit it reviewed; nothing was posted`)
       if (!reviewedAt.startsWith(named)) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} is about another commit (${named}); nothing was posted`)

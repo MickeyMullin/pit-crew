@@ -3284,6 +3284,15 @@ select.input {
   font-weight: 600;
 }
 
+.warn-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.warn-list:empty {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .auto-disclosure .chev {
     transition: none;

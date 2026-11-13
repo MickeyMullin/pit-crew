@@ -1572,6 +1572,70 @@ test('the form follows the findings and CI, and a comment keeps the URL gh print
   }
 })
 
+// before any post, the text is scanned for every registry id and full slug (section 8 of DESIGN.md, Launching runs, Posted reports carry no names)
+const reportAt = (sha: string, body: string): string => `# Review\n\nReviewed commit: \`fix/x\` @ \`${sha.slice(0, 7)}\`\n\n${body}\n`
+
+test('a report that names a registry id or a full slug is refused with the name in the reason, posts nothing, and leaves no mark', async () => {
+  for (const [name, body] of [
+    ['gpt-6.1-terra', 'No actionable findings. Reviewed with gpt-6.1-terra.'],
+    ['moonshotai/kimi-k2.7-code', 'No actionable findings. Second opinion from MoonshotAI/Kimi-K2.7-Code.'],
+    ['qwen-coder-flash', 'No actionable findings.\n\n- qwen-coder-flash agreed'],
+  ] as const) {
+    const h = await blockedHarness()
+    try {
+      const { sha } = await listed(106)
+      const { id } = await blockedRun(h, {}, reportAt(sha, body))
+      const answer = await postIt(h, id, postBody(sha))
+      assert.equal(answer.status, 422, name)
+      assert.match(String(answer.body.error), new RegExp(`names a model \\(${name.replace(/[./]/g, '\\$&')}\\)`, 'i'))
+      assert.match(String(answer.body.error), /nothing was posted/)
+      assert.deepEqual(postsOf(h.runner), [], name)
+      // refused before gh was asked anything about the PR, so no mark was taken and the report stays postable once the text is fixed
+      assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null)
+      assert.notEqual((await rowOf(h, 106))?.agent?.postOffer, null)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('a report with a bare word such as opus or sonnet in ordinary prose posts', async () => {
+  const h = await blockedHarness()
+  try {
+    const { sha } = await listed(106)
+    const { id } = await blockedRun(h, {}, reportAt(sha, 'No actionable findings. The retry helper is a magnum opus of a sonnet; the code is clean, and the flash of insight is mine.'))
+    const answer = await postIt(h, id, postBody(sha))
+    assert.equal(answer.status, 200)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the scan reads the owner\'s registry too, and a model the owner removed from it is still never posted', async () => {
+  const models = { registry: [{ id: 'house-model', runner: 'hermes', provider: 'openrouter', model: 'vendor/house-x1' }] }
+  const custom = await setup({ config: { ...withClone, models }, runner: ghWorld() })
+  try {
+    const { sha } = await listed(106)
+    const { id } = await blockedRun(custom, {}, reportAt(sha, 'Second pass by vendor/house-x1.'))
+    const answer = await postIt(custom, id, postBody(sha))
+    assert.equal(answer.status, 422)
+    assert.match(String(answer.body.error), /names a model \(vendor\/house-x1\)/)
+    assert.deepEqual(postsOf(custom.runner), [])
+  } finally {
+    await custom.cleanup()
+  }
+  const removed = await setup({ config: { ...withClone, models }, runner: ghWorld() })
+  try {
+    const { sha } = await listed(106)
+    const { id } = await blockedRun(removed, {}, reportAt(sha, 'Checked by kimi-code.'))
+    assert.equal((await postIt(removed, id, postBody(sha))).status, 422)
+    assert.deepEqual(postsOf(removed.runner), [])
+  } finally {
+    await removed.cleanup()
+  }
+})
+
 test('Post it takes the same token and Origin as a direct action and what its confirmation showed', async () => {
   const h = await blockedHarness()
   try {

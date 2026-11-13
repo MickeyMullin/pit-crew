@@ -260,6 +260,80 @@ test('the model a cell shows is the model on the real command line, for Claude a
   }
 })
 
+// what a run records of its models (section 8 of DESIGN.md, Launching runs, Recording the models): the registry id, the runner, the provider and model slug, whether the pinned fallback replaced it, and whether the review ended degraded, in request.json and, with each role's outcome, in the row
+const recordedModels = async (h: Awaited<ReturnType<typeof setup>>, id: number) => {
+  const dir = join(h.home, '.local', 'state', 'pit-view', 'runs', String(id))
+  return { file: JSON.parse(await readFile(join(dir, 'request.json'), 'utf8')).models, row: h.cache.getRun(id)?.models }
+}
+
+test('a Claude run records its model in request.json and on its row: the registry id, runner, provider, and slug, no fallback, not degraded', { timeout: 20_000 }, async () => {
+  const h = await setup({ agent: { runner: 'claude', claudeModel: 'opus' } })
+  try {
+    const run = await h.launcher.start(request)
+    await h.launcher.settled(run.id)
+    const { file, row } = await recordedModels(h, run.id)
+    const role = { role: 'reviewer', id: 'opus', runner: 'claude', provider: 'anthropic', model: 'opus', fallback: false }
+    assert.deepEqual(file, { roles: [role], degraded: false })
+    assert.deepEqual(row, { roles: [{ ...role, outcome: null }], degraded: false })
+    // nothing in either record can hold a key or a spend figure
+    assert.doesNotMatch(JSON.stringify([file, row]), /key|cost|usd|spend/i)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a Codex run records its -m model by registry id, and with no -m records the runner\'s own default as no id and no model', { timeout: 20_000 }, async () => {
+  const named = await setup({ agent: { runner: 'codex', claudeModel: 'sonnet', codexModel: 'gpt-6.1-terra' } })
+  try {
+    const run = await named.launcher.start(request)
+    await named.launcher.settled(run.id)
+    const { file } = await recordedModels(named, run.id)
+    assert.deepEqual(file.roles, [{ role: 'reviewer', id: 'gpt-6.1-terra', runner: 'codex', provider: 'openai', model: 'gpt-6.1-terra', fallback: false }])
+  } finally {
+    await named.cleanup()
+  }
+  const unnamed = await setup({ agent: { runner: 'codex', claudeModel: 'sonnet' } })
+  try {
+    const run = await unnamed.launcher.start(request)
+    await unnamed.launcher.settled(run.id)
+    const { file, row } = await recordedModels(unnamed, run.id)
+    assert.deepEqual(file.roles, [{ role: 'reviewer', id: null, runner: 'codex', provider: 'openai', model: null, fallback: false }])
+    assert.equal(row?.roles[0]?.id, null)
+  } finally {
+    await unnamed.cleanup()
+  }
+})
+
+test('a model that is in no registry entry is recorded by its slug with no id, and the owner\'s registry names the id when it lists the model', { timeout: 20_000 }, async () => {
+  const bare = await setup({ agent: { runner: 'claude', claudeModel: 'claude-x-9' } })
+  try {
+    const run = await bare.launcher.start(request)
+    await bare.launcher.settled(run.id)
+    assert.deepEqual((await recordedModels(bare, run.id)).file.roles, [{ role: 'reviewer', id: null, runner: 'claude', provider: 'anthropic', model: 'claude-x-9', fallback: false }])
+  } finally {
+    await bare.cleanup()
+  }
+  const listed = await setup({ agent: { runner: 'claude', claudeModel: 'claude-x-9' }, models: { registry: [{ id: 'house', runner: 'claude', provider: 'anthropic', model: 'claude-x-9' }] } })
+  try {
+    const run = await listed.launcher.start(request)
+    await listed.launcher.settled(run.id)
+    assert.equal((await recordedModels(listed, run.id)).file.roles[0].id, 'house')
+  } finally {
+    await listed.cleanup()
+  }
+})
+
+test('a fix or update session is recorded as a session, not a reviewer', { timeout: 20_000 }, async () => {
+  const h = await setup()
+  try {
+    const run = await h.launcher.start({ repo: scenario.repo, number: 104, command: 'update-pr', args: ['104', `--head=${'a'.repeat(40)}`], label: 'Update branch', runner: 'claude' })
+    await h.launcher.settled(run.id)
+    assert.equal((await recordedModels(h, run.id)).file.roles[0].role, 'session')
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a Codex run end to end: the $ skill and note as its prompt, the session from thread.started, settled done by its files', { timeout: 20_000 }, async () => {
   const h = await setup({ agent: { runner: 'codex', claudeModel: 'sonnet', codexModel: 'gpt-6.1-terra' } })
   try {

@@ -108,6 +108,8 @@ export type Config = {
   // clone of repo is checked when a run starts, not on save
   cloneDir?: string
   agent: AgentSettings
+  // the model registry and the per-command slots exactly as stored, which src/models.ts reads: a read keeps whatever is there, since a bad entry or slot is set aside there with a warning, and a save refuses a bad entry (modelsSaveProblem). Absent means the built-in models
+  models?: unknown
   notifications?: Notifications
   autoReview?: AutoReviewSettings
 }
@@ -233,7 +235,7 @@ const personKeys = ['login', 'alias', 'initials', 'color', 'avatar'] as const
 const ticketKeys = ['enabled', 'kind', 'name', 'source', 'pattern', 'baseUrl', 'linkTemplate'] as const
 const configKeys = [
   'repo', 'viewer', 'people', 'tickets', 'refreshSeconds', 'idleMinutes', 'todayStartsAt',
-  'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'extraReviewInstructions', 'allowedHosts', 'cloneDir', 'agent', 'notifications', 'autoReview',
+  'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'extraReviewInstructions', 'allowedHosts', 'cloneDir', 'agent', 'models', 'notifications', 'autoReview',
 ] as const
 
 // a bare DNS name: dot-separated labels of letters, digits and inner hyphens, with no scheme,
@@ -426,6 +428,7 @@ export const validateConfig = (input: unknown): Config => {
     ...(cloneDir === undefined ? {} : { cloneDir }),
     agent: toAgent(input.agent),
   }
+  if (input.models !== undefined) config.models = input.models
   if (input.notifications !== undefined) config.notifications = toNotifications(input.notifications)
   if (input.autoReview !== undefined) config.autoReview = toAutoReview(input.autoReview)
   return config

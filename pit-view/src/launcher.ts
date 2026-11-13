@@ -11,6 +11,8 @@ import type { CiReading } from './derive.ts'
 import type { Stack } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
 import type { Gh, RawOpenPr, Runner } from './github.ts'
+import { resolveModels, roleFor } from './models.ts'
+import type { RequestModels, RunModels } from './models.ts'
 import type { Timers } from './poller.ts'
 import { prReportName, reportHash } from './reports.ts'
 import type { ReportInfo } from './reports.ts'
@@ -816,6 +818,8 @@ export type AgentCell = {
   costUsd: number | null
   // the extra review instructions the latest run used and where they came from; null for none
   extraInstructions: ExtraInstructions | null
+  // the roles and models the latest run recorded (section 8 of DESIGN.md, Launching runs, Recording the models); null with no run, and for a run from before they were recorded, which the drawer reads as not recorded
+  recorded: RunModels | null
   // who started the latest run, null with none; when an auto-review run was queued (null for a manual run); and whether the run posted: true when it did, false once it has ended without posting, null before it ends or with no run
   origin: Origin | null
   queuedAt: string | null
@@ -1141,7 +1145,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     state: 'idle', label: plan.label, action, models: modelLabels(config.agent), starts: startOptions(pr, config, stack, ownInFlight, queueing), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
-    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,
+    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,
   }
   const { run, covered } = cellRunOf(ownRun, cover)
   if (run === undefined) return idle
@@ -1180,6 +1184,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     resume: run.resume,
     costUsd: run.costUsd,
     extraInstructions: run.extraInstructions,
+    recorded: run.models,
     origin: run.origin,
     queuedAt: run.queuedAt,
     posted: ended === null ? null : posted(withPostFate(run).result),
@@ -2248,6 +2253,8 @@ export type SessionStore<T extends Session> = {
   slot: (target: { repo: string, number?: number, command: string }, config: Config) => ReviewSlot | null
   // rows the owner started that still wait in the line, which a restart fails; a scheduled row keeps waiting in its own table
   queued: () => T[]
+  // whether the table has the models column (section 8 of DESIGN.md, Launching runs, Recording the models): runs do, and a sweep's request.json carries the models alone
+  recordsModels: boolean
 }
 
 // one run being watched
@@ -2316,6 +2323,7 @@ export const runStore = (cache: Cache): SessionStore<Run> => ({
     return pr !== undefined ? slotOf(pr, config) : 'review'
   },
   queued: () => cache.queuedRuns().filter((run) => run.origin === 'manual'),
+  recordsModels: true,
 })
 
 // the sweeps table's store: one sweep in flight per repository, queued or running, and a result.json that must carry the sweep result schema
@@ -2336,6 +2344,7 @@ export const sweepStore = (cache: Cache): SessionStore<Sweep> => ({
   counted: () => true,
   slot: () => 'review',
   queued: () => cache.queuedSweeps().filter((sweep) => sweep.origin === 'manual'),
+  recordsModels: false,
 })
 
 // the review runs' launcher and the sweeps' launcher are the one engine over two stores, on the one line the caller gives them both
@@ -2847,6 +2856,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     let child: SpawnedProcess
     let spec: LaunchSpec
     let record: Record<string, unknown>
+    let models: RequestModels
     let stdin: string | null
     let resume: string | null
     try {
@@ -2870,6 +2880,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         spec = { ...spec, args: scheduledText ? argsUnderText(run.args, extra) : run.args }
         invocation = runners[runner].invocation(spec)
         stdin = invocation.stdin
+        // the models the command line above was built from, read from the same spec, so the record cannot disagree with the run
+        models = {
+          roles: [roleFor(resolveModels(options.config().models), run.command.startsWith('review-') ? 'reviewer' : 'session', runner, runner === 'claude' ? spec.claudeModel : spec.codexModel ?? null)],
+          degraded: false,
+        }
         record = {
           runner,
           command: run.command,
@@ -2878,6 +2893,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
           sessionId,
           argv: [invocation.command, ...invocation.args],
           startedAt: run.startedAt,
+          models,
           ...(extra === null ? {} : { extraInstructions: extra }),
         }
         // before the spawn, so a run never carries the flag without its file; a write refused fails the start here. A scheduled run with no text takes away what an earlier pass, or a launch the cap took back, wrote in this folder
@@ -2885,6 +2901,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         else if (scheduledText) await fs.rm(join(dir, extraInstructionsFile))
         await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid: null, pidStartedAt: null }, null, 2)}\n`)
       } while (textNow()?.text !== extra?.text)
+      // the row says the same, with each role's outcome still open
+      if (store.recordsModels) run = store.update(run.id, { models: { roles: models.roles.map((role) => ({ ...role, outcome: null })), degraded: models.degraded } })
       // the last thing before the spawn, with nothing awaited between this reading and it: a review or a sweep starts only for the repository and the viewer its start was confirmed for, and only while it still fits, under the config in effect now
       if (admitted !== null) {
         const current = options.config()

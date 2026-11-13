@@ -3,6 +3,7 @@
 // fetched for it, and the drawer's own confirmation state; drawer.ts turns the model into
 // elements. Nothing here reads the DOM or the clock: every time is passed in
 import type { OpenRow } from '../src/derive.ts'
+import type { RunModels } from '../src/models.ts'
 import type { ReportListing } from '../src/reports.ts'
 import { actionConfirmModel, actionOffers } from './actionsview.ts'
 import type { ActionConfirm, ActionConfirmModel, ActionOffer, PersonChoice } from './actionsview.ts'
@@ -165,6 +166,27 @@ export type ExtraLine = { term: string, from: string, text: string }
 export const extraLine = (extra: AgentCell['extraInstructions']): ExtraLine | null =>
   extra === null ? null : { term: 'Extra instructions', from: extra.source === 'default' ? 'from Settings' : 'typed for this run', text: extra.text }
 
+// the roles and models a run recorded (section 8 of DESIGN.md, Launching runs, Recording the models): one line, with a flag for a role the pinned fallback replaced and for a review that ended degraded; a run from before they were recorded reads as not recorded
+export type ModelsLine = { term: string, text: string, flags: string[] }
+
+const modelRunnerLabels: Readonly<Record<string, string>> = { ...runnerLabels, hermes: 'Hermes' }
+
+const capitalized = (word: string): string => `${word.slice(0, 1).toUpperCase()}${word.slice(1)}`
+
+// a response from before the field existed lacks it entirely, which reads the same as null
+export const modelsLine = (models: RunModels | null | undefined): ModelsLine => {
+  if (models == null) return { term: 'Models', text: 'not recorded', flags: [] }
+  const text = models.roles.map((role) => {
+    const name = role.id ?? role.model ?? 'Codex default'
+    return `${capitalized(role.role)}: ${name} (${modelRunnerLabels[role.runner] ?? role.runner})${role.outcome === null ? '' : `, ${role.outcome}`}`
+  }).join(' · ')
+  const flags = [
+    ...models.roles.filter((role) => role.fallback).map((role) => `The pinned fallback replaced the ${role.role}.`),
+    ...(models.degraded ? ['Degraded: the review ended on one surviving draft, so it was not posted.'] : []),
+  ]
+  return { term: 'Models', text, flags }
+}
+
 // the five-step bar
 const stepOrder = ['resolveBase', 'review', 'consolidate', 'writeReport', 'post'] as const
 
@@ -208,6 +230,7 @@ export const newestNote = (steps: readonly StepSlot[], command: string | null = 
 
 export type RunningModel = {
   extra: ExtraLine | null
+  models: ModelsLine
   label: string
   tandem: boolean
   runnerLabel: string
@@ -229,6 +252,7 @@ export const runningModel = (row: Pick<OpenRow, 'headOid'>, cell: AgentCell): Ru
     stepsName: stepsName(steps),
     note: newestNote(cell.steps, cell.command),
     extra: extraLine(cell.extraInstructions),
+    models: modelsLine(cell.recorded),
   }
 }
 
@@ -401,13 +425,14 @@ export const storedAskModel = (row: Pick<OpenRow, 'number' | 'title'>, cell: Age
   }
 }
 
-export type WaitingModel = { question: string, resume: string | null, copyName: string, extra: ExtraLine | null }
+export type WaitingModel = { question: string, resume: string | null, copyName: string, extra: ExtraLine | null, models: ModelsLine }
 
 export const waitingModel = (cell: AgentCell, number: number): WaitingModel => ({
   question: cell.question ?? 'The run stopped to ask a question but did not record it. Open its session to see it.',
   resume: cell.resume,
   copyName: `Copy resume command for #${number}`,
   extra: extraLine(cell.extraInstructions),
+  models: modelsLine(cell.recorded),
 })
 
 // why a run failed, in words; the kinds are Pit View's own, and a detail after the colon is kept
@@ -562,6 +587,7 @@ export const commitModel = (commit: string | null, repo: string | undefined, hea
 
 export type ResultModel = {
   extra: ExtraLine | null
+  models: ModelsLine
   text: string
   tone: DoneTone
   runnerLabel: string
@@ -631,6 +657,7 @@ export const resultModel = (cell: AgentCell, number: number, headOid: string, of
   notPosted: isBlockedPost(cell.result) ? 'Review done, post not made: a permission check refused the post before it ran, so nothing reached GitHub.' : null,
   report: blockedReport(cell.result),
   extra: extraLine(cell.extraInstructions),
+  models: modelsLine(cell.recorded),
 })
 
 // which card the latest run gets
@@ -646,7 +673,7 @@ export const cardKind = (cell: AgentCell): CardKind => {
 }
 
 // previous runs: a compact line each
-export type RunRow = { id: number, label: string, runner: string, text: string, tone: Tone, startedAt: string, cost: string | null, extra: ExtraLine | null }
+export type RunRow = { id: number, label: string, runner: string, text: string, tone: Tone, startedAt: string, cost: string | null, extra: ExtraLine | null, models: ModelsLine }
 
 const failureShort: Readonly<Record<string, string>> = {
   badResult: 'bad result',
@@ -726,6 +753,7 @@ export const runRows = (runs: readonly RunView[], shownId: number | null): RunRo
     startedAt: run.startedAt,
     cost: formatCost(run.costUsd),
     extra: extraLine(run.extraInstructions),
+    models: modelsLine(run.models),
   }))
 
 // the Auto-review list: each auto run of the PR (section 10, In the UI). startedAt is null until the run really started: a queued run, or one that failed or was skipped before its process, holds only the time it was queued
@@ -987,6 +1015,7 @@ export const cellFromRun = (cell: AgentCell, run: RunView): AgentCell => {
     resume: run.resume,
     costUsd: run.costUsd,
     extraInstructions: run.extraInstructions,
+    recorded: run.models,
     // the server's offer is about one run, and a newer run on the list is not it
     postOffer: cell.runId === run.id ? cell.postOffer : null,
     storedOffer: cell.runId === run.id ? cell.storedOffer : null,

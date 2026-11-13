@@ -24,6 +24,7 @@ import type { Runner, WriteLimits } from './github.ts'
 import { latestReviewsOf, markedStack } from './derive.ts'
 import { chooseExtraInstructions, createLauncher, createPostGuard, createReviewLine, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest, withExtraInstructions } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, PostGuard, Procs, Queueing, Spawn, StartKind } from './launcher.ts'
+import { modelsSaveProblem, modelsView } from './models.ts'
 import { renderMarkdown } from './markdown.ts'
 import { createNotifier, noDeliver, systemDeliver, systemExec } from './notify.ts'
 import type { Deliver } from './notify.ts'
@@ -866,6 +867,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       // a save refuses what a read tolerates: Concurrent auto-reviews above the review cap
       const over = autoConcurrencyProblem(checked)
       if (over !== null) throw new ConfigError(over)
+      // and a registry entry with a bad id, runner, provider, or model slug
+      const unsound = modelsSaveProblem(checked.models)
+      if (unsound !== null) throw new ConfigError(unsound)
       saved = await saveConfig(options.configPath, checked)
     } catch (error) {
       if (error instanceof ConfigError) return json(res, 400, { error: error.message })
@@ -1027,6 +1031,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'POST', pattern: /^\/api\/sweeps\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopSweep(req, res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/auto-review\/ticks$/, handle: (_req, res) => json(res, 200, cache.ticksFor(effective().repo, 50)) },
     { method: 'POST', pattern: /^\/api\/auto-review\/run$/, handle: (req, res) => runNow(req, res) },
+    // the effective model registry and slots, read-only, for the Settings page (section 1 of DESIGN.md, Configuration)
+    { method: 'GET', pattern: /^\/api\/models$/, handle: (_req, res) => json(res, 200, modelsView(effective().models)) },
     { method: 'GET', pattern: /^\/api\/instance$/, handle: async (_req, res) => json(res, 200, { name: options.instance ?? '', configPath: tildePath(options.configPath, home), pid: process.pid, loginAgent: { installed: await options.launch.fs.exists(loginAgentFile(home)) } }) },
     { method: 'GET', pattern: /^\/api\/config$/, handle: (_req, res) => json(res, 200, stored) },
     { method: 'PUT', pattern: /^\/api\/config$/, handle: (req, res) => putConfig(req, res) },

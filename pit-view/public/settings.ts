@@ -3,6 +3,7 @@
 // PUT /api/config, which patches open dashboards and starts the refresh a change needs
 import type { AutoReviewView } from '../src/autoreview.ts'
 import type { Config } from '../src/config.ts'
+import type { ModelsView } from '../src/models.ts'
 import type { View } from '../src/poller.ts'
 import { avatar } from './cells.ts'
 import { tokenHeader } from './agent.ts'
@@ -318,7 +319,7 @@ const removeTicket = (id: string): void => {
 
 // the fixed fields
 
-const staticText = ['repo', 'viewer', 'idleMinutes', 'bots', 'reportsDir', 'maxConcurrentReviews', 'extraReviewInstructions', 'cloneDir', 'autoFrom', 'autoTo', 'autoConcurrency', 'autoDailyLimit'] as const
+const staticText = ['repo', 'viewer', 'idleMinutes', 'bots', 'reportsDir', 'maxConcurrentReviews', 'extraReviewInstructions', 'cloneDir', 'models', 'autoFrom', 'autoTo', 'autoConcurrency', 'autoDailyLimit'] as const
 
 // the auto-review switches that need no question, by form key
 const autoSwitches = ['autoEnabled', 'autoOthers', 'autoOwn', 'autoDependabot'] as const
@@ -845,12 +846,28 @@ const revert = (): void => {
 }
 
 // the view (for sample keys) and the suggestions are extras: the form works without them
+// the effective slots and the warnings the server read from the saved setting: a bad entry or an unknown id is named here, and the slot shows what it falls back to
+const showModels = (view: ModelsView | null): void => {
+  const warnings = byId('models-warnings')
+  const effective = byId('models-effective')
+  if (view === null) {
+    warnings.replaceChildren()
+    effective.textContent = ''
+    return
+  }
+  warnings.replaceChildren(...view.warnings.map((warning) => h('li', { class: 'warn-text' }, warning)))
+  const slot = (value: string | string[]): string => Array.isArray(value) ? value.join(' + ') : value
+  effective.textContent = `In effect: review ${slot(view.slots.review)}; stack ${slot(view.slots.stack)}; sweep ${slot(view.slots.sweep)}; auto-review of people ${slot(view.slots.autoReviewHuman)}; auto-review of bots ${slot(view.slots.autoReviewBot)}; pinned fallback ${view.fallback.id}.`
+}
+
 const loadExtras = async (): Promise<void> => {
-  const [view, suggestions] = await Promise.all([
+  const [view, suggestions, models] = await Promise.all([
     getJson<View>('/api/view').catch(() => null),
     getJson<Suggestion[]>('/api/people/suggestions').catch(() => []),
+    getJson<ModelsView>('/api/models').catch(() => null),
   ])
   if (page === null) return
+  showModels(models)
   page.texts = sampleTextsFrom(view)
   page.suggestions = suggestions
   page.autoView = view?.autoReview ?? null

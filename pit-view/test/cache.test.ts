@@ -1221,7 +1221,7 @@ test('a cache from version 13 gains the ticks table and the auto-review columns 
     for (const column of ['origin', 'tick', 'reason', 'queued_at', 'posting', 'worktree']) old.exec(`ALTER TABLE sweeps DROP COLUMN ${column}`)
     old.exec('UPDATE meta SET value = \'13\' WHERE key = \'schemaVersion\'')
     old.close()
-    assert.equal(schemaVersion, 16)
+    assert.equal(schemaVersion, 17)
     assert.equal(githubTablesVersion, 16)
     const cache = openCache({ path, clock: handClock().clock })
     // version 16 changed what the GitHub tables hold, so a cache from version 13 refetches its PRs
@@ -1244,6 +1244,43 @@ test('a cache from version 13 gains the ticks table and the auto-review columns 
   }
 })
 
+test('a version 16 cache gains runs.models in place: its runs read as not recorded, the field is stored whole, and it survives a reopen', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const created = first.createRun(newRun(106), (id) => `~/runs/${id}`)
+    first.close()
+    const old = new DatabaseSync(path)
+    old.exec('ALTER TABLE runs DROP COLUMN models')
+    old.exec('UPDATE meta SET value = \'16\' WHERE key = \'schemaVersion\'')
+    old.close()
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.equal(cache.getRun(created.id)?.models, null)
+    const models = { roles: [{ role: 'reviewer', id: 'sonnet', runner: 'claude' as const, provider: 'anthropic', model: 'sonnet', fallback: false, outcome: null }], degraded: false }
+    assert.deepEqual(cache.updateRun(created.id, { models }).models, models)
+    assert.equal(cache.updateRun(created.id, { models: null }).models, null)
+    cache.updateRun(created.id, { models })
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
+    cache.close()
+    const again = openCache({ path, clock: handClock().clock })
+    assert.deepEqual(again.getRun(created.id)?.models, models)
+    again.close()
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a new run carries the models it was created with, and one created without them reads as not recorded', () => {
+  const cache = openCache({ path: ':memory:', clock: handClock().clock })
+  const models = { roles: [{ role: 'reviewer', id: null, runner: 'codex' as const, provider: 'openai', model: null, fallback: false, outcome: null }], degraded: false }
+  const withModels = cache.createRun({ ...newRun(106), models }, (id) => `~/runs/${id}`)
+  assert.deepEqual(cache.getRun(withModels.id)?.models, models)
+  const without = cache.createRun(newRun(107), (id) => `~/runs/${id}`)
+  assert.equal(cache.getRun(without.id)?.models, null)
+  cache.close()
+})
+
 test('a cache from version 15 drops its cached PRs, whose check runs lack the workflow run\'s identity, and keeps every run and sweep', async () => {
   const { dir, cleanup } = await tempDir()
   try {
@@ -1260,7 +1297,7 @@ test('a cache from version 15 drops its cached PRs, whose check runs lack the wo
     assert.equal(count(cache, 'prs'), 0)
     assert.equal(cache.getRun(created.id)?.id, created.id)
     assert.equal(cache.getSweep(sweep.id)?.id, sweep.id)
-    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, '16')
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
     cache.close()
   } finally {
     await cleanup()

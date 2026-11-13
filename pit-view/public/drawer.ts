@@ -17,7 +17,7 @@ import {
   commentsCheckOn, confirmHolds, specialInstructionsSent, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
   rereadBound, resumeReadyText, returnSelector,
 } from './drawerview.ts'
-import type { Confirm, DrawerModel, ExtraLine, Loadable, Opener, StartConfirmModel, StopModel, StoredAskModel, StoredButtonsModel } from './drawerview.ts'
+import type { Confirm, DrawerModel, ExtraLine, Loadable, ModelsLine, Opener, StartConfirmModel, StopModel, StoredAskModel, StoredButtonsModel } from './drawerview.ts'
 import { formatSince } from './format.ts'
 import type { ReportPanel } from './reportpanel.ts'
 import { getJson, sendRun } from './runapi.ts'
@@ -201,6 +201,13 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   // the text a run used, kept as written with its line breaks
   const extraDetail = (extra: ExtraLine | null): HTMLElement | null =>
     extra === null ? null : h('p', { class: 'drawer-extra', 'data-extra-instructions': '' }, h('span', { class: 'drawer-label' }, `${extra.term}, ${extra.from}: `), extra.text)
+
+  // the roles and models a run recorded, with a flag for a fallback or a degraded review
+  const modelsDetail = (line: ModelsLine): HTMLElement =>
+    h('p', { class: 'drawer-extra', 'data-models': '' }, h('span', { class: 'drawer-label' }, `${line.term}: `), line.text, ...line.flags.map((flag) => h('span', { class: 'warn-text', 'data-models-flag': '' }, ` ${flag}`)))
+
+  const modelsParts = (line: ModelsLine): Part[] =>
+    [{ key: 'models', sig: JSON.stringify(line), build: () => modelsDetail(line) }]
 
   const extraParts = (extra: ExtraLine | null): Part[] =>
     extra === null ? [] : [{ key: 'extra', sig: JSON.stringify(extra), build: () => extraDetail(extra) as HTMLElement }]
@@ -728,7 +735,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           build: () => h('p', { class: 'drawer-run-note' }, h('span', { class: 'drawer-label' }, `${note.label}: `), note.note),
         })
       }
-      parts.push(...extraParts(running.extra))
+      parts.push(...extraParts(running.extra), ...modelsParts(running.models))
       parts.push({
         key: 'actions',
         sig: JSON.stringify([stopConfirmAsk ? ['confirm', model.stop] : settling ? 'settling' : 'buttons', cell.runId, model.stopsEnabled]),
@@ -839,6 +846,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
         h('h3', { id: 'drawer-waiting-title', class: 'drawer-section-title' }, 'Waiting for your answer'),
         h('p', { class: 'drawer-question' }, waiting?.question ?? ''),
         waiting === null ? null : extraDetail(waiting.extra),
+        waiting === null ? null : modelsDetail(waiting.models),
         waiting === null ? null : resumeBlock(waiting.resume, waiting.copyName, n),
         rereadBlock(model))
     },
@@ -876,6 +884,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           result.cost === null ? null : h('span', { class: 'drawer-meta' }, ` · ${result.cost}`)),
         result.note === null ? null : h('p', { class: 'drawer-note' }, result.note),
         extraDetail(result.extra),
+        modelsDetail(result.models),
         result.notPosted === null ? null : h('p', { class: 'drawer-notice', 'data-post-not-made': '' }, result.notPosted),
         result.byHand === null ? null : h('p', { class: 'drawer-note', 'data-by-hand': '' }, result.byHand),
         result.stale === null ? null : h('p', { class: 'drawer-note' }, result.stale),
@@ -938,7 +947,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
             tag(row.text, row.tone)),
           h('span', { class: 'drawer-item-meta' },
             `${row.runner} · `, ageSpan(row.startedAt, 'started ', options.nowMs()), row.cost === null ? '' : ` · ${row.cost}`),
-          extraDetail(row.extra))))),
+          extraDetail(row.extra),
+          modelsDetail(row.models))))),
   })
 
   // the PR's auto-review runs (section 10, In the UI), under their own heading and only when there are some; each time is an age that moves in place

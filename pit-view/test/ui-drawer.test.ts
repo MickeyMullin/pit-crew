@@ -61,7 +61,7 @@ const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
   lastReviewAt: null,
   runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
   steps: slots(), tandem: false, commit: null,
-  extraInstructions: null, origin: null, queuedAt: null, posted: null,
+  extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null,
   finishedAt: null, text: null, result: null, question: null, note: null, firstNote: null, resolvedByHand: false, resume: null, costUsd: null, postOffer: null, storedOffer: null, stackRun: null,
   ...patch,
 })
@@ -222,6 +222,7 @@ test('a run waiting for an answer shows the question and the resume command to c
     resume: 'cd ~/dev/orbit && claude --resume 6f1c',
     copyName: 'Copy resume command for #101',
     extra: null,
+    models: { term: 'Models', text: 'not recorded', flags: [] },
   })
   assert.equal(model.result, null)
   assert.match(drawerModel(input(finished({ status: 'needsInput', question: null }))).waiting?.question ?? '', /did not record/)

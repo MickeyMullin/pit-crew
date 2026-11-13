@@ -1,0 +1,205 @@
+// src/models.ts
+// the model registry and the per-command slots (section 1 of DESIGN.md, Configuration, the models key). Pure functions of the owner's setting: nothing here reads a file, a key, or a spend figure, and an entry never carries one
+
+// the agents a registry entry can run under; hermes entries are stored and shown, but no launch uses one until the Hermes runner exists
+export type ModelRunner = 'claude' | 'codex' | 'hermes'
+export const modelRunners: readonly ModelRunner[] = ['claude', 'codex', 'hermes']
+
+// id is what a slot names; provider and model are what the runner is told (a Claude alias, a Codex -m name, or an OpenRouter slug)
+export type ModelEntry = { id: string, runner: ModelRunner, provider: string, model: string }
+
+// the table used when the owner's setting is missing or misconfigured. There is no Codex default entry: each Codex entry names its model, which is passed as -m
+export const builtInRegistry: readonly ModelEntry[] = [
+  { id: 'sonnet', runner: 'claude', provider: 'anthropic', model: 'sonnet' },
+  { id: 'opus', runner: 'claude', provider: 'anthropic', model: 'opus' },
+  { id: 'gpt-6.1-terra', runner: 'codex', provider: 'openai', model: 'gpt-6.1-terra' },
+  { id: 'gpt-6.1-sol', runner: 'codex', provider: 'openai', model: 'gpt-6.1-sol' },
+  { id: 'deepseek-flash', runner: 'hermes', provider: 'openrouter', model: '~deepseek/deepseek-flash-latest' },
+  { id: 'kimi-code', runner: 'hermes', provider: 'openrouter', model: 'moonshotai/kimi-k2.7-code' },
+  { id: 'qwen-coder-flash', runner: 'hermes', provider: 'openrouter', model: 'qwen/qwen3-coder-flash' },
+]
+
+// the pinned fallback: a reviewer that fails is retried once on it, and its cost is bounded by the quotas that gate unattended auto-reviews
+export const builtInFallbackId = 'kimi-code'
+
+export const slotNames = ['review', 'stack', 'sweep', 'autoReviewHuman', 'autoReviewBot'] as const
+export type SlotName = typeof slotNames[number]
+
+// review and autoReviewHuman hold a pair (primary, then secondary); the others hold one model
+export const pairSlotNames = ['review', 'autoReviewHuman'] as const
+export type PairSlotName = typeof pairSlotNames[number]
+const isPairSlot = (slot: SlotName): slot is PairSlotName => (pairSlotNames as readonly string[]).includes(slot)
+
+export type SlotValue<S extends SlotName> = S extends PairSlotName ? [ModelEntry, ModelEntry] : ModelEntry
+
+const defaultPair: readonly [string, string] = ['sonnet', 'gpt-6.1-terra']
+const defaultOne = 'sonnet'
+
+export type ResolvedModels = {
+  registry: ModelEntry[]
+  fallback: ModelEntry
+  slots: { [S in SlotName]: SlotValue<S> }
+  // what Settings shows: one line for each part of the setting that was set aside
+  warnings: string[]
+}
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+// a model name as a runner is handed it: never empty, never with whitespace or a control character, and never starting with a dash that a command line would read as a flag
+export const slugProblem = (model: unknown): string | null => {
+  if (typeof model !== 'string' || model === '') return 'model must be a name such as sonnet or vendor/model-name, and not empty'
+  if (/[\s\u0000-\u001f\u007f-\u009f]/.test(model)) return 'model must have no spaces or control characters'
+  if (model.startsWith('-')) return 'model must not start with a dash'
+  return model.length > 200 ? 'model must be at most 200 characters' : null
+}
+
+const labelPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+
+// why one registry entry is unusable, or null when it is fine
+const entryProblem = (value: unknown): string | null => {
+  if (!isObject(value)) return 'an entry must be an object with id, runner, provider, and model'
+  if (typeof value.id !== 'string' || !labelPattern.test(value.id)) return 'id must be letters, digits, dots, underscores, and dashes, starting with a letter or digit'
+  if (!modelRunners.includes(value.runner as ModelRunner)) return `runner must be one of ${modelRunners.join(', ')}`
+  if (typeof value.provider !== 'string' || !labelPattern.test(value.provider)) return 'provider must be letters, digits, dots, underscores, and dashes, such as anthropic'
+  return slugProblem(value.model)
+}
+
+const entryOf = (value: Record<string, unknown>): ModelEntry =>
+  ({ id: value.id as string, runner: value.runner as ModelRunner, provider: value.provider as string, model: value.model as string })
+
+const idOf = (value: unknown, index: number): string => isObject(value) && typeof value.id === 'string' && value.id !== '' ? value.id : `#${index + 1}`
+
+// the problem a save refuses, or null: a registry that is not a list, an entry with a bad id, runner, provider, or model, or an id used twice. A read tolerates all of it (resolveModels sets it aside), and a slot naming an unknown id is a warning in Settings rather than a refusal
+export const modelsSaveProblem = (raw: unknown): string | null => {
+  if (raw === undefined) return null
+  if (!isObject(raw)) return 'models must be an object with registry, fallback, and slots'
+  if (raw.registry === undefined) return null
+  if (!Array.isArray(raw.registry)) return 'models.registry must be a list of entries'
+  const seen = new Set<string>()
+  for (const [index, value] of raw.registry.entries()) {
+    const problem = entryProblem(value)
+    if (problem !== null) return `models.registry[${index}] (${idOf(value, index)}): ${problem}`
+    const id = (value as { id: string }).id
+    if (seen.has(id)) return `models.registry[${index}] (${id}): id appears twice`
+    seen.add(id)
+  }
+  return null
+}
+
+// the effective models: the owner's setting where it is sound, the built-in table where it is missing or misconfigured. One bad entry drops only that entry, and a slot that cannot be read takes its own built-in default and says so
+export const resolveModels = (raw: unknown): ResolvedModels => {
+  const warnings: string[] = []
+  let setting: Record<string, unknown> = {}
+  if (raw !== undefined) {
+    if (isObject(raw)) setting = raw
+    else warnings.push('models must be an object with registry, fallback, and slots, so the built-in models are used')
+  }
+  let registry: ModelEntry[] = [...builtInRegistry]
+  if (setting.registry !== undefined) {
+    if (!Array.isArray(setting.registry)) warnings.push('models.registry must be a list of entries, so the built-in table is used')
+    else {
+      const kept: ModelEntry[] = []
+      for (const [index, value] of setting.registry.entries()) {
+        const problem = entryProblem(value)
+        if (problem !== null) warnings.push(`Registry entry ${idOf(value, index)} is ignored: ${problem}.`)
+        else if (kept.some((entry) => entry.id === (value as { id: string }).id)) warnings.push(`Registry entry ${(value as { id: string }).id} appears twice, so the first one stands.`)
+        else kept.push(entryOf(value as Record<string, unknown>))
+      }
+      if (kept.length === 0) warnings.push('models.registry holds no usable entry, so the built-in table is used')
+      else registry = kept
+    }
+  }
+  // a default the owner's registry no longer lists is read from the built-in table
+  const entryFor = (id: string): ModelEntry | null => registry.find((entry) => entry.id === id) ?? null
+  const builtIn = (id: string): ModelEntry => entryFor(id) ?? builtInRegistry.find((entry) => entry.id === id) as ModelEntry
+  let fallback = builtIn(builtInFallbackId)
+  if (setting.fallback !== undefined) {
+    const named = typeof setting.fallback === 'string' ? entryFor(setting.fallback) : null
+    if (named === null) warnings.push(`The pinned fallback ${typeof setting.fallback === 'string' ? setting.fallback : 'given'} is not in the registry, so ${builtInFallbackId} is used.`)
+    else fallback = named
+  }
+  const given = setting.slots
+  let slotSetting: Record<string, unknown> = {}
+  if (given !== undefined) {
+    if (isObject(given)) slotSetting = given
+    else warnings.push('models.slots must be an object, so every slot takes its built-in default')
+  }
+  const take = (slot: SlotName, id: unknown, fallbackId: string): ModelEntry => {
+    const found = typeof id === 'string' ? entryFor(id) : null
+    if (found !== null) return found
+    warnings.push(`Slot ${slot} names ${typeof id === 'string' ? id : 'something that is not a model id'}, which is not in the registry, so ${fallbackId} is used.`)
+    return builtIn(fallbackId)
+  }
+  const pairs = {} as Record<PairSlotName, [ModelEntry, ModelEntry]>
+  const ones = {} as Record<Exclude<SlotName, PairSlotName>, ModelEntry>
+  for (const slot of slotNames) {
+    const value = slotSetting[slot]
+    if (isPairSlot(slot)) {
+      if (value === undefined) pairs[slot] = [builtIn(defaultPair[0]), builtIn(defaultPair[1])]
+      else if (!Array.isArray(value) || value.length !== 2) {
+        warnings.push(`Slot ${slot} holds a pair of models, primary and secondary, so ${defaultPair.join(' and ')} are used.`)
+        pairs[slot] = [builtIn(defaultPair[0]), builtIn(defaultPair[1])]
+      } else pairs[slot] = [take(slot, value[0], defaultPair[0]), take(slot, value[1], defaultPair[1])]
+    } else if (value === undefined) ones[slot] = builtIn(defaultOne)
+    else if (typeof value !== 'string') {
+      warnings.push(`Slot ${slot} holds one model, so ${defaultOne} is used.`)
+      ones[slot] = builtIn(defaultOne)
+    } else ones[slot] = take(slot, value, defaultOne)
+  }
+  return { registry, fallback, slots: { ...pairs, ...ones }, warnings }
+}
+
+// a slot's models under the resolution order: a per-run override, then the slot's default. The override names registry ids; one that is not in the registry is ignored, and a pair given one id overrides only its primary. The built-in default is what the slot already holds when the setting could not be read
+export const resolveSlot = <S extends SlotName>(resolved: ResolvedModels, slot: S, override?: string | readonly string[]): SlotValue<S> => {
+  const named = (typeof override === 'string' ? [override] : override ?? []).map((id) => resolved.registry.find((entry) => entry.id === id) ?? null)
+  const base = resolved.slots[slot]
+  if (Array.isArray(base)) return [named[0] ?? base[0], named[1] ?? base[1]] as SlotValue<S>
+  return (named[0] ?? base) as SlotValue<S>
+}
+
+// a name that is one plain word, such as opus, is ordinary prose, so only a name with a separator in it is looked for
+const isBareWord = (name: string): boolean => /^[a-z]+$/i.test(name)
+
+// the first registry id or full slug the text contains, longest first, or null. Every name Pit View knows is looked for, the owner's registry and the built-in table both, so a name the owner removed is still never posted. A leading ~ on a slug is optional in the text
+export const nameInText = (resolved: Pick<ResolvedModels, 'registry'>, text: string): string | null => {
+  const names = new Set<string>()
+  for (const entry of [...resolved.registry, ...builtInRegistry]) {
+    for (const name of [entry.id, entry.model, entry.model.replace(/^~/, '')]) {
+      if (name !== '' && !isBareWord(name)) names.add(name.toLowerCase())
+    }
+  }
+  const lower = text.toLowerCase()
+  return [...names].sort((a, b) => b.length - a.length).find((name) => lower.includes(name)) ?? null
+}
+
+// what a run records for each model it used (request.json and the run row's models column, section 8 of DESIGN.md, Launching runs, Recording the models). id is the registry id, null when the model passed to the runner is in no registry entry or the runner's own default was used; model is what the runner was told, null for Codex's own default; fallback is whether the pinned fallback replaced the role's model; outcome is how the role ended, null when none is recorded. Never a key, a key reference, or a spend figure
+export type ModelRole = { role: string, id: string | null, runner: ModelRunner, provider: string, model: string | null, fallback: boolean }
+export type RecordedRole = ModelRole & { outcome: string | null }
+
+// request.json carries the roles as they started; the row adds each role's outcome. degraded is whether the review ended on one surviving draft, which never posts
+export type RequestModels = { roles: ModelRole[], degraded: boolean }
+export type RunModels = { roles: RecordedRole[], degraded: boolean }
+
+// the role a launch records for the model it was started with. A Claude or Codex launch passes one model on its command line (Codex's own default when none is given, which is no model), and the registry id is the entry that lists that runner and model, or null when none does. The launcher passes the models it built the command line from, so the record cannot disagree with the run
+export const roleFor = (resolved: Pick<ResolvedModels, 'registry'>, role: string, runner: ModelRunner, model: string | null): ModelRole => {
+  const entry = model === null ? undefined : [...resolved.registry, ...builtInRegistry].find((candidate) => candidate.runner === runner && candidate.model === model)
+  return { role, id: entry?.id ?? null, runner, provider: entry?.provider ?? (runner === 'claude' ? 'anthropic' : runner === 'codex' ? 'openai' : 'openrouter'), model, fallback: false }
+}
+
+// what GET /api/models serves for the Settings page: the effective registry and pinned fallback, each slot by registry id, and the warnings. Only what is configured above: never a key, a key reference, or a spend figure
+export type ModelsView = {
+  registry: ModelEntry[]
+  fallback: ModelEntry
+  slots: { [S in SlotName]: S extends PairSlotName ? [string, string] : string }
+  warnings: string[]
+}
+
+export const modelsView = (raw: unknown): ModelsView => {
+  const resolved = resolveModels(raw)
+  const slots = Object.fromEntries(slotNames.map((slot) => {
+    const value = resolved.slots[slot]
+    return [slot, Array.isArray(value) ? value.map((entry) => entry.id) : value.id]
+  })) as ModelsView['slots']
+  return { registry: resolved.registry, fallback: resolved.fallback, slots, warnings: resolved.warnings }
+}
