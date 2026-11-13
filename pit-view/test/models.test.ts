@@ -392,3 +392,15 @@ test('the refusal context is at most 60 characters even when the match alone is 
   const sized = nameInText(resolved, `${'x '.repeat(100)}${slug}${' y'.repeat(100)}`)
   assert.ok(sized !== null && sized.context.length <= 60)
 })
+
+test('projectModels returns the empty projection for a models value that is not a plain object, so a nested credential in an array never survives validateConfig', () => {
+  const base = defaultConfig()
+  // the review's probe
+  assert.deepEqual(validateConfig({ ...base, models: [{ apiKey: 'x' }] }).models, {})
+  for (const value of [[], [{ apiKey: 'x' }], 'sk-live-string', 7, true, null, () => ({ apiKey: 'x' })]) {
+    assert.deepEqual(projectModels(value), {}, String(typeof value))
+    assert.deepEqual(validateConfig({ ...base, models: value }).models, {}, String(typeof value))
+    assert.match(modelsSaveProblem(value) ?? '', /^models must be an object/)
+  }
+  assert.doesNotMatch(JSON.stringify(validateConfig({ ...base, models: [{ apiKey: 'sk-array' }] })), /sk-array|apiKey/)
+})

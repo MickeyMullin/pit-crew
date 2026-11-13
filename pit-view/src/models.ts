@@ -83,9 +83,9 @@ const entryProblem = (value: unknown): string | null => {
   return null
 }
 
-// the setting reduced to the shapes it holds, a strict allowlist that builds a new value and copies nothing it was not told to: `registry` is a list of entries that are objects, each with only the four entry fields, each a string of at most 200 characters; `fallback` is a string; `slots` is an object with only the five slot names, each a string id or, for a pair slot, a pair of two string ids. A value of any other shape is dropped. Applied on every read and every save, so nothing else the file or a request carries is ever stored or served
-export const projectModels = (raw: unknown): Record<string, unknown> | unknown => {
-  if (!isObject(raw)) return raw
+// the setting reduced to the shapes it holds, a strict allowlist that builds a new value and copies nothing it was not told to: `registry` is a list of entries that are objects, each with only the four entry fields, each a string of at most 200 characters; `fallback` is a string; `slots` is an object with only the five slot names, each a string id or, for a pair slot, a pair of two string ids. A value of any other shape is dropped, and a setting that is not a plain object at all (a list, a string, a number, a boolean, null, or a function) projects to the empty setting, which means the built-in models. Applied on every read and every save, so nothing else the file or a request carries is ever stored or served
+export const projectModels = (raw: unknown): Record<string, unknown> => {
+  if (!isObject(raw)) return {}
   const projected: Record<string, unknown> = {}
   const own = (value: Record<string, unknown>, key: string): unknown => Object.hasOwn(value, key) ? value[key] : undefined
   const registry = own(raw, 'registry')

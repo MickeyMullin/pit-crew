@@ -2520,3 +2520,35 @@ test('malformed nested models settings are refused on a save and never served fr
     await hand.cleanup()
   }
 })
+
+test('a models value that is not a plain object is refused by PUT /api/config naming models and never the value, and a hand-edited one is never served', async () => {
+  const values: unknown[] = [[{ apiKey: 'sk-array-value' }], [], 'sk-array-value', 7, true, null]
+  const h = await setup()
+  try {
+    const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
+    for (const value of values) {
+      const refused = await saveConfigAs(h.server, { ...stored, models: value })
+      assert.equal(refused.status, 400, JSON.stringify(value))
+      assert.match(String(refused.body.error), /models/)
+      assert.doesNotMatch(String(refused.body.error), /sk-array-value|apiKey/)
+    }
+    assert.doesNotMatch(await readFile(h.configPath, 'utf8'), /sk-array-value|apiKey/)
+  } finally {
+    await h.cleanup()
+  }
+  for (const value of values) {
+    const hand = await setup({ config: { models: value } })
+    try {
+      const config = await getJson<Config>(`${hand.base}/api/config`)
+      const view = await getJson<unknown>(`${hand.base}/api/models`)
+      assert.equal(config.status, 200, JSON.stringify(value))
+      assert.equal(view.status, 200)
+      assert.doesNotMatch(JSON.stringify([config.body, view.body]), /sk-array-value|apiKey/)
+      assert.ok(config.body.models === undefined || JSON.stringify(config.body.models) === '{}', JSON.stringify(config.body.models))
+      assert.equal((await saveConfigAs(hand.server, config.body)).status, 200)
+      assert.doesNotMatch(await readFile(hand.configPath, 'utf8'), /sk-array-value|apiKey/)
+    } finally {
+      await hand.cleanup()
+    }
+  }
+})
