@@ -10,8 +10,8 @@ import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { Config } from '../src/config.ts'
 import { startServer } from '../src/server.ts'
-import type { PitServer } from '../src/server.ts'
-import { keyFileName, oauthFileName, openLoopback, SESSION_LIFETIME_MS, sessionCookieName, STATE_LIFETIME_MS, stateCookieName } from '../src/signin.ts'
+import type { PitServer, ServerOptions } from '../src/server.ts'
+import { keyFileName, oauthFileName, openLoopback, revokedFileName, writeKey, SESSION_LIFETIME_MS, sessionCookieName, STATE_LIFETIME_MS, stateCookieName } from '../src/signin.ts'
 import { signedInAs, showSignOut } from '../public/instance.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { fakeLaunch, fakeTime, fixtureRunner, tempDir } from './helpers.ts'
@@ -64,6 +64,10 @@ type Rig = {
   configPath: string
   github: Awaited<ReturnType<typeof fakeGitHub>>
   logs: string[]
+  // while fail is set, every write of the signing key fails as a read-only folder would make it
+  keyWrite: { fail: boolean }
+  // a restart over the same folders: the server closes and a new one starts, with a new port and token
+  restart: () => Promise<void>
   cleanup: () => Promise<void>
 }
 
@@ -89,8 +93,13 @@ const setup = async ({ oauth = validOAuth as string | null, mode = 0o600, config
   const github = await fakeGitHub({ 'code-viewer': scenario.viewer, ...logins })
   const time = fakeTime()
   const logs: string[] = []
-  const server = await startServer({
+  const keyWrite = { fail: false }
+  const serverOptions: ServerOptions = {
     home,
+    writeSigningKey: async (path: string): Promise<void> => {
+      if (keyWrite.fail) throw Object.assign(new Error('injected'), { code: 'EACCES' })
+      await writeKey(path)
+    },
     port: 0,
     runner: fixtureRunner().runner,
     clock: time.clock,
@@ -105,20 +114,28 @@ const setup = async ({ oauth = validOAuth as string | null, mode = 0o600, config
     pageSize: scenario.pageSize,
     oauthEndpoints: { web: github.base, api: github.base },
     ...(keepaliveMs === undefined ? {} : { keepaliveMs }),
-  })
+  }
+  const server = await startServer(serverOptions)
   await mkdir(join(home, 'public'), { recursive: true })
   await writeFile(join(home, 'public', 'index.html'), '<!-- public/index.html -->\n<!doctype html>\n<html>\n<head>\n<title>Pit View</title>\n</head>\n<body></body>\n</html>\n')
   await writeFile(join(home, 'public', 'settings.html'), '<!-- public/settings.html -->\n<!doctype html>\n<html>\n<head>\n<title>Settings</title>\n</head>\n<body></body>\n</html>\n')
   await writeFile(join(home, 'public', 'app.ts'), '// public/app.ts\nexport const answer: number = 42\n')
   await writeFile(join(home, 'public', 'styles.css'), '/* public/styles.css */\n')
-  return {
-    server, time, home, dir, configPath, github, logs,
+  const rig: Rig = {
+    server, time, home, dir, configPath, github, logs, keyWrite,
+    restart: async () => {
+      await rig.server.close()
+      rig.server = await startServer(serverOptions)
+    },
     cleanup: async () => {
-      await server.close()
+      // a test that made the folder read-only gives it back, so it can be removed
+      await chmod(dir, 0o700).catch(() => {})
+      await rig.server.close()
       await github.close()
       await removeHome()
     },
   }
+  return rig
 }
 
 type Answer = { status: number, headers: IncomingHttpHeaders, body: string }
@@ -656,6 +673,124 @@ test('a viewer change in Settings ends every session, even when the viewer is ch
     assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
     assert.equal((await proxied(rig, '/api/view', { Cookie: await signIn(rig) })).status, 200)
     await rig.server.poller.idle()
+  } finally {
+    await rig.cleanup()
+  }
+})
+
+const markerPath = (rig: Rig): string => join(rig.home, '.local', 'state', 'pit-view', revokedFileName)
+
+const saveViewer = async (rig: Rig, viewer: string): Promise<number> => {
+  const stored = JSON.parse((await loopback(rig, '/api/config')).body) as Config
+  return (await raw(rig.server.port, '/api/config', { Host: `127.0.0.1:${rig.server.port}`, Origin: `http://127.0.0.1:${rig.server.port}`, 'X-Pit-View-Token': rig.server.token, 'Content-Type': 'application/json' }, 'PUT', JSON.stringify({ ...stored, viewer }))).status
+}
+
+const signOut = (rig: Rig, session?: string): Promise<Answer> =>
+  proxied(rig, '/auth/sign-out', { ...(session === undefined ? {} : { Cookie: session }), Origin: proxyOrigin }, 'POST')
+
+test('a sign-out whose new key cannot be written says it did not end the sessions, keeps the host closed, and writes a marker with mode 0600', async () => {
+  const rig = await setup()
+  try {
+    const session = await signIn(rig)
+    rig.keyWrite.fail = true
+    const out = await signOut(rig, session)
+    assert.equal(out.status, 503)
+    assert.ok(!out.body.includes('Signed out'))
+    assert.match(out.body, /did not end/)
+    assert.match(out.body, /session\.key/)
+    assert.match(out.body, /EACCES/)
+    assert.ok(!out.body.includes(rig.server.token))
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
+    assert.equal((await proxied(rig, '/')).status, 503)
+    assert.equal((await stat(markerPath(rig))).mode & 0o777, 0o600)
+    // loopback is untouched
+    assert.equal((await loopback(rig, '/api/view')).status, 200)
+  } finally {
+    await rig.cleanup()
+  }
+})
+
+test('after a failed sign-out and a restart the old cookie is refused and the host stays closed; a later rotation reopens it and the old cookie stays refused', async () => {
+  const rig = await setup()
+  try {
+    const session = await signIn(rig)
+    rig.keyWrite.fail = true
+    assert.equal((await signOut(rig, session)).status, 503)
+    await rig.restart()
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
+    assert.equal((await proxied(rig, '/', { Cookie: session })).status, 503)
+    assert.ok(!(await proxied(rig, '/', { Cookie: session })).body.includes(rig.server.token))
+    assert.equal((await proxied(rig, '/auth/sign-in')).status, 503)
+    // the key can be written again: the next use makes a new one, which opens the host
+    rig.keyWrite.fail = false
+    const fresh = await signIn(rig)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: fresh })).status, 200)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
+    await assert.rejects(stat(markerPath(rig)), { code: 'ENOENT' })
+    await rig.restart()
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: fresh })).status, 200)
+  } finally {
+    await rig.cleanup()
+  }
+})
+
+test('a sign-out with no session cannot close the host for the owner, even while the key cannot be written', async () => {
+  const rig = await setup()
+  try {
+    const session = await signIn(rig)
+    rig.keyWrite.fail = true
+    const stranger = await signOut(rig)
+    assert.equal(stranger.status, 200)
+    await assert.rejects(stat(markerPath(rig)), { code: 'ENOENT' })
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 200)
+    await rig.restart()
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 200)
+  } finally {
+    await rig.cleanup()
+  }
+})
+
+test('a failed key write at a viewer change leaves the host closed through a restart, so changing the viewer back does not revive an old session', async () => {
+  const rig = await setup()
+  try {
+    const session = await signIn(rig)
+    rig.keyWrite.fail = true
+    assert.equal(await saveViewer(rig, 'sam-tran'), 200)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
+    assert.equal((await stat(markerPath(rig))).mode & 0o777, 0o600)
+    await rig.restart()
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
+    assert.equal((await proxied(rig, '/')).status, 503)
+    // the viewer goes back while the key still cannot be written
+    assert.equal(await saveViewer(rig, scenario.viewer), 200)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
+    await rig.restart()
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
+    rig.keyWrite.fail = false
+    const fresh = await signIn(rig)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: fresh })).status, 200)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
+    await rig.server.poller.idle()
+  } finally {
+    await rig.cleanup()
+  }
+})
+
+test('a sign-out with the config folder really read-only fails the same way, and the marker in the state folder survives a restart', async () => {
+  const rig = await setup()
+  try {
+    const session = await signIn(rig)
+    await chmod(rig.dir, 0o500)
+    const out = await signOut(rig, session)
+    assert.equal(out.status, 503)
+    assert.ok(!out.body.includes('Signed out'))
+    await rig.restart()
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
+    await chmod(rig.dir, 0o700)
+    const fresh = await signIn(rig)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: fresh })).status, 200)
+    assert.equal((await proxied(rig, '/api/view', { Cookie: session })).status, 401)
   } finally {
     await rig.cleanup()
   }

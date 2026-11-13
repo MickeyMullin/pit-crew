@@ -91,6 +91,8 @@ export type ServerOptions = {
   postDeadlines?: WriteLimits
   // where sign-in through the proxy asks GitHub: github.com and api.github.com when absent, a fake in tests
   oauthEndpoints?: OAuthEndpoints
+  // how sign-in writes a new signing key; a test replaces it to make the write fail
+  writeSigningKey?: (path: string) => Promise<void>
 }
 
 export type PitServer = {
@@ -363,7 +365,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   let ghLogin = stored.viewer === '' ? await localLogin(runner) : ''
   const effective = (): Config => ({ ...stored, viewer: stored.viewer === '' ? ghLogin : stored.viewer })
   // sign-in through the proxy reads its two files from the config file's own folder, at every use
-  const signIn = createSignIn({ dir: dirname(options.configPath), home, clock, endpoints: options.oauthEndpoints ?? githubEndpoints, log })
+  const signIn = createSignIn({ dir: dirname(options.configPath), stateDir: options.stateDir, ...(options.writeSigningKey === undefined ? {} : { writeKey: options.writeSigningKey }), home, clock, endpoints: options.oauthEndpoints ?? githubEndpoints, log })
 
   // the port comes first: a second server must exit before it touches the running one's cache
   let dispatch: ((req: IncomingMessage, res: ServerResponse) => void) | null = null
@@ -874,6 +876,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (stored.viewer === '' && ghLogin === '') ghLogin = await localLogin(runner)
     // a new viewer ends every session through the proxy, and a change back does not bring them back
     if (before.viewer.toLowerCase() !== effective().viewer.toLowerCase()) {
+      // the save stands whether or not a new key could be written: the viewer is the owner's to change, and when the key is not written the proxied host stays closed, across a restart too, with the reason logged and shown there
       await signIn.rotate('the viewer changed')
       await recheckStreams()
     }
@@ -1062,8 +1065,10 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     for await (const _chunk of req as AsyncIterable<Buffer>) { /* drained */ }
     // someone with no session cannot end the owner's
     if (await signIn.session(req.headers.cookie, effective().viewer) !== null) {
-      await signIn.rotate('a sign-out')
+      const rotated = await signIn.rotate('a sign-out')
       await recheckStreams()
+      // the sessions were not ended, so the page must not say they were; the proxied host is closed until a new key can be written
+      if (!rotated.ok) return authPage(res, 503, 'Not signed out', `This did not end the sessions: ${rotated.reason}. Pit View is closed on this host until it can, so no session works meanwhile.`, { cookies: [clearCookie(sessionCookieName, 'Strict')], signInLink: false })
     }
     authPage(res, 200, 'Signed out', 'You are signed out of Pit View.', { cookies: [clearCookie(sessionCookieName, 'Strict')] })
   }

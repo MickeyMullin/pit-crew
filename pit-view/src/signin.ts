@@ -2,7 +2,7 @@
 // sign-in through the reverse proxy (section 3 of DESIGN.md, Hosting, Sign-in behind the proxy): GitHub's OAuth web flow, admitting only the configured viewer, with the session in a signed cookie
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { constants } from 'node:fs'
-import { open, rename, unlink } from 'node:fs/promises'
+import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
 import type { IncomingHttpHeaders } from 'node:http'
 import { join } from 'node:path'
 import type { Clock } from './config.ts'
@@ -22,6 +22,8 @@ export const stateCookieName = '__Host-pit-view-state'
 // both live in the instance's config folder, beside config.json and never in it
 export const oauthFileName = 'oauth.json'
 export const keyFileName = 'session.key'
+// the revocation marker, in the instance's state folder rather than the config folder, so a config folder that cannot be written does not also leave it unwritable: its presence means a new signing key was owed and could not be written, so the old one is not trusted
+export const revokedFileName = 'session.revoked'
 
 export type OAuthEndpoints = { web: string, api: string }
 export const githubEndpoints: OAuthEndpoints = { web: 'https://github.com', api: 'https://api.github.com' }
@@ -92,7 +94,7 @@ const parseKey = (text: string): Buffer | null => {
 }
 
 // a new key, written to a fresh file of mode 0600 and then moved into place, so a reader sees the old key or the new one and never a part
-const writeKey = async (path: string): Promise<void> => {
+export const writeKey = async (path: string): Promise<void> => {
   const temporary = `${path}.${randomBytes(6).toString('hex')}`
   const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
   try {
@@ -178,6 +180,10 @@ const verifyState = (key: Buffer, value: string, sent: string, now: number): boo
 export type SignInDeps = {
   // the instance's config folder, which holds oauth.json and session.key
   dir: string
+  // the instance's state folder, which holds the revocation marker
+  stateDir: string
+  // how a new signing key is written; only a test replaces it
+  writeKey?: (path: string) => Promise<void>
   home: string
   clock: Clock
   endpoints: OAuthEndpoints
@@ -198,8 +204,8 @@ export type SignIn = {
   // where to send the browser to sign in, and the state cookie to set; the reason when sign-in is closed
   begin: (redirectUri: string) => Promise<{ location: string, cookie: string } | { reason: string }>
   finish: (cookieHeader: string | undefined, query: URLSearchParams, redirectUri: string, viewer: string) => Promise<CallbackOutcome>
-  // a new signing key, which ends every session; when it cannot be written, sign-in stays closed until a later one can, so no old session comes back
-  rotate: (why: string) => Promise<void>
+  // a new signing key, which ends every session; when it cannot be written it says why, and sign-in stays closed, across a restart too, until a new key can be written, so no old session comes back
+  rotate: (why: string) => Promise<{ ok: true } | { ok: false, reason: string }>
 }
 
 export class SignInError extends Error {
@@ -214,8 +220,12 @@ export const createSignIn = (deps: SignInDeps): SignIn => {
   const deadlineMs = deps.deadlineMs ?? GITHUB_DEADLINE_MS
   // logged when it changes, not at every request
   let lastReason: string | null = null
-  // set when a new key could not be written, which would otherwise leave the sessions it was to end in force
-  let unrotated: string | null = null
+  const markerPath = join(deps.stateDir, revokedFileName)
+  const makeKey = deps.writeKey ?? writeKey
+  // set when a new key could not be written, which would otherwise leave the sessions it was to end in force; the marker file carries it across a restart, and this covers a marker that could not be written
+  let owed = false
+  // one recovery at a time
+  let recovering: Promise<string | null> | null = null
 
   const closed = (reason: string): SignInState => {
     if (reason !== lastReason) deps.log(`sign-in: the proxied host is closed: ${reason}`)
@@ -229,7 +239,7 @@ export const createSignIn = (deps: SignInDeps): SignIn => {
       if ('problem' in read) return read.problem
       if ('text' in read) return parseKey(read.text) ?? `${shown(keyPath)} does not hold a key; delete it, and Pit View makes a new one`
       try {
-        await writeKey(keyPath)
+        await makeKey(keyPath)
         deps.log(`sign-in: made a new signing key in ${shown(keyPath)}`)
       } catch (error) {
         return `${shown(keyPath)} cannot be written (${(error as NodeJS.ErrnoException).code ?? 'error'})`
@@ -238,8 +248,58 @@ export const createSignIn = (deps: SignInDeps): SignIn => {
     return `${shown(keyPath)} cannot be read`
   }
 
+  // anything at the marker's path counts, and so does a path that cannot be examined: the doubt is not resolved in favor of the old key
+  const markerPresent = async (): Promise<boolean> => {
+    try {
+      await lstat(markerPath)
+      return true
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== 'ENOENT'
+    }
+  }
+
+  const writeMarker = async (): Promise<void> => {
+    try {
+      await mkdir(deps.stateDir, { recursive: true, mode: 0o700 })
+      const handle = await open(markerPath, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW, 0o600)
+      await handle.close()
+    } catch (error) {
+      deps.log(`sign-in: the revocation marker ${shown(markerPath)} could not be written (${(error as NodeJS.ErrnoException).code ?? 'error'}); sign-in stays closed until Pit View restarts or a new key is written`)
+    }
+  }
+
+  const keyProblem = (error: unknown): string => `a new signing key could not be written to ${shown(keyPath)} (${(error as NodeJS.ErrnoException).code ?? 'error'})`
+
+  // a new key, written and then the marker removed; the reason when either fails
+  const replaceKey = async (): Promise<string | null> => {
+    try {
+      await makeKey(keyPath)
+    } catch (error) {
+      return keyProblem(error)
+    }
+    owed = false
+    try {
+      await unlink(markerPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return `the revocation marker ${shown(markerPath)} could not be removed (${(error as NodeJS.ErrnoException).code ?? 'error'})`
+    }
+    return null
+  }
+
+  // while a new key is owed, every use tries to write it, so the host opens as soon as it can
+  const recover = async (): Promise<string | null> => {
+    const problem = await replaceKey()
+    if (problem !== null) return `${problem}, so sign-in stays closed until one can be, and no session made before then works`
+    deps.log('sign-in: wrote the owed signing key, which ends every earlier session')
+    return null
+  }
+
   const state = async (): Promise<SignInState> => {
-    if (unrotated !== null) return closed(unrotated)
+    if (owed || await markerPresent()) {
+      recovering ??= recover().finally(() => { recovering = null })
+      const problem = await recovering
+      if (problem !== null) return closed(problem)
+    }
     const read = await readGuarded(oauthPath, shown(oauthPath))
     if ('missing' in read) return closed(`${shown(oauthPath)} does not exist; sign-in is not set up`)
     if ('problem' in read) return closed(read.problem)
@@ -329,17 +389,21 @@ export const createSignIn = (deps: SignInDeps): SignIn => {
     return { kind: 'signedIn', login, cookie: setCookie(sessionCookieName, mintSession(now.files.key, login, deps.clock.now()), SESSION_LIFETIME_MS, 'Strict') }
   }
 
-  const rotate = async (why: string): Promise<void> => {
-    // with no key there is no session to end
-    if ('missing' in await readGuarded(keyPath, shown(keyPath))) return
-    try {
-      await writeKey(keyPath)
-      unrotated = null
+  const rotate = async (why: string): Promise<{ ok: true } | { ok: false, reason: string }> => {
+    // with no key and nothing owed there is no session to end
+    if ('missing' in await readGuarded(keyPath, shown(keyPath)) && !owed && !await markerPresent()) return { ok: true }
+    // behind recovery, never beside it, so two new keys are not written at once
+    while (recovering !== null) await recovering
+    const problem = await replaceKey()
+    if (problem === null) {
       deps.log(`sign-in: made a new signing key, which ends every session (${why})`)
-    } catch (error) {
-      unrotated = `a new signing key could not be written to ${shown(keyPath)} (${(error as NodeJS.ErrnoException).code ?? 'error'}) after ${why}, so sign-in stays closed until Pit View restarts`
-      closed(unrotated)
+      return { ok: true }
     }
+    const reason = `${problem} after ${why}, so no session was ended and sign-in stays closed until one can be`
+    owed = true
+    await writeMarker()
+    closed(reason)
+    return { ok: false, reason }
   }
 
   return { state, session, begin, finish, rotate }
