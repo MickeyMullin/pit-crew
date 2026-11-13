@@ -56,13 +56,56 @@ export const slugProblem = (model: unknown): string | null => {
 
 const labelPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
+// the fields an entry and the models setting hold; anything else is dropped on a read and on a save
+const entryFields = ['id', 'runner', 'provider', 'model'] as const
+const modelsKeys = ['registry', 'fallback', 'slots'] as const
+
+// a field name that looks like a credential: a save that carries one is refused by name, so the owner learns why, and it is never stored
+const credentialName = /key|secret|token|password|authorization|bearer|credential/i
+
 // why one registry entry is unusable, or null when it is fine
 const entryProblem = (value: unknown): string | null => {
   if (!isObject(value)) return 'an entry must be an object with id, runner, provider, and model'
   if (typeof value.id !== 'string' || !labelPattern.test(value.id)) return 'id must be letters, digits, dots, underscores, and dashes, starting with a letter or digit'
   if (!modelRunners.includes(value.runner as ModelRunner)) return `runner must be one of ${modelRunners.join(', ')}`
   if (typeof value.provider !== 'string' || !labelPattern.test(value.provider)) return 'provider must be letters, digits, dots, underscores, and dashes, such as anthropic'
-  return slugProblem(value.model)
+  const slug = slugProblem(value.model)
+  if (slug !== null) return slug
+  // a built-in id means the built-in entry: restating it exactly is harmless, and anything else would change what the built-in fallback runs
+  const builtIn = builtInRegistry.find((entry) => entry.id === value.id)
+  if (builtIn !== undefined && (builtIn.runner !== value.runner || builtIn.provider !== value.provider || builtIn.model !== value.model)) return `id ${builtIn.id} is a built-in model id (${builtIn.runner}, ${builtIn.provider}, ${builtIn.model}), so an entry may use it only to restate that entry exactly; choose another id`
+  return null
+}
+
+// the setting reduced to the fields it holds: the three top-level keys, and in each registry entry that is an object the four entry fields. An entry that is not an object, and a field with a bad value, are kept as they are for the check to name. Applied on every read and every save, so nothing else the file or a request carries is ever stored or served
+export const projectModels = (raw: unknown): unknown => {
+  if (!isObject(raw)) return raw
+  const projected: Record<string, unknown> = {}
+  for (const key of modelsKeys) if (raw[key] !== undefined) projected[key] = raw[key]
+  if (Array.isArray(projected.registry)) {
+    projected.registry = projected.registry.map((value: unknown) => {
+      if (!isObject(value)) return value
+      const entry: Record<string, unknown> = {}
+      for (const field of entryFields) if (value[field] !== undefined) entry[field] = value[field]
+      return entry
+    })
+  }
+  return projected
+}
+
+// the first field of the raw setting, or of one of its registry entries, whose name looks like a credential, as the path a save names
+const credentialProblem = (raw: Record<string, unknown>): string | null => {
+  for (const key of Object.keys(raw)) {
+    if (!(modelsKeys as readonly string[]).includes(key) && credentialName.test(key)) return `models.${key}: a field named ${key} looks like a credential, and the models setting never holds a key, a key reference, a token, or a secret; remove it`
+  }
+  if (Array.isArray(raw.registry)) {
+    for (const [index, value] of raw.registry.entries()) {
+      if (!isObject(value)) continue
+      const field = Object.keys(value).find((name) => !(entryFields as readonly string[]).includes(name) && credentialName.test(name))
+      if (field !== undefined) return `models.registry[${index}] (${idOf(value, index)}): a field named ${field} looks like a credential, and an entry never holds a key, a key reference, a token, or a secret; remove it`
+    }
+  }
+  return null
 }
 
 const entryOf = (value: Record<string, unknown>): ModelEntry =>
@@ -70,10 +113,12 @@ const entryOf = (value: Record<string, unknown>): ModelEntry =>
 
 const idOf = (value: unknown, index: number): string => isObject(value) && typeof value.id === 'string' && value.id !== '' ? value.id : `#${index + 1}`
 
-// the problem a save refuses, or null: a registry that is not a list, an entry with a bad id, runner, provider, or model, or an id used twice. A read tolerates all of it (resolveModels sets it aside), and a slot naming an unknown id is a warning in Settings rather than a refusal
+// the problem a save refuses, or null: a field named like a credential (checked on the raw request, before projectModels drops the unknown fields), a registry that is not a list, an entry with a bad id, runner, provider, or model, a built-in id used for another entry, or an id used twice. A read tolerates all of it (resolveModels sets it aside), and a slot naming an unknown id is a warning in Settings rather than a refusal
 export const modelsSaveProblem = (raw: unknown): string | null => {
   if (raw === undefined) return null
   if (!isObject(raw)) return 'models must be an object with registry, fallback, and slots'
+  const credential = credentialProblem(raw)
+  if (credential !== null) return credential
   if (raw.registry === undefined) return null
   if (!Array.isArray(raw.registry)) return 'models.registry must be a list of entries'
   const seen = new Set<string>()
@@ -110,9 +155,9 @@ export const resolveModels = (raw: unknown): ResolvedModels => {
       else registry = kept
     }
   }
-  // a default the owner's registry no longer lists is read from the built-in table
   const entryFor = (id: string): ModelEntry | null => registry.find((entry) => entry.id === id) ?? null
-  const builtIn = (id: string): ModelEntry => entryFor(id) ?? builtInRegistry.find((entry) => entry.id === id) as ModelEntry
+  // a built-in default is read from the built-in table alone, never from the owner's registry, so no custom entry can change what a default runs
+  const builtIn = (id: string): ModelEntry => builtInRegistry.find((entry) => entry.id === id) as ModelEntry
   let fallback = builtIn(builtInFallbackId)
   if (setting.fallback !== undefined) {
     const named = typeof setting.fallback === 'string' ? entryFor(setting.fallback) : null
@@ -158,20 +203,19 @@ export const resolveSlot = <S extends SlotName>(resolved: ResolvedModels, slot: 
   return (named[0] ?? base) as SlotValue<S>
 }
 
-// every term a posted report must not contain, in one place so the owner can extend it. A term matches case-insensitively and as whole words, so claudette, okimi, and said are never hits; spaces in a phrase match any run of whitespace. versioned lets a version follow the word, as in GPT-5.2 or GPT4. Copilot and agent are left out on purpose: Copilot is a GitHub reviewer that may be named in a review of someone else's PR, and agent is ordinary code-review vocabulary. The registry ids and full slugs are looked for as well (nameInText), from the owner's registry and the built-in table both
+// every term a posted report must not contain, in one place so the owner can extend it. A term matches case-insensitively and as whole words, in the text as written and in its normalized form (nameInText), so claudette, okimi, and said are never hits; spaces in a phrase match any run of whitespace. versioned lets a version follow the word, as in GPT-5.2 or GPT4. Copilot and agent are left out on purpose: Copilot is a GitHub reviewer that may be named in a review of someone else's PR, and agent is ordinary code-review vocabulary. The registry ids and full slugs are looked for as well (nameInText), from the owner's registry and the built-in table both
 export type PostedTextTerm = { term: string, kind: 'vendor' | 'aiTerm' | 'credit' | 'reviewMode', versioned?: true }
 export const postedTextTerms: readonly PostedTextTerm[] = [
   ...['claude', 'anthropic', 'codex', 'openai', 'chatgpt', 'gemini', 'grok', 'deepseek', 'kimi', 'qwen', 'moonshot', 'openrouter', 'hermes', 'sonnet', 'opus'].map((term): PostedTextTerm => ({ term, kind: 'vendor' })),
   { term: 'gpt', kind: 'vendor', versioned: true },
   ...['ai', 'a.i.', 'llm', 'llms', 'language model', 'language models', 'artificial intelligence'].map((term): PostedTextTerm => ({ term, kind: 'aiTerm' })),
   ...['ai-generated', 'ai generated', 'generated by', 'written by', 'authored by an', 'co-authored', 'reviewed by an', 'assistant', 'autonomous', 'bot-written'].map((term): PostedTextTerm => ({ term, kind: 'credit' })),
-  ...['tandem review', 'degraded', 'consolidator'].map((term): PostedTextTerm => ({ term, kind: 'reviewMode' })),
+  ...['tandem', 'degraded', 'consolidator'].map((term): PostedTextTerm => ({ term, kind: 'reviewMode' })),
 ]
 
 const escapeRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')
 const edge = { before: '(?<![\\p{L}\\p{N}_])', after: '(?![\\p{L}\\p{N}_])' }
-const wholeWords = (term: string, versioned = false): RegExp =>
-  new RegExp(`${edge.before}${escapeRegex(term).replace(/ /g, '\\s+')}${versioned ? '(?:[-\\s]?\\d[\\d.]*)?' : ''}${edge.after}`, 'iu')
+const termSource = (term: string, versioned = false): string => `${escapeRegex(term).replace(/ /g, '\\s+')}${versioned ? '(?:[-\\s]?\\d[\\d.]*)?' : ''}`
 
 // where a refusal is: the text around the match, at most 60 characters, whitespace collapsed, and never the whole report
 const contextAround = (text: string, index: number, length: number): string => {
@@ -182,24 +226,90 @@ const contextAround = (text: string, index: number, length: number): string => {
   return `${start > 0 ? '…' : ''}${slice}${end < text.length ? '…' : ''}`
 }
 
+// the HTML entities a renderer decodes in Markdown text that could spell or hide a letter: the numeric forms, decimal and hex, and a short table of named ones. A numeric one decodes with or without its semicolon (its digits end where the first non-digit begins, so it is never ambiguous), and a named one without a semicolon only for the legacy few and only when no letter, digit, or equals sign follows. An entity that is not a code point, or is not in the table, is left alone
+const namedEntities: Readonly<Record<string, string>> = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', shy: '', zwj: '', zwnj: '', lrm: '', rlm: '', ZeroWidthSpace: '', NoBreak: '', hyphen: '-', dash: '-', ndash: '-', mdash: '-', lowbar: '_', ast: '*', grave: '`', lsqb: '[', rsqb: ']', lpar: '(', rpar: ')', num: '#', period: '.', sol: '/', colon: ':', commat: '@',
+}
+const bareEntities: ReadonlySet<string> = new Set(['amp', 'lt', 'gt', 'quot', 'nbsp', 'shy'])
+const entityPattern = /&(?:#([0-9]{1,8})|#[xX]([0-9a-fA-F]{1,8})|([A-Za-z][A-Za-z0-9]{1,31}))(;?)/g
+const decodeEntities = (text: string): string =>
+  text.replace(entityPattern, (whole, decimal: string | undefined, hex: string | undefined, name: string | undefined, semicolon: string, offset: number) => {
+    if (name === undefined) {
+      const code = decimal !== undefined ? Number.parseInt(decimal, 10) : Number.parseInt(hex as string, 16)
+      return code >= 1 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : whole
+    }
+    const decoded = namedEntities[name]
+    if (decoded === undefined || !Object.hasOwn(namedEntities, name)) return whole
+    if (semicolon === ';') return decoded
+    return bareEntities.has(name) && !/[A-Za-z0-9=]/.test(text.charAt(offset + whole.length)) ? decoded : whole
+  })
+
+// format characters that draw nothing (zero-width, bidi controls, soft hyphen, word joiner, byte-order mark, and the like), a combining grapheme joiner, and variation selectors
+const invisible = /[\p{Cf}\u034f\u180e\ufe00-\ufe0f]/gu
+
+// inline link syntax down to its text, and each destination kept to be scanned beside it. One pass from left to right with indexOf, so it is linear: a closing parenthesis that is missing once is missing for every later link
+const unlink = (text: string): { text: string, destinations: string[] } => {
+  const destinations: string[] = []
+  let out = ''
+  let at = 0
+  let open = text.indexOf('](')
+  let missing = false
+  while (open >= 0 && !missing) {
+    const close = text.indexOf(')', open + 2)
+    if (close < 0) {
+      missing = true
+      break
+    }
+    out += text.slice(at, open)
+    destinations.push(text.slice(open + 2, close))
+    at = close + 1
+    open = text.indexOf('](', at)
+  }
+  return { text: out + text.slice(at), destinations }
+}
+
+// the text as it renders and as a person reads it: entities decoded, invisible characters gone, compatibility forms (fullwidth letters and the like) folded by NFKC, links reduced to their text with their destinations kept beside it, emphasis, code, and strikethrough markers and the brackets of a link removed, and whitespace collapsed. Every step is a single pass, so the cost is linear in the report
+export const normalizeForScan = (text: string): string => {
+  let decoded = text
+  for (let pass = 0; pass < 3; pass++) {
+    const next = decodeEntities(decoded)
+    if (next === decoded) break
+    decoded = next
+  }
+  const folded = decoded.replace(invisible, '').normalize('NFKC').replace(invisible, '')
+  const { text: linked, destinations } = unlink(folded)
+  return [linked, ...destinations].join(' ').replace(/[*_`~[\]]/g, '').replace(/\s+/g, ' ').trim()
+}
+
 export type PostedTextHit = { term: string, context: string }
 
-// the first term in the text, the one that starts earliest and the longer on a tie, or null. The terms are postedTextTerms plus every registry id and full slug Pit View knows, the owner's registry and the built-in table both, so a name the owner removed is still never posted. A leading ~ on a slug is optional in the text. The term returned is the list's entry, lowercase
+// the first term in the text, the one that starts earliest and the longer on a tie, or null, looked for in the normalized text (normalizeForScan) and then in the literal text, since removing markers can also join what was apart. The terms are postedTextTerms plus every registry id and full slug Pit View knows, the owner's registry and the built-in table both, so a name the owner removed is still never posted. A leading ~ on a slug is optional in the text. The term returned is the list's entry, lowercase, and the context is from the text it was found in. One regular expression of whole-word alternatives, with no nested repetition, runs once over each text
 export const nameInText = (resolved: Pick<ResolvedModels, 'registry'>, text: string): PostedTextHit | null => {
-  const patterns = new Map<string, RegExp>()
+  const sources = new Map<string, string>()
   for (const entry of [...resolved.registry, ...builtInRegistry]) {
     for (const name of [entry.id, entry.model, entry.model.replace(/^~/, '')]) {
-      if (name !== '') patterns.set(name.toLowerCase(), wholeWords(name))
+      if (name !== '') sources.set(name.toLowerCase(), termSource(name))
     }
   }
-  for (const { term, versioned } of postedTextTerms) patterns.set(term, wholeWords(term, versioned === true))
-  let best: { term: string, index: number, length: number } | null = null
-  for (const [term, pattern] of patterns) {
-    const found = pattern.exec(text)
-    if (found === null) continue
-    if (best === null || found.index < best.index || (found.index === best.index && term.length > best.term.length)) best = { term, index: found.index, length: found[0].length }
+  for (const { term, versioned } of postedTextTerms) sources.set(term, termSource(term, versioned === true))
+  // the longest term first, so one that starts where a shorter one does is the one found
+  const ordered = [...sources].sort(([a], [b]) => b.length - a.length)
+  const matcher = new RegExp(`${edge.before}(?:${ordered.map(([, source]) => source).join('|')})${edge.after}`, 'iu')
+  const find = (haystack: string): PostedTextHit | null => {
+    const found = matcher.exec(haystack)
+    if (found === null) return null
+    const term = ordered.find(([, source]) => startsWith(source, haystack, found.index))?.[0] ?? found[0].toLowerCase()
+    return { term, context: contextAround(haystack, found.index, found[0].length) }
   }
-  return best === null ? null : { term: best.term, context: contextAround(text, best.index, best.length) }
+  const normalized = normalizeForScan(text)
+  return find(normalized) ?? (normalized === text ? null : find(text))
+}
+
+// whether the term's pattern matches at exactly this index
+const startsWith = (source: string, haystack: string, index: number): boolean => {
+  const pattern = new RegExp(`${edge.before}(?:${source})${edge.after}`, 'iuy')
+  pattern.lastIndex = index
+  return pattern.test(haystack)
 }
 
 // what a run records for each model it used (request.json and the run row's models column, section 8 of DESIGN.md, Launching runs, Recording the models). id is the registry id, null when the model passed to the runner is in no registry entry or the runner's own default was used; model is what the runner was told, null for Codex's own default; fallback is whether the pinned fallback replaced the role's model; outcome is how the role ended, null when none is recorded. Never a key, a key reference, or a spend figure

@@ -1626,9 +1626,19 @@ test('a report with a phrase that credits a tool or model is refused', async () 
 })
 
 test('a report with a review-mode word is refused', async () => {
-  await refusedPost('No actionable findings. Tandem review agreed.', 'tandem review')
+  await refusedPost('No actionable findings. Tandem review agreed.', 'tandem')
+  await refusedPost('No actionable findings. A tandem pass agreed.', 'tandem')
   await refusedPost('No actionable findings. The review is degraded.', 'degraded')
   await refusedPost('No actionable findings. The consolidator merged it.', 'consolidator')
+})
+
+test('a report that hides a name in an entity, a Markdown marker, an invisible character, a link, or a width form is refused, and posts nothing', async () => {
+  await refusedPost('No actionable findings. Checked by Cla&#117;de.', 'claude')
+  await refusedPost('No actionable findings. Checked by Clau**de**.', 'claude')
+  await refusedPost('No actionable findings. Checked by Clau\u200bde.', 'claude')
+  await refusedPost('No actionable findings. Checked by `claude`.', 'claude')
+  await refusedPost('No actionable findings. Checked by [claude](http://x.example).', 'claude')
+  await refusedPost('No actionable findings. Checked by \uff23\uff4c\uff41\uff55\uff44\uff45.', 'claude')
 })
 
 test('a clean report and a report with only near misses posts, and so does a bare Copilot or agent', async () => {

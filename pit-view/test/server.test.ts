@@ -493,6 +493,49 @@ test('PUT /api/config refuses a model slug with a space or a leading dash, saves
   }
 })
 
+test('PUT /api/config stores only the known fields of a registry entry, and refuses a credential-like field by name', async () => {
+  const h = await setup()
+  try {
+    const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
+    const entry = { id: 'mine', runner: 'hermes', provider: 'openrouter', model: 'vendor/model-x' }
+    // an ordinary unknown field is dropped from the file, the response, and a later read
+    const saved = await saveConfigAs(h.server, { ...stored, models: { registry: [{ ...entry, note: 'keep me out', color: 'red' }], slots: { stack: 'mine' } } })
+    assert.equal(saved.status, 200)
+    const expected = { registry: [entry], slots: { stack: 'mine' } }
+    assert.deepEqual(saved.body.models, expected)
+    assert.deepEqual(JSON.parse(await readFile(h.configPath, 'utf8')).models, expected)
+    assert.deepEqual((await getJson<Config>(`${h.base}/api/config`)).body.models, expected)
+    // a field whose name looks like a credential is refused, naming the field, and nothing is written
+    for (const name of ['apiKey', 'secret', 'token', 'password', 'Authorization', 'bearer', 'credential', 'key']) {
+      const refused = await saveConfigAs(h.server, { ...stored, models: { registry: [{ ...entry, [name]: 'sk-live-value' }] } })
+      assert.equal(refused.status, 400, name)
+      assert.match(String(refused.body.error), new RegExp(`models\\.registry\\[0\\] \\(mine\\).*${name}`), name)
+      assert.doesNotMatch(String(refused.body.error), /sk-live-value/)
+    }
+    assert.doesNotMatch(await readFile(h.configPath, 'utf8'), /sk-live-value/)
+    assert.deepEqual((await getJson<Config>(`${h.base}/api/config`)).body.models, expected)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('GET /api/config and GET /api/models never return a credential-like field, even from a hand-edited config file', async () => {
+  const entry = { id: 'mine', runner: 'claude', provider: 'anthropic', model: 'house-1' }
+  const h = await setup({ config: { models: { registry: [{ ...entry, apiKey: 'sk-hand-edited', token: 'tok-hand-edited', authorization: 'Bearer abc' }], secret: 'top' } } })
+  try {
+    const config = await getJson<Config>(`${h.base}/api/config`)
+    assert.equal(config.status, 200)
+    assert.deepEqual(config.body.models, { registry: [entry] })
+    const view = await getJson<unknown>(`${h.base}/api/models`)
+    assert.doesNotMatch(JSON.stringify([config.body, view.body]), /sk-hand-edited|tok-hand-edited|Bearer abc|apiKey|authorization|"top"/)
+    // saving what was read back writes none of it either
+    assert.equal((await saveConfigAs(h.server, config.body)).status, 200)
+    assert.doesNotMatch(await readFile(h.configPath, 'utf8'), /sk-hand-edited|tok-hand-edited|Bearer abc|apiKey|authorization|"top"/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('GET /api/models serves the effective registry, the pinned fallback, each slot by id, and the warnings, and never a key or a spend figure', async () => {
   const h = await setup()
   try {

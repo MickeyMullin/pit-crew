@@ -1,6 +1,7 @@
 // src/config.ts
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { projectModels } from './models.ts'
 import { isNotificationKind, notificationKinds } from './notify.ts'
 import type { NotificationKind } from './notify.ts'
 
@@ -108,7 +109,7 @@ export type Config = {
   // clone of repo is checked when a run starts, not on save
   cloneDir?: string
   agent: AgentSettings
-  // the model registry and the per-command slots exactly as stored, which src/models.ts reads: a read keeps whatever is there, since a bad entry or slot is set aside there with a warning, and a save refuses a bad entry (modelsSaveProblem). Absent means the built-in models
+  // the model registry and the per-command slots exactly as stored, which src/models.ts reads: a read keeps the known fields of whatever is there (projectModels drops every other field, on a read and on a save), since a bad entry or slot is set aside there with a warning, and a save refuses a bad entry and a credential-like field (modelsSaveProblem). Absent means the built-in models
   models?: unknown
   notifications?: Notifications
   autoReview?: AutoReviewSettings
@@ -428,7 +429,7 @@ export const validateConfig = (input: unknown): Config => {
     ...(cloneDir === undefined ? {} : { cloneDir }),
     agent: toAgent(input.agent),
   }
-  if (input.models !== undefined) config.models = input.models
+  if (input.models !== undefined) config.models = projectModels(input.models)
   if (input.notifications !== undefined) config.notifications = toNotifications(input.notifications)
   if (input.autoReview !== undefined) config.autoReview = toAutoReview(input.autoReview)
   return config

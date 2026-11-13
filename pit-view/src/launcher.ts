@@ -2857,6 +2857,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     let spec: LaunchSpec
     let record: Record<string, unknown>
     let models: RequestModels
+    // whether the row holds the models, so a failure at the spawn itself takes them back off
+    let modelsOnRow = false
     let stdin: string | null
     let resume: string | null
     try {
@@ -2901,8 +2903,6 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         else if (scheduledText) await fs.rm(join(dir, extraInstructionsFile))
         await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid: null, pidStartedAt: null }, null, 2)}\n`)
       } while (textNow()?.text !== extra?.text)
-      // the row says the same, with each role's outcome still open
-      if (store.recordsModels) run = store.update(run.id, { models: { roles: models.roles.map((role) => ({ ...role, outcome: null })), degraded: models.degraded } })
       // the last thing before the spawn, with nothing awaited between this reading and it: a review or a sweep starts only for the repository and the viewer its start was confirmed for, and only while it still fits, under the config in effect now
       if (admitted !== null) {
         const current = options.config()
@@ -2921,6 +2921,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
           record = { ...record, args, argv: [invocation.command, ...invocation.args] }
         }
       }
+      // the row says the same, with each role's outcome still open, written only now that nothing but the spawn is left: a run the cap took back, or one that failed before this, holds none
+      if (store.recordsModels) {
+        run = store.update(run.id, { models: { roles: models.roles.map((role) => ({ ...role, outcome: null })), degraded: models.degraded } })
+        modelsOnRow = true
+      }
       child = spawn({
         command: invocation.command,
         args: invocation.args,
@@ -2937,7 +2942,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       launching.delete(run.id)
       log(`${noun} ${run.id}: cannot start: ${note}`)
       // a queued review someone awaits ends here, and so does a start whose failure the database refuses to record
-      run = end(run, { status: 'failed', finishedAt: now(), note }, 'failed to start')
+      run = end(run, { status: 'failed', finishedAt: now(), note, ...(modelsOnRow ? { models: null } : {}) }, 'failed to start')
       await prune()
       return run
     }

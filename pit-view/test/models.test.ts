@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { ConfigError, defaultConfig, validateConfig } from '../src/config.ts'
-import { builtInFallbackId, builtInRegistry, modelsSaveProblem, nameInText, postedTextTerms, resolveModels, resolveSlot, slotNames } from '../src/models.ts'
+import { builtInFallbackId, builtInRegistry, modelsSaveProblem, modelsView, nameInText, postedTextTerms, resolveModels, resolveSlot, slotNames } from '../src/models.ts'
 
 const ids = (entries: readonly { id: string }[]): string[] => entries.map((entry) => entry.id)
 
@@ -36,7 +36,7 @@ test('one bad entry drops only that entry', () => {
       { id: 'bad-space', runner: 'claude', provider: 'anthropic', model: 'two words' },
       { id: 'bad-dash', runner: 'codex', provider: 'openai', model: '-m' },
       { id: 'bad-runner', runner: 'gemini', provider: 'google', model: 'gemini-x' },
-      { id: 'sonnet', runner: 'claude', provider: 'anthropic', model: 'haiku' },
+      { id: 'gpt-6.1-terra', runner: 'codex', provider: 'openai', model: 'gpt-6.1-terra' },
       { id: 'gpt-6.1-terra', runner: 'codex', provider: 'openai', model: 'gpt-6.1-terra' },
     ],
   })
@@ -136,7 +136,8 @@ test('nameInText finds a full id or slug and the plain model words, and where it
   const found = (text: string): string | null => nameInText(resolved, text)?.term ?? null
   assert.equal(found('Reviewed with gpt-6.1-terra today.'), 'gpt-6.1-terra')
   assert.equal(found('run on MOONSHOTAI/KIMI-K2.7-CODE'), 'moonshotai/kimi-k2.7-code')
-  assert.equal(found('via ~deepseek/deepseek-flash-latest'), '~deepseek/deepseek-flash-latest')
+  // the leading ~ of a slug is optional, and a tilde is also Markdown's strikethrough marker, so the name is found without it
+  assert.equal(found('via ~deepseek/deepseek-flash-latest'), 'deepseek/deepseek-flash-latest')
   assert.equal(found('via deepseek/deepseek-flash-latest'), 'deepseek/deepseek-flash-latest')
   assert.equal(found('the qwen-coder-flash pass'), 'qwen-coder-flash')
   assert.equal(found('a deepseek-flash note'), 'deepseek-flash')
@@ -177,4 +178,128 @@ test('nameInText scans a custom registry and the built-in table both', () => {
   assert.equal(nameInText(resolved, 'by vendor/house-x1')?.term, 'vendor/house-x1')
   // a name the owner removed from the registry is still a name Pit View knows, so it is never posted
   assert.equal(nameInText(resolved, 'by gpt-6.1-sol')?.term, 'gpt-6.1-sol')
+})
+
+// what a rendered or obfuscated report still says: the scan reads the literal text and a normalized form of it
+test('nameInText reads past entities, invisible characters, Markdown markers, link syntax, and width forms', () => {
+  const resolved = resolveModels(undefined)
+  const cases: [string, string][] = [
+    ['Cla&#117;de agreed', 'claude'],
+    ['Cla&#x75;de agreed', 'claude'],
+    ['Cla&#X75;de agreed', 'claude'],
+    ['Cla&#117de agreed', 'claude'],
+    ['C&#108;&#97;ude agreed', 'claude'],
+    ['Clau&amp;#100;e agreed', 'claude'],
+    ['Clau&zwj;de agreed', 'claude'],
+    ['Clau**de** agreed', 'claude'],
+    ['Cl_au_de agreed', 'claude'],
+    ['Clau~~d~~e agreed', 'claude'],
+    ['Clau\u200bde agreed', 'claude'],
+    ['Clau\u200c\u200d\u200e\u200fde agreed', 'claude'],
+    ['Clau\u2060de agreed', 'claude'],
+    ['Clau\ufeffde agreed', 'claude'],
+    ['Clau\u00adde agreed', 'claude'],
+    ['Clau\u202ede agreed', 'claude'],
+    ['Clau\u2066de agreed', 'claude'],
+    ['`claude` agreed', 'claude'],
+    ['``claude`` agreed', 'claude'],
+    ['[claude](http://x.example) agreed', 'claude'],
+    ['![claude](http://x.example/a.png) agreed', 'claude'],
+    ['[Clau](http://a.example)[de](http://b.example) agreed', 'claude'],
+    ['see [this](https://claude.example/page)', 'claude'],
+    ['\uff23\uff4c\uff41\uff55\uff44\uff45 agreed', 'claude'],
+    ['a tandem pass', 'tandem'],
+    ['Tandem mode found nothing', 'tandem'],
+    ['a  language\u200b   model', 'language model'],
+    ['&#71;PT-5 wrote this', 'gpt'],
+  ]
+  for (const [text, term] of cases) assert.equal(nameInText(resolved, text)?.term, term, text)
+  // the context comes from the normalized text, so it shows the name as it renders
+  const hit = nameInText(resolved, 'Some words, then Cla&#117;de and **more**.')
+  assert.ok(hit?.context.includes('Claude'), String(hit?.context))
+  // an entity that is not a letter of a name, and plain punctuation, do not make a hit
+  for (const text of ['Fish &amp; chips &lt;b&gt; &quot;x&quot;', 'Clau&#32;de is two words', 'a [link](http://x.example/docs) and **bold** and `code`', 'snake_case_name and ~~struck~~', '&#99999999999; and &#0;', 'AIM &amp;said']) {
+    assert.equal(nameInText(resolved, text), null, text)
+  }
+  // the near misses still pass in their normalized form
+  for (const text of ['**claudette**', '`okimi`', '[hermeslike](http://x.example)', '&#65;IM', 'the agent said', 'Copilot']) assert.equal(nameInText(resolved, text), null, text)
+})
+
+test('the review-mode word tandem is refused as a whole word anywhere, and nothing near it is', () => {
+  const resolved = resolveModels(undefined)
+  for (const text of ['tandem', 'In tandem.', '(Tandem)', 'a tandem pass', 'tandem-mode']) assert.equal(nameInText(resolved, text)?.term, 'tandem', text)
+  for (const text of ['tandems', 'tandemly', 'autotandem']) assert.equal(nameInText(resolved, text), null, text)
+  assert.ok(postedTextTerms.some((entry) => entry.term === 'tandem' && entry.kind === 'reviewMode'))
+})
+
+test('the scan of a 1 MB report is linear: hostile runs of markers, brackets, entities, spaces, and digits finish quickly', () => {
+  const resolved = resolveModels(undefined)
+  const mb = 1024 * 1024
+  const hostile = ['[', '](', '*', '_', '&#', '&', ' ', '\u200b', 'language ', 'gpt1', '(', ')\n[', '&amp', 'x'].map((unit) => unit.repeat(Math.ceil(mb / unit.length)).slice(0, mb))
+  hostile.push(`${'language'}${' '.repeat(mb)}x`, `gpt${'1'.repeat(mb)}x`, `[${'a'.repeat(mb)}`, `${'[a]('.repeat(mb / 4)}`, `${'ab cd '.repeat(mb / 6)}`)
+  for (const text of hostile) {
+    const started = performance.now()
+    nameInText(resolved, text)
+    assert.ok(performance.now() - started < 3000, `${text.slice(0, 20)} took ${Math.round(performance.now() - started)} ms`)
+  }
+  // a hit at the very end of a large clean report is still found
+  const started = performance.now()
+  assert.equal(nameInText(resolved, `${'Plain review prose. '.repeat(mb / 20)}Cla&#117;de`)?.term, 'claude')
+  assert.ok(performance.now() - started < 3000)
+})
+
+// a custom entry never changes what a built-in id means, so the built-in fallback is read from the built-in table only
+test('an unknown slot id takes the built-in default even when a custom entry reuses the built-in id with another runner', () => {
+  const custom = { id: 'sonnet', runner: 'codex', provider: 'openai', model: 'gpt-x' }
+  const resolved = resolveModels({ registry: [custom, { id: 'house', runner: 'claude', provider: 'anthropic', model: 'house-1' }], slots: { stack: 'ghost', sweep: 'house' } })
+  assert.deepEqual(resolved.slots.stack, builtInRegistry.find((entry) => entry.id === 'sonnet'))
+  assert.equal(resolved.slots.stack.runner, 'claude')
+  assert.equal(resolved.slots.sweep.id, 'house')
+  assert.ok(resolved.warnings.some((line) => /sonnet.*built-in/.test(line)), resolved.warnings.join(' | '))
+  assert.ok(resolved.warnings.some((line) => /stack.*ghost/.test(line)))
+  assert.ok(!resolved.registry.some((entry) => entry.id === 'sonnet'))
+  // a slot that names the built-in id the registry no longer lists reads the built-in entry, never the custom one
+  assert.deepEqual(resolved.slots.autoReviewBot, builtInRegistry[0])
+  assert.deepEqual(resolved.slots.review[1], builtInRegistry[2])
+  // alone in the registry, the custom entry is set aside and the built-in table stands
+  const alone = resolveModels({ registry: [custom], slots: { stack: 'ghost' } })
+  assert.deepEqual(alone.slots.stack, builtInRegistry[0])
+  assert.deepEqual(alone.registry, [...builtInRegistry])
+  // the pinned fallback is the built-in one when a custom entry reuses its id
+  const fallback = resolveModels({ registry: [{ id: 'kimi-code', runner: 'claude', provider: 'anthropic', model: 'other' }, { id: 'house', runner: 'claude', provider: 'anthropic', model: 'house-1' }] })
+  assert.deepEqual(fallback.fallback, builtInRegistry.find((entry) => entry.id === 'kimi-code'))
+  assert.deepEqual(modelsView({ registry: [custom], slots: { stack: 'ghost' } }).slots.stack, 'sonnet')
+})
+
+test('a custom entry may restate a built-in entry exactly, and may not reuse a built-in id with anything else; a save refuses it by name', () => {
+  const restated = builtInRegistry.find((entry) => entry.id === 'opus')
+  const resolved = resolveModels({ registry: [restated, { id: 'house', runner: 'claude', provider: 'anthropic', model: 'house-1' }] })
+  assert.deepEqual(ids(resolved.registry), ['opus', 'house'])
+  assert.deepEqual(resolved.warnings, [])
+  for (const changed of [{ ...restated, runner: 'codex' }, { ...restated, model: 'other' }, { ...restated, provider: 'elsewhere' }]) {
+    const problem = modelsSaveProblem({ registry: [changed] })
+    assert.match(problem ?? '', /models\.registry\[0\] \(opus\).*built-in/)
+  }
+  assert.equal(modelsSaveProblem({ registry: [restated] }), null)
+})
+
+test('a registry entry is projected to its known fields on read and in the effective view, and a save names a credential-like field', () => {
+  const entry = { id: 'house', runner: 'claude', provider: 'anthropic', model: 'house-1' }
+  const resolved = resolveModels({ registry: [{ ...entry, apiKey: 'sk-live', note: 'x' }] })
+  assert.deepEqual(resolved.registry, [entry])
+  // the stored config drops every unknown field, on a read and on a save
+  const base = defaultConfig()
+  const projected = validateConfig({ ...base, models: { registry: [{ ...entry, apiKey: 'sk-live', extra: 1, token: 't' }], slots: { stack: 'house' }, secret: 'x' } }).models
+  assert.deepEqual(projected, { registry: [entry], slots: { stack: 'house' } })
+  assert.doesNotMatch(JSON.stringify(projected), /sk-live|apiKey|token|secret/)
+  // an entry that is not an object, and a bad field value, are left for the check to name
+  assert.deepEqual(validateConfig({ ...base, models: { registry: ['x', { ...entry, model: 'a b', junk: 1 }] } }).models, { registry: ['x', { ...entry, model: 'a b' }] })
+  for (const name of ['key', 'apiKey', 'api_key', 'API_KEY', 'secret', 'clientSecret', 'token', 'accessToken', 'password', 'Authorization', 'bearer', 'credential', 'credentials']) {
+    const problem = modelsSaveProblem({ registry: [{ ...entry, [name]: 'x' }] })
+    assert.match(problem ?? '', new RegExp(`models\\.registry\\[0\\] \\(house\\).*${name}`), name)
+    assert.match(problem ?? '', /credential/i)
+  }
+  // an ordinary unknown field is dropped without a refusal
+  assert.equal(modelsSaveProblem({ registry: [{ ...entry, note: 'x' }] }), null)
+  assert.match(modelsSaveProblem({ registry: [entry], apiKey: 'x' }) ?? '', /models\.apiKey/)
 })

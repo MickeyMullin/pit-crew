@@ -867,8 +867,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       // a save refuses what a read tolerates: Concurrent auto-reviews above the review cap
       const over = autoConcurrencyProblem(checked)
       if (over !== null) throw new ConfigError(over)
-      // and a registry entry with a bad id, runner, provider, or model slug
-      const unsound = modelsSaveProblem(checked.models)
+      // and a registry entry with a bad id, runner, provider, or model slug, or a credential-like field, which only the raw request still carries: validateConfig has already dropped it from the clean copy
+      const unsound = modelsSaveProblem((body as { models?: unknown }).models)
       if (unsound !== null) throw new ConfigError(unsound)
       saved = await saveConfig(options.configPath, checked)
     } catch (error) {

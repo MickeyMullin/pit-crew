@@ -2247,6 +2247,59 @@ test('a cap lowered while a review is prepared keeps it from spawning, new or fr
   }
 })
 
+// the row's models column says what a process was started with, so it is written once the run is about to spawn and holds none for a run that went back to the queue or failed before its spawn
+test('a run sent back to the queue by a lowered cap holds no models on its row, and records them once it spawns', async () => {
+  const launch = fakeLaunch()
+  const folders = gate()
+  const mkdir = launch.deps.fs.mkdir
+  launch.deps.fs = {
+    ...launch.deps.fs,
+    mkdir: async (path) => {
+      await folders.wait()
+      await mkdir(path)
+    },
+  }
+  const h = await harness({ launch })
+  try {
+    const running = await h.launcher.start(request(106))
+    folders.arm()
+    const pending = h.launcher.start(request(113, { label: 'Review' }))
+    await waitFor(() => folders.held() === 1)
+    const row = h.cache.runsFor(scenario.repo, 113, 1)[0]!
+    h.settings.current = { ...h.settings.current, maxConcurrentReviews: 1 }
+    h.launcher.drain()
+    folders.open(0)
+    assert.equal((await within(pending)).status, 'queued')
+    assert.equal(h.cache.getRun(row.id)?.models, null)
+    // it starts when the running review ends, and its row records the models then
+    h.launch.children[0]!.exit(1)
+    await h.launcher.settled(running.id)
+    await waitFor(() => h.launch.children.length === 2)
+    assert.equal(h.cache.getRun(row.id)?.status, 'running')
+    assert.equal(h.cache.getRun(row.id)?.models?.roles.length, 1)
+    assert.equal(h.cache.getRun(row.id)?.models?.roles[0]?.role, 'reviewer')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a run that fails to spawn holds no models on its row', async () => {
+  const launch = fakeLaunch()
+  launch.spawnError = new Error('spawn claude ENOENT')
+  const h = await harness({ launch })
+  try {
+    const run = await h.launcher.start(request())
+    assert.equal(run.status, 'failed')
+    assert.equal(h.cache.getRun(run.id)?.models, null)
+    launch.spawnError = null
+    const next = await h.launcher.start(request())
+    assert.equal(next.status, 'running')
+    assert.equal(h.cache.getRun(next.id)?.models?.roles[0]?.model, 'sonnet')
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a self-review the one place over the cap still fits when a cap is lowered during its launch, so it spawns', async () => {
   const launch = fakeLaunch()
   const folders = gate()

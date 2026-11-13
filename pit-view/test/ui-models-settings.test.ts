@@ -67,3 +67,13 @@ test('settings.ts reads the effective models from /api/models and keeps the fiel
   assert.ok(source.includes("'/api/models'"))
   assert.ok(source.includes("'models'"))
 })
+
+test('the Models hint says what a built-in id may be used for, what an entry stores, and which posts the name check covers and which the review prompt governs', async () => {
+  const html = await publicFile('settings.html')
+  const hint = html.slice(html.indexOf('id="f-models-hint"'), html.indexOf('id="f-models-error"')).replace(/<[^>]+>/g, '')
+  assert.match(hint, /built-in id.*only to restate/)
+  assert.match(hint, /Only those four fields are stored/)
+  assert.match(hint, /the Post it offer and the post of a stored report/)
+  assert.match(hint, /governed by the review prompt/)
+  assert.match(hint, /unknown id takes its built-in default/)
+})
