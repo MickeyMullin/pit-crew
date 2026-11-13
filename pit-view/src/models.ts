@@ -60,8 +60,14 @@ const labelPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const entryFields = ['id', 'runner', 'provider', 'model'] as const
 const modelsKeys = ['registry', 'fallback', 'slots'] as const
 
-// a field name that looks like a credential: a save that carries one is refused by name, so the owner learns why, and it is never stored
-const credentialName = /key|secret|token|password|authorization|bearer|credential/i
+// a key that looks like a credential: matched after lowercasing it and removing every character that is not a letter or a digit, so apiKey, api_key, API-KEY, x-api-key, client_secret, accessToken, and pass_word are all caught. A save that carries one anywhere in the models value is refused by path and key, so the owner learns why, and it is never stored
+const credentialName = /key|secret|token|password|passwd|authorization|bearer|credential|cookie|session/
+const looksLikeCredential = (key: string): boolean => credentialName.test(key.toLowerCase().replace(/[^a-z0-9]/g, ''))
+const pollutionKeys: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype'])
+
+// the longest a stored id, provider, model, or slot value may be
+const maxText = 200
+const isText = (value: unknown): value is string => typeof value === 'string' && value.length <= maxText
 
 // why one registry entry is unusable, or null when it is fine
 const entryProblem = (value: unknown): string | null => {
@@ -77,33 +83,67 @@ const entryProblem = (value: unknown): string | null => {
   return null
 }
 
-// the setting reduced to the fields it holds: the three top-level keys, and in each registry entry that is an object the four entry fields. An entry that is not an object, and a field with a bad value, are kept as they are for the check to name. Applied on every read and every save, so nothing else the file or a request carries is ever stored or served
-export const projectModels = (raw: unknown): unknown => {
+// the setting reduced to the shapes it holds, a strict allowlist that builds a new value and copies nothing it was not told to: `registry` is a list of entries that are objects, each with only the four entry fields, each a string of at most 200 characters; `fallback` is a string; `slots` is an object with only the five slot names, each a string id or, for a pair slot, a pair of two string ids. A value of any other shape is dropped. Applied on every read and every save, so nothing else the file or a request carries is ever stored or served
+export const projectModels = (raw: unknown): Record<string, unknown> | unknown => {
   if (!isObject(raw)) return raw
   const projected: Record<string, unknown> = {}
-  for (const key of modelsKeys) if (raw[key] !== undefined) projected[key] = raw[key]
-  if (Array.isArray(projected.registry)) {
-    projected.registry = projected.registry.map((value: unknown) => {
-      if (!isObject(value)) return value
+  const own = (value: Record<string, unknown>, key: string): unknown => Object.hasOwn(value, key) ? value[key] : undefined
+  const registry = own(raw, 'registry')
+  if (Array.isArray(registry)) {
+    projected.registry = registry.filter(isObject).map((value) => {
       const entry: Record<string, unknown> = {}
-      for (const field of entryFields) if (value[field] !== undefined) entry[field] = value[field]
+      for (const field of entryFields) {
+        const given = own(value, field)
+        if (isText(given)) entry[field] = given
+      }
       return entry
-    })
+    }).filter((entry) => Object.keys(entry).length > 0)
+  }
+  const fallback = own(raw, 'fallback')
+  if (isText(fallback)) projected.fallback = fallback
+  const slots = own(raw, 'slots')
+  if (isObject(slots)) {
+    const kept: Record<string, unknown> = {}
+    for (const slot of slotNames) {
+      const value = own(slots, slot)
+      if (isText(value)) kept[slot] = value
+      else if (isPairSlot(slot) && Array.isArray(value) && value.length === 2 && value.every(isText)) kept[slot] = [value[0], value[1]]
+    }
+    projected.slots = kept
   }
   return projected
 }
 
-// the first field of the raw setting, or of one of its registry entries, whose name looks like a credential, as the path a save names
-const credentialProblem = (raw: Record<string, unknown>): string | null => {
-  for (const key of Object.keys(raw)) {
-    if (!(modelsKeys as readonly string[]).includes(key) && credentialName.test(key)) return `models.${key}: a field named ${key} looks like a credential, and the models setting never holds a key, a key reference, a token, or a secret; remove it`
-  }
-  if (Array.isArray(raw.registry)) {
-    for (const [index, value] of raw.registry.entries()) {
-      if (!isObject(value)) continue
-      const field = Object.keys(value).find((name) => !(entryFields as readonly string[]).includes(name) && credentialName.test(name))
-      if (field !== undefined) return `models.registry[${index}] (${idOf(value, index)}): a field named ${field} looks like a credential, and an entry never holds a key, a key reference, a token, or a secret; remove it`
+// the first key anywhere in the raw value, at any depth and through arrays, that looks like a credential or is a prototype-pollution key, as the path and key a save names. Walked without recursion, so a deeply nested value cannot overflow the stack; the value is never part of the message
+const credentialProblem = (raw: unknown): string | null => {
+  const pending: { value: unknown, path: string }[] = [{ value: raw, path: 'models' }]
+  while (pending.length > 0) {
+    const { value, path } = pending.pop() as { value: unknown, path: string }
+    if (Array.isArray(value)) {
+      for (let index = value.length - 1; index >= 0; index--) pending.push({ value: value[index], path: `${path}[${index}]` })
+    } else if (isObject(value)) {
+      const keys = Object.keys(value)
+      for (const key of keys) {
+        const shown = key.length > 60 ? `${key.slice(0, 59)}…` : key
+        if (pollutionKeys.has(key)) return `${path}.${shown}: the key ${shown} is not allowed in the models setting; remove it`
+        if (looksLikeCredential(key)) return `${path}.${shown}: a field named ${shown} looks like a credential, and the models setting never holds a key, a key reference, a token, or a secret; remove it`
+      }
+      for (let index = keys.length - 1; index >= 0; index--) pending.push({ value: value[keys[index] as string], path: `${path}.${keys[index]}` })
     }
+  }
+  return null
+}
+
+// the first value of the wrong shape in a known part of the setting, as its path, or null: fallback must be a string, slots an object, each slot a string id (or a pair of two string ids for review and autoReviewHuman), each of at most 200 characters. An unknown key is dropped by projectModels without a refusal
+const shapeProblem = (raw: Record<string, unknown>): string | null => {
+  if (raw.fallback !== undefined && !isText(raw.fallback)) return 'models.fallback must be a model id, a string of at most 200 characters'
+  if (raw.slots === undefined) return null
+  if (!isObject(raw.slots)) return 'models.slots must be an object with the slot names review, stack, sweep, autoReviewHuman, and autoReviewBot'
+  for (const slot of slotNames) {
+    const value = raw.slots[slot]
+    if (value === undefined || isText(value)) continue
+    if (isPairSlot(slot) && Array.isArray(value) && value.length === 2 && value.every(isText)) continue
+    return `models.slots.${slot} must be ${isPairSlot(slot) ? 'a model id or a pair of two model ids' : 'one model id'}, strings of at most 200 characters`
   }
   return null
 }
@@ -113,12 +153,14 @@ const entryOf = (value: Record<string, unknown>): ModelEntry =>
 
 const idOf = (value: unknown, index: number): string => isObject(value) && typeof value.id === 'string' && value.id !== '' ? value.id : `#${index + 1}`
 
-// the problem a save refuses, or null: a field named like a credential (checked on the raw request, before projectModels drops the unknown fields), a registry that is not a list, an entry with a bad id, runner, provider, or model, a built-in id used for another entry, or an id used twice. A read tolerates all of it (resolveModels sets it aside), and a slot naming an unknown id is a warning in Settings rather than a refusal
+// the problem a save refuses, or null: a key named like a credential or a prototype-pollution key at any depth (checked on the raw request, before projectModels drops the unknown fields), a fallback or slot of the wrong shape, a registry that is not a list, an entry with a bad id, runner, provider, or model, a built-in id used for another entry, or an id used twice. A read tolerates all of it (resolveModels sets it aside), and a slot naming an unknown id is a warning in Settings rather than a refusal
 export const modelsSaveProblem = (raw: unknown): string | null => {
   if (raw === undefined) return null
   if (!isObject(raw)) return 'models must be an object with registry, fallback, and slots'
   const credential = credentialProblem(raw)
   if (credential !== null) return credential
+  const shape = shapeProblem(raw)
+  if (shape !== null) return shape
   if (raw.registry === undefined) return null
   if (!Array.isArray(raw.registry)) return 'models.registry must be a list of entries'
   const seen = new Set<string>()
@@ -206,12 +248,15 @@ export const resolveSlot = <S extends SlotName>(resolved: ResolvedModels, slot: 
 // every term a posted report must not contain, in one place so the owner can extend it. A term matches case-insensitively and as whole words, in the text as written and in its normalized form (nameInText), so claudette, okimi, and said are never hits; spaces in a phrase match any run of whitespace. versioned lets a version follow the word, as in GPT-5.2 or GPT4. Copilot and agent are left out on purpose: Copilot is a GitHub reviewer that may be named in a review of someone else's PR, and agent is ordinary code-review vocabulary. The registry ids and full slugs are looked for as well (nameInText), from the owner's registry and the built-in table both
 export type PostedTextTerm = { term: string, kind: 'vendor' | 'aiTerm' | 'credit' | 'reviewMode', versioned?: true }
 export const postedTextTerms: readonly PostedTextTerm[] = [
-  ...['claude', 'anthropic', 'codex', 'openai', 'chatgpt', 'gemini', 'grok', 'deepseek', 'kimi', 'qwen', 'moonshot', 'openrouter', 'hermes', 'sonnet', 'opus'].map((term): PostedTextTerm => ({ term, kind: 'vendor' })),
+  ...['claude', 'anthropic', 'codex', 'openai', 'chatgpt', 'gemini', 'grok', 'deepseek', 'kimi', 'qwen', 'moonshot', 'moonshotai', 'openrouter', 'hermes', 'sonnet', 'opus'].map((term): PostedTextTerm => ({ term, kind: 'vendor' })),
   { term: 'gpt', kind: 'vendor', versioned: true },
   ...['ai', 'a.i.', 'llm', 'llms', 'language model', 'language models', 'artificial intelligence'].map((term): PostedTextTerm => ({ term, kind: 'aiTerm' })),
   ...['ai-generated', 'ai generated', 'generated by', 'written by', 'authored by an', 'co-authored', 'reviewed by an', 'assistant', 'autonomous', 'bot-written'].map((term): PostedTextTerm => ({ term, kind: 'credit' })),
   ...['tandem', 'degraded', 'consolidator'].map((term): PostedTextTerm => ({ term, kind: 'reviewMode' })),
 ]
+
+// provider labels that are ordinary words, so a registry entry that uses one never blocks a report that uses the word
+const genericProviders: ReadonlySet<string> = new Set(['local', 'custom', 'default', 'other', 'none', 'self', 'own', 'test', 'dev', 'cloud', 'api', 'host', 'hosted', 'internal', 'external', 'private', 'public', 'main', 'model', 'models'])
 
 const escapeRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')
 const edge = { before: '(?<![\\p{L}\\p{N}_])', after: '(?![\\p{L}\\p{N}_])' }
@@ -219,6 +264,8 @@ const termSource = (term: string, versioned = false): string => `${escapeRegex(t
 
 // where a refusal is: the text around the match, at most 60 characters, whitespace collapsed, and never the whole report
 const contextAround = (text: string, index: number, length: number): string => {
+  // a match that alone fills the bound is cut with an ellipsis, so the whole context is still 60 characters
+  if (length >= 60) return `${text.slice(index, index + 59).replace(/\s+/g, ' ')}…`
   const room = Math.max(0, 60 - length)
   const start = Math.max(0, index - Math.floor(room / 2))
   const end = Math.min(text.length, index + length + (room - (index - start)))
@@ -283,12 +330,18 @@ export const normalizeForScan = (text: string): string => {
 
 export type PostedTextHit = { term: string, context: string }
 
-// the first term in the text, the one that starts earliest and the longer on a tie, or null, looked for in the normalized text (normalizeForScan) and then in the literal text, since removing markers can also join what was apart. The terms are postedTextTerms plus every registry id and full slug Pit View knows, the owner's registry and the built-in table both, so a name the owner removed is still never posted. A leading ~ on a slug is optional in the text. The term returned is the list's entry, lowercase, and the context is from the text it was found in. One regular expression of whole-word alternatives, with no nested repetition, runs once over each text
+// the first term in the text, the one that starts earliest and the longer on a tie, or null, looked for in the normalized text (normalizeForScan) and then in the literal text, since removing markers can also join what was apart. The terms are postedTextTerms plus every registry id, full slug, provider, and runner Pit View knows, the owner's registry and the built-in table both, so a name the owner removed is still never posted. A leading ~ on a slug is optional in the text. The term returned is the list's entry, lowercase, and the context is from the text it was found in. One regular expression of whole-word alternatives, with no nested repetition, runs once over each text
 export const nameInText = (resolved: Pick<ResolvedModels, 'registry'>, text: string): PostedTextHit | null => {
   const sources = new Map<string, string>()
   for (const entry of [...resolved.registry, ...builtInRegistry]) {
     for (const name of [entry.id, entry.model, entry.model.replace(/^~/, '')]) {
       if (name !== '') sources.set(name.toLowerCase(), termSource(name))
+    }
+  }
+  // each entry's provider and runner too, from both tables; a value shorter than three characters or a generic word would block ordinary reports and is left out
+  for (const entry of [...resolved.registry, ...builtInRegistry]) {
+    for (const name of [entry.provider, entry.runner]) {
+      if (name.length >= 3 && !genericProviders.has(name.toLowerCase())) sources.set(name.toLowerCase(), termSource(name))
     }
   }
   for (const { term, versioned } of postedTextTerms) sources.set(term, termSource(term, versioned === true))

@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { ConfigError, defaultConfig, validateConfig } from '../src/config.ts'
-import { builtInFallbackId, builtInRegistry, modelsSaveProblem, modelsView, nameInText, postedTextTerms, resolveModels, resolveSlot, slotNames } from '../src/models.ts'
+import { builtInFallbackId, builtInRegistry, projectModels, modelsSaveProblem, modelsView, nameInText, postedTextTerms, resolveModels, resolveSlot, slotNames, slugProblem } from '../src/models.ts'
 
 const ids = (entries: readonly { id: string }[]): string[] => entries.map((entry) => entry.id)
 
@@ -292,14 +292,103 @@ test('a registry entry is projected to its known fields on read and in the effec
   const projected = validateConfig({ ...base, models: { registry: [{ ...entry, apiKey: 'sk-live', extra: 1, token: 't' }], slots: { stack: 'house' }, secret: 'x' } }).models
   assert.deepEqual(projected, { registry: [entry], slots: { stack: 'house' } })
   assert.doesNotMatch(JSON.stringify(projected), /sk-live|apiKey|token|secret/)
-  // an entry that is not an object, and a bad field value, are left for the check to name
-  assert.deepEqual(validateConfig({ ...base, models: { registry: ['x', { ...entry, model: 'a b', junk: 1 }] } }).models, { registry: ['x', { ...entry, model: 'a b' }] })
+  // an entry that is not an object is dropped on a read, and a bad field value of an object is left for the check to name
+  assert.deepEqual(validateConfig({ ...base, models: { registry: ['x', { ...entry, model: 'a b', junk: 1 }] } }).models, { registry: [{ ...entry, model: 'a b' }] })
   for (const name of ['key', 'apiKey', 'api_key', 'API_KEY', 'secret', 'clientSecret', 'token', 'accessToken', 'password', 'Authorization', 'bearer', 'credential', 'credentials']) {
     const problem = modelsSaveProblem({ registry: [{ ...entry, [name]: 'x' }] })
-    assert.match(problem ?? '', new RegExp(`models\\.registry\\[0\\] \\(house\\).*${name}`), name)
+    assert.match(problem ?? '', new RegExp(`models\\.registry\\[0\\]\\.${name}`), name)
     assert.match(problem ?? '', /credential/i)
   }
   // an ordinary unknown field is dropped without a refusal
   assert.equal(modelsSaveProblem({ registry: [{ ...entry, note: 'x' }] }), null)
   assert.match(modelsSaveProblem({ registry: [entry], apiKey: 'x' }) ?? '', /models\.apiKey/)
+})
+
+test('projectModels is a strict allowlist of shapes: nested credential data in a slot, the fallback, or an entry never survives a read', () => {
+  const entry = { id: 'house', runner: 'claude', provider: 'anthropic', model: 'house-1' }
+  const base = defaultConfig()
+  const projectedOf = (models: unknown): unknown => validateConfig({ ...base, models }).models
+  // the review's probe
+  assert.deepEqual(projectedOf({ slots: { stack: { apiKey: 'example-secret' } } }), { slots: {} })
+  assert.deepEqual(projectedOf({ slots: { review: { apiKey: 'x' }, sweep: 5, autoReviewBot: ['a'], autoReviewHuman: ['a', 'b', 'c'], stack: ['a', 'b'], extra: 'x' } }), { slots: {} })
+  assert.deepEqual(projectedOf({ slots: { review: ['opus', { token: 'x' }], sweep: 'opus' } }), { slots: { sweep: 'opus' } })
+  assert.deepEqual(projectedOf({ slots: { review: ['opus', 'sonnet'], stack: 'opus', autoReviewHuman: 'opus' } }), { slots: { review: ['opus', 'sonnet'], stack: 'opus', autoReviewHuman: 'opus' } })
+  assert.deepEqual(projectedOf({ fallback: { secret: 'x' } }), {})
+  assert.deepEqual(projectedOf({ fallback: 'opus' }), { fallback: 'opus' })
+  assert.deepEqual(projectedOf({ slots: ['x'] }), {})
+  assert.deepEqual(projectedOf({ registry: { apiKey: 'x' } }), {})
+  assert.deepEqual(projectedOf({ registry: [entry, 'x', ['y'], null, { ...entry, id: { nested: { apiKey: 'x' } }, model: 7, provider: 'x'.repeat(500) }] }), { registry: [entry, { runner: 'claude' }] })
+  assert.doesNotMatch(JSON.stringify(projectModels({ slots: { stack: { apiKey: 'example-secret' } }, fallback: { token: 'z' }, registry: [{ ...entry, id: { client_secret: 'q' } }] })), /example-secret|apiKey|token|client_secret/)
+})
+
+test('a save refuses a credential-like key at any depth, in any spelling, and a prototype-pollution key, naming the path and the key and never the value', () => {
+  const names = ['apiKey', 'api_key', 'API-KEY', 'x-api-key', 'Authorization', 'client_secret', 'accessToken', 'pass_word', 'passwd', 'Bearer', 'my credentials', 'Cookie', 'sessionId']
+  for (const name of names) {
+    for (const value of [
+      { slots: { stack: { [name]: 'leak-value' } } },
+      { registry: [{ id: 'a', runner: 'claude', provider: 'x', model: 'm', [name]: 'leak-value' }] },
+      { fallback: { deep: [{ more: { [name]: 'leak-value' } }] } },
+      { slots: { review: ['a', { [name]: 'leak-value' }] } },
+      { [name]: { nested: 1 } },
+    ]) {
+      const problem = modelsSaveProblem(value)
+      assert.ok(problem !== null, `${name} ${JSON.stringify(value)}`)
+      assert.ok(problem.includes(name), problem)
+      assert.match(problem, /^models/)
+      assert.doesNotMatch(problem, /leak-value/)
+    }
+  }
+  assert.match(modelsSaveProblem({ slots: { stack: { apiKey: 'x' } } }) ?? '', /models\.slots\.stack\.apiKey/)
+  assert.match(modelsSaveProblem({ registry: [{ id: 'a', deep: [{ x: { token: 1 } }] }] }) ?? '', /models\.registry\[0\]\.deep\[0\]\.x\.token/)
+  for (const key of ['__proto__', 'constructor', 'prototype']) {
+    const problem = modelsSaveProblem(JSON.parse(`{"slots":{"stack":{"${key}":{"x":1}}}}`))
+    assert.ok(problem?.includes(key), String(problem))
+    assert.match(modelsSaveProblem(JSON.parse(`{"${key}":1}`)) ?? '', new RegExp(key))
+  }
+  // ordinary keys and the real fields pass
+  assert.equal(modelsSaveProblem({ registry: [{ id: 'a', runner: 'claude', provider: 'x', model: 'm', note: 'n' }], fallback: 'a', slots: { review: ['a', 'a'], stack: 'a' } }), null)
+})
+
+test('a save refuses a value of the wrong shape, naming the path and never the value', () => {
+  const cases: [unknown, RegExp][] = [
+    [{ slots: { stack: { harmless: 'v' } } }, /models\.slots\.stack/],
+    [{ slots: { stack: 5 } }, /models\.slots\.stack/],
+    [{ slots: { sweep: ['a', 'b'] } }, /models\.slots\.sweep/],
+    [{ slots: { review: ['a'] } }, /models\.slots\.review/],
+    [{ slots: { review: ['a', 3] } }, /models\.slots\.review/],
+    [{ slots: { autoReviewHuman: { a: 1 } } }, /models\.slots\.autoReviewHuman/],
+    [{ slots: [] }, /models\.slots/],
+    [{ slots: 'x' }, /models\.slots/],
+    [{ fallback: { a: 1 } }, /models\.fallback/],
+    [{ fallback: 4 }, /models\.fallback/],
+    [{ slots: { stack: 'x'.repeat(300) } }, /models\.slots\.stack/],
+  ]
+  for (const [value, path] of cases) {
+    const problem = modelsSaveProblem(value)
+    assert.match(problem ?? '', path, JSON.stringify(value))
+    assert.doesNotMatch(problem ?? '', /xxxxxxxxxx/)
+  }
+})
+
+test('the scan refuses a provider named in the registry or the built-in table, and a runner, but not a short or generic one', () => {
+  const entry = { id: 'house', runner: 'hermes', provider: 'newvendor', model: 'vendor/model-x' }
+  const resolved = resolveModels({ registry: [entry, { id: 'loc', runner: 'claude', provider: 'local', model: 'loc-1' }, { id: 'short-one', runner: 'claude', provider: 'ab', model: 'short-1' }] })
+  assert.equal(nameInText(resolved, 'review by NewVendor')?.term, 'newvendor')
+  assert.equal(nameInText(resolved, 'review by NEWVENDOR.')?.term, 'newvendor')
+  for (const provider of ['openrouter', 'moonshotai', 'qwen', 'deepseek', 'anthropic', 'openai']) assert.equal(nameInText(resolveModels(undefined), `served by ${provider}`)?.term, provider)
+  assert.equal(nameInText(resolved, 'a local fix and ab test, newvendors too, a new vendor'), null)
+  // a provider the owner removed from the registry is still refused, from the built-in table
+  assert.equal(nameInText(resolveModels({ registry: [{ id: 'z', runner: 'claude', provider: 'zeta', model: 'z-1' }] }), 'moonshotai route')?.term, 'moonshotai')
+})
+
+test('the refusal context is at most 60 characters even when the match alone is longer', () => {
+  const slug = `vendor/${'a'.repeat(193)}`
+  assert.equal(slugProblem(slug), null)
+  const resolved = resolveModels({ registry: [{ id: 'house', runner: 'hermes', provider: 'openrouter', model: slug }] })
+  const hit = nameInText(resolved, `before ${slug} after`)
+  assert.equal(hit?.term, slug)
+  assert.ok(hit !== null && hit.context.length <= 60, String(hit?.context.length))
+  assert.match(hit?.context ?? '', /…/)
+  const sized = nameInText(resolved, `${'x '.repeat(100)}${slug}${' y'.repeat(100)}`)
+  assert.ok(sized !== null && sized.context.length <= 60)
 })

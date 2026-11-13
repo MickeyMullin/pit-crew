@@ -509,7 +509,7 @@ test('PUT /api/config stores only the known fields of a registry entry, and refu
     for (const name of ['apiKey', 'secret', 'token', 'password', 'Authorization', 'bearer', 'credential', 'key']) {
       const refused = await saveConfigAs(h.server, { ...stored, models: { registry: [{ ...entry, [name]: 'sk-live-value' }] } })
       assert.equal(refused.status, 400, name)
-      assert.match(String(refused.body.error), new RegExp(`models\\.registry\\[0\\] \\(mine\\).*${name}`), name)
+      assert.match(String(refused.body.error), new RegExp(`models\\.registry\\[0\\]\\.${name}`), name)
       assert.doesNotMatch(String(refused.body.error), /sk-live-value/)
     }
     assert.doesNotMatch(await readFile(h.configPath, 'utf8'), /sk-live-value/)
@@ -2488,4 +2488,35 @@ const restartOptions = (h: Harness) => ({
   launch: h.launch.deps,
   log: () => {},
   pageSize: scenario.pageSize,
+})
+
+test('malformed nested models settings are refused on a save and never served from a hand-edited file', async () => {
+  const h = await setup()
+  try {
+    const { body: stored } = await getJson<Config>(`${h.base}/api/config`)
+    for (const [models, path] of [
+      [{ slots: { stack: { apiKey: 'sk-nested-value' } } }, 'models.slots.stack.apiKey'],
+      [{ fallback: { 'x-api-key': 'sk-nested-value' } }, 'models.fallback.x-api-key'],
+      [{ registry: [{ id: 'a', runner: 'claude', provider: 'x', model: 'm', deep: [{ client_secret: 'sk-nested-value' }] }] }, 'models.registry[0].deep[0].client_secret'],
+    ] as [unknown, string][]) {
+      const refused = await saveConfigAs(h.server, { ...stored, models })
+      assert.equal(refused.status, 400, path)
+      assert.ok(String(refused.body.error).includes(path), String(refused.body.error))
+      assert.doesNotMatch(String(refused.body.error), /sk-nested-value/)
+    }
+    assert.doesNotMatch(await readFile(h.configPath, 'utf8'), /sk-nested-value/)
+  } finally {
+    await h.cleanup()
+  }
+  const hand = await setup({ config: { models: { slots: { stack: { apiKey: 'sk-hand-nested' }, sweep: 'opus' }, fallback: { token: 'sk-hand-nested' }, registry: [{ id: { secret: 'sk-hand-nested' } }] } } })
+  try {
+    const config = await getJson<Config>(`${hand.base}/api/config`)
+    const view = await getJson<unknown>(`${hand.base}/api/models`)
+    assert.equal(config.status, 200)
+    assert.doesNotMatch(JSON.stringify([config.body, view.body]), /sk-hand-nested|apiKey|secret|token/)
+    assert.equal((await saveConfigAs(hand.server, config.body)).status, 200)
+    assert.doesNotMatch(await readFile(hand.configPath, 'utf8'), /sk-hand-nested|apiKey|secret|token/)
+  } finally {
+    await hand.cleanup()
+  }
 })
