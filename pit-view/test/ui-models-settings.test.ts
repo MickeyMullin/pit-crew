@@ -5,10 +5,10 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { defaultConfig } from '../src/config.ts'
-import { builtInFallbackId, builtInRegistry, modelsSaveProblem, resolveModels } from '../src/models.ts'
+import { builtInFallbackId, builtInRegistry, modelsSaveProblem, projectModels, resolveModels } from '../src/models.ts'
 import { isDirty, serverError, toConfig, toForm, validateForm } from '../public/settings-form.ts'
 import {
-  addCustomRow, builtInEntries, builtInSlotDefaults, editRow, fallbackChoices, modelsErrors, modelsServerError, modelsSetting, removeRow, routeWarnings, runnerChoices, setSlot,
+  addCustomRow, builtInEntries, builtInSlotDefaults, editRow, fallbackChoices, modelsErrors, modelsServerError, modelsSetting, registryIds, removeRow, routeWarnings, runnerChoices, setFallback, setSlot,
   slotAsRead, slotChoices, slotControls, toModelsForm,
 } from '../public/models-form.ts'
 import type { ModelsForm } from '../public/models-form.ts'
@@ -88,7 +88,7 @@ test('an entry that restates a built-in entry exactly is that built-in row, read
 test('an unset control leaves its key out, and each part is left out when nothing in it is set', () => {
   const form = formOf({ fallback: 'sonnet', slots: { stack: 'opus', sweep: 'opus' } })
   assert.deepEqual(modelsSetting(form), { fallback: 'sonnet', slots: { stack: 'opus', sweep: 'opus' } })
-  const noFallback = { ...form, fallback: '' }
+  const noFallback = setFallback(form, '')
   assert.deepEqual(modelsSetting(noFallback), { slots: { stack: 'opus', sweep: 'opus' } })
   const noStack = setSlot(noFallback, control('models.slots.stack'), '')
   assert.deepEqual(modelsSetting(noStack), { slots: { sweep: 'opus' } })
@@ -103,8 +103,8 @@ test('a pair slot is saved as a pair: both unset leaves it out, and one set take
   const secondary = setSlot(form, control('models.slots.autoReviewHuman.1'), 'gpt-6.1-sol')
   assert.deepEqual(modelsSetting(secondary), { slots: { autoReviewHuman: ['sonnet', 'gpt-6.1-sol'] } })
   assert.equal(modelsSetting(setSlot(primary, control('models.slots.review.0'), '')), undefined)
-  // a hand-edited single id for a pair slot reads as the primary
-  assert.deepEqual(formOf({ slots: { review: 'opus' } }).slots.review, ['opus', ''])
+  // a hand-edited single id for a pair slot resolves to both built-in defaults on the server, so the controls show both unset
+  assert.deepEqual(formOf({ slots: { review: 'opus' } }).slots.review, ['', ''])
 })
 
 test('adding, editing, and removing a custom entry changes the registry and nothing else', () => {
@@ -138,7 +138,7 @@ test('the controls offer registry ids only, show the built-in default when unset
   const blank = slotChoices(form, '', 'sonnet')
   assert.deepEqual(blank[0], { value: '', label: 'Built-in default (sonnet)' })
   assert.deepEqual(blank.slice(1).map((choice) => choice.value), builtInRegistry.map((model) => model.id))
-  const named = editRow(form, 'new1', 'entryId', 'mine')
+  const named = (['entryId', 'runner', 'provider', 'model'] as const).reduce((current, key) => editRow(current, 'new1', key, { entryId: 'mine', runner: 'hermes', provider: 'openrouter', model: 'vendor/model-x' }[key]), form)
   assert.deepEqual(slotChoices(named, '', 'sonnet').map((choice) => choice.value), ['', ...builtInRegistry.map((model) => model.id), 'mine'])
   const unknown = slotChoices(named, 'gone', 'sonnet')
   assert.deepEqual(unknown[unknown.length - 1], { value: 'gone', label: 'gone (not in the registry)' })
@@ -361,4 +361,92 @@ test('a server refusal that names a read-only row never vanishes: it stays a mes
   const field = modelsServerError('models.registry[1].extra: not allowed', form)
   assert.equal(field.field, null)
   assert.match(field.message, /not allowed/)
+})
+
+// what the server resolves for a setting: each slot's ids, the fallback's id, and the registry's ids
+const resolvedOf = (raw: unknown) => {
+  const resolved = resolveModels(raw)
+  return {
+    slots: Object.fromEntries(Object.entries(resolved.slots).map(([slot, value]) => [slot, Array.isArray(value) ? value.map((model) => model.id) : value.id])),
+    fallback: resolved.fallback.id,
+    registry: resolved.registry.map((model) => model.id),
+    warnings: resolved.warnings,
+  }
+}
+
+const usable = { id: 'extra', runner: 'claude', provider: 'anthropic', model: 'sonnet' }
+const setAside = { id: 'aside', runner: 'bogus', provider: 'anthropic', model: 'sonnet' }
+// every shape a hand-edited file can hold that the server accepts or warns on
+const handEdited: { name: string, raw: Record<string, unknown> }[] = [
+  { name: 'a single id on a pair slot', raw: { slots: { review: 'opus', autoReviewHuman: 'sonnet' } } },
+  { name: 'a pair with one side unknown', raw: { slots: { review: ['opus', 'nope'], autoReviewHuman: ['nope', 'gpt-6.1-sol'] } } },
+  { name: 'a pair with one side empty', raw: { slots: { review: ['', 'opus'], autoReviewHuman: ['opus', ''] } } },
+  { name: 'an id not in the registry on a single slot', raw: { slots: { stack: 'nope', sweep: 'nope', autoReviewBot: '' } } },
+  { name: 'a fallback that names an unknown id', raw: { fallback: 'nope' } },
+  { name: 'an empty fallback', raw: { fallback: '' } },
+  { name: 'a pair of the wrong length, a number, and a pair on a single slot', raw: { fallback: 7, slots: { review: ['a', 'b', 'c'], autoReviewHuman: 5, stack: ['sonnet', 'opus'], sweep: { id: 'x' } } } },
+  { name: 'a slots value that is not an object', raw: { slots: ['opus'] } },
+  { name: 'a slot naming the id of a set-aside entry', raw: { registry: [setAside, usable], slots: { stack: 'aside', review: ['aside', 'extra'] }, fallback: 'aside' } },
+  { name: 'a slot naming an id a repeat makes ambiguous', raw: { registry: [usable, { ...usable, runner: 'codex' }], slots: { stack: 'extra', review: ['extra', 'extra'] }, fallback: 'extra' } },
+  { name: 'a built-in id restated differently, set aside', raw: { registry: [{ ...usable, id: 'opus', model: 'haiku' }, usable], slots: { stack: 'opus', review: ['opus', 'extra'] } } },
+  { name: 'an entry the server sets aside for spaces around a field', raw: { registry: [{ ...usable, provider: ' anthropic' }, { ...usable, id: 'other' }], slots: { stack: 'extra' } } },
+  { name: 'a registry that is not usable at all', raw: { registry: [setAside], slots: { stack: 'aside' } } },
+]
+
+test('a save with no edit never changes what the server resolves for any slot or the fallback, for every hand-edited shape', () => {
+  for (const { name, raw } of handEdited) {
+    // the config serves the projected setting, which keeps every warning; a raw one with a wrong shape is dropped, so only what it resolves must hold
+    const served = projectModels(raw)
+    assert.deepEqual(resolvedOf(modelsSetting(formOf(served))), resolvedOf(served), name)
+    assert.deepEqual({ ...resolvedOf(modelsSetting(formOf(raw))), warnings: [] }, { ...resolvedOf(raw), warnings: [] }, name)
+  }
+})
+
+test('changing one control leaves every untouched slot and the fallback resolving as before, for every hand-edited shape', () => {
+  for (const { name, raw } of handEdited) {
+    const base = resolvedOf(raw)
+    const withExtra = addCustomRow(formOf(projectModels(raw)), 'add')
+    const filled = (['entryId', 'runner', 'provider', 'model'] as const).reduce((current, key) => editRow(current, 'add', key, { entryId: 'brand-new', runner: 'claude', provider: 'anthropic', model: 'sonnet' }[key]), withExtra)
+    const touched = setSlot(filled, slotControls.find((candidate) => candidate.field === 'models.slots.sweep') as (typeof slotControls)[number], 'brand-new')
+    const after = resolvedOf(modelsSetting(touched))
+    assert.equal(after.slots.sweep, 'brand-new', name)
+    assert.deepEqual({ ...after.slots, sweep: null }, { ...base.slots, sweep: null }, name)
+    assert.equal(after.fallback, base.fallback, name)
+  }
+  // touching one control of a pair slot rewrites that pair from its controls, and the other side still resolves as it did
+  const single = setSlot(formOf({ slots: { review: 'opus' } }), control('models.slots.review.1'), 'gpt-6.1-sol')
+  assert.deepEqual(resolvedOf(modelsSetting(single)).slots.review, ['sonnet', 'gpt-6.1-sol'])
+  const unknown = setSlot(formOf({ slots: { review: ['opus', 'nope'] } }), control('models.slots.review.0'), 'sonnet')
+  assert.deepEqual(resolvedOf(modelsSetting(unknown)).slots.review, ['sonnet', 'gpt-6.1-terra'])
+  // the fallback is rewritten only when its own choice is touched
+  assert.deepEqual(modelsSetting(formOf({ fallback: 'nope' })), { fallback: 'nope' })
+  assert.deepEqual(modelsSetting(setFallback(formOf({ fallback: 'nope' }), 'sonnet')), { fallback: 'sonnet' })
+  assert.equal(modelsSetting(setFallback(formOf({ fallback: 'nope' }), '')), undefined)
+})
+
+test('a row the owner did not edit is written as stored, so a field the server sets aside is not made valid by a trim', () => {
+  const raw = { registry: [{ ...usable, provider: ' anthropic' }, { ...usable, id: 'other' }] }
+  assert.deepEqual(modelsSetting(formOf(raw)), raw)
+  const edited = editRow(formOf(raw), formOf(raw).registry[1]?.rowId as string, 'model', 'opus')
+  assert.equal(modelsSetting(edited) !== undefined, true)
+})
+
+test('the controls offer only the ids the server would keep, and show a slot naming any other id as not in the registry', () => {
+  const form = formOf({ registry: [setAside, usable, { ...usable, runner: 'codex' }, { ...usable, id: 'late' }] })
+  assert.deepEqual(registryIds(form), ['extra', 'late'])
+  const named = slotChoices(form, 'aside', 'sonnet')
+  assert.deepEqual(named.at(-1), { value: 'aside', label: 'aside (not in the registry)' })
+})
+
+test('a row with several problems shows its field problems first, and the repeated-id message only when no field of the row has an error', () => {
+  const form = formOf({ registry: [entry, { ...entry, runner: 'other' }, { ...entry, id: 'sonnet', model: 'haiku' }, { ...entry }] })
+  assert.deepEqual(modelsErrors(form).map((error) => [error.field, error.message]), [
+    ['models.registry.1.runner', 'Runner must be one of claude, codex, hermes.'],
+    ['models.registry.2.id', modelsErrors(form)[1]?.message],
+    ['models.registry.3.id', 'Id appears twice.'],
+  ])
+  // the first row to hold an id is never a repeat, and a later exact restatement after a custom row holding that built-in id is an editable repeat
+  const restated = formOf({ registry: [{ ...entry, id: 'sonnet', model: 'haiku' }, builtInRegistry[0]] })
+  assert.deepEqual(restated.registry.map((row) => row.builtIn), [false, false])
+  assert.deepEqual(modelsErrors(restated).map((error) => error.field), ['models.registry.0.id', 'models.registry.1.id'])
 })

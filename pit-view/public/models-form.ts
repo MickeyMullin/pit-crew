@@ -34,7 +34,10 @@ export type RowField = 'entryId' | 'runner' | 'provider' | 'model'
 // a slot as typed: the id a control chose, or empty for unset, which leaves the key out
 export type SlotsForm = { review: [string, string], autoReviewHuman: [string, string], stack: string, sweep: string, autoReviewBot: string }
 
-export type ModelsForm = { registry: RegistryRow[], fallback: string, slots: SlotsForm }
+// what the config held for a part the owner has not touched since it was read, as the server reads it: a row's four fields untrimmed (by row id), the fallback, and each slot's value. A save writes these back as they were until the control is changed, so it never rewrites what the owner did not touch and never changes what the server resolves
+export type OriginalValues = { rows: Record<string, { entryId: string, runner: string, provider: string, model: string }>, fallback?: string, slots: Partial<Record<SlotName, string | [string, string]>> }
+
+export type ModelsForm = { registry: RegistryRow[], fallback: string, slots: SlotsForm, original: OriginalValues }
 
 // one slot control: its field key, the slot and the position in it (null for a slot that holds one id), its label, and the built-in default it shows while unset
 export type SlotControl = { field: string, slot: SlotName, index: 0 | 1 | null, label: string, defaultId: string }
@@ -62,35 +65,54 @@ const builtInRows = (makeId: () => string): RegistryRow[] => builtInEntries.map(
 const restatesBuiltIn = (row: Pick<RegistryRow, 'entryId' | 'runner' | 'provider' | 'model'>): boolean =>
   builtInEntries.some((entry) => entry.id === row.entryId && entry.runner === row.runner && entry.provider === row.provider && entry.model === row.model)
 
-const slotValue = (raw: unknown, index: 0 | 1 | null): string => {
-  if (index === null) return text(raw)
-  if (Array.isArray(raw)) return text(raw[index])
-  // a single id for a pair slot reads as the primary, which is what an owner meant by it
-  return index === 0 ? text(raw) : ''
+// the longest a stored id may be, as in src/models.ts
+const maxText = 200
+const isText = (value: unknown): value is string => typeof value === 'string' && value.length <= maxText
+
+// the value a slot holds in the stored setting, in the shapes the server keeps on a read (projectModels in src/models.ts): one id, or for a pair slot also a pair of two ids; undefined for anything else, which the server drops
+const storedSlot = (name: SlotName, raw: unknown): string | [string, string] | undefined => {
+  if (isText(raw)) return raw
+  return (name === 'review' || name === 'autoReviewHuman') && Array.isArray(raw) && raw.length === 2 && isText(raw[0]) && isText(raw[1]) ? [raw[0], raw[1]] : undefined
 }
 
-// the setting as the config holds it to form state: no setting, or a registry that holds no entry, shows the built-in table; otherwise the entries as stored, the first one that restates a built-in entry exactly being that built-in row, and any later repeat of an id already held a custom row. Only the four entry fields, the fallback, and the five slot names are read, so anything else in the value is not carried
+// what the server resolves from a stored slot, shown by the controls: a single slot holds one id, and a pair slot holds exactly a pair, since one id for a pair slot takes both built-in defaults (src/models.ts, resolveModels), so it shows unset
+const shownSlot = (name: SlotName, stored: string | [string, string] | undefined): string | [string, string] => {
+  if (name === 'review' || name === 'autoReviewHuman') return Array.isArray(stored) ? [...stored] : ['', '']
+  return typeof stored === 'string' ? stored : ''
+}
+
+// the setting as the config holds it to form state: no setting, or a registry that holds no entry, shows the built-in table; otherwise the entries as stored, the first entry to hold an id being that id's row (a built-in row when it restates the built-in entry exactly, otherwise a custom one) and any later entry with the same id a custom row. Each slot shows what the server resolves for it (a slot the server takes the built-in default for shows unset), and the stored values stay in `original` until a control changes them. Only the four entry fields, the fallback, and the five slot names are read, so anything else in the value is not carried
 export const toModelsForm = (raw: unknown, makeId: () => string): ModelsForm => {
   const setting = isObject(raw) ? raw : {}
   const stored = own(setting, 'registry')
   const entries = Array.isArray(stored) ? stored.filter(isObject).filter((entry) => (['id', 'runner', 'provider', 'model'] as const).some((field) => typeof own(entry, field) === 'string')) : []
   const seen = new Set<string>()
+  const original: OriginalValues = { rows: {}, slots: {} }
   const registry = entries.length === 0
     ? builtInRows(makeId)
     : entries.map((entry): RegistryRow => {
       const row = { entryId: text(own(entry, 'id')), runner: text(own(entry, 'runner')), provider: text(own(entry, 'provider')), model: text(own(entry, 'model')) }
       // the first entry to hold an id is the one that stands, as on the server, so a repeat of a built-in entry is a custom row that can be edited or removed
-      const first = !seen.has(row.entryId.trim())
-      seen.add(row.entryId.trim())
-      return { rowId: makeId(), builtIn: first && restatesBuiltIn(row), ...row }
+      const first = !seen.has(row.entryId)
+      seen.add(row.entryId)
+      const rowId = makeId()
+      original.rows[rowId] = row
+      return { rowId, builtIn: first && restatesBuiltIn(row), ...row }
     })
   const slots = own(setting, 'slots')
   const given = isObject(slots) ? slots : {}
-  const pair = (name: 'review' | 'autoReviewHuman'): [string, string] => [slotValue(own(given, name), 0), slotValue(own(given, name), 1)]
+  const shown = (name: SlotName): string | [string, string] => {
+    const stored = storedSlot(name, own(given, name))
+    if (stored !== undefined) original.slots[name] = stored
+    return shownSlot(name, stored)
+  }
+  const fallback = own(setting, 'fallback')
+  if (isText(fallback)) original.fallback = fallback
   return {
     registry,
-    fallback: text(own(setting, 'fallback')),
-    slots: { review: pair('review'), autoReviewHuman: pair('autoReviewHuman'), stack: text(own(given, 'stack')), sweep: text(own(given, 'sweep')), autoReviewBot: text(own(given, 'autoReviewBot')) },
+    fallback: text(fallback),
+    slots: { review: shown('review') as [string, string], autoReviewHuman: shown('autoReviewHuman') as [string, string], stack: shown('stack') as string, sweep: shown('sweep') as string, autoReviewBot: shown('autoReviewBot') as string },
+    original,
   }
 }
 
@@ -98,17 +120,30 @@ export const toModelsForm = (raw: unknown, makeId: () => string): ModelsForm => 
 const isBuiltInTable = (rows: readonly RegistryRow[]): boolean =>
   rows.length === 0 || (rows.length === builtInEntries.length && rows.every((row, at) => row.builtIn && row.entryId === builtInEntries[at]?.id))
 
-// the models value the config stores, in exactly the stored shape, or undefined when every part is at its default, which leaves the key out of the file. An unset control leaves its key out; a pair slot with one side set takes the built-in default for the other, since a pair holds two ids
+// a row's four fields as the server would read them: as stored while the owner has not edited the row, otherwise trimmed
+const fieldsOf = (form: ModelsForm, row: RegistryRow): { id: string, runner: string, provider: string, model: string } => {
+  const stored = form.original.rows[row.rowId]
+  return stored === undefined ? { id: row.entryId.trim(), runner: row.runner, provider: row.provider.trim(), model: row.model.trim() } : { id: stored.entryId, runner: stored.runner, provider: stored.provider, model: stored.model }
+}
+
+// the models value the config stores, in exactly the stored shape, or undefined when every part is at its default, which leaves the key out of the file. A part the owner has not changed since it was read (a row, the fallback, a slot) is written as it was stored, so a save never changes what the server resolves for it. Otherwise an unset control leaves its key out, and a pair slot with one side set takes the built-in default for the other, since a pair holds two ids
 export const modelsSetting = (form: ModelsForm): Record<string, unknown> | undefined => {
   const setting: Record<string, unknown> = {}
-  if (!isBuiltInTable(form.registry)) setting.registry = form.registry.map((row) => ({ id: row.entryId.trim(), runner: row.runner, provider: row.provider.trim(), model: row.model.trim() }))
-  if (form.fallback !== '') setting.fallback = form.fallback
+  if (!isBuiltInTable(form.registry)) setting.registry = form.registry.map((row) => fieldsOf(form, row))
+  const fallback = form.original.fallback ?? form.fallback
+  if (fallback !== '' || form.original.fallback !== undefined) setting.fallback = fallback
   const slots: Record<string, unknown> = {}
   for (const name of ['review', 'autoReviewHuman'] as const) {
+    const kept = form.original.slots[name]
     const [primary, secondary] = form.slots[name]
-    if (primary !== '' || secondary !== '') slots[name] = [primary === '' ? builtInSlotDefaults[name][0] : primary, secondary === '' ? builtInSlotDefaults[name][1] : secondary]
+    if (kept !== undefined) slots[name] = [...kept]
+    else if (primary !== '' || secondary !== '') slots[name] = [primary === '' ? builtInSlotDefaults[name][0] : primary, secondary === '' ? builtInSlotDefaults[name][1] : secondary]
   }
-  for (const name of ['stack', 'sweep', 'autoReviewBot'] as const) if (form.slots[name] !== '') slots[name] = form.slots[name]
+  for (const name of ['stack', 'sweep', 'autoReviewBot'] as const) {
+    const kept = form.original.slots[name]
+    if (kept !== undefined) slots[name] = kept
+    else if (form.slots[name] !== '') slots[name] = form.slots[name]
+  }
   if (Object.keys(slots).length > 0) setting.slots = slots
   return Object.keys(setting).length === 0 ? undefined : setting
 }
@@ -122,7 +157,9 @@ export const addCustomRow = (form: ModelsForm, rowId: string): ModelsForm =>
 export const editRow = (form: ModelsForm, rowId: string, field: RowField, value: string): ModelsForm => {
   const row = form.registry.find((candidate) => candidate.rowId === rowId)
   if (row === undefined || row.builtIn) return form
-  return { ...form, registry: form.registry.map((candidate) => candidate === row ? { ...row, [field]: value } : candidate) }
+  // an edited row is written from its fields, no longer as it was stored
+  const { [rowId]: _stored, ...rows } = form.original.rows
+  return { ...form, registry: form.registry.map((candidate) => candidate === row ? { ...row, [field]: value } : candidate), original: { ...form.original, rows } }
 }
 
 // a built-in row cannot be removed; a registry left with no row at all shows the built-in table again, which is what an empty registry means
@@ -141,7 +178,14 @@ export const slotOf = (form: ModelsForm, control: SlotControl): string => {
 export const setSlot = (form: ModelsForm, control: SlotControl, value: string): ModelsForm => {
   const current = form.slots[control.slot]
   const next = Array.isArray(current) ? (control.index === 1 ? [current[0], value] : [value, current[1]]) as [string, string] : value
-  return { ...form, slots: { ...form.slots, [control.slot]: next } }
+  // a changed control writes its slot from the controls, no longer as it was stored
+  const { [control.slot]: _stored, ...slots } = form.original.slots
+  return { ...form, slots: { ...form.slots, [control.slot]: next }, original: { ...form.original, slots } }
+}
+
+export const setFallback = (form: ModelsForm, value: string): ModelsForm => {
+  const { fallback: _stored, ...rest } = form.original
+  return { ...form, fallback: value, original: rest }
 }
 
 // the choices
@@ -152,13 +196,13 @@ export const runnerChoices = (value: string): Choice<string>[] => {
   return [value === '' ? { value: '', label: 'Choose a runner' } : { value, label: `${value} (not a runner)` }, ...all]
 }
 
-// the ids a slot or the fallback can name: the registry's, in row order, once each
+// the ids a slot or the fallback can name: those of the rows the server would keep, in row order, once each. A row it sets aside for a bad field or a built-in id used for another entry, and a later row repeating an id, name nothing
 export const registryIds = (form: ModelsForm): string[] => {
   const seen: string[] = []
-  for (const row of form.registry) {
-    const id = row.entryId.trim()
-    if (id !== '' && !seen.includes(id)) seen.push(id)
-  }
+  form.registry.forEach((row) => {
+    const { id } = fieldsOf(form, row)
+    if (!seen.includes(id) && rowProblems(form, row).length === 0) seen.push(id)
+  })
   return seen
 }
 
@@ -187,30 +231,36 @@ const modelProblem = (model: string): string | null => {
   return model.length > 200 ? 'model must be at most 200 characters' : null
 }
 
+// what is wrong with one custom row by its own fields, as the entry rules the server applies to it: a field and its reason, none for a built-in row, which cannot be edited. A repeated id is not here, since it depends on the rows before
+const rowProblems = (form: ModelsForm, row: RegistryRow): { field: 'id' | 'runner' | 'provider' | 'model', reason: string }[] => {
+  if (row.builtIn) return []
+  const { id, runner, provider, model } = fieldsOf(form, row)
+  const problems: { field: 'id' | 'runner' | 'provider' | 'model', reason: string }[] = []
+  const idBad = !labelPattern.test(id)
+  const runnerBad = !runnerNames.includes(runner)
+  const providerBad = !labelPattern.test(provider)
+  const modelBad = modelProblem(model)
+  if (idBad) problems.push({ field: 'id', reason: `id ${labelRule}, starting with a letter or digit` })
+  if (runnerBad) problems.push({ field: 'runner', reason: `runner must be one of ${runnerNames.join(', ')}` })
+  if (providerBad) problems.push({ field: 'provider', reason: `provider ${labelRule}, such as anthropic` })
+  if (modelBad !== null) problems.push({ field: 'model', reason: modelBad })
+  if (!idBad && !runnerBad && !providerBad && modelBad === null) {
+    const builtIn = builtInEntries.find((entry) => entry.id === id)
+    if (builtIn !== undefined && (builtIn.runner !== runner || builtIn.provider !== provider || builtIn.model !== model)) {
+      problems.push({ field: 'id', reason: `id ${builtIn.id} is a built-in model id (${builtIn.runner}, ${builtIn.provider}, ${builtIn.model}), so an entry may use it only to restate that entry exactly; choose another id` })
+    }
+  }
+  return problems
+}
+
 export const modelsErrors = (form: ModelsForm): FieldError[] => {
   const errors: FieldError[] = []
   const earlier: string[] = []
   form.registry.forEach((row, index) => {
-    const id = row.entryId.trim()
-    const provider = row.provider.trim()
-    const model = row.model.trim()
-    const at = (field: string, reason: string): void => void errors.push({ field: `models.registry.${index}.${field}`, message: `${capitalize(reason)}.` })
-    if (!row.builtIn) {
-      const idBad = !labelPattern.test(id)
-      const runnerBad = !runnerNames.includes(row.runner)
-      const providerBad = !labelPattern.test(provider)
-      const modelBad = modelProblem(model)
-      if (idBad) at('id', `id ${labelRule}, starting with a letter or digit`)
-      if (runnerBad) at('runner', `runner must be one of ${runnerNames.join(', ')}`)
-      if (providerBad) at('provider', `provider ${labelRule}, such as anthropic`)
-      if (modelBad !== null) at('model', modelBad)
-      if (!idBad && !runnerBad && !providerBad && modelBad === null) {
-        const builtIn = builtInEntries.find((entry) => entry.id === id)
-        if (builtIn !== undefined && (builtIn.runner !== row.runner || builtIn.provider !== provider || builtIn.model !== model)) {
-          at('id', `id ${builtIn.id} is a built-in model id (${builtIn.runner}, ${builtIn.provider}, ${builtIn.model}), so an entry may use it only to restate that entry exactly; choose another id`)
-        } else if (earlier.includes(id)) at('id', 'id appears twice')
-      }
-    }
+    const problems = rowProblems(form, row)
+    for (const { field, reason } of problems) errors.push({ field: `models.registry.${index}.${field}`, message: `${capitalize(reason)}.` })
+    const { id } = fieldsOf(form, row)
+    if (!row.builtIn && problems.length === 0 && earlier.includes(id)) errors.push({ field: `models.registry.${index}.id`, message: 'Id appears twice.' })
     earlier.push(id)
   })
   return errors

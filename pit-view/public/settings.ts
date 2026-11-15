@@ -6,7 +6,7 @@ import type { Config } from '../src/config.ts'
 import type { ModelsView } from '../src/models.ts'
 import type { View } from '../src/poller.ts'
 import { avatar } from './cells.ts'
-import { addCustomRow, editRow, fallbackChoices, removeRow, routeWarnings, setSlot, slotAsRead, slotChoices, slotControls, slotOf } from './models-form.ts'
+import { addCustomRow, editRow, fallbackChoices, removeRow, routeWarnings, setFallback, setSlot, slotAsRead, slotChoices, slotControls, slotOf } from './models-form.ts'
 import type { RowField } from './models-form.ts'
 import { choiceField, registryRow } from './modelsview.ts'
 import type { RegistryHandlers } from './modelsview.ts'
@@ -897,7 +897,7 @@ const renderModelChoices = (): void => {
     choices: fallbackChoices(form.models, form.models.fallback),
     onChange: (value) => {
       if (page === null) return
-      page.form.models = { ...page.form.models, fallback: value }
+      page.form.models = setFallback(page.form.models, value)
       changed()
     },
     asRead: modelsView?.fallback.id ?? null,
