@@ -201,16 +201,37 @@
 
     <section id="models" class="card settings-card" aria-labelledby="models-heading">
       <h2 id="models-heading" class="card-title">Models</h2>
-      <div class="field-grid">
-        <div class="field">
-          <label for="f-models">Registry and slots</label>
-          <textarea id="f-models" class="input mono" rows="12" spellcheck="false" autocomplete="off" aria-describedby="f-models-hint"></textarea>
-          <p id="f-models-hint" class="hint">A JSON object with <code>registry</code> (a list of <code>{ id, runner, provider, model }</code> entries, the runner being <code>claude</code>, <code>codex</code>, or <code>hermes</code>), <code>fallback</code> (the id of the pinned fallback), and <code>slots</code> (<code>review</code> and <code>autoReviewHuman</code> each a pair of ids, primary first, and <code>stack</code>, <code>sweep</code>, and <code>autoReviewBot</code> each one id). A model name has no spaces and does not start with a dash. An entry may use a built-in id only to restate that built-in entry exactly. Only those four fields are stored: any other field is dropped, and a field named like a key, secret, token, or password is refused. Empty means the built-in models. A bad entry is set aside on its own, and a slot that names an unknown id takes its built-in default, read from the built-in table, with a warning below. The slots are stored and checked here, and no start reads them yet: a start still uses the models set under Agent and the runner chosen in the drawer. Only Claude and Codex entries can start a run for now. The text the dashboard posts (the Post it offer and the post of a stored report) is refused when it names any model here or in the built-in table, a vendor or runner, a term for AI, or a review mode; a review that posts for itself is governed by the review prompt, not by this check.</p>
-          <p id="f-models-error" class="field-error" hidden></p>
-          <ul id="models-warnings" class="warn-list" aria-live="polite"></ul>
-          <p id="models-effective" class="hint mono"></p>
+      <p id="models-hint" class="hint">No start reads these slots yet: a start still uses the models set under Agent and the runner chosen in the drawer. The text the dashboard posts (the Post it offer and the post of a stored report) is refused when it names any model here or in the built-in table, a vendor or runner, a term for AI, or a review mode; a review that posts for itself is governed by the review prompt, not by this check.</p>
+      <ul id="models-warnings" class="warn-list" aria-live="polite"></ul>
+
+      <fieldset id="f-models-registry" class="auto-group">
+        <legend class="group-title">Registry</legend>
+        <div class="group-body">
+          <div class="col-heads models-grid" aria-hidden="true">
+            <span>Id</span><span>Runner</span><span>Provider</span><span>Model</span><span></span>
+          </div>
+          <div id="models-registry" class="rows"></div>
+          <p id="f-models-registry-error" class="field-error" hidden></p>
+          <ul id="models-registry-warnings" class="warn-list" aria-live="polite"></ul>
+          <div class="row-actions">
+            <button id="add-model" type="button" class="button button-add">+ Add model</button>
+          </div>
         </div>
-      </div>
+      </fieldset>
+
+      <fieldset id="group-models-fallback" class="auto-group">
+        <legend class="group-title">Pinned fallback</legend>
+        <div class="group-body">
+          <div id="models-fallback" class="field-grid"></div>
+        </div>
+      </fieldset>
+
+      <fieldset id="group-models-slots" class="auto-group">
+        <legend class="group-title">Slots</legend>
+        <div class="group-body">
+          <div id="models-slots" class="field-grid"></div>
+        </div>
+      </fieldset>
     </section>
 
     <section id="auto-review" class="card settings-card" aria-labelledby="auto-review-heading">

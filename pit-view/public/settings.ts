@@ -6,6 +6,10 @@ import type { Config } from '../src/config.ts'
 import type { ModelsView } from '../src/models.ts'
 import type { View } from '../src/poller.ts'
 import { avatar } from './cells.ts'
+import { addCustomRow, editRow, fallbackChoices, removeRow, routeWarnings, setSlot, slotAsRead, slotChoices, slotControls, slotOf } from './models-form.ts'
+import type { RowField } from './models-form.ts'
+import { choiceField, registryRow } from './modelsview.ts'
+import type { RegistryHandlers } from './modelsview.ts'
 import { tokenHeader } from './agent.ts'
 import { byId, h, setText, svg } from './dom.ts'
 import type { Shape } from './dom.ts'
@@ -52,6 +56,8 @@ type PageState = {
   autoView: AutoReviewView | null
   // the Limits disclosure; not stored, and held open while an error stands in its fields
   limitsOpen: boolean
+  // what the server reads from the saved models setting; null until it is read, and when it could not be
+  modelsView: ModelsView | null
 }
 
 let page: PageState | null = null
@@ -319,7 +325,7 @@ const removeTicket = (id: string): void => {
 
 // the fixed fields
 
-const staticText = ['repo', 'viewer', 'idleMinutes', 'bots', 'reportsDir', 'maxConcurrentReviews', 'extraReviewInstructions', 'cloneDir', 'models', 'autoFrom', 'autoTo', 'autoConcurrency', 'autoDailyLimit'] as const
+const staticText = ['repo', 'viewer', 'idleMinutes', 'bots', 'reportsDir', 'maxConcurrentReviews', 'extraReviewInstructions', 'cloneDir', 'autoFrom', 'autoTo', 'autoConcurrency', 'autoDailyLimit'] as const
 
 // the auto-review switches that need no question, by form key
 const autoSwitches = ['autoEnabled', 'autoOthers', 'autoOwn', 'autoDependabot'] as const
@@ -670,9 +676,9 @@ const liveErrors = (form: Form): FieldError[] => {
 // a field's name in the summary: its label, with the row it sits in
 const fieldName = (key: FieldKey): string => {
   const label = document.querySelector(`label[for="${fieldId(key)}"]`)?.textContent?.trim() ?? document.getElementById(fieldId(key))?.querySelector('legend')?.textContent?.trim() ?? key
-  const row = /^(people|tickets)\.(\d+)\./.exec(key)
+  const row = /^(people|tickets|models\.registry)\.(\d+)\./.exec(key)
   if (row === null) return label
-  return `${row[1] === 'people' ? 'Person' : 'Ticket system'} ${Number(row[2]) + 1}, ${label.toLowerCase()}`
+  return `${row[1] === 'people' ? 'Person' : row[1] === 'tickets' ? 'Ticket system' : 'Model'} ${Number(row[2]) + 1}, ${label.toLowerCase()}`
 }
 
 const showErrors = (): void => {
@@ -766,6 +772,7 @@ const renderAll = (): void => {
   fillStatic()
   renderPeople()
   renderTickets()
+  renderModels()
   if (page !== null) page.errors = page.checking ? page.errors : liveErrors(page.form)
   showErrors()
   showAuto()
@@ -813,6 +820,8 @@ const save = async (): Promise<void> => {
     current.checking = false
     current.postAsk = null
     current.postConfirmed = {}
+    // what the server read is read again below, so the old reading is not shown beside the new controls
+    current.modelsView = null
     renderAll()
     const at = formatClock(Date.now())
     setStatus(needsRefresh(before, current.saved) ? `Saved at ${at}. The dashboard is refreshing from GitHub with these settings.` : `Saved at ${at}.`, 'ok')
@@ -845,21 +854,79 @@ const revert = (): void => {
   setStatus('Changes discarded.')
 }
 
-// the view (for sample keys) and the suggestions are extras: the form works without them
-// the effective slots and the warnings the server read from the saved setting: a bad entry or an unknown id is named here, and the slot shows what it falls back to
-const showModels = (view: ModelsView | null): void => {
-  const warnings = byId('models-warnings')
-  const effective = byId('models-effective')
-  if (view === null) {
-    warnings.replaceChildren()
-    effective.textContent = ''
-    return
-  }
-  warnings.replaceChildren(...view.warnings.map((warning) => h('li', { class: 'warn-text' }, warning)))
-  const slot = (value: string | string[]): string => Array.isArray(value) ? value.join(' + ') : value
-  effective.textContent = `Slots as read (a start does not use them yet): review ${slot(view.slots.review)}; stack ${slot(view.slots.stack)}; sweep ${slot(view.slots.sweep)}; auto-review of people ${slot(view.slots.autoReviewHuman)}; auto-review of bots ${slot(view.slots.autoReviewBot)}; pinned fallback ${view.fallback.id}.`
+// models: the registry table, then the pinned fallback and each slot as one choice among the registry's ids
+
+const modelsHandlers: RegistryHandlers = {
+  edit: (rowId: string, field: RowField, value: string): void => {
+    if (page === null) return
+    page.form.models = editRow(page.form.models, rowId, field, value)
+    // the choices offer the registry's ids, so a changed id changes them
+    if (field === 'entryId') renderModelChoices()
+    changed()
+  },
+  remove: (rowId: string): void => {
+    if (page === null) return
+    const index = page.form.models.registry.findIndex((row) => row.rowId === rowId)
+    if (index < 0) return
+    // the Remove buttons are the custom rows' alone, so focus finds its place among those
+    const position = page.form.models.registry.slice(0, index).filter((row) => !row.builtIn).length
+    page.form.models = removeRow(page.form.models, rowId)
+    renderRegistry()
+    renderModelChoices()
+    changed()
+    // focus moves to the row that took its place, or to Add model when none did
+    const removes = byId('models-registry').querySelectorAll<HTMLButtonElement>('.remove')
+    ;(removes[Math.min(position, removes.length - 1)] ?? byId('add-model')).focus()
+  },
 }
 
+const renderRegistry = (): void => {
+  if (page === null) return
+  byId('models-registry').replaceChildren(...page.form.models.registry.map((row, index) => registryRow(row, index, modelsHandlers)))
+}
+
+// the fallback and the slots, with what the server reads for each and the warnings about it beside it
+const renderModelChoices = (): void => {
+  if (page === null) return
+  const { form, modelsView } = page
+  const warnings = routeWarnings(modelsView?.warnings ?? [])
+  byId('models-fallback').replaceChildren(choiceField({
+    field: 'models.fallback',
+    label: 'Pinned fallback',
+    value: form.models.fallback,
+    choices: fallbackChoices(form.models, form.models.fallback),
+    onChange: (value) => {
+      if (page === null) return
+      page.form.models = { ...page.form.models, fallback: value }
+      changed()
+    },
+    asRead: modelsView?.fallback.id ?? null,
+    warnings: warnings.fallback,
+  }))
+  byId('models-slots').replaceChildren(...slotControls.map((control) => choiceField({
+    field: control.field,
+    label: control.label,
+    value: slotOf(form.models, control),
+    choices: slotChoices(form.models, slotOf(form.models, control), control.defaultId),
+    onChange: (value) => {
+      if (page === null) return
+      page.form.models = setSlot(page.form.models, control, value)
+      changed()
+    },
+    asRead: slotAsRead(modelsView, control),
+    warnings: warnings.slots[control.slot],
+  })))
+  const list = (id: string, items: readonly string[]): void => byId(id).replaceChildren(...items.map((warning) => h('li', { class: 'warn-text' }, warning)))
+  list('models-warnings', warnings.general)
+  list('models-registry-warnings', warnings.registry)
+}
+
+const renderModels = (): void => {
+  renderRegistry()
+  renderModelChoices()
+}
+
+// the view (for sample keys) and the suggestions are extras: the form works without them
 const loadExtras = async (): Promise<void> => {
   const [view, suggestions, models] = await Promise.all([
     getJson<View>('/api/view').catch(() => null),
@@ -867,7 +934,9 @@ const loadExtras = async (): Promise<void> => {
     getJson<ModelsView>('/api/models').catch(() => null),
   ])
   if (page === null) return
-  showModels(models)
+  page.modelsView = models
+  renderModelChoices()
+  showErrors()
   page.texts = sampleTextsFrom(view)
   page.suggestions = suggestions
   page.autoView = view?.autoReview ?? null
@@ -904,6 +973,7 @@ const load = async (): Promise<void> => {
     postConfirmed: {},
     autoView: null,
     limitsOpen: false,
+    modelsView: null,
   }
   renderAll()
   state.hidden = true
@@ -942,6 +1012,15 @@ byId('limits-toggle').addEventListener('click', () => {
 })
 for (const { id, section, focus } of resetButtons) byId(id).addEventListener('click', () => resetAuto(section, focus))
 byId('add-person').addEventListener('click', () => addPerson())
+byId('add-model').addEventListener('click', () => {
+  if (page === null) return
+  const rowId = makeId()
+  page.form.models = addCustomRow(page.form.models, rowId)
+  renderRegistry()
+  renderModelChoices()
+  changed()
+  focusField(`models.registry.${page.form.models.registry.length - 1}.id`)
+})
 byId('add-ticket').addEventListener('click', () => {
   if (page === null) return
   page.form.tickets.push(newTicket(makeId(), page.form.tickets.length === 0 ? 'jira' : 'template'))

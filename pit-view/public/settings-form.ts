@@ -8,6 +8,8 @@ import type { View } from '../src/poller.ts'
 import { indicatorWords } from './autoreviewbar.ts'
 import type { Reading } from './autoreviewbar.ts'
 import { formatClock } from './format.ts'
+import { modelsErrors, modelsServerError, modelsSetting, toModelsForm } from './models-form.ts'
+import type { ModelsForm } from './models-form.ts'
 
 // the page posts here after a save, so an open dashboard rereads density and the agent column
 export const configChannel = 'pit-view.config'
@@ -50,8 +52,8 @@ export type Form = {
   maxConcurrentReviews: string
   selfReviewOverCap: boolean
   extraReviewInstructions: string
-  // the models setting (registry, fallback, and slots, section 1 of DESIGN.md) as formatted JSON; empty means the built-in models
-  models: string
+  // the models setting (registry, fallback, and slots, section 1 of DESIGN.md), one control for each part (public/models-form.ts)
+  models: ModelsForm
   notifyEnabled: boolean
   notifyKinds: NotificationKind[]
   // the clone folder as typed: an absolute path or one under ~, empty for none
@@ -123,7 +125,7 @@ export const toForm = (config: Config, makeId: MakeId): Form => ({
   maxConcurrentReviews: String(config.maxConcurrentReviews),
   selfReviewOverCap: config.selfReviewOverCap,
   extraReviewInstructions: config.extraReviewInstructions,
-  models: config.models === undefined ? '' : JSON.stringify(config.models, null, 2),
+  models: toModelsForm(config.models, makeId),
   notifyEnabled: config.notifications?.enabled ?? false,
   notifyKinds: config.notifications?.kinds ?? allKinds,
   cloneDir: config.cloneDir ?? '',
@@ -198,18 +200,6 @@ const extraProblem = (text: string): string | null => {
   return length > 2000 ? `Must be at most 2,000 characters; it has ${length.toLocaleString('en-US')}.` : null
 }
 
-// the models field: nothing for empty text, the parsed object otherwise, and why it is not one when it is not
-export const parseModels = (text: string): { ok: true, value: unknown } | { ok: false, message: string } => {
-  if (text.trim() === '') return { ok: true, value: undefined }
-  let value: unknown
-  try {
-    value = JSON.parse(text)
-  } catch {
-    return { ok: false, message: 'This is not valid JSON.' }
-  }
-  return typeof value === 'object' && value !== null && !Array.isArray(value) ? { ok: true, value } : { ok: false, message: 'Use a JSON object with registry, fallback, and slots, or leave it empty for the built-in models.' }
-}
-
 // the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit (allowedHosts and agent) are carried over from the config it loaded
 export const toConfig = (form: Form, base: Config): Config => {
   const config: Config = {
@@ -245,9 +235,9 @@ export const toConfig = (form: Form, base: Config): Config => {
     ...(form.cloneDir.trim() === '' ? {} : { cloneDir: form.cloneDir.trim() }),
     agent: base.agent,
   }
-  // empty means the built-in models and leaves the key out; text that does not parse is stopped by validateForm before a save
-  const models = parseModels(form.models)
-  if (models.ok && models.value !== undefined) config.models = models.value
+  // every part at its default means the built-in models and leaves the key out
+  const models = modelsSetting(form.models)
+  if (models !== undefined) config.models = models
   // absent means off, so a config that never had the key and a form still at that default leave it out
   const kinds = allKinds.filter((kind) => form.notifyKinds.includes(kind))
   const untouched = !form.notifyEnabled && kinds.length === allKinds.length
@@ -365,8 +355,7 @@ export const validateForm = (form: Form): FieldError[] => {
   }
   const extra = extraProblem(form.extraReviewInstructions)
   if (extra !== null) errors.push({ field: 'extraReviewInstructions', message: extra })
-  const models = parseModels(form.models)
-  if (!models.ok) errors.push({ field: 'models', message: models.message })
+  errors.push(...modelsErrors(form.models))
   errors.push(...autoErrors(form))
   const overCap = autoCapError(form)
   if (overCap !== null) errors.push(overCap)
@@ -459,7 +448,7 @@ export const postingAsk = (kind: PostKind, login: string): PostingAsk => {
   }
 }
 
-const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'extraReviewInstructions', 'models', 'notifyEnabled', 'cloneDir'])
+const formFields = new Set(['repo', 'viewer', 'refreshSeconds', 'idleMinutes', 'todayStartsAt', 'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'extraReviewInstructions', 'notifyEnabled', 'cloneDir'])
 
 // the server's autoReview paths and the fields they land on
 const autoFields: Readonly<Record<string, string>> = {
@@ -482,8 +471,8 @@ const capitalize = (text: string): string => text === '' ? text : `${text[0]!.to
 // a refusal from PUT /api/config ("people[2].avatar must be ...") placed on the field it names;
 // anything the form has no field for (an unknown key) stays a message for the whole form
 export const serverError = (message: string, form: Form): FieldError => {
-  // a refusal of the registry or its shape (src/models.ts, modelsSaveProblem)
-  if (/^models[.\s]/.test(message)) return { field: 'models', message }
+  // a refusal of the registry, the fallback, or a slot (src/models.ts, modelsSaveProblem), placed on its control
+  if (/^models[.\s]/.test(message)) return modelsServerError(message, form.models)
   const auto = /^autoReview\.((?:activeHours|post)\.\w+|\w+) (.+)$/.exec(message)
   if (auto !== null) {
     const field = autoFields[auto[1] ?? '']

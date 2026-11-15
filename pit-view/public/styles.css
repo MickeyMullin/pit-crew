@@ -2764,6 +2764,24 @@ select.input {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.models-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  align-items: start;
+}
+
+.col-heads.models-grid {
+  display: none;
+}
+
+.models-builtin .cell {
+  min-height: 32px;
+  justify-content: center;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
 .cell-preview,
 .cell-sample,
 .cell-remove {
@@ -2960,6 +2978,30 @@ select.input {
   }
 
   .person-grid .cell-remove {
+    padding-top: 0;
+  }
+
+  .col-heads.models-grid {
+    display: grid;
+  }
+
+  .models-grid {
+    grid-template-columns: minmax(0, 1fr) 110px minmax(0, 0.8fr) minmax(0, 1.8fr) 72px;
+  }
+
+  /* the column headings name each control, so the per-row labels are for screen readers only */
+  .models-grid .row-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .models-grid .cell-remove {
+    grid-column: auto;
     padding-top: 0;
   }
 }
