@@ -221,7 +221,7 @@ test('validateForm carries the registry errors, and a refusal from the server la
   const refusal = 'models.registry[7] (mine): model must have no spaces or control characters'
   form.models = formOf({ registry: [...builtInRegistry, entry] })
   assert.deepEqual(serverError(refusal, form), { field: 'models.registry.7.model', message: 'Model must have no spaces or control characters.' })
-  assert.deepEqual(serverError('models.registry[0] (sonnet): runner must be one of claude, codex, hermes', form).field, 'models.registry.0.runner')
+  assert.deepEqual(serverError('models.registry[7] (mine): runner must be one of claude, codex, hermes', form).field, 'models.registry.7.runner')
   assert.deepEqual(serverError('models.registry[7] (mine): id appears twice', form).field, 'models.registry.7.id')
   assert.deepEqual(serverError('models.registry[7] (mine): provider must be letters, digits, dots, underscores, and dashes, such as anthropic', form).field, 'models.registry.7.provider')
   assert.deepEqual(serverError('models.registry[7] (mine): an entry must be an object with id, runner, provider, and model', form).field, 'models.registry.7.id')
@@ -307,4 +307,58 @@ test('the hint is reduced to the posted-text name check and to no start reading 
   assert.match(hint, /governed by the review prompt/)
   assert.doesNotMatch(hint, /four fields|JSON|restate/)
   assert.ok(hint.length < 700, `the hint is ${hint.length} characters`)
+})
+
+const sonnet = { id: 'sonnet', runner: 'claude', provider: 'anthropic', model: 'sonnet' }
+
+test('only the first entry that restates a built-in entry is the read-only built-in row; a repeat of it is an editable custom row that is flagged as a repeated id', () => {
+  const stored = { registry: [sonnet, sonnet] }
+  const form = formOf(stored)
+  assert.deepEqual(form.registry.map((row) => row.builtIn), [true, false])
+  assert.equal(modelsSaveProblem(stored) !== null, true)
+  assert.deepEqual(modelsErrors(form).map((error) => error.field), ['models.registry.1.id'])
+  assert.match(modelsErrors(form)[0]?.message ?? '', /appears twice/)
+  // the server's refusal lands on the same field, which exists because the row is editable
+  const refusal = modelsServerError(modelsSaveProblem(stored) as string, form)
+  assert.equal(refusal.field, 'models.registry.1.id')
+})
+
+test('removing the repeated built-in row clears the error and saves what the server accepts', () => {
+  const form = formOf({ registry: [sonnet, sonnet] })
+  const repeat = form.registry[1] as { rowId: string }
+  const next = removeRow(form, repeat.rowId)
+  assert.deepEqual(next.registry.map((row) => row.builtIn), [true])
+  assert.deepEqual(modelsErrors(next), [])
+  const saved = modelsSetting(next)
+  assert.equal(modelsSaveProblem(saved), null)
+  assert.deepEqual(saved, { registry: [sonnet] })
+})
+
+test('a repeat of a custom id, a custom row restating a built-in id differently, and an empty id are each flagged on their own field', () => {
+  const twice = formOf({ registry: [entry, { ...entry }] })
+  assert.deepEqual(modelsErrors(twice).map((error) => error.field), ['models.registry.1.id'])
+  const differs = formOf({ registry: [{ ...sonnet, model: 'other' }] })
+  assert.deepEqual(differs.registry.map((row) => row.builtIn), [false])
+  assert.deepEqual(modelsErrors(differs).map((error) => error.field), ['models.registry.0.id'])
+  assert.match(modelsErrors(differs)[0]?.message ?? '', /built-in model id/)
+  const empty = formOf({ registry: [{ ...entry, id: '' }] })
+  assert.deepEqual(modelsErrors(empty).map((error) => error.field), ['models.registry.0.id'])
+})
+
+test('a custom row that holds a built-in id with other values makes every later entry with that id a custom row too, in the server\'s order', () => {
+  const stored = { registry: [{ ...sonnet, model: 'other' }, sonnet, sonnet] }
+  const form = formOf(stored)
+  assert.deepEqual(form.registry.map((row) => row.builtIn), [false, false, false])
+  const message = modelsSaveProblem(stored) as string
+  assert.equal(modelsServerError(message, form).field, 'models.registry.0.id')
+})
+
+test('a server refusal that names a read-only row never vanishes: it stays a message for the whole form', () => {
+  const form = formOf(undefined)
+  const refusal = modelsServerError('models.registry[0] (sonnet): id appears twice', form)
+  assert.equal(refusal.field, null)
+  assert.match(refusal.message, /appears twice/)
+  const field = modelsServerError('models.registry[1].extra: not allowed', form)
+  assert.equal(field.field, null)
+  assert.match(field.message, /not allowed/)
 })

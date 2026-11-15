@@ -69,16 +69,20 @@ const slotValue = (raw: unknown, index: 0 | 1 | null): string => {
   return index === 0 ? text(raw) : ''
 }
 
-// the setting as the config holds it to form state: no setting, or a registry that holds no entry, shows the built-in table; otherwise the entries as stored, each one that restates a built-in entry exactly being that built-in row. Only the four entry fields, the fallback, and the five slot names are read, so anything else in the value is not carried
+// the setting as the config holds it to form state: no setting, or a registry that holds no entry, shows the built-in table; otherwise the entries as stored, the first one that restates a built-in entry exactly being that built-in row, and any later repeat of an id already held a custom row. Only the four entry fields, the fallback, and the five slot names are read, so anything else in the value is not carried
 export const toModelsForm = (raw: unknown, makeId: () => string): ModelsForm => {
   const setting = isObject(raw) ? raw : {}
   const stored = own(setting, 'registry')
   const entries = Array.isArray(stored) ? stored.filter(isObject).filter((entry) => (['id', 'runner', 'provider', 'model'] as const).some((field) => typeof own(entry, field) === 'string')) : []
+  const seen = new Set<string>()
   const registry = entries.length === 0
     ? builtInRows(makeId)
     : entries.map((entry): RegistryRow => {
       const row = { entryId: text(own(entry, 'id')), runner: text(own(entry, 'runner')), provider: text(own(entry, 'provider')), model: text(own(entry, 'model')) }
-      return { rowId: makeId(), builtIn: restatesBuiltIn(row), ...row }
+      // the first entry to hold an id is the one that stands, as on the server, so a repeat of a built-in entry is a custom row that can be edited or removed
+      const first = !seen.has(row.entryId.trim())
+      seen.add(row.entryId.trim())
+      return { rowId: makeId(), builtIn: first && restatesBuiltIn(row), ...row }
     })
   const slots = own(setting, 'slots')
   const given = isObject(slots) ? slots : {}
@@ -222,10 +226,13 @@ export const modelsServerError = (message: string, form: ModelsForm): FieldError
   if (entry !== null) {
     const index = Number(entry[1])
     const reason = entry[2] ?? ''
-    return form.registry[index] === undefined ? whole : { field: `models.registry.${index}.${rowField(reason)}`, message: `${capitalize(reason)}.` }
+    const row = form.registry[index]
+    // a read-only row has no control to hold the message, so it stays in the card's summary with the row named
+    if (row === undefined || row.builtIn) return whole
+    return { field: `models.registry.${index}.${rowField(reason)}`, message: `${capitalize(reason)}.` }
   }
   const field = /^models\.registry\[(\d+)\]\.[^:]*: /.exec(message)
-  if (field !== null) return form.registry[Number(field[1])] === undefined ? whole : { field: `models.registry.${field[1]}.id`, message }
+  if (field !== null) return form.registry[Number(field[1])]?.builtIn !== false ? whole : { field: `models.registry.${field[1]}.id`, message }
   const registry = /^models\.registry must (.+)$/.exec(message)
   if (registry !== null) return { field: 'models.registry', message: `Must ${registry[1]}.` }
   const fallback = /^models\.fallback must (.+)$/.exec(message)
