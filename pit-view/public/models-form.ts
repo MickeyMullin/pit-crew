@@ -34,8 +34,8 @@ export type RowField = 'entryId' | 'runner' | 'provider' | 'model'
 // a slot as typed: the id a control chose, or empty for unset, which leaves the key out
 export type SlotsForm = { review: [string, string], autoReviewHuman: [string, string], stack: string, sweep: string, autoReviewBot: string }
 
-// what the config held for a part the owner has not touched since it was read, as the server reads it: a row's four fields untrimmed (by row id), the fallback, and each slot's value. A save writes these back as they were until the control is changed, so it never rewrites what the owner did not touch and never changes what the server resolves
-export type OriginalValues = { rows: Record<string, { entryId: string, runner: string, provider: string, model: string }>, fallback?: string, slots: Partial<Record<SlotName, string | [string, string]>> }
+// what the config held for a part the owner has not touched since it was read, as the server reads it: a row's entry fields that were stored, untrimmed and none added (by row id), the fallback, and each slot's value. A save writes these back as they were until the control is changed, so it never rewrites what the owner did not touch and never changes what the server resolves
+export type OriginalValues = { rows: Record<string, Partial<Record<'id' | 'runner' | 'provider' | 'model', string>>>, fallback?: string, slots: Partial<Record<SlotName, string | [string, string]>> }
 
 export type ModelsForm = { registry: RegistryRow[], fallback: string, slots: SlotsForm, original: OriginalValues }
 
@@ -92,11 +92,13 @@ export const toModelsForm = (raw: unknown, makeId: () => string): ModelsForm => 
     ? builtInRows(makeId)
     : entries.map((entry): RegistryRow => {
       const row = { entryId: text(own(entry, 'id')), runner: text(own(entry, 'runner')), provider: text(own(entry, 'provider')), model: text(own(entry, 'model')) }
+      const given: Partial<Record<'id' | 'runner' | 'provider' | 'model', string>> = {}
+      for (const field of ['id', 'runner', 'provider', 'model'] as const) if (typeof own(entry, field) === 'string') given[field] = own(entry, field) as string
       // the first entry to hold an id is the one that stands, as on the server, so a repeat of a built-in entry is a custom row that can be edited or removed
       const first = !seen.has(row.entryId)
       seen.add(row.entryId)
       const rowId = makeId()
-      original.rows[rowId] = row
+      original.rows[rowId] = given
       return { rowId, builtIn: first && restatesBuiltIn(row), ...row }
     })
   const slots = own(setting, 'slots')
@@ -120,16 +122,22 @@ export const toModelsForm = (raw: unknown, makeId: () => string): ModelsForm => 
 const isBuiltInTable = (rows: readonly RegistryRow[]): boolean =>
   rows.length === 0 || (rows.length === builtInEntries.length && rows.every((row, at) => row.builtIn && row.entryId === builtInEntries[at]?.id))
 
-// a row's four fields as the server would read them: as stored while the owner has not edited the row, otherwise trimmed
-const fieldsOf = (form: ModelsForm, row: RegistryRow): { id: string, runner: string, provider: string, model: string } => {
+// a row's entry as the config stores it: exactly the fields that were stored while the owner has not edited the row (a field that was missing stays missing), otherwise its four fields, trimmed
+const storedEntry = (form: ModelsForm, row: RegistryRow): Partial<Record<'id' | 'runner' | 'provider' | 'model', string>> => {
   const stored = form.original.rows[row.rowId]
-  return stored === undefined ? { id: row.entryId.trim(), runner: row.runner, provider: row.provider.trim(), model: row.model.trim() } : { id: stored.entryId, runner: stored.runner, provider: stored.provider, model: stored.model }
+  return stored === undefined ? { id: row.entryId.trim(), runner: row.runner, provider: row.provider.trim(), model: row.model.trim() } : { ...stored }
+}
+
+// a row's four fields as the server would read them, a missing one as empty, which the entry rules refuse in the same words
+const fieldsOf = (form: ModelsForm, row: RegistryRow): { id: string, runner: string, provider: string, model: string } => {
+  const { id = '', runner = '', provider = '', model = '' } = storedEntry(form, row)
+  return { id, runner, provider, model }
 }
 
 // the models value the config stores, in exactly the stored shape, or undefined when every part is at its default, which leaves the key out of the file. A part the owner has not changed since it was read (a row, the fallback, a slot) is written as it was stored, so a save never changes what the server resolves for it. Otherwise an unset control leaves its key out, and a pair slot with one side set takes the built-in default for the other, since a pair holds two ids
 export const modelsSetting = (form: ModelsForm): Record<string, unknown> | undefined => {
   const setting: Record<string, unknown> = {}
-  if (!isBuiltInTable(form.registry)) setting.registry = form.registry.map((row) => fieldsOf(form, row))
+  if (!isBuiltInTable(form.registry)) setting.registry = form.registry.map((row) => storedEntry(form, row))
   const fallback = form.original.fallback ?? form.fallback
   if (fallback !== '' || form.original.fallback !== undefined) setting.fallback = fallback
   const slots: Record<string, unknown> = {}
@@ -204,6 +212,13 @@ export const registryIds = (form: ModelsForm): string[] => {
     if (!seen.includes(id) && rowProblems(form, row).length === 0) seen.push(id)
   })
   return seen
+}
+
+// whether the fallback and slot choices must be drawn again after an edit, an add, or a remove: exactly when the ids they offer changed, whichever field or operation changed them, since a row turns valid or invalid by any of its four fields
+export const choicesNeedRedraw = (before: ModelsForm, after: ModelsForm): boolean => {
+  const was = registryIds(before)
+  const now = registryIds(after)
+  return was.length !== now.length || was.some((id, at) => id !== now[at])
 }
 
 // unset first, showing the built-in default it stands for, then the registry's ids; an id the setting names that the registry lacks stays as a choice, marked, so a save keeps it and the owner can see it

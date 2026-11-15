@@ -8,7 +8,7 @@ import { defaultConfig } from '../src/config.ts'
 import { builtInFallbackId, builtInRegistry, modelsSaveProblem, projectModels, resolveModels } from '../src/models.ts'
 import { isDirty, serverError, toConfig, toForm, validateForm } from '../public/settings-form.ts'
 import {
-  addCustomRow, builtInEntries, builtInSlotDefaults, editRow, fallbackChoices, modelsErrors, modelsServerError, modelsSetting, registryIds, removeRow, routeWarnings, runnerChoices, setFallback, setSlot,
+  addCustomRow, builtInEntries, builtInSlotDefaults, choicesNeedRedraw, editRow, fallbackChoices, modelsErrors, modelsServerError, modelsSetting, registryIds, removeRow, routeWarnings, runnerChoices, setFallback, setSlot,
   slotAsRead, slotChoices, slotControls, toModelsForm,
 } from '../public/models-form.ts'
 import type { ModelsForm } from '../public/models-form.ts'
@@ -400,8 +400,7 @@ test('a save with no edit never changes what the server resolves for any slot or
     const served = projectModels(raw)
     assert.deepEqual(resolvedOf(modelsSetting(formOf(served))), resolvedOf(served), name)
     assert.deepEqual({ ...resolvedOf(modelsSetting(formOf(raw))), warnings: [] }, { ...resolvedOf(raw), warnings: [] }, name)
-    // what the form writes back must pass the same save check the server applies, whenever the stored value did, and a stored bare id is written back as that bare id
-    if (modelsSaveProblem(raw) === null) assert.equal(modelsSaveProblem(modelsSetting(formOf(raw))), null, name)
+    // a stored bare id is written back as that bare id
     const slotsOf = (raw as { slots?: Record<string, unknown> }).slots
     for (const slot of ['review', 'autoReviewHuman']) if (typeof slotsOf?.[slot] === 'string') assert.equal((modelsSetting(formOf(raw))?.slots as Record<string, unknown>)[slot], slotsOf[slot], `${name}: ${slot}`)
   }
@@ -454,4 +453,118 @@ test('a row with several problems shows its field problems first, and the repeat
   const restated = formOf({ registry: [{ ...entry, id: 'sonnet', model: 'haiku' }, builtInRegistry[0]] })
   assert.deepEqual(restated.registry.map((row) => row.builtIn), [false, false])
   assert.deepEqual(modelsErrors(restated).map((error) => error.field), ['models.registry.0.id', 'models.registry.1.id'])
+})
+
+// the page's own sequence for an edit: the new form from the control's operation, then the decision the page makes from the two forms
+const registryEdits: { name: string, form: ModelsForm, apply: (form: ModelsForm) => ModelsForm, redraw: boolean }[] = (() => {
+  const valid = { entryId: 'extra', runner: 'claude', provider: 'anthropic', model: 'sonnet' }
+  const withRow = (fields: Partial<typeof valid>): ModelsForm => {
+    const base = addCustomRow(formOf(undefined), 'row')
+    return (Object.entries({ ...valid, ...fields }) as [keyof typeof valid, string][]).reduce((current, [key, value]) => editRow(current, 'row', key, value), base)
+  }
+  const edit = (field: 'entryId' | 'runner' | 'provider' | 'model', value: string) => (form: ModelsForm): ModelsForm => editRow(form, 'row', field, value)
+  return [
+    { name: 'adding a blank row names nothing yet', form: formOf(undefined), apply: (form) => addCustomRow(form, 'row'), redraw: false },
+    { name: 'a new id on a valid row', form: withRow({}), apply: edit('entryId', 'other'), redraw: true },
+    { name: 'an id typed first, on a row that is still invalid, adds nothing', form: withRow({ entryId: '', provider: '', model: '' }), apply: edit('entryId', 'extra'), redraw: false },
+    { name: 'the provider typed after the id makes the row valid when the model is there', form: withRow({ provider: '' }), apply: edit('provider', 'anthropic'), redraw: true },
+    { name: 'the model typed last makes the row valid', form: withRow({ model: '' }), apply: edit('model', 'sonnet'), redraw: true },
+    { name: 'a runner chosen makes the row valid', form: withRow({ runner: '' }), apply: edit('runner', 'codex'), redraw: true },
+    { name: 'an id made bad makes the row invalid', form: withRow({}), apply: edit('entryId', '-bad'), redraw: true },
+    { name: 'a runner made bad makes the row invalid', form: withRow({}), apply: edit('runner', 'bogus'), redraw: true },
+    { name: 'a provider emptied makes the row invalid', form: withRow({}), apply: edit('provider', ''), redraw: true },
+    { name: 'a model emptied makes the row invalid', form: withRow({}), apply: edit('model', ''), redraw: true },
+    { name: 'a model changed on a valid row changes no id', form: withRow({}), apply: edit('model', 'opus'), redraw: false },
+    { name: 'a provider changed on a valid row changes no id', form: withRow({}), apply: edit('provider', 'openai'), redraw: false },
+    { name: 'a runner changed on a valid row changes no id', form: withRow({}), apply: edit('runner', 'hermes'), redraw: false },
+    { name: 'a model changed on an invalid row changes no id', form: withRow({ provider: '' }), apply: edit('model', 'opus'), redraw: false },
+    { name: 'a valid row becoming a repeat of an earlier id stops naming anything new', form: withRow({ entryId: 'other' }), apply: (form) => editRow(addCustomRow(form, 'second'), 'second', 'entryId', 'x'), redraw: false },
+    { name: 'removing a valid row', form: withRow({}), apply: (form) => removeRow(form, 'row'), redraw: true },
+    { name: 'removing an invalid row', form: withRow({ model: '' }), apply: (form) => removeRow(form, 'row'), redraw: false },
+    { name: 'removing a repeat of an id another row holds', form: addCustomRow(withRow({}), 'again'), apply: (form) => removeRow(editRow(editRow(editRow(editRow(form, 'again', 'entryId', 'extra'), 'again', 'provider', 'anthropic'), 'again', 'model', 'sonnet'), 'again', 'runner', 'claude'), 'again'), redraw: false },
+  ]
+})()
+
+test('the choices are redrawn exactly when the ids they offer changed, for an edit of each field, an add, a remove, and a row turning valid or invalid', () => {
+  for (const { name, form, apply, redraw } of registryEdits) {
+    const after = apply(form)
+    assert.equal(choicesNeedRedraw(form, after), redraw, name)
+    assert.equal(redraw, JSON.stringify(registryIds(form)) !== JSON.stringify(registryIds(after)), name)
+  }
+})
+
+test('typing an id first and then the provider and model makes the new id appear among the offered ids only once the row is valid', () => {
+  let form = addCustomRow(formOf(undefined), 'row')
+  const steps: [typeof registryEdits[number]['name'], 'entryId' | 'provider' | 'model', string, boolean][] = [['id', 'entryId', 'fresh', false], ['provider', 'provider', 'anthropic', false], ['model', 'model', 'sonnet', true]]
+  for (const [name, field, value, redraw] of steps) {
+    const next = editRow(form, 'row', field, value)
+    assert.equal(choicesNeedRedraw(form, next), redraw, name)
+    form = next
+  }
+  assert.equal(registryIds(form).includes('fresh'), true)
+  assert.equal(slotChoices(form, '', 'sonnet').some((choice) => choice.value === 'fresh'), true)
+  assert.equal(fallbackChoices(form, '').some((choice) => choice.value === 'fresh'), true)
+})
+
+test('the page asks choicesNeedRedraw after every registry edit, add, and remove, and never decides from the field alone', async () => {
+  const page = await publicFile('settings.ts')
+  assert.equal((page.match(/choicesNeedRedraw\(/g) ?? []).length, 3)
+  assert.doesNotMatch(page, /field === 'entryId'/)
+})
+
+// the registry shapes the server refuses on a save (modelsSaveProblem) that a hand-edited file can hold: each is served as stored, so the form shows the row, refuses the save at that row, writes the stored value back unchanged, and passes the server's check once the row is removed or fixed
+const refusedRegistries: { name: string, raw: Record<string, unknown>, row: number, field: string }[] = [
+  { name: 'a repeat of a custom id', raw: { registry: [usable, { ...usable }] }, row: 1, field: 'id' },
+  { name: 'a repeat of a set-aside entry', raw: { registry: [setAside, { ...setAside }] }, row: 0, field: 'runner' },
+  { name: 'an entry set aside for a bad runner', raw: { registry: [usable, setAside] }, row: 1, field: 'runner' },
+  { name: 'an empty id', raw: { registry: [{ ...usable, id: '' }] }, row: 0, field: 'id' },
+  { name: 'an entry with no id', raw: { registry: [{ runner: 'claude', provider: 'anthropic', model: 'sonnet' }] }, row: 0, field: 'id' },
+  { name: 'an entry with only an id', raw: { registry: [{ id: 'lonely' }] }, row: 0, field: 'runner' },
+  { name: 'a built-in id restated differently', raw: { registry: [{ ...usable, id: 'opus', model: 'haiku' }] }, row: 0, field: 'id' },
+  { name: 'a space around a field', raw: { registry: [{ ...usable, provider: ' anthropic' }] }, row: 0, field: 'provider' },
+  { name: 'an exact restatement after a custom entry holding that built-in id', raw: { registry: [{ ...usable, id: 'sonnet', model: 'haiku' }, sonnet] }, row: 0, field: 'id' },
+]
+
+test('a stored registry the server would refuse is refused visibly at its row, written back unchanged, and passes once the row is removed', () => {
+  for (const { name, raw, row, field } of refusedRegistries) {
+    assert.notEqual(modelsSaveProblem(projectModels(raw)), null, `${name}: the server refuses it`)
+    const form = formOf(projectModels(raw))
+    const errors = modelsErrors(form)
+    assert.equal(errors.some((error) => error.field === `models.registry.${row}.${field}`), true, `${name}: an error at the row`)
+    assert.equal(errors.length > 0 && errors.every((error) => error.field !== null && /^models\.registry\.\d+\.(id|runner|provider|model)$/.test(error.field)), true, `${name}: every error is on a control`)
+    assert.deepEqual(modelsSetting(form), projectModels(raw), `${name}: written back as stored`)
+    const refusal = modelsServerError(modelsSaveProblem(modelsSetting(form)) as string, form)
+    assert.notEqual(refusal.field, null, `${name}: the server's refusal lands on a control`)
+    assert.equal(form.registry[row]?.builtIn, false, `${name}: the row is editable`)
+    // removing every row with an error makes the save pass the server's check
+    let fixed = form
+    for (const bad of [...new Set(errors.map((error) => Number(/^models\.registry\.(\d+)\./.exec(error.field as string)?.[1])))].sort((a, b) => b - a)) fixed = removeRow(fixed, form.registry[bad]?.rowId as string)
+    assert.deepEqual(modelsErrors(fixed), [], name)
+    assert.equal(modelsSaveProblem(modelsSetting(fixed)), null, `${name}: passes once removed`)
+  }
+})
+
+test('a stored registry the server would refuse passes once the row is fixed, and an unrelated save of it is blocked until then', () => {
+  const form = formOf({ registry: [usable, setAside], slots: { stack: 'extra' } })
+  assert.equal(validateForm(toForm({ ...defaultConfig(), models: { registry: [usable, setAside], slots: { stack: 'extra' } } }, ids())).some((error) => error.field === 'models.registry.1.runner'), true)
+  const fixed = editRow(form, form.registry[1]?.rowId as string, 'runner', 'claude')
+  assert.deepEqual(modelsErrors(fixed), [])
+  assert.equal(modelsSaveProblem(modelsSetting(fixed)), null)
+})
+
+test('a stored registry the server accepts is written back as stored and passes the same check, for every hand-edited shape it accepts', () => {
+  const accepted = handEdited.filter(({ raw }) => modelsSaveProblem(projectModels(raw)) === null)
+  const refused = handEdited.filter(({ raw }) => modelsSaveProblem(projectModels(raw)) !== null)
+  assert.equal(accepted.length > 0 && refused.length > 0, true)
+  for (const { name, raw } of accepted) {
+    const form = formOf(projectModels(raw))
+    assert.deepEqual(modelsErrors(form), [], name)
+    assert.equal(modelsSaveProblem(modelsSetting(form)), null, name)
+  }
+  // a shape the server refuses is refused at a row, never repaired by the form
+  for (const { name, raw } of refused) {
+    const form = formOf(projectModels(raw))
+    assert.notEqual(modelsErrors(form).length, 0, name)
+    assert.deepEqual(modelsSetting(form), Object.keys(projectModels(raw)).length === 0 ? undefined : projectModels(raw), name)
+  }
 })

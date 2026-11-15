@@ -6,7 +6,7 @@ import type { Config } from '../src/config.ts'
 import type { ModelsView } from '../src/models.ts'
 import type { View } from '../src/poller.ts'
 import { avatar } from './cells.ts'
-import { addCustomRow, editRow, fallbackChoices, removeRow, routeWarnings, setFallback, setSlot, slotAsRead, slotChoices, slotControls, slotOf } from './models-form.ts'
+import { addCustomRow, choicesNeedRedraw, editRow, fallbackChoices, removeRow, routeWarnings, setFallback, setSlot, slotAsRead, slotChoices, slotControls, slotOf } from './models-form.ts'
 import type { RowField } from './models-form.ts'
 import { choiceField, registryRow } from './modelsview.ts'
 import type { RegistryHandlers } from './modelsview.ts'
@@ -859,9 +859,10 @@ const revert = (): void => {
 const modelsHandlers: RegistryHandlers = {
   edit: (rowId: string, field: RowField, value: string): void => {
     if (page === null) return
-    page.form.models = editRow(page.form.models, rowId, field, value)
-    // the choices offer the registry's ids, so a changed id changes them
-    if (field === 'entryId') renderModelChoices()
+    const before = page.form.models
+    page.form.models = editRow(before, rowId, field, value)
+    // the choices offer the ids of the rows the server keeps, which any field of a row can change
+    if (choicesNeedRedraw(before, page.form.models)) renderModelChoices()
     changed()
   },
   remove: (rowId: string): void => {
@@ -870,9 +871,10 @@ const modelsHandlers: RegistryHandlers = {
     if (index < 0) return
     // the Remove buttons are the custom rows' alone, so focus finds its place among those
     const position = page.form.models.registry.slice(0, index).filter((row) => !row.builtIn).length
-    page.form.models = removeRow(page.form.models, rowId)
+    const before = page.form.models
+    page.form.models = removeRow(before, rowId)
     renderRegistry()
-    renderModelChoices()
+    if (choicesNeedRedraw(before, page.form.models)) renderModelChoices()
     changed()
     // focus moves to the row that took its place, or to Add model when none did
     const removes = byId('models-registry').querySelectorAll<HTMLButtonElement>('.remove')
@@ -1015,9 +1017,10 @@ byId('add-person').addEventListener('click', () => addPerson())
 byId('add-model').addEventListener('click', () => {
   if (page === null) return
   const rowId = makeId()
-  page.form.models = addCustomRow(page.form.models, rowId)
+  const before = page.form.models
+  page.form.models = addCustomRow(before, rowId)
   renderRegistry()
-  renderModelChoices()
+  if (choicesNeedRedraw(before, page.form.models)) renderModelChoices()
   changed()
   focusField(`models.registry.${page.form.models.registry.length - 1}.id`)
 })
