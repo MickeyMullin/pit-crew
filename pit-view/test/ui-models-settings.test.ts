@@ -8,7 +8,7 @@ import { defaultConfig } from '../src/config.ts'
 import { builtInFallbackId, builtInRegistry, modelsSaveProblem, projectModels, resolveModels } from '../src/models.ts'
 import { isDirty, serverError, toConfig, toForm, validateForm } from '../public/settings-form.ts'
 import {
-  addCustomRow, builtInEntries, builtInSlotDefaults, choicesNeedRedraw, editRow, fallbackChoices, modelsErrors, modelsServerError, modelsSetting, registryIds, removeRow, routeWarnings, runnerChoices, setFallback, setSlot,
+  addCustomRow, builtInEntries, builtInSlotDefaults, choicesNeedRedraw, editRow, fallbackChoices, modelsErrors, modelsServerError, modelsSetting, readOnlyChanged, readOnlyRows, registryIds, removeRow, routeWarnings, runnerChoices, setFallback, setSlot,
   slotAsRead, slotChoices, slotControls, toModelsForm,
 } from '../public/models-form.ts'
 import type { ModelsForm } from '../public/models-form.ts'
@@ -449,10 +449,10 @@ test('a row with several problems shows its field problems first, and the repeat
     ['models.registry.2.id', modelsErrors(form)[1]?.message],
     ['models.registry.3.id', 'Id appears twice.'],
   ])
-  // the first row to hold an id is never a repeat, and a later exact restatement after a custom row holding that built-in id is an editable repeat
+  // the first row to hold an id is never a repeat, a later exact restatement after a custom row holding that built-in id is an editable row, and a repeat is named only against a row that stood, as the server names only the first row it refuses
   const restated = formOf({ registry: [{ ...entry, id: 'sonnet', model: 'haiku' }, builtInRegistry[0]] })
   assert.deepEqual(restated.registry.map((row) => row.builtIn), [false, false])
-  assert.deepEqual(modelsErrors(restated).map((error) => error.field), ['models.registry.0.id', 'models.registry.1.id'])
+  assert.deepEqual(modelsErrors(restated).map((error) => error.field), ['models.registry.0.id'])
 })
 
 // the page's own sequence for an edit: the new form from the control's operation, then the decision the page makes from the two forms
@@ -567,4 +567,91 @@ test('a stored registry the server accepts is written back as stored and passes 
     assert.notEqual(modelsErrors(form).length, 0, name)
     assert.deepEqual(modelsSetting(form), Object.keys(projectModels(raw)).length === 0 ? undefined : projectModels(raw), name)
   }
+})
+
+// which row is the read-only built-in row follows the rows as they are now: after every edit, add, and remove the form's errors must name what the server's save check names, on the same row and in the same words, and the row it names must be one the owner can edit or remove
+const agrees = (form: ModelsForm, name: string): void => {
+  const server = modelsSaveProblem(modelsSetting(form))
+  const errors = modelsErrors(form)
+  if (server === null) return assert.deepEqual(errors, [], `${name}: no error where the server accepts`)
+  const first = errors[0]
+  assert.notEqual(first, undefined, `${name}: an error where the server refuses`)
+  assert.deepEqual(first, modelsServerError(server, form), `${name}: the first error is the server's refusal, on its row`)
+  const row = Number(/^models\.registry\[(\d+)\]/.exec(server)?.[1])
+  assert.equal(readOnlyRows(form)[row], false, `${name}: the named row is not read-only`)
+}
+
+const customSonnet = { id: 'custom', runner: 'claude', provider: 'anthropic', model: 'sonnet' }
+
+test('renaming an earlier custom row to a built-in id makes the later built-in row an editable repeat that the form names, as the server does', () => {
+  const start = formOf({ registry: [customSonnet, builtInRegistry[0]] })
+  assert.deepEqual(readOnlyRows(start), [false, true])
+  agrees(start, 'start')
+  const renamed = editRow(start, start.registry[0]?.rowId as string, 'entryId', 'sonnet')
+  assert.deepEqual(readOnlyRows(renamed), [false, false])
+  assert.deepEqual(modelsErrors(renamed).map((error) => [error.field, error.message]), [['models.registry.1.id', 'Id appears twice.']])
+  agrees(renamed, 'renamed')
+  assert.deepEqual(readOnlyChanged(start, renamed), [1])
+  // the repeated row can be edited or removed on its own, and either passes the server's check
+  const rowId = renamed.registry[1]?.rowId as string
+  assert.equal(modelsSaveProblem(modelsSetting(removeRow(renamed, rowId))), null)
+  const reworked = editRow(renamed, rowId, 'entryId', 'other')
+  assert.notEqual(reworked, renamed)
+  agrees(reworked, 'edited')
+  assert.equal(modelsSaveProblem(modelsSetting(reworked)), null)
+})
+
+test('a row that stops holding the id gives it back, and removing the earlier row does too', () => {
+  const renamed = editRow(formOf({ registry: [customSonnet, builtInRegistry[0]] }), 'r1', 'entryId', 'sonnet')
+  const back = editRow(renamed, 'r1', 'entryId', 'custom')
+  assert.deepEqual(readOnlyRows(back), [false, true])
+  assert.deepEqual(readOnlyChanged(renamed, back), [1])
+  agrees(back, 'renamed back')
+  // typing through an id that is not valid yet leaves the later row as it is
+  const typing = editRow(renamed, 'r1', 'entryId', 'sonne')
+  assert.deepEqual(readOnlyRows(typing), [false, true])
+  agrees(typing, 'typing')
+  const removed = removeRow(renamed, 'r1')
+  assert.deepEqual(readOnlyRows(removed), [true])
+  agrees(removed, 'earlier row removed')
+  assert.deepEqual(modelsSetting(removed), { registry: [builtInRegistry[0]] })
+  // an edit that changes no row's mark redraws no row
+  assert.deepEqual(readOnlyChanged(back, editRow(back, 'r1', 'model', 'opus')), [])
+})
+
+test('an added row that restates a built-in id, and an added row that takes a later row\'s id, are named as the server names them', () => {
+  const table = formOf(undefined)
+  const fill = (form: ModelsForm, id: string, fields: Record<string, string>): ModelsForm =>
+    Object.entries({ entryId: id, ...fields }).reduce((current, [key, value]) => editRow(current, 'new', key as 'entryId', value), form)
+  const added = fill(addCustomRow(table, 'new'), 'sonnet', { provider: 'anthropic', model: 'sonnet' })
+  assert.equal(readOnlyRows(added)[0], true)
+  assert.deepEqual(modelsErrors(added).map((error) => error.field), [`models.registry.${builtInEntries.length}.id`])
+  agrees(added, 'added restatement')
+  // a custom row first, then an exact built-in row: a row added at the end takes nothing from either
+  const base = formOf({ registry: [customSonnet, builtInRegistry[0]] })
+  agrees(fill(addCustomRow(base, 'new'), 'extra', { provider: 'anthropic', model: 'sonnet' }), 'added unrelated')
+  // a repeat is named only against a row that stood: a custom row holding the id with a bad field is refused alone
+  const bad = editRow(base, 'r1', 'entryId', 'sonnet')
+  const badModel = editRow(bad, 'r1', 'model', '')
+  assert.deepEqual(modelsErrors(badModel).map((error) => error.field), ['models.registry.0.model'])
+  assert.deepEqual(readOnlyRows(badModel), [false, true])
+  agrees(badModel, 'earlier row with a bad field')
+  agrees(editRow(badModel, 'r1', 'model', 'sonnet'), 'earlier row fixed')
+})
+
+test('the offered ids, the built-in table state, and the choices follow the rows as they are after each of these edits', () => {
+  const renamed = editRow(formOf({ registry: [customSonnet, builtInRegistry[0]] }), 'r1', 'entryId', 'sonnet')
+  assert.deepEqual(registryIds(renamed), ['sonnet'])
+  assert.deepEqual(registryIds(formOf({ registry: [customSonnet, builtInRegistry[0]] })), ['custom', 'sonnet'])
+  assert.equal(choicesNeedRedraw(formOf({ registry: [customSonnet, builtInRegistry[0]] }), renamed), true)
+  // every row restating its built-in entry in order is the untouched table, and only while each is the read-only row
+  assert.equal(modelsSetting(formOf({ registry: [...builtInRegistry] })), undefined)
+})
+
+test('the page redraws only the rows whose read-only mark changed, so the field being typed in keeps its focus and text', async () => {
+  const page = await publicFile('settings.ts')
+  assert.match(page, /redrawRows\(readOnlyChanged\(before, page\.form\.models\)\)/)
+  assert.doesNotMatch(page, /\.builtIn\b/)
+  const view = await publicFile('modelsview.ts')
+  assert.doesNotMatch(view, /row\.builtIn/)
 })

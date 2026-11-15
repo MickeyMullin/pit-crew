@@ -26,7 +26,7 @@ export const builtInSlotDefaults: { review: readonly [string, string], autoRevie
 
 export const runnerNames: readonly string[] = ['claude', 'codex', 'hermes']
 
-// each row carries an id of its own, so a row keeps its elements while others come and go; a built-in row is one of the built-in entries and is never edited
+// each row carries an id of its own, so a row keeps its elements while others come and go. `builtIn` says the row began as an exact restatement of a built-in entry that no earlier row held; whether it is the read-only built-in row now is decided by `readOnlyRows` from the rows as they are, since an edit to an earlier row can take its id
 export type RegistryRow = { rowId: string, builtIn: boolean, entryId: string, runner: string, provider: string, model: string }
 
 export type RowField = 'entryId' | 'runner' | 'provider' | 'model'
@@ -119,8 +119,11 @@ export const toModelsForm = (raw: unknown, makeId: () => string): ModelsForm => 
 }
 
 // the built-in table untouched is the empty registry, which is what an absent key means
-const isBuiltInTable = (rows: readonly RegistryRow[]): boolean =>
-  rows.length === 0 || (rows.length === builtInEntries.length && rows.every((row, at) => row.builtIn && row.entryId === builtInEntries[at]?.id))
+const isBuiltInTable = (form: ModelsForm): boolean => {
+  const rows = form.registry
+  const readOnly = readOnlyRows(form)
+  return rows.length === 0 || (rows.length === builtInEntries.length && rows.every((row, at) => readOnly[at] === true && row.entryId === builtInEntries[at]?.id))
+}
 
 // a row's entry as the config stores it: exactly the fields that were stored while the owner has not edited the row (a field that was missing stays missing), otherwise its four fields, trimmed
 const storedEntry = (form: ModelsForm, row: RegistryRow): Partial<Record<'id' | 'runner' | 'provider' | 'model', string>> => {
@@ -137,7 +140,7 @@ const fieldsOf = (form: ModelsForm, row: RegistryRow): { id: string, runner: str
 // the models value the config stores, in exactly the stored shape, or undefined when every part is at its default, which leaves the key out of the file. A part the owner has not changed since it was read (a row, the fallback, a slot) is written as it was stored, so a save never changes what the server resolves for it. Otherwise an unset control leaves its key out, and a pair slot with one side set takes the built-in default for the other, since a pair holds two ids
 export const modelsSetting = (form: ModelsForm): Record<string, unknown> | undefined => {
   const setting: Record<string, unknown> = {}
-  if (!isBuiltInTable(form.registry)) setting.registry = form.registry.map((row) => storedEntry(form, row))
+  if (!isBuiltInTable(form)) setting.registry = form.registry.map((row) => storedEntry(form, row))
   const fallback = form.original.fallback ?? form.fallback
   if (fallback !== '' || form.original.fallback !== undefined) setting.fallback = fallback
   const slots: Record<string, unknown> = {}
@@ -163,17 +166,19 @@ export const addCustomRow = (form: ModelsForm, rowId: string): ModelsForm =>
 
 // a built-in row is read-only: an edit of one answers the form as it was
 export const editRow = (form: ModelsForm, rowId: string, field: RowField, value: string): ModelsForm => {
-  const row = form.registry.find((candidate) => candidate.rowId === rowId)
-  if (row === undefined || row.builtIn) return form
-  // an edited row is written from its fields, no longer as it was stored
+  const at = form.registry.findIndex((candidate) => candidate.rowId === rowId)
+  const row = form.registry[at]
+  if (row === undefined || readOnlyRows(form)[at] === true) return form
+  // an edited row is written from its fields, no longer as it was stored, and is a custom row from here on, whatever it began as
   const { [rowId]: _stored, ...rows } = form.original.rows
-  return { ...form, registry: form.registry.map((candidate) => candidate === row ? { ...row, [field]: value } : candidate), original: { ...form.original, rows } }
+  return { ...form, registry: form.registry.map((candidate) => candidate === row ? { ...row, builtIn: false, [field]: value } : candidate), original: { ...form.original, rows } }
 }
 
 // a built-in row cannot be removed; a registry left with no row at all shows the built-in table again, which is what an empty registry means
 export const removeRow = (form: ModelsForm, rowId: string): ModelsForm => {
-  const row = form.registry.find((candidate) => candidate.rowId === rowId)
-  if (row === undefined || row.builtIn) return form
+  const at = form.registry.findIndex((candidate) => candidate.rowId === rowId)
+  const row = form.registry[at]
+  if (row === undefined || readOnlyRows(form)[at] === true) return form
   const registry = form.registry.filter((candidate) => candidate !== row)
   return { ...form, registry: registry.length === 0 ? builtInEntries.map((entry) => builtInRow(entry, `built-in:${entry.id}`)) : registry }
 }
@@ -207,9 +212,10 @@ export const runnerChoices = (value: string): Choice<string>[] => {
 // the ids a slot or the fallback can name: those of the rows the server would keep, in row order, once each. A row it sets aside for a bad field or a built-in id used for another entry, and a later row repeating an id, name nothing
 export const registryIds = (form: ModelsForm): string[] => {
   const seen: string[] = []
-  form.registry.forEach((row) => {
+  const readOnly = readOnlyRows(form)
+  form.registry.forEach((row, at) => {
     const { id } = fieldsOf(form, row)
-    if (!seen.includes(id) && rowProblems(form, row).length === 0) seen.push(id)
+    if (!seen.includes(id) && rowProblems(form, row, readOnly[at] === true).length === 0) seen.push(id)
   })
   return seen
 }
@@ -247,10 +253,10 @@ const modelProblem = (model: string): string | null => {
 }
 
 // what is wrong with one custom row by its own fields, as the entry rules the server applies to it: a field and its reason, none for a built-in row, which cannot be edited. A repeated id is not here, since it depends on the rows before
-const rowProblems = (form: ModelsForm, row: RegistryRow): { field: 'id' | 'runner' | 'provider' | 'model', reason: string }[] => {
-  if (row.builtIn) return []
-  const { id, runner, provider, model } = fieldsOf(form, row)
-  const problems: { field: 'id' | 'runner' | 'provider' | 'model', reason: string }[] = []
+type RowProblem = { field: 'id' | 'runner' | 'provider' | 'model', reason: string }
+
+const fieldProblems = ({ id, runner, provider, model }: { id: string, runner: string, provider: string, model: string }): RowProblem[] => {
+  const problems: RowProblem[] = []
   const idBad = !labelPattern.test(id)
   const runnerBad = !runnerNames.includes(runner)
   const providerBad = !labelPattern.test(provider)
@@ -268,15 +274,40 @@ const rowProblems = (form: ModelsForm, row: RegistryRow): { field: 'id' | 'runne
   return problems
 }
 
+// which rows are the read-only built-in rows, by position, decided from the rows as they are now so that every edit, add, and remove can change it. A row is read-only when it began as an exact restatement of a built-in entry (`builtIn`) and no earlier row that passes its own checks holds the same id, the server's rule that the first entry holding an id stands and a later one is refused as a repeat. A row an earlier row has taken the id of is an ordinary row again, so it can be edited or removed, and it is read-only again once that earlier row goes or changes its id
+export const readOnlyRows = (form: ModelsForm): boolean[] => {
+  const held: string[] = []
+  return form.registry.map((row) => {
+    const fields = fieldsOf(form, row)
+    const readOnly = row.builtIn && !held.includes(fields.id)
+    if (readOnly || fieldProblems(fields).length === 0) held.push(fields.id)
+    return readOnly
+  })
+}
+
+// whether a row's read-only mark differs between two forms, by position, which the page redraws those rows for; a row an edit did not touch keeps its elements, and with them the focus and the text being typed
+export const readOnlyChanged = (before: ModelsForm, after: ModelsForm): number[] => {
+  const was = readOnlyRows(before)
+  const now = readOnlyRows(after)
+  const changed: number[] = []
+  if (before.registry.length !== after.registry.length) return after.registry.map((_row, at) => at)
+  now.forEach((value, at) => { if (was[at] !== value || before.registry[at]?.rowId !== after.registry[at]?.rowId) changed.push(at) })
+  return changed
+}
+
+const rowProblems = (form: ModelsForm, row: RegistryRow, readOnly: boolean): RowProblem[] => readOnly ? [] : fieldProblems(fieldsOf(form, row))
+
 export const modelsErrors = (form: ModelsForm): FieldError[] => {
   const errors: FieldError[] = []
+  // the ids the server has seen by each row: those of the rows before it that pass their own checks, since it refuses the first that does not, so a repeat is only ever named against a row that stood
   const earlier: string[] = []
+  const readOnly = readOnlyRows(form)
   form.registry.forEach((row, index) => {
-    const problems = rowProblems(form, row)
+    const problems = rowProblems(form, row, readOnly[index] === true)
     for (const { field, reason } of problems) errors.push({ field: `models.registry.${index}.${field}`, message: `${capitalize(reason)}.` })
     const { id } = fieldsOf(form, row)
-    if (!row.builtIn && problems.length === 0 && earlier.includes(id)) errors.push({ field: `models.registry.${index}.id`, message: 'Id appears twice.' })
-    earlier.push(id)
+    if (problems.length === 0 && earlier.includes(id)) errors.push({ field: `models.registry.${index}.id`, message: 'Id appears twice.' })
+    if (problems.length === 0) earlier.push(id)
   })
   return errors
 }
@@ -293,11 +324,11 @@ export const modelsServerError = (message: string, form: ModelsForm): FieldError
     const reason = entry[2] ?? ''
     const row = form.registry[index]
     // a read-only row has no control to hold the message, so it stays in the card's summary with the row named
-    if (row === undefined || row.builtIn) return whole
+    if (row === undefined || readOnlyRows(form)[index] === true) return whole
     return { field: `models.registry.${index}.${rowField(reason)}`, message: `${capitalize(reason)}.` }
   }
   const field = /^models\.registry\[(\d+)\]\.[^:]*: /.exec(message)
-  if (field !== null) return form.registry[Number(field[1])]?.builtIn !== false ? whole : { field: `models.registry.${field[1]}.id`, message }
+  if (field !== null) return form.registry[Number(field[1])] === undefined || readOnlyRows(form)[Number(field[1])] === true ? whole : { field: `models.registry.${field[1]}.id`, message }
   const registry = /^models\.registry must (.+)$/.exec(message)
   if (registry !== null) return { field: 'models.registry', message: `Must ${registry[1]}.` }
   const fallback = /^models\.fallback must (.+)$/.exec(message)

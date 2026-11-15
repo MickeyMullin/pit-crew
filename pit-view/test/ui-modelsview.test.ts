@@ -23,11 +23,11 @@ test('a built-in row is read-only text marked built-in, and a custom row edits a
   const calls: string[] = []
   const handlers = { edit: (id: string, field: string, value: string) => calls.push(`edit ${id} ${field} ${value}`), remove: (id: string) => calls.push(`remove ${id}`) }
   const form = editRow(addCustomRow(toModelsForm(undefined, (() => { let n = 0; return () => `b${++n}` })()), 'c1'), 'c1', 'entryId', 'mine')
-  const builtIn = fake(registryRow(form.registry[0]!, 0, handlers))
+  const builtIn = fake(registryRow(form.registry[0]!, 0, true, handlers))
   assert.equal(builtIn.querySelectorAll('input').length + builtIn.querySelectorAll('select').length + builtIn.querySelectorAll('button').length, 0)
   assert.match(builtIn.textContent, /sonnet/)
   assert.match(builtIn.textContent, /Built-in/)
-  const custom = fake(registryRow(form.registry[builtInEntries.length]!, builtInEntries.length, handlers))
+  const custom = fake(registryRow(form.registry[builtInEntries.length]!, builtInEntries.length, false, handlers))
   assert.equal(custom.querySelectorAll('input').length, 3)
   assert.deepEqual(custom.querySelectorAll('option').map((option) => option.getAttribute('value')), ['claude', 'codex', 'hermes'])
   const [id, provider, model] = custom.querySelectorAll('input') as [FakeElement, FakeElement, FakeElement]

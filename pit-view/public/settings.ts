@@ -6,7 +6,7 @@ import type { Config } from '../src/config.ts'
 import type { ModelsView } from '../src/models.ts'
 import type { View } from '../src/poller.ts'
 import { avatar } from './cells.ts'
-import { addCustomRow, choicesNeedRedraw, editRow, fallbackChoices, removeRow, routeWarnings, setFallback, setSlot, slotAsRead, slotChoices, slotControls, slotOf } from './models-form.ts'
+import { addCustomRow, choicesNeedRedraw, editRow, fallbackChoices, readOnlyChanged, readOnlyRows, removeRow, routeWarnings, setFallback, setSlot, slotAsRead, slotChoices, slotControls, slotOf } from './models-form.ts'
 import type { RowField } from './models-form.ts'
 import { choiceField, registryRow } from './modelsview.ts'
 import type { RegistryHandlers } from './modelsview.ts'
@@ -861,6 +861,8 @@ const modelsHandlers: RegistryHandlers = {
     if (page === null) return
     const before = page.form.models
     page.form.models = editRow(before, rowId, field, value)
+    // an edit can take an id from a later row, or give one back, which changes which row is read-only; only those rows are drawn again, so the field being typed in keeps its focus and text
+    redrawRows(readOnlyChanged(before, page.form.models))
     // the choices offer the ids of the rows the server keeps, which any field of a row can change
     if (choicesNeedRedraw(before, page.form.models)) renderModelChoices()
     changed()
@@ -870,7 +872,8 @@ const modelsHandlers: RegistryHandlers = {
     const index = page.form.models.registry.findIndex((row) => row.rowId === rowId)
     if (index < 0) return
     // the Remove buttons are the custom rows' alone, so focus finds its place among those
-    const position = page.form.models.registry.slice(0, index).filter((row) => !row.builtIn).length
+    const readOnlyBefore = readOnlyRows(page.form.models)
+    const position = readOnlyBefore.slice(0, index).filter((readOnly) => !readOnly).length
     const before = page.form.models
     page.form.models = removeRow(before, rowId)
     renderRegistry()
@@ -884,7 +887,21 @@ const modelsHandlers: RegistryHandlers = {
 
 const renderRegistry = (): void => {
   if (page === null) return
-  byId('models-registry').replaceChildren(...page.form.models.registry.map((row, index) => registryRow(row, index, modelsHandlers)))
+  const readOnly = readOnlyRows(page.form.models)
+  byId('models-registry').replaceChildren(...page.form.models.registry.map((row, index) => registryRow(row, index, readOnly[index] === true, modelsHandlers)))
+}
+
+// draws again only the rows at these positions, leaving the others, and the field being typed in, as they are
+const redrawRows = (positions: readonly number[]): void => {
+  if (page === null || positions.length === 0) return
+  const readOnly = readOnlyRows(page.form.models)
+  const rows = page.form.models.registry
+  const table = byId('models-registry')
+  for (const at of positions) {
+    const row = rows[at]
+    const old = table.children[at]
+    if (row !== undefined && old !== undefined) old.replaceWith(registryRow(row, at, readOnly[at] === true, modelsHandlers))
+  }
 }
 
 // the fallback and the slots, with what the server reads for each and the warnings about it beside it

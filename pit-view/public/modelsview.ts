@@ -56,11 +56,11 @@ const customCells = (row: RegistryRow, index: number, handlers: RegistryHandlers
   ]
 }
 
-// one row of the registry: a built-in entry read-only and marked, a custom one with a control for each field and a Remove
-export const registryRow = (row: RegistryRow, index: number, handlers: RegistryHandlers): HTMLFieldSetElement =>
-  h('fieldset', { class: `row models-grid${row.builtIn ? ' models-builtin' : ''}`, 'data-row': row.rowId },
-    h('legend', { class: 'sr-only' }, row.builtIn ? `Built-in model ${row.entryId}` : `Model ${index + 1}${row.entryId.trim() === '' ? '' : `: ${row.entryId.trim()}`}`),
-    ...(row.builtIn ? builtInCells(row) : customCells(row, index, handlers)))
+// one row of the registry: the read-only built-in row (as `readOnlyRows` decides) shown and marked, any other with a control for each field and a Remove
+export const registryRow = (row: RegistryRow, index: number, readOnly: boolean, handlers: RegistryHandlers): HTMLFieldSetElement =>
+  h('fieldset', { class: `row models-grid${readOnly ? ' models-builtin' : ''}`, 'data-row': row.rowId },
+    h('legend', { class: 'sr-only' }, readOnly ? `Built-in model ${row.entryId}` : `Model ${index + 1}${row.entryId.trim() === '' ? '' : `: ${row.entryId.trim()}`}`),
+    ...(readOnly ? builtInCells(row) : customCells(row, index, handlers)))
 
 export type ChoiceProps = {
   // the field key, which names the control, its error, and its notes
