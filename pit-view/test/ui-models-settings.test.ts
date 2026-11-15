@@ -36,7 +36,7 @@ test('the page keeps a copy of the built-in table and the defaults, and a test k
 
 test('the empty setting shows the built-in models: every built-in row read-only, nothing set, and nothing to save', () => {
   const form = formOf(undefined)
-  assert.deepEqual(form.registry.map((row) => [row.entryId, row.builtIn]), builtInRegistry.map((model) => [model.id, true]))
+  assert.deepEqual(form.registry.map((row, at) => [row.entryId, readOnlyRows(form)[at]]), builtInRegistry.map((model) => [model.id, true]))
   assert.deepEqual(form.registry.map((row) => [row.runner, row.provider, row.model]), builtInRegistry.map((model) => [model.runner, model.provider, model.model]))
   assert.equal(form.fallback, '')
   assert.deepEqual(slotControls.map((one) => [one.field, one.defaultId]), [
@@ -62,7 +62,7 @@ test('a non-object, a list, and an empty registry read as the empty setting', ()
 test('a stored setting fills each control and serializes back to exactly the stored shape', () => {
   const raw = { registry: [entry], fallback: 'mine', slots: { review: ['mine', 'mine'], stack: 'mine', autoReviewBot: 'mine' } }
   const form = formOf(raw)
-  assert.deepEqual(form.registry.map((row) => [row.builtIn, row.entryId, row.runner, row.provider, row.model]), [[false, 'mine', 'hermes', 'openrouter', 'vendor/model-x']])
+  assert.deepEqual(form.registry.map((row, at) => [readOnlyRows(form)[at], row.entryId, row.runner, row.provider, row.model]), [[false, 'mine', 'hermes', 'openrouter', 'vendor/model-x']])
   assert.equal(form.fallback, 'mine')
   assert.equal(form.slots.stack, 'mine')
   assert.equal(form.slots.sweep, '')
@@ -76,7 +76,7 @@ test('a stored setting fills each control and serializes back to exactly the sto
 
 test('an entry that restates a built-in entry exactly is that built-in row, read-only, and a registry of built-ins in table order is the empty registry', () => {
   const restated = formOf({ registry: [...builtInRegistry, entry] })
-  assert.deepEqual(restated.registry.map((row) => row.builtIn), [true, true, true, true, true, true, true, false])
+  assert.deepEqual(readOnlyRows(restated), [true, true, true, true, true, true, true, false])
   assert.deepEqual(modelsSetting(restated), { registry: [...builtInRegistry, entry] })
   assert.equal(modelsSetting(formOf({ registry: [...builtInRegistry] })), undefined)
   // a registry the owner trimmed by hand stays as it is, so saving never changes which models a slot can name
@@ -112,7 +112,7 @@ test('adding, editing, and removing a custom entry changes the registry and noth
   const added = addCustomRow(start, 'new1')
   assert.equal(added.registry.length, builtInRegistry.length + 1)
   const row = added.registry[added.registry.length - 1]
-  assert.deepEqual([row?.rowId, row?.builtIn, row?.entryId, row?.provider, row?.model], ['new1', false, '', '', ''])
+  assert.deepEqual([row?.rowId, readOnlyRows(added)[added.registry.length - 1], row?.entryId, row?.provider, row?.model], ['new1', false, '', '', ''])
   assert.equal(start.registry.length, builtInRegistry.length)
   const edited = editRow(editRow(editRow(editRow(added, 'new1', 'entryId', ' mine '), 'new1', 'runner', 'hermes'), 'new1', 'provider', 'openrouter'), 'new1', 'model', 'vendor/model-x')
   assert.deepEqual(modelsSetting(edited), { registry: [...builtInRegistry, entry] })
@@ -163,7 +163,7 @@ test('nothing in the form can carry a key, a secret, a token, or a password', ()
     secret: 'z',
   }
   const form = formOf(hostile)
-  assert.deepEqual(Object.keys(form.registry[0] ?? {}).sort(), ['builtIn', 'entryId', 'model', 'provider', 'rowId', 'runner'])
+  assert.deepEqual(Object.keys(form.registry[0] ?? {}).sort(), ['entryId', 'model', 'provider', 'rowId', 'runner'])
   const text = JSON.stringify(modelsSetting(form))
   assert.doesNotMatch(text, /key|token|password|secret/i)
   assert.deepEqual(modelsSetting(form), { registry: [entry], fallback: 'mine', slots: { review: ['mine', 'mine'], stack: 'mine' } })
@@ -314,7 +314,7 @@ const sonnet = { id: 'sonnet', runner: 'claude', provider: 'anthropic', model: '
 test('only the first entry that restates a built-in entry is the read-only built-in row; a repeat of it is an editable custom row that is flagged as a repeated id', () => {
   const stored = { registry: [sonnet, sonnet] }
   const form = formOf(stored)
-  assert.deepEqual(form.registry.map((row) => row.builtIn), [true, false])
+  assert.deepEqual(readOnlyRows(form), [true, false])
   assert.equal(modelsSaveProblem(stored) !== null, true)
   assert.deepEqual(modelsErrors(form).map((error) => error.field), ['models.registry.1.id'])
   assert.match(modelsErrors(form)[0]?.message ?? '', /appears twice/)
@@ -327,7 +327,7 @@ test('removing the repeated built-in row clears the error and saves what the ser
   const form = formOf({ registry: [sonnet, sonnet] })
   const repeat = form.registry[1] as { rowId: string }
   const next = removeRow(form, repeat.rowId)
-  assert.deepEqual(next.registry.map((row) => row.builtIn), [true])
+  assert.deepEqual(readOnlyRows(next), [true])
   assert.deepEqual(modelsErrors(next), [])
   const saved = modelsSetting(next)
   assert.equal(modelsSaveProblem(saved), null)
@@ -338,17 +338,17 @@ test('a repeat of a custom id, a custom row restating a built-in id differently,
   const twice = formOf({ registry: [entry, { ...entry }] })
   assert.deepEqual(modelsErrors(twice).map((error) => error.field), ['models.registry.1.id'])
   const differs = formOf({ registry: [{ ...sonnet, model: 'other' }] })
-  assert.deepEqual(differs.registry.map((row) => row.builtIn), [false])
+  assert.deepEqual(readOnlyRows(differs), [false])
   assert.deepEqual(modelsErrors(differs).map((error) => error.field), ['models.registry.0.id'])
   assert.match(modelsErrors(differs)[0]?.message ?? '', /built-in model id/)
   const empty = formOf({ registry: [{ ...entry, id: '' }] })
   assert.deepEqual(modelsErrors(empty).map((error) => error.field), ['models.registry.0.id'])
 })
 
-test('a custom row that holds a built-in id with other values makes every later entry with that id a custom row too, in the server\'s order', () => {
+test('a custom row that holds a built-in id with other values holds nothing, so the first exact restatement after it is the read-only row and the next is the repeat, and the server names the earlier row first', () => {
   const stored = { registry: [{ ...sonnet, model: 'other' }, sonnet, sonnet] }
   const form = formOf(stored)
-  assert.deepEqual(form.registry.map((row) => row.builtIn), [false, false, false])
+  assert.deepEqual(readOnlyRows(form), [false, true, false])
   const message = modelsSaveProblem(stored) as string
   assert.equal(modelsServerError(message, form).field, 'models.registry.0.id')
 })
@@ -449,9 +449,9 @@ test('a row with several problems shows its field problems first, and the repeat
     ['models.registry.2.id', modelsErrors(form)[1]?.message],
     ['models.registry.3.id', 'Id appears twice.'],
   ])
-  // the first row to hold an id is never a repeat, a later exact restatement after a custom row holding that built-in id is an editable row, and a repeat is named only against a row that stood, as the server names only the first row it refuses
+  // the first row to hold an id is never a repeat, an exact restatement after a row that fails its own checks is the read-only row, and a repeat is named only against a row that stood, as the server names only the first row it refuses
   const restated = formOf({ registry: [{ ...entry, id: 'sonnet', model: 'haiku' }, builtInRegistry[0]] })
-  assert.deepEqual(restated.registry.map((row) => row.builtIn), [false, false])
+  assert.deepEqual(readOnlyRows(restated), [false, true])
   assert.deepEqual(modelsErrors(restated).map((error) => error.field), ['models.registry.0.id'])
 })
 
@@ -535,7 +535,7 @@ test('a stored registry the server would refuse is refused visibly at its row, w
     assert.deepEqual(modelsSetting(form), projectModels(raw), `${name}: written back as stored`)
     const refusal = modelsServerError(modelsSaveProblem(modelsSetting(form)) as string, form)
     assert.notEqual(refusal.field, null, `${name}: the server's refusal lands on a control`)
-    assert.equal(form.registry[row]?.builtIn, false, `${name}: the row is editable`)
+    assert.equal(readOnlyRows(form)[row], false, `${name}: the row is editable`)
     // removing every row with an error makes the save pass the server's check
     let fixed = form
     for (const bad of [...new Set(errors.map((error) => Number(/^models\.registry\.(\d+)\./.exec(error.field as string)?.[1])))].sort((a, b) => b - a)) fixed = removeRow(fixed, form.registry[bad]?.rowId as string)
@@ -583,15 +583,15 @@ const agrees = (form: ModelsForm, name: string): void => {
 
 const customSonnet = { id: 'custom', runner: 'claude', provider: 'anthropic', model: 'sonnet' }
 
-test('renaming an earlier custom row to a built-in id makes the later built-in row an editable repeat that the form names, as the server does', () => {
+test('renaming an earlier custom row to a built-in id with that entry\'s values makes it the read-only row and the later row the editable repeat, as the server names it', () => {
   const start = formOf({ registry: [customSonnet, builtInRegistry[0]] })
   assert.deepEqual(readOnlyRows(start), [false, true])
   agrees(start, 'start')
   const renamed = editRow(start, start.registry[0]?.rowId as string, 'entryId', 'sonnet')
-  assert.deepEqual(readOnlyRows(renamed), [false, false])
+  assert.deepEqual(readOnlyRows(renamed), [true, false])
   assert.deepEqual(modelsErrors(renamed).map((error) => [error.field, error.message]), [['models.registry.1.id', 'Id appears twice.']])
   agrees(renamed, 'renamed')
-  assert.deepEqual(readOnlyChanged(start, renamed), [1])
+  assert.deepEqual(readOnlyChanged(start, renamed), [0, 1])
   // the repeated row can be edited or removed on its own, and either passes the server's check
   const rowId = renamed.registry[1]?.rowId as string
   assert.equal(modelsSaveProblem(modelsSetting(removeRow(renamed, rowId))), null)
@@ -601,13 +601,14 @@ test('renaming an earlier custom row to a built-in id makes the later built-in r
   assert.equal(modelsSaveProblem(modelsSetting(reworked)), null)
 })
 
-test('a row that stops holding the id gives it back, and removing the earlier row does too', () => {
-  const renamed = editRow(formOf({ registry: [customSonnet, builtInRegistry[0]] }), 'r1', 'entryId', 'sonnet')
+test('a row that takes a built-in id with other values holds nothing, and removing it leaves the exact restatement read-only', () => {
+  const differing = formOf({ registry: [{ ...customSonnet, model: 'other' }, builtInRegistry[0]] })
+  const renamed = editRow(differing, 'r1', 'entryId', 'sonnet')
+  assert.deepEqual(readOnlyRows(renamed), [false, true])
+  agrees(renamed, 'renamed to a built-in id with other values')
   const back = editRow(renamed, 'r1', 'entryId', 'custom')
   assert.deepEqual(readOnlyRows(back), [false, true])
-  assert.deepEqual(readOnlyChanged(renamed, back), [1])
   agrees(back, 'renamed back')
-  // typing through an id that is not valid yet leaves the later row as it is
   const typing = editRow(renamed, 'r1', 'entryId', 'sonne')
   assert.deepEqual(readOnlyRows(typing), [false, true])
   agrees(typing, 'typing')
@@ -631,12 +632,13 @@ test('an added row that restates a built-in id, and an added row that takes a la
   const base = formOf({ registry: [customSonnet, builtInRegistry[0]] })
   agrees(fill(addCustomRow(base, 'new'), 'extra', { provider: 'anthropic', model: 'sonnet' }), 'added unrelated')
   // a repeat is named only against a row that stood: a custom row holding the id with a bad field is refused alone
-  const bad = editRow(base, 'r1', 'entryId', 'sonnet')
-  const badModel = editRow(bad, 'r1', 'model', '')
+  const badModel = editRow(editRow(base, 'r1', 'model', ''), 'r1', 'entryId', 'sonnet')
   assert.deepEqual(modelsErrors(badModel).map((error) => error.field), ['models.registry.0.model'])
   assert.deepEqual(readOnlyRows(badModel), [false, true])
   agrees(badModel, 'earlier row with a bad field')
-  agrees(editRow(badModel, 'r1', 'model', 'sonnet'), 'earlier row fixed')
+  const fixed = editRow(badModel, 'r1', 'model', 'sonnet')
+  assert.deepEqual(readOnlyRows(fixed), [true, false])
+  agrees(fixed, 'earlier row fixed')
 })
 
 test('the offered ids, the built-in table state, and the choices follow the rows as they are after each of these edits', () => {
@@ -653,5 +655,76 @@ test('the page redraws only the rows whose read-only mark changed, so the field 
   assert.match(page, /redrawRows\(readOnlyChanged\(before, page\.form\.models\)\)/)
   assert.doesNotMatch(page, /\.builtIn\b/)
   const view = await publicFile('modelsview.ts')
-  assert.doesNotMatch(view, /row\.builtIn/)
+  assert.doesNotMatch(view, /\.builtIn\b/)
+})
+
+// the read-only rows are a function of the current rows alone, compared with the server on every small registry: the form as built, after removing each row, and after editing each field of each row to each other value
+type Fields = { id: string, runner: string, provider: string, model: string }
+const rowKinds = (id: string): Fields[] => {
+  const exact = builtInRegistry.find((model) => model.id === id) ?? { id, runner: 'hermes', provider: 'openrouter', model: 'vendor/model-x' }
+  return [{ ...exact, id }, { ...exact, id, model: 'other-model' }, { ...exact, id, runner: 'bogus' }, { id, runner: exact.runner, model: exact.model } as Fields]
+}
+const shapes = (): Fields[][] => {
+  const rows = ['sonnet', 'mine', ''].flatMap(rowKinds)
+  const all: Fields[][] = rows.map((row) => [row])
+  for (const first of rows) for (const second of rows) {
+    all.push([first, second])
+    for (const third of rows) all.push([first, second, third])
+  }
+  return all
+}
+const editValues: Record<RowFieldName, string[]> = { entryId: ['sonnet', 'mine', ''], runner: ['claude', 'hermes', 'bogus'], provider: ['anthropic', ''], model: ['sonnet', 'other-model', ''] }
+type RowFieldName = 'entryId' | 'runner' | 'provider' | 'model'
+
+// the server's rule written out separately: a row is the built-in row when the server accepts it alone, it restates a built-in entry, and no earlier row the server accepts alone holds its id
+const serverReadOnly = (setting: Record<string, unknown> | undefined): boolean[] => {
+  const rows = (setting?.registry ?? []) as Record<string, unknown>[]
+  const held: unknown[] = []
+  return rows.map((row) => {
+    const alone = modelsSaveProblem({ registry: [row] }) === null
+    const readOnly = alone && builtInRegistry.some((model) => model.id === row.id && model.runner === row.runner && model.provider === row.provider && model.model === row.model) && !held.includes(row.id)
+    if (alone) held.push(row.id)
+    return readOnly
+  })
+}
+
+const agreesWithServer = (form: ModelsForm, name: string): void => {
+  const setting = modelsSetting(form)
+  const rule = setting === undefined ? form.registry.map(() => true) : serverReadOnly(setting)
+  assert.deepEqual(readOnlyRows(form), rule, `${name}: read-only rows`)
+  const server = modelsSaveProblem(setting)
+  const errors = modelsErrors(form)
+  if (server === null) return assert.deepEqual(errors, [], `${name}: no error where the server accepts`)
+  assert.deepEqual(errors[0], modelsServerError(server, form), `${name}: the first error is the server's refusal`)
+  assert.equal(readOnlyRows(form)[Number(/^models\.registry\[(\d+)\]/.exec(server)?.[1])], false, `${name}: the named row is editable`)
+}
+
+test('read-only rows follow the current rows alone and agree with the server on every small registry, after every removal and every single-field edit', () => {
+  for (const shape of shapes()) {
+    const name = JSON.stringify(shape)
+    const form = formOf({ registry: shape })
+    agreesWithServer(form, name)
+    for (const row of form.registry) {
+      const removed = removeRow(form, row.rowId)
+      agreesWithServer(removed, `${name} without ${row.rowId}`)
+      for (const [field, values] of Object.entries(editValues) as [RowFieldName, string[]][]) {
+        for (const value of values) agreesWithServer(editRow(form, row.rowId, field, value), `${name}: ${row.rowId}.${field}=${value}`)
+      }
+    }
+  }
+})
+
+test('an invalid earlier row never claims a built-in id: removing it leaves the exact restatement read-only and not removable, and the reverse order does too', () => {
+  const invalid = { ...sonnet, model: 'other' }
+  const form = formOf({ registry: [invalid, sonnet] })
+  assert.deepEqual(readOnlyRows(form), [false, true])
+  const removed = removeRow(form, form.registry[0]?.rowId as string)
+  assert.deepEqual(readOnlyRows(removed), [true])
+  assert.equal(removeRow(removed, removed.registry[0]?.rowId as string), removed)
+  assert.equal(editRow(removed, removed.registry[0]?.rowId as string, 'model', 'x'), removed)
+  const reverse = formOf({ registry: [sonnet, invalid] })
+  assert.deepEqual(readOnlyRows(reverse), [true, false])
+  assert.deepEqual(readOnlyRows(removeRow(reverse, reverse.registry[1]?.rowId as string)), [true])
+  agreesWithServer(form, 'finding')
+  agreesWithServer(reverse, 'reverse')
 })
