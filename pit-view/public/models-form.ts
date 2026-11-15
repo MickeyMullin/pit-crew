@@ -136,7 +136,7 @@ export const modelsSetting = (form: ModelsForm): Record<string, unknown> | undef
   for (const name of ['review', 'autoReviewHuman'] as const) {
     const kept = form.original.slots[name]
     const [primary, secondary] = form.slots[name]
-    if (kept !== undefined) slots[name] = [...kept]
+    if (kept !== undefined) slots[name] = typeof kept === 'string' ? kept : [...kept]
     else if (primary !== '' || secondary !== '') slots[name] = [primary === '' ? builtInSlotDefaults[name][0] : primary, secondary === '' ? builtInSlotDefaults[name][1] : secondary]
   }
   for (const name of ['stack', 'sweep', 'autoReviewBot'] as const) {

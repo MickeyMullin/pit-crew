@@ -391,6 +391,7 @@ const handEdited: { name: string, raw: Record<string, unknown> }[] = [
   { name: 'a built-in id restated differently, set aside', raw: { registry: [{ ...usable, id: 'opus', model: 'haiku' }, usable], slots: { stack: 'opus', review: ['opus', 'extra'] } } },
   { name: 'an entry the server sets aside for spaces around a field', raw: { registry: [{ ...usable, provider: ' anthropic' }, { ...usable, id: 'other' }], slots: { stack: 'extra' } } },
   { name: 'a registry that is not usable at all', raw: { registry: [setAside], slots: { stack: 'aside' } } },
+  { name: 'a bare model id on both pair slots', raw: { registry: [usable], slots: { review: 'extra', autoReviewHuman: 'sonnet' } } },
 ]
 
 test('a save with no edit never changes what the server resolves for any slot or the fallback, for every hand-edited shape', () => {
@@ -399,6 +400,10 @@ test('a save with no edit never changes what the server resolves for any slot or
     const served = projectModels(raw)
     assert.deepEqual(resolvedOf(modelsSetting(formOf(served))), resolvedOf(served), name)
     assert.deepEqual({ ...resolvedOf(modelsSetting(formOf(raw))), warnings: [] }, { ...resolvedOf(raw), warnings: [] }, name)
+    // what the form writes back must pass the same save check the server applies, whenever the stored value did, and a stored bare id is written back as that bare id
+    if (modelsSaveProblem(raw) === null) assert.equal(modelsSaveProblem(modelsSetting(formOf(raw))), null, name)
+    const slotsOf = (raw as { slots?: Record<string, unknown> }).slots
+    for (const slot of ['review', 'autoReviewHuman']) if (typeof slotsOf?.[slot] === 'string') assert.equal((modelsSetting(formOf(raw))?.slots as Record<string, unknown>)[slot], slotsOf[slot], `${name}: ${slot}`)
   }
 })
 
