@@ -1375,6 +1375,13 @@ const clearedResult = (parsed: Parsed<RunResultJson>, secrets: readonly string[]
   return parsed.ok ? { ok: true, value: withoutKeysDeep(parsed.value, secrets) as RunResultJson } : { ok: false, error: withoutKeysDeep(parsed.error, secrets) as string }
 }
 
+// the report path of a valid review result as written, for the guarded clearing of the report only
+const rawReportPath = (text: string | null): string | null => {
+  if (text === null) return null
+  const parsed = parseResult(text)
+  return parsed.ok && parsed.value.schema === 'pit-crew/review-result@1' ? reportPath(parsed.value) : null
+}
+
 const keyNotice = 'Pit View removed the contents of this file because it could not take a key out of it.\n'
 
 const clip = (text: string, length = 300): string => text.length > length ? `${text.slice(0, length)}…` : text
@@ -2814,20 +2821,21 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   }
 
   // the report a valid result names, taken out of every key, only when it is a regular file inside the reports folder
-  const clearReport = async (value: RunResultJson, id: number, secrets: readonly string[]): Promise<void> => {
-    const path = reportPath(value)
+  const clearReport = async (value: RunResultJson, id: number, secrets: readonly string[], named: string | null = reportPath(value)): Promise<void> => {
+    const path = named
     if (path === null || value.schema !== 'pit-crew/review-result@1' || secrets.length === 0 || !await inReports(expandHome(path, home))) return
     await clearPath(expandHome(path, home), 'the report', id, secrets, false)
   }
 
   // the report a review finished with, recorded by its hash, so Post it can tell it from what a later run wrote to the same name. Only a run has the column, and only a review posts. A hermes child has no sandbox and may write a key into the report its result names, so for a hermes run that report is cleared of every key first and the hash is that of the cleared text
-  const finishedReport = async (value: RunResultJson, id: number, secrets: readonly string[] = [], hermes = false): Promise<RunChanges> => {
+  const finishedReport = async (value: RunResultJson, id: number, secrets: readonly string[] = [], hermes = false, named: string | null = reportPath(value)): Promise<RunChanges> => {
     if (store.schema !== null || value.schema !== 'pit-crew/review-result@1') return {}
-    const path = reportPath(value)
+    // the stored path is the redacted one; `named` is the path as the child wrote it, kept in memory for the guarded clearing and never stored, shown, or logged
+    const path = hermes ? named : reportPath(value)
     const inside = path !== null && hermes && await inReports(expandHome(path, home))
-    if (hermes) await clearReport(value, id, secrets)
-    // a hermes child has no sandbox and may name any file, so a path outside the reports folder is never opened: it has no hash
-    const text = path === null || (hermes && !inside) ? null : hermes ? await ownText(expandHome(path, home)) : await fs.readFile(expandHome(path, home)).catch(() => null)
+    if (hermes) await clearReport(value, id, secrets, named)
+    // a hermes child has no sandbox and may name any file, so a path outside the reports folder is never opened: it has no hash. A name that held a key is stored as [key], which names no file, so such a report has no hash either
+    const text = path === null || (hermes && (!inside || path !== reportPath(value))) ? null : hermes ? await ownText(expandHome(path, home)) : await fs.readFile(expandHome(path, home)).catch(() => null)
     return { reportHash: text === null ? null : reportHash(text) }
   }
 
@@ -2841,6 +2849,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     const secrets = entry.row.runner === 'hermes' ? await hermesSecrets(entry.id) : []
     const text = await ownText(join(entry.dir, 'result.json'))
     // a hermes child may write a key into any field of a valid result, so the result is cleared of every whole key, in the text and then in every string of what was parsed, before anything judges, stores, shows, or logs it
+    // the path the child wrote, before any key in it is replaced: held for the guarded clearing of the report alone
+    const written = text === null ? null : rawReportPath(text)
     let parsed = text === null ? null : clearedResult(parseResult(secrets.reduce((kept, secret) => kept.split(secret).join('[key]'), text)), secrets)
     // a launch of one kind takes only its own kind of result: a review's result in a sweep's folder is no result
     if (parsed?.ok === true && store.schema !== null && parsed.value.schema !== store.schema) {
@@ -2865,8 +2875,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     // any status: a blocked post leaves a finished review whose worker may have stopped to ask or failed over it
     if (parsed?.ok === true) {
       const path = reportPath(parsed.value)
-      if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
-      finished = await finishedReport(parsed.value, entry.id, secrets, entry.row.runner === 'hermes')
+      const hermes = entry.row.runner === 'hermes'
+      const named = hermes ? written ?? path : path
+      if (named !== null) reportExists = await fs.exists(expandHome(named, home)).catch(() => false)
+      finished = await finishedReport(parsed.value, entry.id, secrets, hermes, named)
     }
     const lastEvent = await hermesTail(entry, parsed, secrets)
     await clearLogs(entry, secrets)
@@ -3566,6 +3578,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       const dir = expandHome(run.dir, home)
       // a hermes child may have written a key into what it wrote since: result.json and events.jsonl are rewritten without any, and the result is cleared like the settle path clears it, in the text and then in every string of what was parsed
       const secrets = run.runner === 'hermes' ? await hermesSecrets(id) : []
+      // the path as the child wrote it, read before the clearing replaces any key in it
+      const written = run.runner === 'hermes' ? rawReportPath(await ownText(join(dir, 'result.json'))) : null
       await clearLogs({ dir, id }, secrets, ['result.json', 'events.jsonl'])
       const text = await ownText(join(dir, 'result.json'))
       if (text === null) return refuse(`result.json is missing from ${tildePath(dir, home)}`)
@@ -3573,15 +3587,15 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (!parsed.ok) return refuse(parsed.error)
       const value = parsed.value
       // the report the result names is cleared before any refusal below, so a refused re-read leaves no key in it
-      if (run.runner === 'hermes') await clearReport(value, id, secrets)
+      const named = run.runner === 'hermes' ? written ?? reportPath(value) : reportPath(value)
+      if (run.runner === 'hermes') await clearReport(value, id, secrets, named)
       const expected = run.command === 'fix-pr' ? 'pit-crew/fix-result@1' : run.command === 'update-pr' ? 'pit-crew/update-result@1' : 'pit-crew/review-result@1'
       if (value.schema !== expected) return refuse(`result.json has schema ${value.schema}, but this run's result has schema ${expected}`)
       if (value.command !== run.command) return refuse(`result.json is for command ${value.command}, not ${run.command}`)
       const moved = targetMismatch(run, run.result, value) ?? reviewedMismatch(run.result, value)
       if (moved !== null) return refuse(moved)
       let reportExists: boolean | null = null
-      const path = reportPath(value)
-      if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
+      if (named !== null) reportExists = await fs.exists(expandHome(named, home)).catch(() => false)
       // judged on its own: the stream's denials belong to the original attempt, and the owner has resolved them
       const judgement = judge({ stopped: false, restarted: false, exit: null, parsed, reportExists, denials: [], mayPost: mayPost(run.command, run.args), lastEvent: null })
       // a guard failure is the launcher's own verdict; a valid failed result carries its own error, whatever words that starts with
@@ -3591,7 +3605,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (judgement.status === run.status && note === run.note && JSON.stringify(judgement.result) === JSON.stringify(run.result)) {
         return refuse('result.json has not changed since the run settled')
       }
-      const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true, ...await finishedReport(value, id, secrets, run.runner === 'hermes') }
+      const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true, ...await finishedReport(value, id, secrets, run.runner === 'hermes', named) }
       // a re-read that turns a scheduled run done makes it a done run from then on, whose worktree goes
       if (judgement.status === 'done' && run.worktree !== null) Object.assign(changes, await cloneResume(run))
       // the first time a failed re-read replaces the note, the note recorded at exit moves to its own field, so a later finish by hand can still tell why the run first stopped; an original with no note is kept as an empty string, so firstNote stays set and a later failure cannot be copied in as the original

@@ -205,6 +205,19 @@ if (mode === 'reportat') {
   }))
   process.exit(0)
 }
+if (mode === 'namedreport') {
+  // a clean review whose report has a key in its own file name and in its content, and whose valid result names it
+  const number = Number(/^\\/review-pr (\\d+)/.exec(request)[1])
+  for (const line of lines) out(line)
+  const named = '~/agents/output/PR-' + number + '-' + allKeys[0] + '.md'
+  fs.writeFileSync(path.join(process.env.HOME, 'agents', 'output', 'PR-' + number + '-' + allKeys[0] + '.md'), 'Reviewed commit: feat/x @ f00dfac\\nthe token was ' + allKeys[0] + ' and ' + allKeys[1] + '\\n')
+  fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify({
+    schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: '${scenario.repo}', pr: number },
+    reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' }, verdict: 'clean', recommendation: null, findings: [],
+    ci: null, fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: named, question: null, error: null,
+  }))
+  process.exit(0)
+}
 if (mode === 'reportkey' || mode === 'sessionkey') {
   // 'reportkey': a clean review whose report holds both keys; 'sessionkey': a clean review whose last stream event names a key as its session
   const number = Number(/^\\/review-pr (\\d+)/.exec(request)[1])
@@ -1062,6 +1075,42 @@ test('a rewrite never writes through the old predictable temporary name: planted
     // only the links the test planted are left; the launcher's own temporary files are gone
     const left = [...(await readdir(runDir)), ...(await readdir(join(h.home, 'agents', 'output')))].filter((name) => name.endsWith('.tmp')).sort()
     assert.deepEqual(left, planted.map((name) => basename(name)).sort())
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a key in the file name of the report a valid result names does not hide the report from the clearing: its content is cleared, the stored path shows [key], and the run has no report hash, at settle and on a re-read', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    await h.mode('namedreport')
+    const run = await h.launcher.start(request)
+    const final = await h.launcher.settled(run.id)
+    assert.equal(final.status, 'done', final.note ?? '')
+    const folder = join(h.home, 'agents', 'output')
+    const file = join(folder, `PR-104-${fakeKey}.md`)
+    const cleared = await readFile(file, 'utf8')
+    holdsNoPiece(cleared, 'the report content')
+    assert.match(cleared, /the token was \[key\] and \[key\]/)
+    assert.equal(final.reportHash, null, 'the stored path does not name the file, so there is no hash')
+    assert.equal((final.result as { report?: string } | null)?.report, '~/agents/output/PR-104-[key].md')
+    holdsNoPiece(JSON.stringify([final, h.cache.getRun(run.id), runView(final), h.logs]), 'the row, the drawer, or the log')
+    // a re-read of a failed run whose resumed session writes such a report
+    await h.mode('failsession')
+    const second = await h.launcher.start(request)
+    assert.equal((await h.launcher.settled(second.id)).status, 'failed')
+    const again = join(folder, `PR-104-${otherKey}.md`)
+    await writeFile(again, `Reviewed commit: feat/x @ f00dfac\nagain ${fakeKey} and ${otherKey}\n`)
+    await writeFile(join(h.runDir(second), 'result.json'), JSON.stringify({
+      schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: scenario.repo, pr: 104 }, reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' },
+      verdict: 'clean', recommendation: null, findings: [], ci: null, fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: `~/agents/output/PR-104-${otherKey}.md`, question: null, error: null,
+    }))
+    const read = await h.launcher.reread(second.id)
+    assert.equal(read.status, 'done', read.note ?? '')
+    holdsNoPiece(await readFile(again, 'utf8'), 'the re-read report content')
+    assert.equal(read.reportHash, null)
+    assert.equal((read.result as { report?: string } | null)?.report, '~/agents/output/PR-104-[key].md')
+    holdsNoPiece(JSON.stringify([read, runView(read), h.logs]), 'the re-read row, drawer, or log')
   } finally {
     await h.cleanup()
   }
