@@ -14,6 +14,7 @@ import {
   procsFrom, runners, runView, systemFs, systemSpawn,
 } from '../src/launcher.ts'
 import type { LaunchSpec } from '../src/launcher.ts'
+import { runnerLabels } from '../public/agent.ts'
 import { openRouterKeyPath, writeOpenRouterKey } from '../src/openrouter.ts'
 import { systemTimers } from '../src/poller.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -103,6 +104,10 @@ test('agent.hermesProfile is lowercase letters and digits, defaults to pitview, 
   }
   // hermes is never the default runner: it starts only for a registry entry
   assert.throws(() => validateConfig({ ...base, agent: { runner: 'hermes' } }), /runner/)
+})
+
+test('a hermes run is named Hermes wherever the drawer names a run\'s runner', () => {
+  assert.deepEqual(runnerLabels, { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes' })
 })
 
 // the fake hermes: replays the recorded stream with an unknown event among its lines, writes the steps, the report, and the result a clean --no-post review writes, and records what it was called with. Its mode is a file in HOME
