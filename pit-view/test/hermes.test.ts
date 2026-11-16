@@ -2,7 +2,7 @@
 // the hermes runner (section 8 of DESIGN.md, Launching runs, The hermes runner): its command line and resume line, the stream it prints, the environment its child gets, which models it may start with, and what is refused. The end-to-end tests run the real launcher over a small fake hermes executable on a temp PATH and a recorded stream with invented content, so no model is ever called
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { chmod, mkdir, readdir, readFile, realpath, stat, utimes, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readdir, readFile, realpath, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { openCache } from '../src/cache.ts'
@@ -170,6 +170,17 @@ if (mode === 'stepkey' || mode === 'failsession' || mode === 'denials') {
     schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: '${scenario.repo}', pr: number },
     reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' }, verdict: 'clean', recommendation: null, findings: [],
     ci: null, fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: '~/agents/output/PR-' + number + '.md', question: null, error: null,
+  }))
+  process.exit(0)
+}
+if (mode === 'reportat') {
+  // a clean review whose valid result names, as its report, the path in target.txt
+  const number = Number(/^\\/review-pr (\\d+)/.exec(request)[1])
+  for (const line of lines) out(line)
+  fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify({
+    schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: '${scenario.repo}', pr: number },
+    reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' }, verdict: 'clean', recommendation: null, findings: [],
+    ci: null, fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: fs.readFileSync(path.join(process.env.HOME, 'target.txt'), 'utf8').trim(), question: null, error: null,
   }))
   process.exit(0)
 }
@@ -849,6 +860,43 @@ test('a key a hermes child writes into the report its valid result names is take
     assert.equal(read.reportHash, reportHash(again))
     assert.equal((await stat(file)).mode & 0o777, 0o640)
     holdsNoPiece(JSON.stringify([read, runView(read), h.logs]), 'the re-read row, drawer, or log')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the clearing of a report touches only a regular file inside the reports folder: a result that names a key file, a path that climbs out by .., or a symbolic link to a key file leaves that file byte for byte and in its modification time, at settle and on a re-read', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    const outside = join(h.home, 'agents', 'outside.md')
+    await writeFile(outside, `held ${fakeKey} and ${otherKey}\n`)
+    await utimes(outside, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'))
+    const link = join(h.home, 'agents', 'output', 'link.md')
+    await symlink(h.keyPath, link)
+    const targets = [h.keyPath, h.envPath, join(h.home, 'agents', 'output', '..', 'outside.md'), link]
+    const watched = [h.keyPath, h.envPath, outside]
+    const before = await Promise.all(watched.map(async (path) => ({ text: await readFile(path, 'utf8'), mtime: (await stat(path)).mtimeMs })))
+    const same = async (label: string): Promise<void> => {
+      const after = await Promise.all(watched.map(async (path) => ({ text: await readFile(path, 'utf8'), mtime: (await stat(path)).mtimeMs })))
+      assert.deepEqual(after, before, label)
+    }
+    for (const target of targets) {
+      await writeFile(join(h.home, 'target.txt'), target)
+      await h.mode('reportat')
+      const run = await h.launcher.start(request)
+      await h.launcher.settled(run.id)
+      await same(`after settle, naming ${target}`)
+      await h.mode('failsession')
+      const second = await h.launcher.start(request)
+      const failed = await h.launcher.settled(second.id)
+      assert.equal(failed.status, 'failed')
+      await writeFile(join(h.runDir(second), 'result.json'), JSON.stringify({
+        schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: scenario.repo, pr: 104 }, reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' },
+        verdict: 'clean', recommendation: null, findings: [], ci: null, fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: target, question: null, error: null,
+      }))
+      await h.launcher.reread(second.id)
+      await same(`after a re-read, naming ${target}`)
+    }
   } finally {
     await h.cleanup()
   }

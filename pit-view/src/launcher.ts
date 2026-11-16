@@ -2,7 +2,7 @@
 import { spawn as spawnChild } from 'node:child_process'
 import { closeSync, openSync, watch as watchDir } from 'node:fs'
 import { chmod, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { join, resolve, sep } from 'node:path'
+import { basename, join, resolve, sep } from 'node:path'
 import type { Cache, NewRun, NewSweep, Origin, QueueReason, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
 import { defaultHermesProfile, expandHome, normalizeExtraInstructions, tildePath } from './config.ts'
 import type { AgentSettings, Clock, Config, ExtraInstructions, RunnerName, RunRunner } from './config.ts'
@@ -2746,11 +2746,25 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     end(run, { status: 'failed', finishedAt: now(), note }, 'failed in the queue')
   }
 
+  // whether a path is a regular file inside the folder the report route serves: its resolved real path lies under the real reports folder, and the file is not itself a symbolic link. Any other path is no report the route can serve, so the clearing never reads or rewrites it
+  const inReports = async (path: string): Promise<boolean> => {
+    try {
+      const named = resolve(path)
+      const folder = await fs.realpath(join(home, 'agents', 'output'))
+      const real = await fs.realpath(named)
+      if (real !== join(await fs.realpath(resolve(named, '..')), basename(named))) return false
+      if (!real.startsWith(folder + sep)) return false
+      return (await stat(real)).isFile()
+    } catch {
+      return false
+    }
+  }
+
   // the report a review finished with, recorded by its hash, so Post it can tell it from what a later run wrote to the same name. Only a run has the column, and only a review posts. A hermes child has no sandbox and may write a key into the report its result names, so for a hermes run that report is cleared of every key first and the hash is that of the cleared text
   const finishedReport = async (value: RunResultJson, id: number, secrets: readonly string[] = []): Promise<RunChanges> => {
     if (store.schema !== null || value.schema !== 'pit-crew/review-result@1') return {}
     const path = reportPath(value)
-    if (path !== null) await clearPath(expandHome(path, home), 'the report', id, secrets, false)
+    if (path !== null && secrets.length > 0 && await inReports(expandHome(path, home))) await clearPath(expandHome(path, home), 'the report', id, secrets, false)
     const text = path === null ? null : await fs.readFile(expandHome(path, home)).catch(() => null)
     return { reportHash: text === null ? null : reportHash(text) }
   }
