@@ -167,6 +167,24 @@ if (mode.startsWith('boundary')) {
   process.stderr.write('x'.repeat(40) + keys[errKey] + 's'.repeat(600 - keys[errKey].length + o) + '\\n')
   process.exit(1)
 }
+if (mode.startsWith('result')) {
+  // 'result error|summary|nested': a valid result.json with the keys in a string field, in a finding's summary, or in nested fields and an object name
+  const [fakeKey, other] = allKeys
+  const number = Number(/^\\/review-pr (\\d+)/.exec(request)[1])
+  const base = {
+    schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: '${scenario.repo}', pr: number },
+    reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' }, verdict: 'clean', recommendation: null, findings: [],
+    ci: null, fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: '~/agents/output/PR-' + number + '.md', question: null, error: null,
+  }
+  const variant = mode.split(' ')[1]
+  if (variant === 'error') Object.assign(base, { status: 'failed', report: null, error: 'the provider said: bad key ' + fakeKey + ' and ' + other })
+  if (variant === 'summary') base.findings = [{ priority: 'P2', summary: 'a finding that quotes ' + fakeKey + ' and ' + other, files: [] }]
+  if (variant === 'nested') base.findings = [{ priority: 'P3', summary: 'plain', files: ['a.ts'], evidence: { lines: [['x', fakeKey]], [other]: other }, [fakeKey]: 1 }]
+  fs.writeFileSync(path.join(process.env.HOME, 'agents', 'output', 'PR-' + number + '.md'), 'Reviewed commit: feat/x @ f00dfac\\n')
+  fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify(base))
+  for (const line of lines) out(line)
+  process.exit(0)
+}
 const step = (name, state, note = null) => mode !== 'nosteps' && fs.appendFileSync(path.join(dir, 'events.jsonl'), JSON.stringify({ at: at(), step: name, state, note }) + '\\n')
 for (const line of lines.slice(0, -1)) out(line)
 out(JSON.stringify({ type: 'future_event', detail: 'not in the recorded stream' }))
@@ -663,3 +681,22 @@ test('the stream alone gives a hermes run its session id, resume line, and last 
     await h.cleanup()
   }
 })
+
+// a Hermes child may put a key into a valid result.json, and the result goes to the judge, the row, the note, and the log
+for (const variant of ['error', 'summary', 'nested']) {
+  test(`a key a hermes child writes into a valid result.json (${variant}) reaches no note, row, drawer view, log, API answer, or stored result file, whole or in any piece of four characters`, async () => {
+    const h = await setup({ profileKey: otherKey })
+    try {
+      await h.mode(`result ${variant}`)
+      const run = await h.launcher.start(request)
+      const final = await h.launcher.settled(run.id)
+      assert.equal(final.status, variant === 'error' ? 'failed' : 'done', final.note ?? '')
+      if (variant === 'error') assert.match(final.note ?? '', /bad key \[key\] and \[key\]/)
+      if (variant === 'summary') assert.match(JSON.stringify(final.result), /a finding that quotes \[key\] and \[key\]/)
+      holdsNoPiece(JSON.stringify([final, h.cache.getRun(run.id), runView(final), h.logs]).replace(/\s/g, ' '), 'the row, the drawer, or the log')
+      holdsNoPiece(await readFile(join(h.runDir(run), 'result.json'), 'utf8'), 'the stored result.json')
+    } finally {
+      await h.cleanup()
+    }
+  })
+}

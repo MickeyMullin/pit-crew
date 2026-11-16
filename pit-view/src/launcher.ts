@@ -1359,6 +1359,20 @@ const withoutKeys = (text: string, secrets: readonly string[]): string => {
   return kept
 }
 
+// every string in a parsed value, and every object name, with each whole key replaced by [key]; a key is matched whole within one string, so a key cut across two fields is not one
+const withoutKeysDeep = (value: unknown, secrets: readonly string[]): unknown => {
+  const out = (text: string): string => secrets.reduce((kept, secret) => kept.split(secret).join('[key]'), text)
+  if (typeof value === 'string') return out(value)
+  if (Array.isArray(value)) return value.map((item) => withoutKeysDeep(item, secrets))
+  if (isObject(value)) return Object.fromEntries(Object.entries(value).map(([name, item]) => [out(name), withoutKeysDeep(item, secrets)]))
+  return value
+}
+
+const clearedResult = (parsed: Parsed<RunResultJson>, secrets: readonly string[]): Parsed<RunResultJson> => {
+  if (secrets.length === 0) return parsed
+  return parsed.ok ? { ok: true, value: withoutKeysDeep(parsed.value, secrets) as RunResultJson } : { ok: false, error: withoutKeysDeep(parsed.error, secrets) as string }
+}
+
 const keyNotice = 'Pit View removed the contents of this file because it could not take a key out of it.\n'
 
 const clip = (text: string, length = 300): string => text.length > length ? `${text.slice(0, length)}…` : text
@@ -2740,8 +2754,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     await pumpOf(entry)
     // a server shutting down leaves the run recorded as running, for recovery to find
     if (closed) return null
+    const secrets = entry.row.runner === 'hermes' ? await hermesSecrets(entry.id) : []
     const text = await fs.readFile(join(entry.dir, 'result.json')).catch(() => null)
-    let parsed = text === null ? null : parseResult(text)
+    // a hermes child may write a key into any field of a valid result, so the result is cleared of every whole key, in the text and then in every string of what was parsed, before anything judges, stores, shows, or logs it
+    let parsed = text === null ? null : clearedResult(parseResult(secrets.reduce((kept, secret) => kept.split(secret).join('[key]'), text)), secrets)
     // a launch of one kind takes only its own kind of result: a review's result in a sweep's folder is no result
     if (parsed?.ok === true && store.schema !== null && parsed.value.schema !== store.schema) {
       parsed = { ok: false, error: `result.json: expected ${store.schema}, found ${parsed.value.schema}` }
@@ -2768,7 +2784,6 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
       finished = await finishedReport(parsed.value)
     }
-    const secrets = entry.row.runner === 'hermes' ? await hermesSecrets(entry.id) : []
     const lastEvent = await hermesTail(entry, parsed, secrets)
     await clearLogs(entry, secrets)
     const judgement = judge({
@@ -2830,7 +2845,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   // the child writes its output straight into stderr.log and stream.jsonl, so a key it printed is in them as it was printed. When the run settles each is rewritten in place with every key replaced by [key] (a whole text, so a key split across two writes is found); a file that cannot be rewritten is replaced by a one-line notice, and one that cannot even be written is removed, so no key stays on disk
   const clearLogs = async (entry: Live, secrets: readonly string[]): Promise<void> => {
     if (secrets.length === 0) return
-    for (const name of ['stderr.log', 'stream.jsonl']) {
+    for (const name of ['stderr.log', 'stream.jsonl', 'result.json']) {
       const path = join(entry.dir, name)
       try {
         const text = await fs.readFile(path)
