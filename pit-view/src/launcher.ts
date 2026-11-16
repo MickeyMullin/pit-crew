@@ -2644,6 +2644,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         entry.child.stdin.end()
       }
       if (entry.stream.costUsd !== run.costUsd) changes.costUsd = entry.stream.costUsd
+      // a hermes child may name a key as its session; such an id is dropped, so the run has none, as one killed before its last event has none
+      if (entry.row.runner === 'hermes' && entry.stream.sessionId !== null && withoutKeys(entry.stream.sessionId, await hermesSecrets(entry.id), false) !== entry.stream.sessionId) entry.stream = { ...entry.stream, sessionId: null }
       if (run.sessionId === null && entry.stream.sessionId !== null) {
         changes.sessionId = entry.stream.sessionId
         entry.spec ??= await specFor(run, entry.dir)
@@ -2744,10 +2746,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     end(run, { status: 'failed', finishedAt: now(), note }, 'failed in the queue')
   }
 
-  // the report a review finished with, recorded by its hash, so Post it can tell it from what a later run wrote to the same name. Only a run has the column, and only a review posts
-  const finishedReport = async (value: RunResultJson): Promise<RunChanges> => {
+  // the report a review finished with, recorded by its hash, so Post it can tell it from what a later run wrote to the same name. Only a run has the column, and only a review posts. A hermes child has no sandbox and may write a key into the report its result names, so for a hermes run that report is cleared of every key first and the hash is that of the cleared text
+  const finishedReport = async (value: RunResultJson, id: number, secrets: readonly string[] = []): Promise<RunChanges> => {
     if (store.schema !== null || value.schema !== 'pit-crew/review-result@1') return {}
     const path = reportPath(value)
+    if (path !== null) await clearPath(expandHome(path, home), 'the report', id, secrets, false)
     const text = path === null ? null : await fs.readFile(expandHome(path, home)).catch(() => null)
     return { reportHash: text === null ? null : reportHash(text) }
   }
@@ -2787,7 +2790,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (parsed?.ok === true) {
       const path = reportPath(parsed.value)
       if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
-      finished = await finishedReport(parsed.value)
+      finished = await finishedReport(parsed.value, entry.id, secrets)
     }
     const lastEvent = await hermesTail(entry, parsed, secrets)
     await clearLogs(entry, secrets)
@@ -2849,18 +2852,20 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   // the child writes its output straight into stderr.log and stream.jsonl, so a key it printed is in them as it was printed. When the run settles each is rewritten in place with every key replaced by [key] (a whole text, so a key split across two writes is found); a file that cannot be rewritten is replaced by a one-line notice, and one that cannot even be written is removed, so no key stays on disk
   const clearLogs = async (entry: Pick<Live, 'dir' | 'id'>, secrets: readonly string[], names: readonly string[] = ['stderr.log', 'stream.jsonl', 'result.json', 'events.jsonl']): Promise<void> => {
+    for (const name of names) await clearPath(join(entry.dir, name), name, entry.id, secrets)
+  }
+
+  // one file rewritten in place with every whole key replaced, by the rule above; an absent file is left alone
+  const clearPath = async (path: string, name: string, id: number, secrets: readonly string[], atEnd = true): Promise<void> => {
     if (secrets.length === 0) return
-    for (const name of names) {
-      const path = join(entry.dir, name)
-      try {
-        const text = await fs.readFile(path)
-        if (text === null) continue
-        const kept = withoutKeys(text, secrets)
-        if (kept !== text) await fs.replaceFile(path, kept)
-      } catch (error) {
-        log(`${noun} ${entry.id}: cannot take a key out of ${name}, so it is replaced: ${messageOf(error)}`)
-        await fs.writeFile(path, keyNotice).catch(() => fs.rm(path)).catch((failure: unknown) => log(`${noun} ${entry.id}: cannot remove ${name}: ${messageOf(failure)}`))
-      }
+    try {
+      const text = await fs.readFile(path)
+      if (text === null) return
+      const kept = withoutKeys(text, secrets, atEnd)
+      if (kept !== text) await fs.replaceFile(path, kept)
+    } catch (error) {
+      log(`${noun} ${id}: cannot take a key out of ${name}, so it is replaced: ${messageOf(error)}`)
+      await fs.writeFile(path, keyNotice).catch(() => fs.rm(path)).catch((failure: unknown) => log(`${noun} ${id}: cannot remove ${name}: ${messageOf(failure)}`))
     }
   }
 
@@ -3486,7 +3491,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (judgement.status === run.status && note === run.note && JSON.stringify(judgement.result) === JSON.stringify(run.result)) {
         return refuse('result.json has not changed since the run settled')
       }
-      const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true, ...await finishedReport(value) }
+      const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true, ...await finishedReport(value, id, secrets) }
       // a re-read that turns a scheduled run done makes it a done run from then on, whose worktree goes
       if (judgement.status === 'done' && run.worktree !== null) Object.assign(changes, await cloneResume(run))
       // the first time a failed re-read replaces the note, the note recorded at exit moves to its own field, so a later finish by hand can still tell why the run first stopped; an original with no note is kept as an empty string, so firstNote stays set and a later failure cannot be copied in as the original

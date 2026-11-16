@@ -16,6 +16,8 @@ import {
 } from '../src/launcher.ts'
 import type { LauncherFs, LaunchSpec, StartRequest } from '../src/launcher.ts'
 import { runnerLabels } from '../public/agent.ts'
+import { readReport, reportHash } from '../src/reports.ts'
+import { renderMarkdown } from '../src/markdown.ts'
 import { keyPrefix, openRouterKeyPath, profileEnvPath } from '../src/openrouter.ts'
 import { sweepRequest } from '../src/sweeps.ts'
 import { systemTimers } from '../src/poller.ts'
@@ -164,6 +166,21 @@ if (mode === 'stepkey' || mode === 'failsession' || mode === 'denials') {
   out(JSON.stringify(last))
   if (mode === 'failsession') process.exit(1)
   fs.writeFileSync(path.join(process.env.HOME, 'agents', 'output', 'PR-' + number + '.md'), 'Reviewed commit: feat/x @ f00dfac\\n')
+  fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify({
+    schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: '${scenario.repo}', pr: number },
+    reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' }, verdict: 'clean', recommendation: null, findings: [],
+    ci: null, fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: '~/agents/output/PR-' + number + '.md', question: null, error: null,
+  }))
+  process.exit(0)
+}
+if (mode === 'reportkey' || mode === 'sessionkey') {
+  // 'reportkey': a clean review whose report holds both keys; 'sessionkey': a clean review whose last stream event names a key as its session
+  const number = Number(/^\\/review-pr (\\d+)/.exec(request)[1])
+  const last = JSON.parse(lines[lines.length - 1])
+  if (mode === 'sessionkey') last.session_id = allKeys[0]
+  for (const line of lines.slice(0, -1)) out(line)
+  out(JSON.stringify(last))
+  fs.writeFileSync(path.join(process.env.HOME, 'agents', 'output', 'PR-' + number + '.md'), 'Reviewed commit: feat/x @ f00dfac\\n' + (mode === 'reportkey' ? 'the token was ' + allKeys[0] + ' and ' + allKeys[1] + '\\n' : ''))
   fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify({
     schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: '${scenario.repo}', pr: number },
     reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' }, verdict: 'clean', recommendation: null, findings: [],
@@ -533,6 +550,12 @@ test('every hermes start of review-pr, review-stack, review-dependabot, and the 
   const stack: StartRequest = { ...request, number: 106, command: 'review-stack', args: ['106'], label: 'Review stack' }
   const dependabot: StartRequest = { ...request, number: 107, command: 'review-dependabot', args: ['107'], label: 'Review' }
   const sweep: StartRequest = { ...sweepRequest(scenario.repo, 'hermes'), model: 'kimi-code' }
+  // these runs fail at once, so one may have ended before settled is asked for it, which then refuses it as not running; settled is called and a refusal is read as having ended
+  const ended = async (launcher: { settled: (id: number) => Promise<unknown> }, id: number): Promise<void> => {
+    await launcher.settled(id).catch((error: unknown) => {
+      if (!(error instanceof LaunchError)) throw error
+    })
+  }
   for (const [name, asked, sweeping] of [['review-pr', { ...request, args: ['104'] } as StartRequest, false], ['review-stack', stack, false], ['review-dependabot', dependabot, false], ['review-dependabot-sweep', sweep, true]] as [string, StartRequest, boolean][]) {
     const h = await setup()
     try {
@@ -541,14 +564,14 @@ test('every hermes start of review-pr, review-stack, review-dependabot, and the 
       const run = await launcher.start(asked)
       assert.equal(run.args.filter((arg) => arg === '--no-post').length, 1, name)
       assert.equal(run.args.at(-1), '--no-post', name)
-      await launcher.settled(run.id)
+      await ended(launcher, run.id)
       const call = await callOf(join(h.home, '.local', 'state', 'pit-view', sweeping ? 'sweeps' : 'runs', String(run.id)))
       assert.match(call.request, / --no-post --emit-json=/, name)
       assert.ok(!call.argv.includes('--no-post'), 'the flag is in the request text, never an argument')
       // the extra-instructions flag stays last
       const flagged = await launcher.start({ ...asked, args: [...asked.args.filter((arg) => arg !== '--no-post'), '--extra-instructions'], number: sweeping ? 0 : asked.number + 1 })
       assert.deepEqual(flagged.args.slice(-2), ['--no-post', '--extra-instructions'], name)
-      await launcher.settled(flagged.id)
+      await ended(launcher, flagged.id)
     } finally {
       await h.cleanup()
     }
@@ -786,6 +809,97 @@ test('the permission denials of a stream result are ignored for a hermes run, wh
     const final = await h.launcher.settled(run.id)
     assert.equal(final.status, 'done', final.note ?? '')
     assert.equal(final.note, null)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a key a hermes child writes into the report its valid result names is taken out of the file before the report is hashed, at settle and on a re-read, so the report route, the row, the log, and the drawer hold no piece of it, and the file keeps its mode', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    await h.mode('reportkey')
+    const run = await h.launcher.start(request)
+    const final = await h.launcher.settled(run.id)
+    assert.equal(final.status, 'done', final.note ?? '')
+    const file = join(h.home, 'agents', 'output', 'PR-104.md')
+    await chmod(file, 0o640)
+    const cleared = await readFile(file, 'utf8')
+    holdsNoPiece(cleared, 'the report')
+    assert.match(cleared, /the token was \[key\] and \[key\]/)
+    assert.equal(final.reportHash, reportHash(cleared), 'the stored hash is that of the cleared text')
+    holdsNoPiece(JSON.stringify([final, h.cache.getRun(run.id), runView(final), h.logs]), 'the row, the drawer, or the log')
+    // the report route answers from the same file
+    const served = await readReport(join(h.home, 'agents', 'output'), 'PR-104.md')
+    holdsNoPiece(JSON.stringify([served.raw, renderMarkdown(served.raw)]), 'the report route')
+    // a re-read of a failed run whose resumed session wrote a report with keys
+    await h.mode('failsession')
+    const second = await h.launcher.start(request)
+    const failed = await h.launcher.settled(second.id)
+    assert.equal(failed.status, 'failed')
+    const dir = h.runDir(second)
+    await writeFile(file, `Reviewed commit: feat/x @ f00dfac\nagain ${fakeKey} and ${otherKey}\n`, { mode: 0o640 })
+    await writeFile(join(dir, 'result.json'), JSON.stringify({
+      schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: scenario.repo, pr: 104 }, reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' },
+      verdict: 'clean', recommendation: null, findings: [], ci: null, fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: '~/agents/output/PR-104.md', question: null, error: null,
+    }))
+    const read = await h.launcher.reread(second.id)
+    assert.equal(read.status, 'done', read.note ?? '')
+    const again = await readFile(file, 'utf8')
+    holdsNoPiece(again, 'the re-read report')
+    assert.equal(read.reportHash, reportHash(again))
+    assert.equal((await stat(file)).mode & 0o777, 0o640)
+    holdsNoPiece(JSON.stringify([read, runView(read), h.logs]), 'the re-read row, drawer, or log')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a report that cannot be rewritten is replaced by a one-line notice, and one that cannot be written is removed, so a key is never left in it', async () => {
+  let failing: 'rewrite' | 'both' = 'rewrite'
+  const h = await setup({
+    profileKey: otherKey,
+    fs: {
+      replaceFile: async () => {
+        throw new Error('disk full')
+      },
+      writeFile: async (path, text) => {
+        if (failing === 'both' && /PR-104\.md$/.test(path)) throw new Error('read-only')
+        await writeFile(path, text, 'utf8')
+      },
+    },
+  })
+  try {
+    await h.mode('reportkey')
+    const first = await h.launcher.start(request)
+    await h.launcher.settled(first.id)
+    const file = join(h.home, 'agents', 'output', 'PR-104.md')
+    const text = await readFile(file, 'utf8')
+    holdsNoPiece(text, 'the report')
+    assert.equal(text.trim().split('\n').length, 1)
+    failing = 'both'
+    const second = await h.launcher.start(request)
+    const done = await h.launcher.settled(second.id)
+    assert.equal(await readFile(file, 'utf8').catch(() => null), null, 'a report that cannot be rewritten or replaced is removed')
+    holdsNoPiece(JSON.stringify([done, h.logs]), 'the row or the log')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a session id that is a key is not stored and no resume line is built for it, while a normal session id still is', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    await h.mode('sessionkey')
+    const run = await h.launcher.start(request)
+    const final = await h.launcher.settled(run.id)
+    assert.equal(final.sessionId, null)
+    assert.equal(final.resume, null)
+    holdsNoPiece(JSON.stringify([final, h.cache.getRun(run.id), runView(final), h.logs]), 'the row, the resume field, the drawer, or the log')
+    await h.mode('ok')
+    const normal = await h.launcher.start(request)
+    const done = await h.launcher.settled(normal.id)
+    assert.match(done.sessionId ?? '', /^local-/)
+    assert.match(done.resume ?? '', /hermes -p pitview chat --resume local-/)
   } finally {
     await h.cleanup()
   }
