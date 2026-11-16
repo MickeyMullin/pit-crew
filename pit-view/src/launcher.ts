@@ -511,7 +511,7 @@ export const hermesMaxTurns = 120
 export const hermesPromptFileName = 'prompt.txt'
 const hermesTailLength = 600
 
-// Hermes under its own profile: the request is a file in the run directory, never an argument and never stdin; the registry entry's provider and model are passed as they are written there; only the terminal and file tools are enabled; and the key is not here, since a command line is recorded and shown (it travels in the child's environment alone). The request is the slash form the Hermes skills answer to
+// Hermes under its own profile: the request is a file in the run directory, never an argument and never stdin; the registry entry's provider and model are passed as they are written there; only the terminal and file tools are enabled; and no key is here or anywhere else the child is given, since a command line is recorded and shown and the child gets the environment every runner's child gets (the key is in the profile's own .env, which Pit View only reads). The request is the slash form the Hermes skills answer to
 export const hermesInvocation = (spec: LaunchSpec): Invocation => {
   if (spec.hermes === undefined) throw new Error('a hermes run needs a hermes entry from the model registry')
   const path = join(spec.runDir, hermesPromptFileName)
@@ -1321,6 +1321,25 @@ const deniedPostOf = (denial: unknown): number | null => {
   if (typeof command !== 'string') return null
   const words = loneCommand(command)
   return words === null ? null : postedPr(words)
+}
+
+// the last stream event is kept already cut to its first 300 characters, so a key may be cut in it and no longer match: whole keys are replaced, and a run of 4 or more characters at the cut that begins a key is dropped
+const clippedEvent = (event: string | null, secrets: string[]): string => {
+  if (event === null) return 'none'
+  const cut = event.endsWith('…')
+  let text = cut ? event.slice(0, -1) : event
+  for (const secret of secrets) text = text.split(secret).join('[key]')
+  if (cut) {
+    for (const secret of secrets) {
+      for (let length = Math.min(secret.length - 1, text.length); length >= 4; length--) {
+        if (text.endsWith(secret.slice(0, length))) {
+          text = text.slice(0, -length)
+          break
+        }
+      }
+    }
+  }
+  return cut ? `${text}…` : text
 }
 
 const clip = (text: string, length = 300): string => text.length > length ? `${text.slice(0, length)}…` : text
@@ -2760,10 +2779,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     const { file, env } = await readKeys()
     const secrets = [file, env].flatMap((read) => 'key' in read ? [read.key] : [])
     const stderr = await fs.readFrom(join(entry.dir, 'stderr.log'), 0).catch(() => Buffer.alloc(0))
-    const tail = stderr.toString('utf8').trim().replace(/\s*\n\s*/g, ' | ').slice(-hermesTailLength)
-    let text = `${entry.stream.lastEvent ?? 'none'}${tail === '' ? '' : `; stderr: ${tail}`}`
-    for (const secret of secrets) text = text.split(secret).join('[key]')
-    return text
+    const out = (text: string): string => secrets.reduce((kept, secret) => kept.split(secret).join('[key]'), text)
+    // the whole stderr text is redacted before it is cut, so a cut never leaves part of a key that no longer matches it
+    const tail = out(stderr.toString('utf8').trim().replace(/\s*\n\s*/g, ' | ')).slice(-hermesTailLength)
+    return `${clippedEvent(entry.stream.lastEvent, secrets)}${tail === '' ? '' : `; stderr: ${tail}`}`
   }
 
   // a process that proved gone, with no exit seen, ends the run the way an observed exit does

@@ -127,6 +127,16 @@ if (mode === 'noresult') {
   process.stderr.write('Error: the model did not answer\\n')
   process.exit(1)
 }
+if (mode.startsWith('boundary')) {
+  // 'boundary <o> <n> <event key> <stderr key>': the stderr text is cut to its last 600 characters inside the stderr key at offset o, and the last stream event is cut to its first 300 inside the event key after n of its characters
+  const [o, n, eventKey, errKey] = mode.split(' ').slice(1).map(Number)
+  const keys = ${JSON.stringify(keys)}
+  const head = '{"type":"tool","text":"'
+  out(lines[0])
+  out(head + 'p'.repeat(300 - n - head.length) + keys[eventKey] + '"}')
+  process.stderr.write('x'.repeat(40) + keys[errKey] + 's'.repeat(600 - keys[errKey].length + o) + '\\n')
+  process.exit(1)
+}
 const step = (name, state, note = null) => fs.appendFileSync(path.join(dir, 'events.jsonl'), JSON.stringify({ at: at(), step: name, state, note }) + '\\n')
 for (const line of lines.slice(0, -1)) out(line)
 out(JSON.stringify({ type: 'future_event', detail: 'not in the recorded stream' }))
@@ -383,6 +393,34 @@ test('a hermes run that ends with no valid result fails like any run and keeps t
     await h.cleanup()
   }
 })
+
+// every run of four characters of a key: none may survive anywhere the key is taken out of
+const fragmentsOf = (key: string): string[] => Array.from({ length: key.length - 3 }, (_, at) => key.slice(at, at + 4))
+
+for (const [name, profileKey, eventKey, errKey] of [['one key in both', fakeKey, 0, 0], ['two keys that differ, one in each', otherKey, 1, 0], ['two keys that differ, swapped', otherKey, 0, 1]] as const) {
+  test(`no fragment of a key survives a cut of the stderr tail or the last stream event, however the cut falls in it (${name})`, async () => {
+    const h = await setup({ profileKey })
+    try {
+      const length = fakeKey.length
+      for (const [offset, kept] of [[0, 4], [length - 1, 6], [Math.floor(length / 2), Math.floor(length / 2)], [length - 1, length - 1], [length - 1, 4], [0, length]]) {
+        await h.mode(`boundary ${offset} ${kept} ${eventKey} ${errKey}`)
+        const run = await h.launcher.start(request)
+        const final = await h.launcher.settled(run.id)
+        assert.equal(final.status, 'failed')
+        const shown = [final.note ?? '', JSON.stringify(runView(final)), h.logs.filter((line) => line.includes(`${run.id}`)).join('\n')]
+        for (const text of shown) {
+          for (const key of [fakeKey, otherKey]) {
+            for (const piece of fragmentsOf(key)) {
+              assert.ok(!text.includes(piece), `offset ${offset}, kept ${kept}: ${piece} of a key is in ${text.slice(0, 80)}`)
+            }
+          }
+        }
+      }
+    } finally {
+      await h.cleanup()
+    }
+  })
+}
 
 const walk = async (dir: string): Promise<string[]> => {
   const found: string[] = []
