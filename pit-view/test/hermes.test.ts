@@ -594,8 +594,12 @@ test('every hermes start of review-pr, review-stack, review-dependabot, and the 
       const { model: _, ...asked } = request
       const run = await h.launcher.start({ ...asked, number: 110, command: 'review-stack', args: ['110'], runner })
       assert.deepEqual(run.args, ['110'], runner)
-      h.launcher.stop(run.id)
-      await h.launcher.settled(run.id)
+      try {
+        h.launcher.stop(run.id)
+      } catch (error) {
+        if (!(error instanceof LaunchError)) throw error
+      }
+      await ended(h.launcher, run.id)
     }
   } finally {
     await h.cleanup()
