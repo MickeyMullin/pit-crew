@@ -1,5 +1,6 @@
 // src/launcher.ts
 import { spawn as spawnChild } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { closeSync, openSync, watch as watchDir } from 'node:fs'
 import { chmod, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, join, resolve, sep } from 'node:path'
@@ -1639,11 +1640,17 @@ export const systemFs: LauncherFs = {
   },
   writeFile: (path, text) => writeFile(path, text, 'utf8'),
   replaceFile: async (path, text) => {
-    const temp = `${path}.${process.pid}.tmp`
+    // an unpredictable name, created exclusively and never through a link, in the file's own folder, so a child that planted a link cannot have the rewrite follow it
+    const temp = `${path}.${randomBytes(8).toString('hex')}.tmp`
     try {
       const mode = (await stat(path)).mode & 0o777
-      await writeFile(temp, text, 'utf8')
-      await chmod(temp, mode)
+      const handle = await open(temp, 'wx', mode)
+      try {
+        await handle.writeFile(text, 'utf8')
+        await handle.chmod(mode)
+      } finally {
+        await handle.close()
+      }
       await rename(temp, path)
     } catch (error) {
       await rm(temp, { force: true }).catch(() => {})
@@ -2760,12 +2767,21 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
+  // the report a valid result names, taken out of every key, only when it is a regular file inside the reports folder
+  const clearReport = async (value: RunResultJson, id: number, secrets: readonly string[]): Promise<void> => {
+    const path = reportPath(value)
+    if (path === null || value.schema !== 'pit-crew/review-result@1' || secrets.length === 0 || !await inReports(expandHome(path, home))) return
+    await clearPath(expandHome(path, home), 'the report', id, secrets, false)
+  }
+
   // the report a review finished with, recorded by its hash, so Post it can tell it from what a later run wrote to the same name. Only a run has the column, and only a review posts. A hermes child has no sandbox and may write a key into the report its result names, so for a hermes run that report is cleared of every key first and the hash is that of the cleared text
-  const finishedReport = async (value: RunResultJson, id: number, secrets: readonly string[] = []): Promise<RunChanges> => {
+  const finishedReport = async (value: RunResultJson, id: number, secrets: readonly string[] = [], hermes = false): Promise<RunChanges> => {
     if (store.schema !== null || value.schema !== 'pit-crew/review-result@1') return {}
     const path = reportPath(value)
-    if (path !== null && secrets.length > 0 && await inReports(expandHome(path, home))) await clearPath(expandHome(path, home), 'the report', id, secrets, false)
-    const text = path === null ? null : await fs.readFile(expandHome(path, home)).catch(() => null)
+    const inside = path !== null && hermes && await inReports(expandHome(path, home))
+    if (hermes) await clearReport(value, id, secrets)
+    // a hermes child has no sandbox and may name any file, so a path outside the reports folder is never opened: it has no hash
+    const text = path === null || (hermes && !inside) ? null : await fs.readFile(expandHome(path, home)).catch(() => null)
     return { reportHash: text === null ? null : reportHash(text) }
   }
 
@@ -2804,7 +2820,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (parsed?.ok === true) {
       const path = reportPath(parsed.value)
       if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
-      finished = await finishedReport(parsed.value, entry.id, secrets)
+      finished = await finishedReport(parsed.value, entry.id, secrets, entry.row.runner === 'hermes')
     }
     const lastEvent = await hermesTail(entry, parsed, secrets)
     await clearLogs(entry, secrets)
@@ -3488,6 +3504,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       const parsed = clearedResult(parseResult(text), secrets)
       if (!parsed.ok) return refuse(parsed.error)
       const value = parsed.value
+      // the report the result names is cleared before any refusal below, so a refused re-read leaves no key in it
+      if (run.runner === 'hermes') await clearReport(value, id, secrets)
       const expected = run.command === 'fix-pr' ? 'pit-crew/fix-result@1' : run.command === 'update-pr' ? 'pit-crew/update-result@1' : 'pit-crew/review-result@1'
       if (value.schema !== expected) return refuse(`result.json has schema ${value.schema}, but this run's result has schema ${expected}`)
       if (value.command !== run.command) return refuse(`result.json is for command ${value.command}, not ${run.command}`)
@@ -3505,7 +3523,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (judgement.status === run.status && note === run.note && JSON.stringify(judgement.result) === JSON.stringify(run.result)) {
         return refuse('result.json has not changed since the run settled')
       }
-      const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true, ...await finishedReport(value, id, secrets) }
+      const changes: RunChanges = { status: judgement.status, note, result: judgement.result, resolvedByHand: true, ...await finishedReport(value, id, secrets, run.runner === 'hermes') }
       // a re-read that turns a scheduled run done makes it a done run from then on, whose worktree goes
       if (judgement.status === 'done' && run.worktree !== null) Object.assign(changes, await cloneResume(run))
       // the first time a failed re-read replaces the note, the note recorded at exit moves to its own field, so a later finish by hand can still tell why the run first stopped; an original with no note is kept as an empty string, so firstNote stays set and a later failure cannot be copied in as the original

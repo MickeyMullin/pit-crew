@@ -2,8 +2,8 @@
 // the hermes runner (section 8 of DESIGN.md, Launching runs, The hermes runner): its command line and resume line, the stream it prints, the environment its child gets, which models it may start with, and what is refused. The end-to-end tests run the real launcher over a small fake hermes executable on a temp PATH and a recorded stream with invented content, so no model is ever called
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { chmod, mkdir, readdir, readFile, realpath, stat, symlink, utimes, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { chmod, lstat, mkdir, readdir, readFile, realpath, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { openCache } from '../src/cache.ts'
 import type { Run } from '../src/cache.ts'
@@ -952,6 +952,124 @@ test('a session id that is a key is not stored and no resume line is built for i
     const done = await h.launcher.settled(normal.id)
     assert.match(done.sessionId ?? '', /^local-/)
     assert.match(done.resume ?? '', /hermes -p pitview chat --resume local-/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// a Claude run's fake, for the tests that show the Claude path unchanged: it reads the one request from stdin, writes a clean result naming the path in target.txt, and exits when stdin closes
+const fakeClaudeNaming = `
+const fs = require('node:fs')
+const path = require('node:path')
+let buffer = ''
+let done = false
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', (chunk) => {
+  buffer += chunk
+  const end = buffer.indexOf('\\n')
+  if (done || end < 0) return
+  done = true
+  const request = JSON.parse(buffer.slice(0, end)).message.content
+  const dir = /--emit-json=(\\S+)/.exec(request)[1]
+  const number = Number(/^[/$]review-pr (\\d+)/.exec(request)[1])
+  process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: process.argv[process.argv.indexOf('--session-id') + 1] }) + '\\n')
+  fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify({
+    schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: '${scenario.repo}', pr: number },
+    reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' }, verdict: 'clean', recommendation: null, findings: [],
+    ci: null, fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: fs.readFileSync(path.join(process.env.HOME, 'target.txt'), 'utf8').trim(), question: null, error: null,
+  }))
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0.1, permission_denials: [] }) + '\\n')
+})
+process.stdin.on('end', () => process.exit(0))
+`
+
+test('a hermes result that names a path outside the reports folder (a key file, the profile .env, a path that climbs out, or a symbolic link) is neither read nor hashed, so its report hash is null, while a Claude run naming the same path is hashed as before', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    await writeFile(join(h.home, 'bin', 'claude.cjs'), fakeClaudeNaming)
+    await writeFile(join(h.home, 'bin', 'claude'), `#!/bin/sh\nexec "${process.execPath}" "${join(h.home, 'bin', 'claude.cjs')}" "$@"\n`)
+    await chmod(join(h.home, 'bin', 'claude'), 0o755)
+    const outside = join(h.home, 'agents', 'outside.md')
+    await writeFile(outside, `held ${fakeKey}\n`)
+    const link = join(h.home, 'agents', 'output', 'link.md')
+    await symlink(h.keyPath, link)
+    for (const target of [h.keyPath, h.envPath, join(h.home, 'agents', 'output', '..', 'outside.md'), link]) {
+      await writeFile(join(h.home, 'target.txt'), target)
+      const text = await readFile(target, 'utf8')
+      await h.mode('reportat')
+      const run = await h.launcher.start(request)
+      const final = await h.launcher.settled(run.id)
+      assert.equal(final.reportHash, null, `a hermes run naming ${target} stores no hash`)
+      assert.equal(h.cache.getRun(run.id)?.reportHash, null)
+      assert.notEqual(final.reportHash, reportHash(text))
+      const claude = await h.launcher.start({ repo: scenario.repo, number: 104, command: 'review-pr', args: ['104', '--no-post'], label: 'Review' })
+      const claudeFinal = await h.launcher.settled(claude.id)
+      assert.equal(claudeFinal.runner, 'claude')
+      assert.equal(claudeFinal.reportHash, reportHash(text), `a Claude run naming ${target} is hashed as before`)
+    }
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a rewrite never writes through the old predictable temporary name: planted as a symbolic link to a file outside, it leaves that file byte for byte and in its modification time, while the key is still taken out of the real report, stderr.log, and stream.jsonl, and no temporary file is left', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    const outside = join(h.home, 'agents', 'outside.md')
+    await writeFile(outside, 'not a report\n')
+    await utimes(outside, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'))
+    const before = { text: await readFile(outside, 'utf8'), mtime: (await stat(outside)).mtimeMs, mode: (await stat(outside)).mode }
+    const runDir = join(h.home, '.local', 'state', 'pit-view', 'runs', '1')
+    await mkdir(runDir, { recursive: true })
+    const planted = [join(h.home, 'agents', 'output', `PR-104.md.${process.pid}.tmp`), join(runDir, `stderr.log.${process.pid}.tmp`), join(runDir, `stream.jsonl.${process.pid}.tmp`)]
+    for (const name of planted) await symlink(outside, name)
+    await h.mode('leakok')
+    const run = await h.launcher.start(request)
+    assert.equal(run.id, 1)
+    await h.launcher.settled(run.id)
+    for (const name of ['stderr.log', 'stream.jsonl']) {
+      const text = await readFile(join(runDir, name), 'utf8')
+      holdsNoPiece(text, name)
+      assert.match(text, /\[key\]/)
+    }
+    await h.mode('reportkey')
+    const second = await h.launcher.start(request)
+    await h.launcher.settled(second.id)
+    const report = join(h.home, 'agents', 'output', 'PR-104.md')
+    holdsNoPiece(await readFile(report, 'utf8'), 'the report')
+    assert.match(await readFile(report, 'utf8'), /\[key\]/)
+    assert.equal((await lstat(report)).isFile(), true, 'the report is a regular file, not a link')
+    const after = { text: await readFile(outside, 'utf8'), mtime: (await stat(outside)).mtimeMs, mode: (await stat(outside)).mode }
+    assert.deepEqual(after, before, 'the outside file is untouched')
+    // only the links the test planted are left; the launcher's own temporary files are gone
+    const left = [...(await readdir(runDir)), ...(await readdir(join(h.home, 'agents', 'output')))].filter((name) => name.endsWith('.tmp')).sort()
+    assert.deepEqual(left, planted.map((name) => basename(name)).sort())
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a re-read that is refused because result.json has not changed still takes a key out of the report the result names', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    await h.mode('failsession')
+    const run = await h.launcher.start(request)
+    const failed = await h.launcher.settled(run.id)
+    assert.equal(failed.status, 'failed')
+    const dir = h.runDir(run)
+    const file = join(h.home, 'agents', 'output', 'PR-104.md')
+    await writeFile(file, 'Reviewed commit: feat/x @ f00dfac\n')
+    await writeFile(join(dir, 'result.json'), JSON.stringify({
+      schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'failed', target: { repo: scenario.repo, pr: 104 }, reviewed: null, verdict: null, recommendation: null,
+      findings: [], ci: null, fixAttempts: 0, posted: null, notPostedReason: null, report: '~/agents/output/PR-104.md', question: null, error: 'it could not finish',
+    }))
+    // the first re-read records this failed result; the second finds it unchanged
+    await h.launcher.reread(run.id).catch(() => {})
+    await writeFile(file, `Reviewed commit: feat/x @ f00dfac\nleft behind ${fakeKey} and ${otherKey}\n`)
+    await assert.rejects(h.launcher.reread(run.id), /has not changed since the run settled/)
+    const text = await readFile(file, 'utf8')
+    holdsNoPiece(text, 'the report')
+    assert.match(text, /left behind \[key\] and \[key\]/)
   } finally {
     await h.cleanup()
   }
