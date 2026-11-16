@@ -151,6 +151,26 @@ if (mode === 'leakfail') {
   process.exit(1)
 }
 if (mode === 'leakok') leak()
+if (mode === 'stepkey' || mode === 'failsession' || mode === 'denials') {
+  // 'stepkey': a valid step whose note holds both keys, written while the run is active; 'failsession': the whole recorded stream and no result, so a session to resume exists; 'denials': a clean review whose result event also lists a permission denial
+  const number = Number(/^\\/review-pr (\\d+)/.exec(request)[1])
+  if (mode === 'stepkey') {
+    fs.appendFileSync(path.join(dir, 'events.jsonl'), JSON.stringify({ at: at(), step: 'review', state: 'started', note: 'checking with ' + allKeys.join(' and ') }) + '\\n')
+    sleep(600)
+  }
+  const last = JSON.parse(lines[lines.length - 1])
+  if (mode === 'denials') last.permission_denials = [{ tool_name: 'terminal', tool_input: {} }]
+  for (const line of lines.slice(0, -1)) out(line)
+  out(JSON.stringify(last))
+  if (mode === 'failsession') process.exit(1)
+  fs.writeFileSync(path.join(process.env.HOME, 'agents', 'output', 'PR-' + number + '.md'), 'Reviewed commit: feat/x @ f00dfac\\n')
+  fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify({
+    schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: '${scenario.repo}', pr: number },
+    reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' }, verdict: 'clean', recommendation: null, findings: [],
+    ci: null, fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: '~/agents/output/PR-' + number + '.md', question: null, error: null,
+  }))
+  process.exit(0)
+}
 if (mode === 'noresult') {
   out(lines[0])
   process.stderr.write('provider error: auth failed for ${keys.join(' and ')}\\n')
@@ -700,3 +720,73 @@ for (const variant of ['error', 'summary', 'nested']) {
     }
   })
 }
+
+// a Hermes child may put a key into the note of a valid events.jsonl step, and the steps are folded into the row and published
+test('a key a hermes child writes into a step note reaches no row, steps column, drawer view, log, or stored events.jsonl, whole or in any piece of four characters, during the run and after it', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    await h.mode('stepkey')
+    const run = await h.launcher.start(request)
+    // while the run is active: the step is folded from the live file
+    let active: Run | null = null
+    for (let waited = 0; waited < 60 && active === null; waited++) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      const row = h.cache.getRun(run.id)
+      if (row?.status === 'running' && (row.steps ?? []).some((slot) => slot.note !== null)) active = row
+    }
+    assert.ok(active !== null, 'the step was folded while the run was active')
+    holdsNoPiece(JSON.stringify([active, runView(active)]), 'the active row or its drawer view')
+    const final = await h.launcher.settled(run.id)
+    assert.equal(final.status, 'done', final.note ?? '')
+    assert.match(JSON.stringify(final.steps), /checking with \[key\] and \[key\]/)
+    holdsNoPiece(JSON.stringify([final, h.cache.getRun(run.id), runView(final), h.logs]), 'the row, the steps, the drawer, or the log')
+    holdsNoPiece(await readFile(join(h.runDir(run), 'events.jsonl'), 'utf8'), 'the stored events.jsonl')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a result a resumed hermes session writes after the run failed is read again with every key cleared, in the stored result, the note, the log, and result.json, and the step notes of events.jsonl are cleared too', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    await h.mode('failsession')
+    const run = await h.launcher.start(request)
+    const failed = await h.launcher.settled(run.id)
+    assert.equal(failed.status, 'failed')
+    assert.notEqual(failed.resume, null)
+    const dir = h.runDir(run)
+    const number = 104
+    await writeFile(join(h.home, 'agents', 'output', `PR-${number}.md`), 'Reviewed commit: feat/x @ f00dfac\n')
+    await writeFile(join(dir, 'result.json'), JSON.stringify({
+      schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'failed', target: { repo: scenario.repo, pr: number }, reviewed: null, verdict: null, recommendation: null,
+      findings: [{ priority: 'P2', summary: `quotes ${fakeKey} and ${otherKey}`, files: [] }], ci: null, fixAttempts: 0, posted: null, notPostedReason: null, report: null, question: null,
+      error: `bad key ${fakeKey} and ${otherKey}`,
+    }))
+    await writeFile(join(dir, 'events.jsonl'), `${JSON.stringify({ at: '2026-01-01T00:00:00Z', step: 'review', state: 'started', note: `with ${fakeKey} and ${otherKey}` })}\n`)
+    const read = await h.launcher.reread(run.id)
+    assert.match(read.note ?? '', /bad key \[key\] and \[key\]/)
+    holdsNoPiece(JSON.stringify([read, h.cache.getRun(run.id), runView(read), h.logs]), 'the row, the drawer, or the log')
+    for (const name of ['result.json', 'events.jsonl']) holdsNoPiece(await readFile(join(dir, name), 'utf8'), name)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the permission denials of a stream result are ignored for a hermes run, which reports none, and kept for Claude and Codex', async () => {
+  const lines = await streamLines()
+  const withDenial = JSON.stringify({ ...(JSON.parse(lines.at(-1) as string) as object), permission_denials: [{ tool_name: 'terminal' }] })
+  assert.deepEqual(foldStream(emptyStream(), withDenial, 'hermes').state.denials, [])
+  assert.equal(foldStream(emptyStream(), withDenial, 'hermes').state.deniedPosts, null)
+  for (const runner of ['claude', 'codex']) assert.deepEqual(foldStream(emptyStream(), withDenial, runner).state.denials, ['terminal'], runner)
+  assert.deepEqual(foldStream(emptyStream(), withDenial).state.denials, ['terminal'])
+  const h = await setup()
+  try {
+    await h.mode('denials')
+    const run = await h.launcher.start(request)
+    const final = await h.launcher.settled(run.id)
+    assert.equal(final.status, 'done', final.note ?? '')
+    assert.equal(final.note, null)
+  } finally {
+    await h.cleanup()
+  }
+})

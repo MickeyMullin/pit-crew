@@ -1345,9 +1345,10 @@ const clippedEvent = (event: string | null, secrets: string[]): string => {
   return cut ? `${text}…` : text
 }
 
-// a text with every whole key in it replaced by [key], and a run of 4 or more characters at its very end that begins a key dropped, as a log cut short in the middle of a key holds
-const withoutKeys = (text: string, secrets: readonly string[]): string => {
+// a text with every whole key in it replaced by [key], and a run of 4 or more characters at its very end that begins a key dropped, as a log cut short in the middle of a key holds; with atEnd false only the whole keys are replaced, for text that is cut into whole lines
+const withoutKeys = (text: string, secrets: readonly string[], atEnd = true): string => {
   let kept = secrets.reduce((found, secret) => found.split(secret).join('[key]'), text)
+  if (!atEnd) return kept
   for (const secret of secrets) {
     for (let length = Math.min(secret.length - 1, kept.length); length >= 4; length--) {
       if (kept.endsWith(secret.slice(0, length))) {
@@ -1379,7 +1380,7 @@ const clip = (text: string, length = 300): string => text.length > length ? `${t
 
 // one stream line folded into the state; closeStdin is true when a result arrived while nothing
 // runs in the background, which is when a Claude run's stdin may close
-export const foldStream = (state: StreamState, line: string): { state: StreamState, closeStdin: boolean } => {
+export const foldStream = (state: StreamState, line: string, runner?: string): { state: StreamState, closeStdin: boolean } => {
   let event: unknown
   try {
     event = JSON.parse(line)
@@ -1397,6 +1398,8 @@ export const foldStream = (state: StreamState, line: string): { state: StreamSta
   if (kind === 'result' && typeof event.exit_code === 'number' && typeof event.session_id === 'string' && event.session_id !== '' && next.sessionId === null) next.sessionId = event.session_id
   if (kind !== 'result') return { state: next, closeStdin: false }
   if (typeof event.total_cost_usd === 'number') next.costUsd = event.total_cost_usd
+  // Hermes reports no permission denials, so whatever its result event lists under that name is not one
+  if (runner === 'hermes') return { state: next, closeStdin: next.outstanding === 0 }
   const denials = Array.isArray(event.permission_denials) ? event.permission_denials : []
   next.denials = denials.map((denial) => isObject(denial) ? String(denial.tool_name ?? denial.toolName ?? 'unknown tool') : String(denial))
   const posts = denials.map(deniedPostOf)
@@ -2614,7 +2617,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (eventsEnd >= 0) {
       entry.offsets.events += eventsEnd + 1
       // the newest line for a step is its current state; the newest line is the run's last step
-      const events = eventsBytes.subarray(0, eventsEnd).toString('utf8').split('\n').map(parseStepEvent).filter((event) => event !== null)
+      // a hermes child may put a key into a step's note, so every whole key is taken out of each line before it is parsed and folded
+      const eventsText = eventsBytes.subarray(0, eventsEnd).toString('utf8')
+      const events = (entry.row.runner === 'hermes' ? withoutKeys(eventsText, await hermesSecrets(entry.id), false) : eventsText).split('\n').map(parseStepEvent).filter((event) => event !== null)
       const latest = events.at(-1)
       if (latest !== undefined) {
         Object.assign(changes, { lastStepAt: latest.at, step: latest.step, stepState: latest.state })
@@ -2630,7 +2635,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       let closeStdin = false
       for (const line of streamBytes.subarray(0, streamEnd).toString('utf8').split('\n')) {
         if (line.trim() === '') continue
-        const folded = foldStream(entry.stream, line)
+        const folded = foldStream(entry.stream, line, entry.row.runner)
         entry.stream = folded.state
         if (folded.closeStdin) closeStdin = true
       }
@@ -2843,9 +2848,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   }
 
   // the child writes its output straight into stderr.log and stream.jsonl, so a key it printed is in them as it was printed. When the run settles each is rewritten in place with every key replaced by [key] (a whole text, so a key split across two writes is found); a file that cannot be rewritten is replaced by a one-line notice, and one that cannot even be written is removed, so no key stays on disk
-  const clearLogs = async (entry: Live, secrets: readonly string[]): Promise<void> => {
+  const clearLogs = async (entry: Pick<Live, 'dir' | 'id'>, secrets: readonly string[], names: readonly string[] = ['stderr.log', 'stream.jsonl', 'result.json', 'events.jsonl']): Promise<void> => {
     if (secrets.length === 0) return
-    for (const name of ['stderr.log', 'stream.jsonl', 'result.json']) {
+    for (const name of names) {
       const path = join(entry.dir, name)
       try {
         const text = await fs.readFile(path)
@@ -3456,9 +3461,12 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         throw new LaunchError('rereadRefused', `${why}; the ${noun} is unchanged`)
       }
       const dir = expandHome(run.dir, home)
+      // a hermes child may have written a key into what it wrote since: result.json and events.jsonl are rewritten without any, and the result is cleared like the settle path clears it, in the text and then in every string of what was parsed
+      const secrets = run.runner === 'hermes' ? await hermesSecrets(id) : []
+      await clearLogs({ dir, id }, secrets, ['result.json', 'events.jsonl'])
       const text = await fs.readFile(join(dir, 'result.json')).catch(() => null)
       if (text === null) return refuse(`result.json is missing from ${tildePath(dir, home)}`)
-      const parsed = parseResult(text)
+      const parsed = clearedResult(parseResult(text), secrets)
       if (!parsed.ok) return refuse(parsed.error)
       const value = parsed.value
       const expected = run.command === 'fix-pr' ? 'pit-crew/fix-result@1' : run.command === 'update-pr' ? 'pit-crew/update-result@1' : 'pit-crew/review-result@1'
@@ -3485,7 +3493,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (note !== run.note && (run as Partial<Run>).firstNote === null) changes.firstNote = run.note ?? ''
       // the later steps too: every line of events.jsonl, folded from the start
       const eventsText = await fs.readFile(join(dir, 'events.jsonl')).catch(() => null)
-      const events = (eventsText ?? '').split('\n').map(parseStepEvent).filter((event) => event !== null)
+      const events = (eventsText === null ? '' : withoutKeys(eventsText, secrets, false)).split('\n').map(parseStepEvent).filter((event) => event !== null)
       const latest = events.at(-1)
       if (latest !== undefined) {
         Object.assign(changes, { steps: foldSteps(emptySteps(), events), lastStepAt: latest.at, step: latest.step, stepState: latest.state })
