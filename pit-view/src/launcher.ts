@@ -1,7 +1,7 @@
 // src/launcher.ts
 import { spawn as spawnChild } from 'node:child_process'
 import { closeSync, openSync, watch as watchDir } from 'node:fs'
-import { mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import type { Cache, NewRun, NewSweep, Origin, QueueReason, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
 import { defaultHermesProfile, expandHome, normalizeExtraInstructions, tildePath } from './config.ts'
@@ -469,6 +469,9 @@ export const codexNote = (reportsDir: string): string =>
 // whether a run may post at all, from its own command and flags and nothing else: never from anything in its result, which an agent wrote after reading other people's PR text. A stack review stops to offer its post, a fix pushes, and an update pushes, so none of them posts by itself
 export const mayPost = (command: string, args: readonly string[]): boolean =>
   ['review-pr', 'review-dependabot', 'review-dependabot-sweep'].includes(command) && !args.includes('--no-post')
+
+// the commands a hermes start serves, every one of them review only: a stack review stops to offer its post and a sweep or Dependabot review posts, so each takes --no-post
+const hermesReviews: readonly string[] = ['review-pr', 'review-stack', 'review-dependabot', 'review-dependabot-sweep']
 
 // the posting switch for a scheduled run's kind under this config: post.dependabot for a sweep or a Dependabot run, and post.others for any other. A config with no autoReview key gives no leave to post
 export const postSwitchOn = (reason: QueueReason | null, config: Config): boolean =>
@@ -1342,6 +1345,22 @@ const clippedEvent = (event: string | null, secrets: string[]): string => {
   return cut ? `${text}…` : text
 }
 
+// a text with every whole key in it replaced by [key], and a run of 4 or more characters at its very end that begins a key dropped, as a log cut short in the middle of a key holds
+const withoutKeys = (text: string, secrets: readonly string[]): string => {
+  let kept = secrets.reduce((found, secret) => found.split(secret).join('[key]'), text)
+  for (const secret of secrets) {
+    for (let length = Math.min(secret.length - 1, kept.length); length >= 4; length--) {
+      if (kept.endsWith(secret.slice(0, length))) {
+        kept = kept.slice(0, -length)
+        break
+      }
+    }
+  }
+  return kept
+}
+
+const keyNotice = 'Pit View removed the contents of this file because it could not take a key out of it.\n'
+
 const clip = (text: string, length = 300): string => text.length > length ? `${text.slice(0, length)}…` : text
 
 // one stream line folded into the state; closeStdin is true when a result arrived while nothing
@@ -1580,6 +1599,8 @@ export const systemSpawn: Spawn = spawnWith({
 export type LauncherFs = {
   mkdir: (path: string) => Promise<void>
   writeFile: (path: string, text: string) => Promise<void>
+  // the file's whole text replaced through a temp file in its folder and a rename, keeping its mode, so a reader sees the old text or the new and a failure leaves no partial file
+  replaceFile: (path: string, text: string) => Promise<void>
   // null when the file does not exist
   readFile: (path: string) => Promise<string | null>
   // the bytes from offset to the end; empty when the file does not exist yet
@@ -1600,6 +1621,18 @@ export const systemFs: LauncherFs = {
     await mkdir(path, { recursive: true })
   },
   writeFile: (path, text) => writeFile(path, text, 'utf8'),
+  replaceFile: async (path, text) => {
+    const temp = `${path}.${process.pid}.tmp`
+    try {
+      const mode = (await stat(path)).mode & 0o777
+      await writeFile(temp, text, 'utf8')
+      await chmod(temp, mode)
+      await rename(temp, path)
+    } catch (error) {
+      await rm(temp, { force: true }).catch(() => {})
+      throw error
+    }
+  },
   readFile: async (path) => {
     try {
       return await readFile(path, 'utf8')
@@ -2430,6 +2463,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   // runs between their running row and their watch, each with whether a stop was asked meanwhile; the stop is carried out once the process is watched
   // the warning a live hermes run started with, kept until it settles so a run that ends without a note of its own still carries it
   const warnings = new Map<number, string>()
+  // the keys a live hermes run was started with, read once at its launch and held in memory only (never on a row, in a file, or in a log) so that its end clears the keys of the profile it started under, whatever the setting says by then
+  const heldKeys = new Map<number, string[]>()
   const launching = new Map<number, boolean>()
   // starts between their checks and their row
   const starting = new Set<string>()
@@ -2733,7 +2768,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
       finished = await finishedReport(parsed.value)
     }
-    const lastEvent = await hermesTail(entry, parsed)
+    const secrets = entry.row.runner === 'hermes' ? await hermesSecrets(entry.id) : []
+    const lastEvent = await hermesTail(entry, parsed, secrets)
+    await clearLogs(entry, secrets)
     const judgement = judge({
       stopped: entry.stopping,
       restarted,
@@ -2757,6 +2794,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     // the process has ended, so the run ends here even when the database refuses the write: whoever awaits it is woken and its slot is freed
     const run = end((started ?? { id: entry.id }) as unknown as T, { ...judgement, note: judgement.note ?? warnings.get(entry.id) ?? null, ...finished, ...resume, finishedAt: now() }, `settled as ${judgement.status}`)
     warnings.delete(entry.id)
+    heldKeys.delete(entry.id)
     log(`${noun} ${run.id} (${run.command} ${run.args.join(' ')}) ${run.status}${run.note === null ? '' : `: ${run.note}`}`)
     // a review or a sweep that ended, however it ended, frees its slot for the next in line
     if (entry.slot !== null) line.admit()
@@ -2773,16 +2811,37 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return { file, env, shown }
   }
 
-  // a hermes run that ended with no valid result keeps the tail of what it printed on stderr in its note, since Hermes says there why it stopped. Both keys, when readable, are taken out of it first
-  const hermesTail = async (entry: Live, parsed: Parsed<RunResultJson> | null): Promise<string | null> => {
-    if (entry.row.runner !== 'hermes' || parsed?.ok === true) return entry.stream.lastEvent
+  // every key a hermes run's end clears: those read at its launch, and those in the two files now when they are readable
+  const hermesSecrets = async (id: number): Promise<string[]> => {
     const { file, env } = await readKeys()
-    const secrets = [file, env].flatMap((read) => 'key' in read ? [read.key] : [])
+    return [...new Set([...heldKeys.get(id) ?? [], ...[file, env].flatMap((read) => 'key' in read ? [read.key] : [])])]
+  }
+
+  // a hermes run that ended with no valid result keeps the tail of what it printed on stderr in its note, since Hermes says there why it stopped. Every key, when known, is taken out of it first
+  const hermesTail = async (entry: Live, parsed: Parsed<RunResultJson> | null, secrets: readonly string[]): Promise<string | null> => {
+    if (entry.row.runner !== 'hermes' || parsed?.ok === true) return entry.stream.lastEvent
     const stderr = await fs.readFrom(join(entry.dir, 'stderr.log'), 0).catch(() => Buffer.alloc(0))
     const out = (text: string): string => secrets.reduce((kept, secret) => kept.split(secret).join('[key]'), text)
     // the whole stderr text is redacted before it is cut, so a cut never leaves part of a key that no longer matches it
     const tail = out(stderr.toString('utf8').trim().replace(/\s*\n\s*/g, ' | ')).slice(-hermesTailLength)
-    return `${clippedEvent(entry.stream.lastEvent, secrets)}${tail === '' ? '' : `; stderr: ${tail}`}`
+    return `${clippedEvent(entry.stream.lastEvent, [...secrets])}${tail === '' ? '' : `; stderr: ${tail}`}`
+  }
+
+  // the child writes its output straight into stderr.log and stream.jsonl, so a key it printed is in them as it was printed. When the run settles each is rewritten in place with every key replaced by [key] (a whole text, so a key split across two writes is found); a file that cannot be rewritten is replaced by a one-line notice, and one that cannot even be written is removed, so no key stays on disk
+  const clearLogs = async (entry: Live, secrets: readonly string[]): Promise<void> => {
+    if (secrets.length === 0) return
+    for (const name of ['stderr.log', 'stream.jsonl']) {
+      const path = join(entry.dir, name)
+      try {
+        const text = await fs.readFile(path)
+        if (text === null) continue
+        const kept = withoutKeys(text, secrets)
+        if (kept !== text) await fs.replaceFile(path, kept)
+      } catch (error) {
+        log(`${noun} ${entry.id}: cannot take a key out of ${name}, so it is replaced: ${messageOf(error)}`)
+        await fs.writeFile(path, keyNotice).catch(() => fs.rm(path)).catch((failure: unknown) => log(`${noun} ${entry.id}: cannot remove ${name}: ${messageOf(failure)}`))
+      }
+    }
   }
 
   // a process that proved gone, with no exit seen, ends the run the way an observed exit does
@@ -2952,6 +3011,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     let resume: string | null
     // a warning for the run when its two copies of the key differ; the run starts either way
     let warning: string | null = null
+    // the keys read for a hermes launch, kept for the run's end
+    let launchKeys: string[] = []
     try {
       await fs.mkdir(dir)
       await probeRunDir(dir, fs).catch((reason: unknown) => {
@@ -2962,6 +3023,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         const entry = hermesEntry(config, request.model)
         spec = { ...spec, hermes: { provider: entry.provider, model: entry.model } }
         const read = await readKeys()
+        launchKeys = [read.file, read.env].flatMap((one) => 'key' in one ? [one.key] : [])
         const status = keyStatus(read.file, read.env)
         if (status.sync === 'differs' && status.prefixes !== null) {
           warning = `warning: the OpenRouter key in ${read.shown.file} (${status.prefixes.keyFile}) differs from the one in ${read.shown.env} (${status.prefixes.profileEnv}); Hermes reads the second, so update whichever is stale`
@@ -3049,6 +3111,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       return run
     }
     if (warning !== null) warnings.set(run.id, warning)
+    if (launchKeys.length > 0) heldKeys.set(run.id, launchKeys)
     // from here the process exists: nothing is awaited and nothing may throw until it is watched, so it is never left running unwatched, uncounted, or out of Stop's reach
     const pid = child.pid
     // the pid goes to request.json first and then to the row, each write on its own, so one refused write never leaves a restart without it; the file's write is begun here and awaited only after the watch
@@ -3107,7 +3170,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     // a command that cannot run under hermes is refused by the check that follows, with its own reason
     if (claudeOnly(asked.command, asked.args)) return asked
     hermesEntry(config, asked.model)
-    if (!mayPost(asked.command, asked.args)) return asked
+    if (!hermesReviews.includes(asked.command) || asked.args.includes('--no-post')) return asked
     const flagged = asked.args.includes(extraInstructionsFlag)
     return { ...asked, args: [...asked.args.filter((arg) => arg !== extraInstructionsFlag), '--no-post', ...(flagged ? [extraInstructionsFlag] : [])] }
   }

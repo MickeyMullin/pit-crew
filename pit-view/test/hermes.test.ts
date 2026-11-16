@@ -1,6 +1,7 @@
 // test/hermes.test.ts
 // the hermes runner (section 8 of DESIGN.md, Launching runs, The hermes runner): its command line and resume line, the stream it prints, the environment its child gets, which models it may start with, and what is refused. The end-to-end tests run the real launcher over a small fake hermes executable on a temp PATH and a recorded stream with invented content, so no model is ever called
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { chmod, mkdir, readdir, readFile, realpath, stat, utimes, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -10,12 +11,13 @@ import { defaultConfig, validateConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import { commandRunner, createGh } from '../src/github.ts'
 import {
-  childEnv, claudeInvocation, codexInvocation, createLauncher, createReviewLine, emptyStream, foldStream, hermesInvocation, hermesMaxTurns, LaunchError,
+  childEnv, claudeInvocation, codexInvocation, createLauncher, createReviewLine, createSweepLauncher, emptyStream, foldStream, hermesInvocation, hermesMaxTurns, LaunchError,
   procsFrom, runners, runView, systemFs, systemSpawn,
 } from '../src/launcher.ts'
-import type { LaunchSpec } from '../src/launcher.ts'
+import type { LauncherFs, LaunchSpec, StartRequest } from '../src/launcher.ts'
 import { runnerLabels } from '../public/agent.ts'
 import { keyPrefix, openRouterKeyPath, profileEnvPath } from '../src/openrouter.ts'
+import { sweepRequest } from '../src/sweeps.ts'
 import { systemTimers } from '../src/poller.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { fakeRemotes, fixtureRunner, ok, tempDir } from './helpers.ts'
@@ -121,6 +123,34 @@ const request = fs.readFileSync(queryFile, 'utf8').trim()
 const dir = /--emit-json=(\\S+)/.exec(request)[1]
 fs.writeFileSync(path.join(dir, 'fake-call.json'), JSON.stringify({ argv, cwd: process.cwd(), envKeys: Object.keys(process.env).sort(), request, queryMode: (fs.statSync(queryFile).mode & 0o777) }))
 const lines = fs.readFileSync(path.join(process.env.HOME, 'stream.jsonl'), 'utf8').split('\\n').filter((line) => line !== '')
+const allKeys = ${JSON.stringify(keys)}
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+// prints every key on stderr and in a stream event, each split across two writes, into files whose mode it sets to 0640
+const leak = () => {
+  fs.fchmodSync(1, 0o640)
+  fs.fchmodSync(2, 0o640)
+  for (const key of allKeys) {
+    const half = Math.floor(key.length / 2)
+    process.stderr.write('auth failed for ' + key.slice(0, half)); sleep(40); process.stderr.write(key.slice(half) + '\\n')
+    process.stdout.write('{"type":"tool","text":"' + key.slice(0, half)); sleep(40); process.stdout.write(key.slice(half) + '"}\\n')
+  }
+}
+if (mode === 'leakwait') {
+  // the test changes the configured profile while this waits
+  while (!fs.existsSync(path.join(process.env.HOME, 'go.txt'))) sleep(20)
+  leak()
+  process.exit(1)
+}
+if (mode === 'leakhang') {
+  leak()
+  setInterval(() => {}, 1000)
+  return
+}
+if (mode === 'leakfail') {
+  leak()
+  process.exit(1)
+}
+if (mode === 'leakok') leak()
 if (mode === 'noresult') {
   out(lines[0])
   process.stderr.write('provider error: auth failed for ${keys.join(' and ')}\\n')
@@ -137,7 +167,7 @@ if (mode.startsWith('boundary')) {
   process.stderr.write('x'.repeat(40) + keys[errKey] + 's'.repeat(600 - keys[errKey].length + o) + '\\n')
   process.exit(1)
 }
-const step = (name, state, note = null) => fs.appendFileSync(path.join(dir, 'events.jsonl'), JSON.stringify({ at: at(), step: name, state, note }) + '\\n')
+const step = (name, state, note = null) => mode !== 'nosteps' && fs.appendFileSync(path.join(dir, 'events.jsonl'), JSON.stringify({ at: at(), step: name, state, note }) + '\\n')
 for (const line of lines.slice(0, -1)) out(line)
 out(JSON.stringify({ type: 'future_event', detail: 'not in the recorded stream' }))
 const number = Number(/^\\/review-pr (\\d+)/.exec(request)[1])
@@ -153,10 +183,10 @@ fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify({
 out(lines[lines.length - 1])
 `
 
-type Setup = { home: string, launcher: ReturnType<typeof createLauncher>, cache: ReturnType<typeof openCache>, logs: string[], keyPath: string, envPath: string, runDir: (run: Run) => string, mode: (mode: string) => Promise<void>, cleanup: () => Promise<void> }
+type Setup = { home: string, launcher: ReturnType<typeof createLauncher>, sweeps: ReturnType<typeof createSweepLauncher>, cache: ReturnType<typeof openCache>, logs: string[], keyPath: string, envPath: string, runDir: (run: Run) => string, mode: (mode: string) => Promise<void>, cleanup: () => Promise<void> }
 
 // key is the copy in openrouter.json and profileKey the one in the profile's .env; each is the same fake key unless it says otherwise, and null leaves the file out
-const setup = async ({ config = {}, key = fakeKey, profileKey = fakeKey, env = {} }: { config?: Partial<Config>, key?: string | null, profileKey?: string | null, env?: Record<string, string> } = {}): Promise<Setup> => {
+const setup = async ({ config = {}, key = fakeKey, profileKey = fakeKey, env = {}, fs = {} }: { config?: Partial<Config>, key?: string | null, profileKey?: string | null, env?: Record<string, string>, fs?: Partial<LauncherFs> } = {}): Promise<Setup> => {
   const temp = await tempDir()
   const home = await realpath(temp.dir)
   const bin = join(home, 'bin')
@@ -179,20 +209,23 @@ const setup = async ({ config = {}, key = fakeKey, profileKey = fakeKey, env = {
   const cache = openCache({ path: ':memory:', clock: { now: () => Date.now() } })
   const logs: string[] = []
   const lineConfig = (): Config => ({ ...defaultConfig(), repo: scenario.repo, viewer: scenario.viewer, cloneDir: '~/dev/orbit', ...config })
-  const launcher = createLauncher({
-    cache, gh: createGh(fixtureRunner().runner), git: async () => ok(fakeRemotes(scenario.repo)), spawn: systemSpawn, fs: systemFs, kill: (pid, signal) => process.kill(pid, signal),
+  const options = {
+    cache, gh: createGh(fixtureRunner().runner), git: async () => ok(fakeRemotes(scenario.repo)), spawn: systemSpawn, fs: { ...systemFs, ...fs }, kill: (pid: number, signal: NodeJS.Signals | 0) => process.kill(pid, signal),
     procs: procsFrom(commandRunner('ps')), clock: { now: () => Date.now() }, timers: systemTimers, config: lineConfig, home, stateDir: join(home, '.local', 'state', 'pit-view'),
     env: { PATH: `${bin}:/usr/bin:/bin`, USER: 'tester', LANG: 'en_US.UTF-8', OPENROUTER_API_KEY: 'sk-or-the-servers-own-environment', ...env },
     newSessionId: () => '00000000-0000-4000-8000-0000000000e2', onWatch: () => {}, onChange: () => {}, line: createReviewLine({ config: lineConfig, timers: systemTimers }),
-    log: (line) => logs.push(line), pollMs: 50, watchedPollMs: 200, openRouterKeyFile: keyPath,
-  })
+    log: (line: string) => logs.push(line), pollMs: 50, watchedPollMs: 200, openRouterKeyFile: keyPath,
+  }
+  const launcher = createLauncher(options)
+  const sweeps = createSweepLauncher(options)
   const mode = (value: string): Promise<void> => writeFile(join(home, 'mode.txt'), value)
   await mode('ok')
   return {
-    home, launcher, cache, logs, keyPath, envPath, mode,
+    home, launcher, sweeps, cache, logs, keyPath, envPath, mode,
     runDir: (run) => join(home, '.local', 'state', 'pit-view', 'runs', String(run.id)),
     cleanup: async () => {
       launcher.close()
+      sweeps.close()
       cache.close()
       await temp.cleanup()
     },
@@ -452,6 +485,180 @@ test('planted keys are in no log line, request.json, run row, report, or drawer 
     }
     assert.deepEqual(holders.sort(), [h.envPath, h.keyPath].sort())
     assert.equal((await stat(h.keyPath)).mode & 0o777, 0o600)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// every start of a review the hermes runner serves carries --no-post, whichever command it is, and the extra-instructions flag stays last
+test('every hermes start of review-pr, review-stack, review-dependabot, and the Dependabot sweep carries --no-post, and the Claude and Codex starts of them do not gain it', async () => {
+  const stack: StartRequest = { ...request, number: 106, command: 'review-stack', args: ['106'], label: 'Review stack' }
+  const dependabot: StartRequest = { ...request, number: 107, command: 'review-dependabot', args: ['107'], label: 'Review' }
+  const sweep: StartRequest = { ...sweepRequest(scenario.repo, 'hermes'), model: 'kimi-code' }
+  for (const [name, asked, sweeping] of [['review-pr', { ...request, args: ['104'] } as StartRequest, false], ['review-stack', stack, false], ['review-dependabot', dependabot, false], ['review-dependabot-sweep', sweep, true]] as [string, StartRequest, boolean][]) {
+    const h = await setup()
+    try {
+      await h.mode('noresult')
+      const launcher = sweeping ? h.sweeps : h.launcher
+      const run = await launcher.start(asked)
+      assert.equal(run.args.filter((arg) => arg === '--no-post').length, 1, name)
+      assert.equal(run.args.at(-1), '--no-post', name)
+      await launcher.settled(run.id)
+      const call = await callOf(join(h.home, '.local', 'state', 'pit-view', sweeping ? 'sweeps' : 'runs', String(run.id)))
+      assert.match(call.request, / --no-post --emit-json=/, name)
+      assert.ok(!call.argv.includes('--no-post'), 'the flag is in the request text, never an argument')
+      // the extra-instructions flag stays last
+      const flagged = await launcher.start({ ...asked, args: [...asked.args.filter((arg) => arg !== '--no-post'), '--extra-instructions'], number: sweeping ? 0 : asked.number + 1 })
+      assert.deepEqual(flagged.args.slice(-2), ['--no-post', '--extra-instructions'], name)
+      await launcher.settled(flagged.id)
+    } finally {
+      await h.cleanup()
+    }
+  }
+  // a Claude or Codex start is passed as it was asked: no flag added
+  const h = await setup()
+  try {
+    for (const runner of ['claude', 'codex'] as const) {
+      const { model: _, ...asked } = request
+      const run = await h.launcher.start({ ...asked, number: 110, command: 'review-stack', args: ['110'], runner })
+      assert.deepEqual(run.args, ['110'], runner)
+      h.launcher.stop(run.id)
+      await h.launcher.settled(run.id)
+    }
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the fix session, the update session, and a tandem review stay refused under hermes after the review-only flag is added', async () => {
+  const h = await setup()
+  try {
+    for (const [command, args, code] of [['fix-pr', ['104'], 'fixRunner'], ['update-pr', ['104'], 'updateRunner'], ['review-stack', ['106', '--tandem'], 'tandemRunner']] as const) {
+      await assert.rejects(h.launcher.start({ ...request, command, args: [...args] }), (error: unknown) => error instanceof LaunchError && error.code === code, command)
+    }
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// the least a file may hold of a key: nothing of four characters or more
+// except a piece that the recorded stream, which holds no key, or the differing-keys warning has in its own words
+const recorded = `${readFileSync(new URL('./fixtures/hermes-stream.jsonl', import.meta.url), 'utf8')} update whichever is stale`
+const holdsNoPiece = (text: string, where: string): void => {
+  for (const key of [fakeKey, otherKey]) {
+    for (const piece of fragmentsOf(key)) assert.ok(recorded.includes(piece) || !text.includes(piece), `${piece} of a key is in ${where}`)
+  }
+}
+
+for (const mode of ['leakok', 'leakfail']) {
+  test(`when a hermes run settles (${mode}), neither stderr.log nor stream.jsonl holds any 4-character piece of either key, though each was printed split across two writes, and their mode and the rest of their text stay`, async () => {
+    const h = await setup({ profileKey: otherKey })
+    try {
+      await h.mode(mode)
+      const run = await h.launcher.start(request)
+      const final = await h.launcher.settled(run.id)
+      assert.equal(final.status, mode === 'leakok' ? 'done' : 'failed')
+      const dir = h.runDir(run)
+      for (const name of ['stderr.log', 'stream.jsonl']) {
+        const text = await readFile(join(dir, name), 'utf8')
+        holdsNoPiece(text, name)
+        assert.match(text, /\[key\]/, `${name} says where the keys were`)
+        assert.equal((await stat(join(dir, name))).mode & 0o777, 0o640, `${name} keeps its mode`)
+      }
+      assert.match(await readFile(join(dir, 'stderr.log'), 'utf8'), /auth failed for \[key\]/)
+      assert.match(await readFile(join(dir, 'stream.jsonl'), 'utf8'), /"type":"tool","text":"\[key\]"/)
+      // written through a temp file that is gone, so the folder holds nothing new
+      assert.deepEqual((await readdir(dir)).filter((name) => /tmp|\.new|\.part/i.test(name)), [])
+      holdsNoPiece(JSON.stringify([final, runView(final), h.logs]).replace(/\\s/g, ' '), 'the row, the drawer, or the log')
+    } finally {
+      await h.cleanup()
+    }
+  })
+}
+
+test('a stopped hermes run is cleared of its keys in both logs like one that ended by itself', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    await h.mode('leakhang')
+    const run = await h.launcher.start(request)
+    for (let waited = 0; waited < 100 && (await readFile(join(h.runDir(run), 'stderr.log'), 'utf8').catch(() => '')).split('\n').length <= 2; waited++) await new Promise((resolve) => setTimeout(resolve, 50))
+    h.launcher.stop(run.id)
+    await h.launcher.settled(run.id)
+    for (const name of ['stderr.log', 'stream.jsonl']) holdsNoPiece(await readFile(join(h.runDir(run), name), 'utf8'), name)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a log whose rewrite fails is replaced by a one-line notice, and when even that fails it is removed, so a key is never left in it', async () => {
+  let failing: 'rewrite' | 'both' = 'rewrite'
+  const h = await setup({
+    profileKey: otherKey,
+    fs: {
+      replaceFile: async () => {
+        throw new Error('disk full')
+      },
+      writeFile: async (path, text) => {
+        if (failing === 'both' && /stderr\.log$/.test(path)) throw new Error('read-only')
+        await writeFile(path, text, 'utf8')
+      },
+      rm: async (path) => {
+        await systemFs.rm(path)
+      },
+    },
+  })
+  try {
+    await h.mode('leakfail')
+    const first = await h.launcher.start(request)
+    await h.launcher.settled(first.id)
+    for (const name of ['stderr.log', 'stream.jsonl']) {
+      const text = await readFile(join(h.runDir(first), name), 'utf8')
+      holdsNoPiece(text, name)
+      assert.equal(text.trim().split('\n').length, 1, `${name} is one line`)
+      assert.match(text, /key/)
+    }
+    failing = 'both'
+    const second = await h.launcher.start(request)
+    await h.launcher.settled(second.id)
+    assert.equal((await readdir(h.runDir(second))).includes('stderr.log'), false, 'a log that cannot be rewritten or replaced is removed')
+    holdsNoPiece(await readFile(join(h.runDir(second), 'stream.jsonl'), 'utf8'), 'stream.jsonl')
+    holdsNoPiece(JSON.stringify([h.cache.getRun(first.id), h.cache.getRun(second.id), h.logs]), 'the rows or the log')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a run whose profile setting changes while it runs is still cleared of the key of the profile it started under, in its note, its drawer, its log, and both files', async () => {
+  const config = { agent: { ...defaultConfig().agent, runner: 'claude' as const } } as Partial<Config>
+  const h = await setup({ config, key: fakeKey, profileKey: otherKey })
+  try {
+    await h.mode('leakwait')
+    const run = await h.launcher.start(request)
+    for (let waited = 0; waited < 100 && !(await stat(join(h.runDir(run), 'fake-call.json')).catch(() => null)); waited++) await new Promise((resolve) => setTimeout(resolve, 50))
+    // the configured profile moves to one with no .env, so the original profile's key is nowhere the settle looks now
+    config.agent = { ...config.agent!, hermesProfile: 'elsewhere' }
+    await writeFile(join(h.home, 'go.txt'), 'go')
+    const final = await h.launcher.settled(run.id)
+    assert.equal(final.status, 'failed')
+    holdsNoPiece(JSON.stringify([final, runView(final), h.logs]), 'the note, the drawer, or the log')
+    for (const name of ['stderr.log', 'stream.jsonl']) holdsNoPiece(await readFile(join(h.runDir(run), name), 'utf8'), name)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the stream alone gives a hermes run its session id, resume line, and last event: with the fake writing no events.jsonl lines the steps stay pending, which is also what a Claude or Codex stream gives, since the steps come from the command\'s own events.jsonl', async () => {
+  const h = await setup()
+  try {
+    await h.mode('nosteps')
+    const run = await h.launcher.start(request)
+    const final = await h.launcher.settled(run.id)
+    assert.equal(final.status, 'done', final.note ?? '')
+    assert.match(final.sessionId ?? '', /^local-/)
+    assert.equal(final.resume, `cd ~/dev/orbit && hermes -p pitview chat --resume ${final.sessionId}`)
+    assert.match(await readFile(join(h.runDir(run), 'stream.jsonl'), 'utf8'), /"type":"future_event"/)
+    assert.equal((await readFile(join(h.runDir(run), 'events.jsonl'), 'utf8').catch(() => '')), '')
+    assert.deepEqual(runView(final).steps.map((slot) => slot.state), ['pending', 'pending', 'pending', 'pending', 'pending'])
   } finally {
     await h.cleanup()
   }
