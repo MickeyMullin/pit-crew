@@ -1625,6 +1625,8 @@ export type LauncherFs = {
   readFile: (path: string) => Promise<string | null>
   // a file in a run's own folder, which the child controls: read only when it is a regular file with one link, opened without following a link, so a symbolic link or a hard link that may lead outside is never read
   readOwn: (path: string) => Promise<OwnRead>
+  // a file Pit View writes into a run's folder once the child can act: the text goes to a new file made exclusively under an unpredictable name and is renamed over the target, so a link or hard link the child put at the name is replaced and what it led to is never written
+  writeOwn: (path: string, text: string) => Promise<void>
   // a new file made exclusively and never through an existing path or link; fails when the name exists
   createFile: (path: string, text: string) => Promise<void>
   // the bytes from offset to the end; empty when the file does not exist yet
@@ -1654,6 +1656,21 @@ export const systemFs: LauncherFs = {
       try {
         await handle.writeFile(text, 'utf8')
         await handle.chmod(mode)
+      } finally {
+        await handle.close()
+      }
+      await rename(temp, path)
+    } catch (error) {
+      await rm(temp, { force: true }).catch(() => {})
+      throw error
+    }
+  },
+  writeOwn: async (path, text) => {
+    const temp = `${path}.${randomBytes(8).toString('hex')}.tmp`
+    try {
+      const handle = await open(temp, 'wx', 0o666)
+      try {
+        await handle.writeFile(text, 'utf8')
       } finally {
         await handle.close()
       }
@@ -3073,14 +3090,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }, (id) => tildePath(join(runsDir, String(id)), home))
   }
 
-  // request.json written whole once its process exists: a write refused, at once or later, is logged and answered with false rather than thrown, since nothing may throw while a process is not yet watched
+  // request.json written whole once its process exists, through a temp file and a rename, so a link the child put at its name is replaced and never written through: a write refused, at once or later, is logged and answered with false rather than thrown, since nothing may throw while a process is not yet watched
   const writeRequest = (id: number, dir: string, contents: Record<string, unknown>): Promise<boolean> => {
     const refused = (error: unknown): boolean => {
       log(`${noun} ${id}: cannot update request.json: ${messageOf(error)}`)
       return false
     }
     try {
-      return fs.writeFile(join(dir, 'request.json'), `${JSON.stringify(contents, null, 2)}\n`).then(() => true, refused)
+      return fs.writeOwn(join(dir, 'request.json'), `${JSON.stringify(contents, null, 2)}\n`).then(() => true, refused)
     } catch (error) {
       return Promise.resolve(refused(error))
     }

@@ -137,6 +137,15 @@ const leak = () => {
     process.stdout.write('{"type":"tool","text":"' + key.slice(0, half)); sleep(40); process.stdout.write(key.slice(half) + '"}\\n')
   }
 }
+if (mode.startsWith('requestlink ')) {
+  // 'requestlink <symlink|hardlink>': as soon as it runs, request.json in the run's folder is replaced by a link to outside-key.txt in HOME, and planted.txt says so; then it runs as an ordinary clean review
+  const target = path.join(process.env.HOME, 'outside-key.txt')
+  const file = path.join(dir, 'request.json')
+  fs.rmSync(file, { force: true })
+  if (mode.endsWith('symlink')) fs.symlinkSync(target, file)
+  else fs.linkSync(target, file)
+  fs.writeFileSync(path.join(process.env.HOME, 'planted.txt'), 'yes')
+}
 if (mode.startsWith('plant ')) {
   // 'plant <name> <symlink|hardlink>': the run's ordinary files, with keys on both logs, and then, as it exits, <name> (or the report) replaced by a link to the file outside-key.txt in HOME
   const [, name, kind] = mode.split(' ')
@@ -1194,6 +1203,65 @@ test('a hard link inside the reports folder to a file outside it is no report: i
     assert.deepEqual(await fingerprint(outside), before)
     assert.deepEqual(await fingerprint(inside), before, 'the in-folder name is the same file and is untouched')
     assert.equal((await stat(outside)).nlink, 2)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// every write of request.json after the first (the ones after the spawn) waits until the fake has planted its link, so the child's replacement is certain to come first; it wraps both the ordinary write and the link-safe one
+const afterPlanting = (home: () => string): Partial<LauncherFs> => {
+  let writes = 0
+  const wait = async (): Promise<void> => {
+    writes += 1
+    if (writes < 2) return
+    for (let tries = 0; tries < 400 && !await systemFs.exists(join(home(), 'planted.txt')); tries += 1) await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  const gated = (name: 'writeFile' | 'writeOwn') => async (path: string, text: string): Promise<void> => {
+    if (path.endsWith('request.json')) await wait()
+    await (systemFs[name] as (path: string, text: string) => Promise<void>)(path, text)
+  }
+  return { writeFile: gated('writeFile'), writeOwn: gated('writeOwn') } as Partial<LauncherFs>
+}
+
+for (const kind of ['symlink', 'hardlink']) {
+  test(`a child that makes request.json a ${kind} to a fake key file before the launcher's second write never has that file overwritten: the file is byte for byte and in its modification time unchanged, and request.json is a regular file holding what Pit View wrote`, async () => {
+    let where = ''
+    const h = await setup({ profileKey: otherKey, fs: afterPlanting(() => where) })
+    where = h.home
+    try {
+      const outside = await plantOutside(h.home)
+      const before = await fingerprint(outside)
+      await h.mode(`requestlink ${kind}`)
+      const run = await h.launcher.start(request)
+      const final = await h.launcher.settled(run.id)
+      assert.equal(final.status, 'done', final.note ?? '')
+      assert.deepEqual(await fingerprint(outside), before, 'the fake key file is as planted')
+      assert.equal((await stat(outside)).nlink, 1, 'no link to it is left')
+      const file = join(h.runDir(run), 'request.json')
+      const info = await lstat(file)
+      assert.ok(info.isFile() && info.nlink === 1, 'request.json is a regular file with one link')
+      const text = await readFile(file, 'utf8')
+      const written = JSON.parse(text) as { runner: string, pid: number }
+      assert.equal(written.runner, 'hermes')
+      assert.equal(typeof written.pid, 'number')
+      assert.doesNotMatch(text, new RegExp(`${fakeKey}|${otherKey}`))
+    } finally {
+      await h.cleanup()
+    }
+  })
+}
+
+test('a normal run still leaves request.json a regular file with one link that holds the pid and the start time', async () => {
+  const h = await setup()
+  try {
+    const run = await h.launcher.start(request)
+    await h.launcher.settled(run.id)
+    const file = join(h.runDir(run), 'request.json')
+    const info = await lstat(file)
+    assert.ok(info.isFile() && info.nlink === 1)
+    const written = JSON.parse(await readFile(file, 'utf8')) as { pid: number | null, pidStartedAt: string | null }
+    assert.equal(typeof written.pid, 'number')
+    assert.ok(written.pidStartedAt !== null)
   } finally {
     await h.cleanup()
   }

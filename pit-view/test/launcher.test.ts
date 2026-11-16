@@ -3361,13 +3361,13 @@ test('a queued review whose pid cannot be written after its spawn keeps its slot
   }
 })
 
-// a launch whose request.json writes that carry a pid throw, as a full disk's would, while the one made before the spawn, with no pid, succeeds; only the first `left.count` of them throw
+// a launch whose request.json writes that carry a pid throw, as a full disk's would, while the one made before the spawn, with no pid, succeeds; only the first `left.count` of them throw. The writes made once the process exists go through writeOwn
 const refusedPidFile = (left = { count: Number.POSITIVE_INFINITY }): FakeLaunch => {
   const launch = fakeLaunch()
-  const writeRunFile = launch.deps.fs.writeFile
+  const writeRunFile = launch.deps.fs.writeOwn
   launch.deps.fs = {
     ...launch.deps.fs,
-    writeFile: async (path, text) => {
+    writeOwn: async (path, text) => {
       if (path.endsWith('request.json') && typeof (JSON.parse(text) as { pid: unknown }).pid === 'number' && left.count > 0) {
         left.count -= 1
         throw new Error('ENOSPC: no space left on device, write')
@@ -3526,11 +3526,16 @@ test('request.json takes the pid as soon as the process exists, and a write of i
   const launch = refusedPidFile(left)
   const written: unknown[] = []
   const writeRunFile = launch.deps.fs.writeFile
+  const writeOwnFile = launch.deps.fs.writeOwn
   launch.deps.fs = {
     ...launch.deps.fs,
     writeFile: async (path, text) => {
       if (path.endsWith('request.json')) written.push((JSON.parse(text) as { pid: unknown }).pid)
       return writeRunFile(path, text)
+    },
+    writeOwn: async (path, text) => {
+      if (path.endsWith('request.json')) written.push((JSON.parse(text) as { pid: unknown }).pid)
+      return writeOwnFile(path, text)
     },
   }
   const h = await harness({ launch, config: { maxConcurrentReviews: 1 } })
