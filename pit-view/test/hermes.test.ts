@@ -1116,6 +1116,32 @@ test('a key in the file name of the report a valid result names does not hide th
   }
 })
 
+test('a failed clearing of a report whose file name holds a key logs the name as [key]: the error text of a failed read, rewrite, removal, or notice never puts the key in the log, a note, or a stored text', async () => {
+  const h = await setup({
+    profileKey: otherKey,
+    fs: {
+      // real filesystem errors name the path they failed on, and here that path holds the key
+      replaceFile: async (path) => {
+        throw new Error(`EACCES: permission denied, rename '${path}.tmp' -> '${path}'`)
+      },
+      rm: async (path) => {
+        if (/PR-104-/.test(path)) throw new Error(`EPERM: operation not permitted, unlink '${path}'`)
+        await systemFs.rm(path)
+      },
+    },
+  })
+  try {
+    await h.mode('namedreport')
+    const run = await h.launcher.start(request)
+    const final = await h.launcher.settled(run.id)
+    assert.equal(final.status, 'done', final.note ?? '')
+    assert.ok(h.logs.some((line) => /the report/.test(line) && /\[key\]/.test(line)), 'the failure is logged, with the name shown as [key]')
+    holdsNoPiece(JSON.stringify([final, h.cache.getRun(run.id), runView(final), h.logs]), 'the row, the drawer, or the log')
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a re-read that is refused because result.json has not changed still takes a key out of the report the result names', async () => {
   const h = await setup({ profileKey: otherKey })
   try {

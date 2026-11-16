@@ -2949,15 +2949,18 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return read.kind === 'file' ? read.text : null
   }
 
+  // error text from the filesystem names the path it failed on, and the child may have put a key in that name, so every message written about a child's file has each known key replaced by [key] first
+  const keyless = (text: string, secrets: readonly string[]): string => secrets.reduce((kept, secret) => secret === '' ? kept : kept.split(secret).join('[key]'), text)
+
   // a path the child may have made a link, or a link to a file outside, taken out of the way: the entry itself is removed, which never touches what it leads to, and a notice is made in its place as a new file. Each step that fails is logged once and not tried again
-  const replaceEntry = async (path: string, name: string, id: number): Promise<void> => {
+  const replaceEntry = async (path: string, name: string, id: number, secrets: readonly string[]): Promise<void> => {
     try {
       await fs.rm(path)
     } catch (failure) {
-      log(`${noun} ${id}: cannot remove ${name}: ${messageOf(failure)}`)
+      log(`${noun} ${id}: cannot remove ${name}: ${keyless(messageOf(failure), secrets)}`)
       return
     }
-    await fs.createFile(path, keyNotice).catch((failure: unknown) => log(`${noun} ${id}: cannot write a notice in place of ${name}: ${messageOf(failure)}`))
+    await fs.createFile(path, keyNotice).catch((failure: unknown) => log(`${noun} ${id}: cannot write a notice in place of ${name}: ${keyless(messageOf(failure), secrets)}`))
   }
 
   // one file rewritten in place with every whole key replaced, by the rule above; an absent file is left alone. A file that is a link, is not a regular file, or has more than one link is never read or written through: it is replaced by a notice. A rewrite that fails removes the entry first and then makes the notice exclusively, so nothing is written through an existing path
@@ -2968,14 +2971,14 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (read.kind === 'absent') return
       if (read.kind === 'unsafe') {
         log(`${noun} ${id}: ${name} is a link or has more than one link, so it is replaced without being read`)
-        await replaceEntry(path, name, id)
+        await replaceEntry(path, name, id, secrets)
         return
       }
       const kept = withoutKeys(read.text, secrets, atEnd)
       if (kept !== read.text) await fs.replaceFile(path, kept)
     } catch (error) {
-      log(`${noun} ${id}: cannot take a key out of ${name}, so it is replaced: ${messageOf(error)}`)
-      await replaceEntry(path, name, id)
+      log(`${noun} ${id}: cannot take a key out of ${name}, so it is replaced: ${keyless(messageOf(error), secrets)}`)
+      await replaceEntry(path, name, id, secrets)
     }
   }
 
