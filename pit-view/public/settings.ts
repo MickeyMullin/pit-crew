@@ -22,7 +22,7 @@ import {
   postAskIsStale, postSwitchesToTurnOff, postViewerNeededText, postingAsk, postingLoginOf, postingNeedsViewer, toConfig, todayChoices, toForm, validateForm, wantsPostConfirm, weekdayChoices,
 } from './settings-form.ts'
 import type { AutoSection, AvatarMode, Choice, FieldError, FieldKey, Form, PersonForm, PostConfirmed, PostKind, SampleText, Suggestion, TicketForm, TicketKind } from './settings-form.ts'
-import { clearRequest, keyInputProblem, keyRoute, keyStatus, replaceRequest } from './openrouterkey.ts'
+import { keyLines, keyRoute } from './openrouterkey.ts'
 import type { KeyView } from './openrouterkey.ts'
 import { readToken } from './runapi.ts'
 import { mountStickyHeader, trackHeight } from './sticky.ts'
@@ -1056,17 +1056,13 @@ window.addEventListener('beforeunload', (event) => {
   if (page !== null && isDirty(page.form, page.saved)) event.preventDefault()
 })
 
-// the OpenRouter key card: its own routes, at once, apart from Save; the field is never filled in, and what is typed is cleared as soon as it is sent
+// the OpenRouter key card: three status lines, read once when the page opens; there is nothing on it to change
 const showKey = (view: KeyView | null): void => {
-  const status = keyStatus(view)
-  const element = byId('openrouter-status')
-  element.textContent = status.text
-  element.setAttribute('data-tone', status.tone)
-}
-const keyError = (message: string | null): void => {
-  const element = byId('openrouter-error')
-  element.hidden = message === null
-  element.textContent = message ?? ''
+  for (const line of keyLines(view)) {
+    const element = byId(`openrouter-${line.id}`)
+    element.textContent = line.text
+    element.setAttribute('data-tone', line.tone)
+  }
 }
 const readKey = async (): Promise<void> => {
   try {
@@ -1075,26 +1071,6 @@ const readKey = async (): Promise<void> => {
     showKey(null)
   }
 }
-const sendKey = async (request: { url: string, init: RequestInit }): Promise<void> => {
-  keyError(null)
-  try {
-    const response = await fetch(request.url, request.init)
-    const body = await response.json() as KeyView | { error?: string }
-    if (!response.ok) return keyError('error' in body ? body.error ?? 'The key was not changed.' : 'The key was not changed.')
-    showKey(body as KeyView)
-  } catch {
-    keyError('The key was not changed: Pit View did not answer.')
-  }
-}
-byId('openrouter-replace').addEventListener('click', () => {
-  const field = byId<HTMLInputElement>('openrouter-key')
-  const problem = keyInputProblem(field.value)
-  if (problem !== null) return keyError(problem)
-  const request = replaceRequest(field.value, readToken(document))
-  field.value = ''
-  void sendKey(request)
-})
-byId('openrouter-clear').addEventListener('click', () => void sendKey(clearRequest(readToken(document))))
 void readKey()
 
 void load()

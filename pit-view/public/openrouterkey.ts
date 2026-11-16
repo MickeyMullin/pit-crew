@@ -1,31 +1,34 @@
 // public/openrouterkey.ts
-// the Settings card for Pit View's OpenRouter key (section 8 of DESIGN.md, The OpenRouter key): whether a key is set, and Replace and Clear. The key is typed into a field that is never filled in, goes to its own route, and is never shown, stored by the page, or sent anywhere else
-import { tokenHeader } from './agent.ts'
+// the Settings card for Pit View's OpenRouter key (section 8 of DESIGN.md, The OpenRouter key): three read-only status lines, whether the key file and the Hermes profile's .env each hold a key and whether the two agree. The page never sends, shows, or stores a key, and has nothing to edit it with
+export type Presence = 'set' | 'missing' | 'problem'
 
-export type KeyView = { set: boolean, problem: string | null }
-export type KeyStatus = { text: string, tone: 'normal' | 'ok' | 'error' }
+export type KeyView = {
+  keyFile: Presence
+  profileEnv: Presence
+  sync: 'in sync' | 'differs' | 'unknown'
+  prefixes: { keyFile: string, profileEnv: string } | null
+  problems: { keyFile: string | null, profileEnv: string | null }
+}
+
+export type KeyLine = { id: 'keyFile' | 'profileEnv' | 'sync', text: string, tone: 'normal' | 'ok' | 'error' }
 
 export const keyRoute = '/api/openrouter-key'
 
-// what the card says: only the two fields the server answers with are read
-export const keyStatus = (view: KeyView | null): KeyStatus => {
-  if (view === null) return { text: 'Could not read whether a key is set.', tone: 'error' }
-  if (view.problem !== null) return { text: `Not usable: ${view.problem}`, tone: 'error' }
-  return view.set ? { text: 'Set.', tone: 'ok' } : { text: 'Not set. Hermes runs fail to start until a key is set.', tone: 'normal' }
+const side = (label: string, state: Presence, problem: string | null): KeyLine['text'] =>
+  state === 'set' ? `${label}: set.` : state === 'missing' ? `${label}: not set.` : `${label}: not usable${problem === null ? '' : `, ${problem}`}`
+
+// what the card says: only the fields the server answers with are read, and a prefix is shown only when the two differ
+export const keyLines = (view: KeyView | null): KeyLine[] => {
+  if (view === null) return [{ id: 'sync', text: 'Could not read the state of the OpenRouter key.', tone: 'error' }]
+  const prefixes = view.sync === 'differs' && view.prefixes !== null ? view.prefixes : null
+  const sync: KeyLine = view.sync === 'in sync'
+    ? { id: 'sync', text: 'The two keys are in sync.', tone: 'ok' }
+    : view.sync === 'differs'
+      ? { id: 'sync', text: `The two keys differ${prefixes === null ? '' : `: key file ${prefixes.keyFile}, profile .env ${prefixes.profileEnv}`}.`, tone: 'error' }
+      : { id: 'sync', text: 'The two keys cannot be compared until both are set.', tone: 'normal' }
+  return [
+    { id: 'keyFile', text: side('Key file', view.keyFile, view.problems.keyFile), tone: view.keyFile === 'set' ? 'ok' : view.keyFile === 'problem' ? 'error' : 'normal' },
+    { id: 'profileEnv', text: side('Profile .env', view.profileEnv, view.problems.profileEnv), tone: view.profileEnv === 'set' ? 'ok' : view.profileEnv === 'problem' ? 'error' : 'normal' },
+    sync,
+  ]
 }
-
-// a problem with what was typed, or null; the message never repeats the key
-export const keyInputProblem = (typed: string): string | null => {
-  const key = typed.trim()
-  if (key === '') return 'Enter the key.'
-  return /\s/.test(key) ? 'A key has no spaces.' : null
-}
-
-export type KeyRequest = { url: string, init: RequestInit }
-
-export const replaceRequest = (typed: string, token: string): KeyRequest => ({
-  url: keyRoute,
-  init: { method: 'PUT', headers: { 'Content-Type': 'application/json', [tokenHeader]: token }, body: JSON.stringify({ apiKey: typed.trim() }) },
-})
-
-export const clearRequest = (token: string): KeyRequest => ({ url: keyRoute, init: { method: 'DELETE', headers: { [tokenHeader]: token } } })

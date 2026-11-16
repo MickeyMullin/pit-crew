@@ -13,7 +13,8 @@ import { fetchViewerLogin } from './github.ts'
 import type { Gh, RawOpenPr, Runner } from './github.ts'
 import { resolveModels, roleFor } from './models.ts'
 import type { ModelEntry, RequestModels, RunModels } from './models.ts'
-import { readOpenRouterKey } from './openrouter.ts'
+import { keyStatus, profileEnvPath, readOpenRouterKey, readProfileEnvKey } from './openrouter.ts'
+import type { KeyRead } from './openrouter.ts'
 import type { Timers } from './poller.ts'
 import { prReportName, reportHash } from './reports.ts'
 import type { ReportInfo } from './reports.ts'
@@ -564,9 +565,6 @@ export const runners: Readonly<Record<RunRunner, RunnerEntry>> = {
 // not pass on that session's variables
 export const childEnvKeys = ['USER', 'LOGNAME', 'SHELL', 'LANG', 'TMPDIR', 'PATH'] as const
 
-// the one variable beyond the list above that any child gets, and only the hermes child: Pit View's own OpenRouter key, read from its file and never from the server's environment (section 8 of DESIGN.md, The OpenRouter key)
-export const hermesEnvKeys = ['OPENROUTER_API_KEY'] as const
-
 // a run's git traffic, and the credentials it carries: the command's own fetch runs inside the runner's sandbox, where an ssh identity cannot be unlocked (Codex refuses /dev/tty) and where depending on an agent's socket would make the run's success a property of what is listening outside it. Redirecting an SSH remote to HTTPS and letting gh's helper answer means no key, no socket, and no prompt is involved: the run authenticates with the same gh login the launcher already requires for its API reads, and the helper is asked for the token rather than given it
 const gitCredentialEnv = {
   GIT_CONFIG_COUNT: '2',
@@ -593,10 +591,6 @@ export const childEnv = (source: Readonly<Record<string, string | undefined>>, h
   }
   return env
 }
-
-// the hermes child's environment: the same one every runner gets, plus the key under its one name. The key is a parameter, so nothing in the server's own environment can stand in for it
-export const hermesChildEnv = (source: Readonly<Record<string, string | undefined>>, home: string, command: string, key: string): Record<string, string> =>
-  ({ ...childEnv(source, home, command), [hermesEnvKeys[0]]: key })
 
 // the run a row starts: never review-local, and --no-post on every review of the viewer's own PR
 
@@ -2223,11 +2217,6 @@ export const probeRunDir = async (dir: string, fs: Pick<LauncherFs, 'writeFile' 
   await fs.rm(probe)
 }
 
-// a hermes launch with no usable key: the message names the file and what is wrong with it, and never a key
-export class HermesKeyProblem extends Error {
-  override name = 'HermesKeyProblem'
-}
-
 // the registry entry a hermes run starts with: one that names the hermes runner, by its id, in the registry in effect (the owner's, or the built-in table). Nothing else starts under hermes
 export const hermesEntry = (config: Pick<Config, 'models'>, id: string | undefined): ModelEntry => {
   const entry = id === undefined ? undefined : resolveModels(config.models).registry.find((candidate) => candidate.id === id)
@@ -2276,7 +2265,7 @@ export type LauncherOptions<T extends Session = Run> = {
   // the posts in flight, shared with the post path; the sweep launcher is given none, since a sweep is not a run of any PR
   posts?: PostGuard
   log?: (line: string) => void
-  // the file Pit View's OpenRouter key is in (section 8 of DESIGN.md, The OpenRouter key); a hermes run is refused when it is not given or holds no key
+  // the file Pit View's OpenRouter key is in (section 8 of DESIGN.md, The OpenRouter key); only read, to warn when it differs from the profile's copy and to take the key out of a stderr tail
   openRouterKeyFile?: string
   // how often a run's files are read when the folder cannot be watched, and the safety
   // net when it can; a recovered run's liveness is checked as often
@@ -2420,8 +2409,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const member = line.join(() => [...live.values()].flatMap((entry) => entry.slot === null ? [] : [entry.slot]))
   const waiters = new Map<number, ((run: T) => void)[]>()
   // runs between their running row and their watch, each with whether a stop was asked meanwhile; the stop is carried out once the process is watched
-  // the key a live hermes run was started with, so what it printed can be cleared of it; held in memory until the run settles
-  const keys = new Map<number, string>()
+  // the warning a live hermes run started with, kept until it settles so a run that ends without a note of its own still carries it
+  const warnings = new Map<number, string>()
   const launching = new Map<number, boolean>()
   // starts between their checks and their row
   const starting = new Set<string>()
@@ -2747,28 +2736,33 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     if (entry.stdinOpen && entry.child?.stdin != null) entry.child.stdin.end()
     entry.stdinOpen = false
     // the process has ended, so the run ends here even when the database refuses the write: whoever awaits it is woken and its slot is freed
-    const run = end((started ?? { id: entry.id }) as unknown as T, { ...judgement, ...finished, ...resume, finishedAt: now() }, `settled as ${judgement.status}`)
+    const run = end((started ?? { id: entry.id }) as unknown as T, { ...judgement, note: judgement.note ?? warnings.get(entry.id) ?? null, ...finished, ...resume, finishedAt: now() }, `settled as ${judgement.status}`)
+    warnings.delete(entry.id)
     log(`${noun} ${run.id} (${run.command} ${run.args.join(' ')}) ${run.status}${run.note === null ? '' : `: ${run.note}`}`)
     // a review or a sweep that ended, however it ended, frees its slot for the next in line
     if (entry.slot !== null) line.admit()
     return run
   }
 
-  // a hermes run that ended with no valid result keeps the tail of what it printed on stderr in its note, since Hermes says there why it stopped. The key is taken out of it first: the one this run started with, and the one in the file now
-  const hermesTail = async (entry: Live, parsed: Parsed<RunResultJson> | null): Promise<string | null> => {
-    const started = keys.get(entry.id)
-    keys.delete(entry.id)
-    if (entry.row.runner !== 'hermes' || parsed?.ok === true) return entry.stream.lastEvent
-    const secrets = [started]
+  // the two copies of Pit View's OpenRouter key, read from their files and held only while the caller needs them: openrouter.json and the .env of the Hermes profile the config names. Only read; nothing here or after it writes either
+  const readKeys = async (): Promise<{ file: KeyRead, env: KeyRead, shown: { file: string, env: string } }> => {
     const keyFile = options.openRouterKeyFile
-    if (keyFile !== undefined) {
-      const read = await readOpenRouterKey(keyFile).catch(() => null)
-      if (read !== null && 'key' in read) secrets.push(read.key)
-    }
+    const envFile = profileEnvPath(home, options.config().agent.hermesProfile ?? defaultHermesProfile)
+    const shown = { file: keyFile === undefined ? '~/.config/pit-view/openrouter.json' : tildePath(keyFile, home), env: tildePath(envFile, home) }
+    const file: KeyRead = keyFile === undefined ? { missing: true } : await readOpenRouterKey(keyFile, shown.file).catch((): KeyRead => ({ missing: true }))
+    const env = await readProfileEnvKey(envFile, shown.env).catch((): KeyRead => ({ missing: true }))
+    return { file, env, shown }
+  }
+
+  // a hermes run that ended with no valid result keeps the tail of what it printed on stderr in its note, since Hermes says there why it stopped. Both keys, when readable, are taken out of it first
+  const hermesTail = async (entry: Live, parsed: Parsed<RunResultJson> | null): Promise<string | null> => {
+    if (entry.row.runner !== 'hermes' || parsed?.ok === true) return entry.stream.lastEvent
+    const { file, env } = await readKeys()
+    const secrets = [file, env].flatMap((read) => 'key' in read ? [read.key] : [])
     const stderr = await fs.readFrom(join(entry.dir, 'stderr.log'), 0).catch(() => Buffer.alloc(0))
     const tail = stderr.toString('utf8').trim().replace(/\s*\n\s*/g, ' | ').slice(-hermesTailLength)
     let text = `${entry.stream.lastEvent ?? 'none'}${tail === '' ? '' : `; stderr: ${tail}`}`
-    for (const secret of secrets) if (secret !== undefined && secret !== '') text = text.split(secret).join('[key]')
+    for (const secret of secrets) text = text.split(secret).join('[key]')
     return text
   }
 
@@ -2937,8 +2931,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     let modelsOnRow = false
     let stdin: string | null
     let resume: string | null
-    // Pit View's OpenRouter key, read for a hermes run and held only until the spawn
-    let hermesKey: string | null = null
+    // a warning for the run when its two copies of the key differ; the run starts either way
+    let warning: string | null = null
     try {
       await fs.mkdir(dir)
       await probeRunDir(dir, fs).catch((reason: unknown) => {
@@ -2948,12 +2942,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (runner === 'hermes') {
         const entry = hermesEntry(config, request.model)
         spec = { ...spec, hermes: { provider: entry.provider, model: entry.model } }
-        const keyFile = options.openRouterKeyFile
-        const shown = keyFile === undefined ? '~/.config/pit-view/openrouter.json' : tildePath(keyFile, home)
-        const read = keyFile === undefined ? { missing: true as const } : await readOpenRouterKey(keyFile, shown)
-        if ('problem' in read) throw new HermesKeyProblem(read.problem)
-        if ('missing' in read) throw new HermesKeyProblem(`${shown} holds no OpenRouter key; add one in Settings`)
-        hermesKey = read.key
+        const read = await readKeys()
+        const status = keyStatus(read.file, read.env)
+        if (status.sync === 'differs' && status.prefixes !== null) {
+          warning = `warning: the OpenRouter key in ${read.shown.file} (${status.prefixes.keyFile}) differs from the one in ${read.shown.env} (${status.prefixes.profileEnv}); Hermes reads the second, so update whichever is stale`
+        }
       }
       // made before the spawn, so nothing that builds it can throw once a process exists; Codex's is written once its session id is read from the stream, so it is left out here
       resume = sessionId === null ? null : resumeFor(run, sessionId, spec)
@@ -3019,7 +3012,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         command: invocation.command,
         args: invocation.args,
         cwd,
-        env: hermesKey === null ? childEnv(options.env, home, run.command) : hermesChildEnv(options.env, home, run.command, hermesKey),
+        env: childEnv(options.env, home, run.command),
         stdoutPath: join(dir, 'stream.jsonl'),
         stderrPath: join(dir, 'stderr.log'),
         stdin: stdin === null ? 'ignore' : 'pipe',
@@ -3027,7 +3020,6 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     } catch (error) {
       const note = error instanceof UnwritableRunDir
         ? `permissionDenied: ${tildePath(error.dir, home)} cannot be written: ${messageOf(error.reason)}`
-        : error instanceof HermesKeyProblem ? `hermesKey: ${error.message}`
         : error instanceof LaunchError ? `${error.code}: ${error.message}`
         : `spawnFailed: ${messageOf(error)}`
       launching.delete(run.id)
@@ -3037,7 +3029,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       await prune()
       return run
     }
-    if (hermesKey !== null) keys.set(run.id, hermesKey)
+    if (warning !== null) warnings.set(run.id, warning)
     // from here the process exists: nothing is awaited and nothing may throw until it is watched, so it is never left running unwatched, uncounted, or out of Stop's reach
     const pid = child.pid
     // the pid goes to request.json first and then to the row, each write on its own, so one refused write never leaves a restart without it; the file's write is begun here and awaited only after the watch
@@ -3051,7 +3043,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
     let pidInRow = true
     try {
-      run = store.update(run.id, { pid, ...(resume === null ? {} : { resume }) })
+      run = store.update(run.id, { pid, ...(resume === null ? {} : { resume }), ...(warning === null ? {} : { note: warning }) })
     } catch (error) {
       // the row keeps no pid, but the watch below has it, so Stop still signals the process and its end still settles it; the write is made again with the start time
       pidInRow = false

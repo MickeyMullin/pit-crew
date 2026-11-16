@@ -17,7 +17,7 @@ import { openCache } from './cache.ts'
 import type { Cache } from './cache.ts'
 import { createClients, keepsSchedule } from './clients.ts'
 import type { ClientState, Clients } from './clients.ts'
-import { autoConcurrencyProblem, cacheFile, ConfigError, configFile, expandHome, extraInstructionsProblem, readConfig, runnerNames, saveConfig, stateDir, tildePath, validateConfig } from './config.ts'
+import { autoConcurrencyProblem, cacheFile, ConfigError, configFile, defaultHermesProfile, expandHome, extraInstructionsProblem, readConfig, runnerNames, saveConfig, stateDir, tildePath, validateConfig } from './config.ts'
 import type { Clock, Config, RunnerName, RunRunner } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner, WriteLimits } from './github.ts'
@@ -25,7 +25,8 @@ import { latestReviewsOf, markedStack } from './derive.ts'
 import { chooseExtraInstructions, createLauncher, createPostGuard, createReviewLine, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest, withExtraInstructions } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, PostGuard, Procs, Queueing, Spawn, StartKind } from './launcher.ts'
 import { modelsSaveProblem, modelsView } from './models.ts'
-import { clearOpenRouterKey, keyProblem, openRouterFileName, readOpenRouterKey, writeOpenRouterKey } from './openrouter.ts'
+import { keyStatus, openRouterFileName, profileEnvPath, readOpenRouterKey, readProfileEnvKey } from './openrouter.ts'
+import type { OpenRouterStatus } from './openrouter.ts'
 import { renderMarkdown } from './markdown.ts'
 import { createNotifier, noDeliver, systemDeliver, systemExec } from './notify.ts'
 import type { Deliver } from './notify.ts'
@@ -869,30 +870,11 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   }
 
   // a save can turn on auto-review or its posting, so it takes a direct action's Origin and token (section 10 of DESIGN.md, In the UI)
-  // whether a key is set, and what is wrong with its file when it is not usable: never the key, and never any part of the file's contents
-  const keyView = async (): Promise<{ set: boolean, problem: string | null }> => {
-    const read = await readOpenRouterKey(openRouterKeyFile, tildePath(openRouterKeyFile, home))
-    return { set: 'key' in read, problem: 'problem' in read ? read.problem : null }
-  }
-
-  // Replace writes the key file alone, and answers whether a key is set; the request's key is read here and goes nowhere else
-  const putOpenRouterKey = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    requireOrigin(req)
-    requireToken(req)
-    const body = await readJson(req)
-    if (typeof body !== 'object' || body === null || Array.isArray(body) || Object.keys(body).length !== 1 || !('apiKey' in body)) throw new HttpError(400, 'send { "apiKey": "the key" } and nothing else')
-    const problem = keyProblem((body as { apiKey: unknown }).apiKey)
-    if (problem !== null) throw new HttpError(400, `apiKey: ${problem}`)
-    await writeOpenRouterKey(openRouterKeyFile, (body as { apiKey: string }).apiKey)
-    json(res, 200, await keyView())
-  }
-
-  const deleteOpenRouterKey = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    requireOrigin(req)
-    requireToken(req)
-    await noBody(req)
-    await clearOpenRouterKey(openRouterKeyFile)
-    json(res, 200, await keyView())
+  // whether each copy of the OpenRouter key is set, whether the two agree, and what is wrong with a file that cannot be used: never a key and never any part of a file's contents. Read only; Pit View writes neither file
+  const keyView = async (): Promise<OpenRouterStatus> => {
+    const envFile = profileEnvPath(home, effective().agent.hermesProfile ?? defaultHermesProfile)
+    const [file, env] = await Promise.all([readOpenRouterKey(openRouterKeyFile, tildePath(openRouterKeyFile, home)), readProfileEnvKey(envFile, tildePath(envFile, home))])
+    return keyStatus(file, env)
   }
 
   const putConfig = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -1073,8 +1055,6 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'GET', pattern: /^\/api\/models$/, handle: (_req, res) => json(res, 200, modelsView(effective().models)) },
     { method: 'GET', pattern: /^\/api\/instance$/, handle: async (_req, res) => json(res, 200, { name: options.instance ?? '', configPath: tildePath(options.configPath, home), pid: process.pid, loginAgent: { installed: await options.launch.fs.exists(loginAgentFile(home)) } }) },
     { method: 'GET', pattern: /^\/api\/openrouter-key$/, handle: async (_req, res) => json(res, 200, await keyView()) },
-    { method: 'PUT', pattern: /^\/api\/openrouter-key$/, handle: (req, res) => putOpenRouterKey(req, res) },
-    { method: 'DELETE', pattern: /^\/api\/openrouter-key$/, handle: (req, res) => deleteOpenRouterKey(req, res) },
     { method: 'GET', pattern: /^\/api\/config$/, handle: (_req, res) => json(res, 200, stored) },
     { method: 'PUT', pattern: /^\/api\/config$/, handle: (req, res) => putConfig(req, res) },
     { method: 'GET', pattern: /^\/api\/people\/suggestions$/, handle: (_req, res) => json(res, 200, suggestions()) },

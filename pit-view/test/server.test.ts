@@ -1,6 +1,6 @@
 // test/server.test.ts
 import assert from 'node:assert/strict'
-import { chmod, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readdir, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -10,7 +10,7 @@ import { openCache } from '../src/cache.ts'
 import type { Config } from '../src/config.ts'
 import type { Notice } from '../src/notify.ts'
 import type { Patch, View } from '../src/poller.ts'
-import { writeOpenRouterKey } from '../src/openrouter.ts'
+import { keyPrefix } from '../src/openrouter.ts'
 import { hostAllowed, originAllowed, PortInUseError, resolveRuntime, startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
 import { iso } from '../src/time.ts'
@@ -2554,94 +2554,141 @@ test('a models value that is not a plain object is refused by PUT /api/config na
   }
 })
 
-// the OpenRouter key (section 8 of DESIGN.md, The OpenRouter key): a file of its own, set, replaced, and cleared through three routes that answer only whether a key is set
+// the OpenRouter key (section 8 of DESIGN.md, The OpenRouter key): Pit View reads openrouter.json and the Hermes profile's .env and writes neither; one read-only route says whether each is set and whether they agree
 const plantedKey = 'sk-or-v1-PLANTEDfakefakefakefakefakefake77aa'
+const staleKey = 'sk-or-v1-PLANTEDstalestalestalestalestale55bb'
 const keyRoute = (h: Harness): string => `${h.base}/api/openrouter-key`
-const keyHeaders = (h: Harness): Record<string, string> => ({ Origin: h.server.url, 'x-pit-view-token': h.server.token })
 const keyFile = (h: Harness): string => join(h.home, '.config', 'pit-view', 'openrouter.json')
-
-test('the OpenRouter key routes answer only whether a key is set: set, replace, and clear write the key file alone, and no answer carries the key', async () => {
-  const h = await setup()
-  try {
-    assert.deepEqual((await getJson<unknown>(keyRoute(h))).body, { set: false, problem: null })
-    const first = await send(keyRoute(h), 'PUT', { apiKey: plantedKey }, keyHeaders(h))
-    assert.equal(first.status, 200)
-    assert.deepEqual(first.body, { set: true, problem: null })
-    assert.deepEqual(JSON.parse(await readFile(keyFile(h), 'utf8')), { apiKey: plantedKey })
-    assert.equal((await stat(keyFile(h))).mode & 0o777, 0o600)
-    const second = await send(keyRoute(h), 'PUT', { apiKey: `${plantedKey}-2` }, keyHeaders(h))
-    assert.equal(second.status, 200)
-    assert.deepEqual((await getJson<unknown>(keyRoute(h))).body, { set: true, problem: null })
-    assert.doesNotMatch(JSON.stringify([first, second, await getJson<unknown>(keyRoute(h))]), /PLANTED/)
-    const cleared = await send(keyRoute(h), 'DELETE', undefined, keyHeaders(h))
-    assert.deepEqual(cleared.body, { set: false, problem: null })
-    await assert.rejects(readFile(keyFile(h), 'utf8'), /ENOENT/)
-    // the config file was never touched by any of it
-    assert.doesNotMatch(await readFile(h.configPath, 'utf8'), /PLANTED|apiKey|openrouter/i)
-  } finally {
-    await h.cleanup()
-  }
+const envFile = (h: Harness): string => join(h.home, '.hermes', 'profiles', 'pitview', '.env')
+const keyFiles = (file: string | null, env: string | null): Record<string, string> => ({
+  ...(file === null ? {} : { '.config/pit-view/openrouter.json': `${JSON.stringify({ apiKey: file })}\n` }),
+  ...(env === null ? {} : { '.hermes/profiles/pitview/.env': `OTHER=1\nOPENROUTER_API_KEY=${env}\nGIT_CONFIG_COUNT=3\n` }),
 })
-
-test('the OpenRouter key routes refuse a write without the token or the Origin, a body that is not exactly { apiKey }, and a key that is empty or has whitespace, naming the field and never the key', async () => {
-  const h = await setup()
-  try {
-    assert.equal((await send(keyRoute(h), 'PUT', { apiKey: plantedKey }, { Origin: h.server.url })).status, 403)
-    assert.equal((await send(keyRoute(h), 'PUT', { apiKey: plantedKey }, { 'x-pit-view-token': h.server.token })).status, 403)
-    assert.equal((await send(keyRoute(h), 'DELETE', undefined, { Origin: h.server.url })).status, 403)
-    for (const body of [{}, { apiKey: '' }, { apiKey: 'has space' }, { apiKey: 7 }, { apiKey: plantedKey, extra: 1 }, [plantedKey], plantedKey]) {
-      const refused = await send(keyRoute(h), 'PUT', body, keyHeaders(h))
-      assert.equal(refused.status, 400, JSON.stringify(body))
-      assert.doesNotMatch(JSON.stringify(refused.body), /PLANTED/)
+// a harness with both files planted at 0600 and long ago, so a write shows in the bytes or the modification time
+const keyed = async (file: string | null, env: string | null, config = {}): Promise<Harness> => {
+  const h = await setup({ files: keyFiles(file, env), config })
+  for (const path of [keyFile(h), envFile(h)]) {
+    if (await stat(path).then(() => true, () => false)) {
+      await chmod(path, 0o600)
+      await utimes(path, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'))
     }
-    await assert.rejects(readFile(keyFile(h), 'utf8'), /ENOENT/)
+  }
+  return h
+}
+type KeyAnswer = { keyFile: string, profileEnv: string, sync: string, prefixes: { keyFile: string, profileEnv: string } | null, problems: { keyFile: string | null, profileEnv: string | null } }
+
+test('GET /api/openrouter-key says whether each file holds a key and whether they agree, and shows the 8-character hash prefixes only when they differ', async () => {
+  const none = await keyed(null, null)
+  try {
+    assert.deepEqual((await getJson<KeyAnswer>(keyRoute(none))).body, { keyFile: 'missing', profileEnv: 'missing', sync: 'unknown', prefixes: null, problems: { keyFile: null, profileEnv: null } })
   } finally {
-    await h.cleanup()
+    await none.cleanup()
+  }
+  const same = await keyed(plantedKey, plantedKey)
+  try {
+    const view = await getJson<KeyAnswer>(keyRoute(same))
+    assert.deepEqual(view.body, { keyFile: 'set', profileEnv: 'set', sync: 'in sync', prefixes: null, problems: { keyFile: null, profileEnv: null } })
+  } finally {
+    await same.cleanup()
+  }
+  const differs = await keyed(plantedKey, staleKey)
+  try {
+    const view = await getJson<KeyAnswer>(keyRoute(differs))
+    assert.equal(view.body.sync, 'differs')
+    assert.deepEqual(view.body.prefixes, { keyFile: keyPrefix(plantedKey), profileEnv: keyPrefix(staleKey) })
+    assert.doesNotMatch(JSON.stringify(view), /PLANTED/)
+  } finally {
+    await differs.cleanup()
+  }
+  const half = await keyed(plantedKey, null)
+  try {
+    assert.deepEqual((await getJson<KeyAnswer>(keyRoute(half))).body, { keyFile: 'set', profileEnv: 'missing', sync: 'unknown', prefixes: null, problems: { keyFile: null, profileEnv: null } })
+  } finally {
+    await half.cleanup()
   }
 })
 
-test('a key file with the wrong mode is reported as a problem that names the file and never its contents, and is not offered as set', async () => {
-  const h = await setup({ files: { '.config/pit-view/openrouter.json': JSON.stringify({ apiKey: plantedKey }) } })
+test('a file with the wrong mode is a problem that names the file and never its contents, on either side, and the sides are then unknown', async () => {
+  const h = await keyed(plantedKey, staleKey)
   try {
     await chmod(keyFile(h), 0o644)
-    const view = await getJson<{ set: boolean, problem: string | null }>(keyRoute(h))
-    assert.equal(view.body.set, false)
-    assert.match(view.body.problem ?? '', /openrouter\.json.*0644/)
+    await chmod(envFile(h), 0o640)
+    const view = await getJson<KeyAnswer>(keyRoute(h))
+    assert.equal(view.body.keyFile, 'problem')
+    assert.equal(view.body.profileEnv, 'problem')
+    assert.equal(view.body.sync, 'unknown')
+    assert.match(view.body.problems.keyFile ?? '', /openrouter\.json.*0644/)
+    assert.match(view.body.problems.profileEnv ?? '', /\.hermes\/profiles\/pitview\/\.env.*0640/)
     assert.doesNotMatch(JSON.stringify(view.body), /PLANTED/)
   } finally {
     await h.cleanup()
   }
 })
 
-test('saving settings through the real save path leaves openrouter.json byte for byte as it was, and neither GET /api/config, GET /api/models, nor a saved config ever holds the key', async () => {
-  const h = await setup({ files: { '.config/pit-view/openrouter.json': `${JSON.stringify({ apiKey: plantedKey })}\n` } })
+test('the profile whose .env is read is the one the config names', async () => {
+  const h = await setup({ config: { agent: { runner: 'claude', claudeModel: 'sonnet', hermesProfile: 'review2' } }, files: { '.hermes/profiles/review2/.env': `OPENROUTER_API_KEY=${plantedKey}\n`, ...keyFiles(plantedKey, staleKey) } })
   try {
-    const before = await readFile(keyFile(h))
-    const modeBefore = (await stat(keyFile(h))).mode
-    const config = await getJson<Config>(`${h.base}/api/config`)
-    for (const change of [{}, { refreshSeconds: 120 }, { agent: { runner: 'codex', claudeModel: 'opus' } }, { models: { slots: { stack: 'opus' } } }]) {
-      assert.equal((await saveConfigAs(h.server, { ...config.body, ...change })).status, 200)
-      assert.deepEqual(await readFile(keyFile(h)), before)
-      assert.equal((await stat(keyFile(h))).mode, modeBefore)
-    }
-    // a key smuggled into a save is dropped or refused, never stored beside the settings
-    const smuggled = await saveConfigAs(h.server, { ...config.body, openRouterKey: plantedKey })
-    assert.ok(smuggled.status === 400 || !(await readFile(h.configPath, 'utf8')).includes('PLANTED'))
-    for (const url of ['/api/config', '/api/models', '/api/instance', '/api/openrouter-key']) {
-      assert.doesNotMatch(JSON.stringify((await getJson<unknown>(`${h.base}${url}`)).body), /PLANTED/, url)
-    }
-    assert.doesNotMatch(await readFile(h.configPath, 'utf8'), /PLANTED/)
-    assert.deepEqual(await readFile(keyFile(h)), before)
+    await chmod(join(h.home, '.hermes', 'profiles', 'review2', '.env'), 0o600)
+    await chmod(keyFile(h), 0o600)
+    assert.equal((await getJson<KeyAnswer>(keyRoute(h))).body.sync, 'in sync')
   } finally {
     await h.cleanup()
   }
 })
 
-test('a start may name hermes with a registry id: the run is hermes, its child gets the key in the one variable, and no answer or run view carries the key; no model, an unknown one, and a tandem or fix start are refused', async () => {
-  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+test('no route writes either key file: every route, including a settings save, a start of a hermes run, and a PUT, POST, or DELETE on the key route, leaves both files byte for byte and in modification time as planted, and none is made', async () => {
+  const h = await keyed(plantedKey, staleKey, { cloneDir: '~/dev/orbit' })
   try {
     await filled(h)
-    await writeOpenRouterKey(keyFile(h), plantedKey)
+    const before = await Promise.all([keyFile(h), envFile(h)].map(async (path) => ({ path, bytes: await readFile(path), stat: await stat(path) })))
+    const config = await getJson<Config>(`${h.base}/api/config`)
+    const headers = { Origin: h.server.url, ...token(h) }
+    const answers = [
+      await saveConfigAs(h.server, { ...config.body, refreshSeconds: 120 }),
+      await send(keyRoute(h), 'PUT', { apiKey: 'sk-or-v1-PLANTEDnew' }, headers),
+      await send(keyRoute(h), 'POST', { apiKey: 'sk-or-v1-PLANTEDnew' }, headers),
+      await send(keyRoute(h), 'DELETE', undefined, headers),
+      await send(`${h.base}/api/prs/106/runs`, 'POST', { repo: scenario.repo, runner: 'hermes', model: 'kimi-code' }, token(h)),
+    ]
+    for (const answer of answers.slice(1, 4)) assert.ok(answer.status >= 400 && answer.status < 500, JSON.stringify(answer))
+    assert.equal(answers[0]?.status, 200)
+    assert.equal(answers[4]?.status, 200)
+    for (const url of ['/api/config', '/api/models', '/api/instance', '/api/openrouter-key', '/api/prs']) await getJson<unknown>(`${h.base}${url}`)
+    for (const file of before) {
+      assert.deepEqual(await readFile(file.path), file.bytes, file.path)
+      const after = await stat(file.path)
+      assert.equal(after.mtimeMs, file.stat.mtimeMs, file.path)
+      assert.equal(after.mode, file.stat.mode, file.path)
+    }
+    assert.deepEqual(await readdir(join(h.home, '.config', 'pit-view')).then((names) => names.filter((name) => name.startsWith('openrouter'))), ['openrouter.json'])
+    assert.deepEqual(await readdir(join(h.home, '.hermes', 'profiles', 'pitview')), ['.env'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('neither GET /api/config, GET /api/models, GET /api/instance, the key route, nor a saved config ever holds a key, and a key smuggled into a save is dropped or refused', async () => {
+  const h = await keyed(plantedKey, staleKey)
+  try {
+    const config = await getJson<Config>(`${h.base}/api/config`)
+    for (const change of [{}, { refreshSeconds: 120 }, { agent: { runner: 'codex', claudeModel: 'opus' } }, { models: { slots: { stack: 'opus' } } }]) {
+      assert.equal((await saveConfigAs(h.server, { ...config.body, ...change })).status, 200)
+    }
+    const smuggled = await saveConfigAs(h.server, { ...config.body, openRouterKey: plantedKey })
+    assert.ok(smuggled.status === 400 || !(await readFile(h.configPath, 'utf8')).includes('PLANTED'))
+    for (const url of ['/api/config', '/api/models', '/api/instance', '/api/openrouter-key']) {
+      assert.doesNotMatch(JSON.stringify((await getJson<unknown>(`${h.base}${url}`)).body), /PLANTED/, url)
+    }
+    assert.doesNotMatch(await readFile(h.configPath, 'utf8'), /PLANTED|apiKey|OPENROUTER/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a start may name hermes with a registry id: the run is hermes, its child gets no key, and no answer or run view carries the key; no model, an unknown one, and a tandem or fix start are refused', async () => {
+  const h = await keyed(plantedKey, plantedKey, { cloneDir: '~/dev/orbit' })
+  try {
+    await filled(h)
     const url = `${h.base}/api/prs/106/runs`
     const refused = [
       await send(url, 'POST', { repo: scenario.repo, runner: 'hermes' }, token(h)),
@@ -2659,7 +2706,8 @@ test('a start may name hermes with a registry id: the run is hermes, its child g
     assert.equal(started.body.runner, 'hermes')
     const child = h.launch.children[0]!
     assert.equal(child.request.command, 'hermes')
-    assert.equal(child.request.env.OPENROUTER_API_KEY, plantedKey)
+    assert.equal('OPENROUTER_API_KEY' in child.request.env, false)
+    assert.doesNotMatch(JSON.stringify(child.request), /PLANTED/)
     assert.ok(child.request.args.includes('moonshotai/kimi-k2.7-code'))
     assert.doesNotMatch(JSON.stringify([started.body, (await getJson<unknown>(url)).body, refused.map((answer) => answer.body)]), /PLANTED/)
   } finally {

@@ -1,7 +1,7 @@
 // test/hermes.test.ts
 // the hermes runner (section 8 of DESIGN.md, Launching runs, The hermes runner): its command line and resume line, the stream it prints, the environment its child gets, which models it may start with, and what is refused. The end-to-end tests run the real launcher over a small fake hermes executable on a temp PATH and a recorded stream with invented content, so no model is ever called
 import assert from 'node:assert/strict'
-import { chmod, mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readdir, readFile, realpath, stat, utimes, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { openCache } from '../src/cache.ts'
@@ -10,18 +10,20 @@ import { defaultConfig, validateConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import { commandRunner, createGh } from '../src/github.ts'
 import {
-  childEnv, claudeInvocation, codexInvocation, createLauncher, createReviewLine, emptyStream, foldStream, hermesChildEnv, hermesEnvKeys, hermesInvocation, hermesMaxTurns, LaunchError,
+  childEnv, claudeInvocation, codexInvocation, createLauncher, createReviewLine, emptyStream, foldStream, hermesInvocation, hermesMaxTurns, LaunchError,
   procsFrom, runners, runView, systemFs, systemSpawn,
 } from '../src/launcher.ts'
 import type { LaunchSpec } from '../src/launcher.ts'
 import { runnerLabels } from '../public/agent.ts'
-import { openRouterKeyPath, writeOpenRouterKey } from '../src/openrouter.ts'
+import { keyPrefix, openRouterKeyPath, profileEnvPath } from '../src/openrouter.ts'
 import { systemTimers } from '../src/poller.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { fakeRemotes, fixtureRunner, ok, tempDir } from './helpers.ts'
 
 // a recognizable fake key, scanned for everywhere it must never appear
 const fakeKey = 'sk-or-v1-PLANTEDfakefakefakefakefakefake9f3a7c'
+// the copy in the profile's .env, which differs from the one above in the tests that say so
+const otherKey = 'sk-or-v1-PLANTEDstalestalestalestalestale0b1d2e'
 
 const spec = (over: Partial<LaunchSpec> = {}): LaunchSpec => ({
   command: 'review-pr', args: ['104', '--no-post'], cwd: '/home/tester/agents/worktrees/orbit-104', runDir: '/home/tester/.local/state/pit-view/runs/7', home: '/home/tester',
@@ -55,15 +57,11 @@ test('the other runners take no query file, and the hermes resume line carries t
   assert.equal(runners.hermes.resume('~/dev/orbit', "a b'c", spec(), '/home/tester'), `cd ~/dev/orbit && hermes -p pitview chat --resume 'a b'\\''c'`)
 })
 
-test('the hermes child environment is the launcher\'s own plus one named variable, and nothing from the server\'s environment', () => {
-  assert.deepEqual([...hermesEnvKeys], ['OPENROUTER_API_KEY'])
+test('the hermes child environment is exactly the launcher\'s own, as for Claude and Codex, with no key of any kind, whatever the server\'s environment holds', () => {
   const server = { PATH: '/usr/bin', USER: 'tester', OPENROUTER_API_KEY: 'sk-or-server-env', HERMES_HOME: '/elsewhere', ANTHROPIC_API_KEY: 'sk-ant-x', GH_TOKEN: 'gho_x', SSH_AUTH_SOCK: '/s' }
-  const env = hermesChildEnv(server, '/home/tester', 'review-pr', fakeKey)
-  assert.deepEqual(env, { ...childEnv(server, '/home/tester', 'review-pr'), OPENROUTER_API_KEY: fakeKey })
-  assert.deepEqual(Object.keys(env).sort(), ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_KEY_1', 'GIT_CONFIG_KEY_2', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_VALUE_1', 'GIT_CONFIG_VALUE_2', 'HOME', 'OPENROUTER_API_KEY', 'PATH', 'USER'])
-  // the server's own value of the variable, and its other names, never reach any child
-  assert.equal(childEnv(server, '/home/tester', 'review-pr').OPENROUTER_API_KEY, undefined)
-  assert.doesNotMatch(JSON.stringify(env), /sk-or-server-env|sk-ant-x|gho_x|elsewhere/)
+  const env = childEnv(server, '/home/tester', 'review-pr')
+  assert.deepEqual(Object.keys(env).sort(), ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_KEY_1', 'GIT_CONFIG_KEY_2', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_VALUE_1', 'GIT_CONFIG_VALUE_2', 'HOME', 'PATH', 'USER'])
+  assert.doesNotMatch(JSON.stringify(env), /sk-or-server-env|sk-ant-x|gho_x|elsewhere|OPENROUTER/)
 })
 
 const streamLines = async (): Promise<string[]> => (await readFile(new URL('./fixtures/hermes-stream.jsonl', import.meta.url), 'utf8')).split('\n').filter((line) => line !== '')
@@ -111,7 +109,7 @@ test('a hermes run is named Hermes wherever the drawer names a run\'s runner', (
 })
 
 // the fake hermes: replays the recorded stream with an unknown event among its lines, writes the steps, the report, and the result a clean --no-post review writes, and records what it was called with. Its mode is a file in HOME
-const fakeHermes = (key: string): string => `
+const fakeHermes = (keys: string[]): string => `
 const fs = require('node:fs')
 const path = require('node:path')
 const argv = process.argv.slice(2)
@@ -121,11 +119,11 @@ const mode = fs.readFileSync(path.join(process.env.HOME, 'mode.txt'), 'utf8').tr
 const queryFile = argv[argv.indexOf('--query-file') + 1]
 const request = fs.readFileSync(queryFile, 'utf8').trim()
 const dir = /--emit-json=(\\S+)/.exec(request)[1]
-fs.writeFileSync(path.join(dir, 'fake-call.json'), JSON.stringify({ argv, cwd: process.cwd(), envKeys: Object.keys(process.env).sort(), keyIsTheFile: process.env.OPENROUTER_API_KEY === '${key}', request, queryMode: (fs.statSync(queryFile).mode & 0o777) }))
+fs.writeFileSync(path.join(dir, 'fake-call.json'), JSON.stringify({ argv, cwd: process.cwd(), envKeys: Object.keys(process.env).sort(), request, queryMode: (fs.statSync(queryFile).mode & 0o777) }))
 const lines = fs.readFileSync(path.join(process.env.HOME, 'stream.jsonl'), 'utf8').split('\\n').filter((line) => line !== '')
 if (mode === 'noresult') {
   out(lines[0])
-  process.stderr.write('provider error: auth failed for ' + process.env.OPENROUTER_API_KEY + '\\n')
+  process.stderr.write('provider error: auth failed for ${keys.join(' and ')}\\n')
   process.stderr.write('Error: the model did not answer\\n')
   process.exit(1)
 }
@@ -145,19 +143,29 @@ fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify({
 out(lines[lines.length - 1])
 `
 
-type Setup = { home: string, launcher: ReturnType<typeof createLauncher>, cache: ReturnType<typeof openCache>, logs: string[], keyPath: string, runDir: (run: Run) => string, mode: (mode: string) => Promise<void>, cleanup: () => Promise<void> }
+type Setup = { home: string, launcher: ReturnType<typeof createLauncher>, cache: ReturnType<typeof openCache>, logs: string[], keyPath: string, envPath: string, runDir: (run: Run) => string, mode: (mode: string) => Promise<void>, cleanup: () => Promise<void> }
 
-const setup = async ({ config = {}, key = fakeKey, env = {} }: { config?: Partial<Config>, key?: string | null, env?: Record<string, string> } = {}): Promise<Setup> => {
+// key is the copy in openrouter.json and profileKey the one in the profile's .env; each is the same fake key unless it says otherwise, and null leaves the file out
+const setup = async ({ config = {}, key = fakeKey, profileKey = fakeKey, env = {} }: { config?: Partial<Config>, key?: string | null, profileKey?: string | null, env?: Record<string, string> } = {}): Promise<Setup> => {
   const temp = await tempDir()
   const home = await realpath(temp.dir)
   const bin = join(home, 'bin')
   for (const dir of [bin, join(home, 'dev', 'orbit'), join(home, 'agents', 'output'), join(home, 'agents', 'worktrees')]) await mkdir(dir, { recursive: true })
-  await writeFile(join(bin, 'hermes.cjs'), fakeHermes(fakeKey))
+  await writeFile(join(bin, 'hermes.cjs'), fakeHermes([fakeKey, otherKey]))
   await writeFile(join(bin, 'hermes'), `#!/bin/sh\nexec "${process.execPath}" "${join(bin, 'hermes.cjs')}" "$@"\n`)
   await chmod(join(bin, 'hermes'), 0o755)
   await writeFile(join(home, 'stream.jsonl'), await readFile(new URL('./fixtures/hermes-stream.jsonl', import.meta.url)))
   const keyPath = openRouterKeyPath(home)
-  if (key !== null) await writeOpenRouterKey(keyPath, key)
+  const envPath = profileEnvPath(home, 'pitview')
+  // planted by hand and long ago, so a write by the launcher shows in the bytes or the modification time
+  const plant = async (path: string, text: string | null): Promise<void> => {
+    if (text === null) return
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, text, { mode: 0o600 })
+    await utimes(path, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'))
+  }
+  await plant(keyPath, key === null ? null : `${JSON.stringify({ apiKey: key })}\n`)
+  await plant(envPath, profileKey === null ? null : `SOME_OTHER=1\nOPENROUTER_API_KEY=${profileKey}\nGIT_CONFIG_COUNT=3\n`)
   const cache = openCache({ path: ':memory:', clock: { now: () => Date.now() } })
   const logs: string[] = []
   const lineConfig = (): Config => ({ ...defaultConfig(), repo: scenario.repo, viewer: scenario.viewer, cloneDir: '~/dev/orbit', ...config })
@@ -171,7 +179,7 @@ const setup = async ({ config = {}, key = fakeKey, env = {} }: { config?: Partia
   const mode = (value: string): Promise<void> => writeFile(join(home, 'mode.txt'), value)
   await mode('ok')
   return {
-    home, launcher, cache, logs, keyPath, mode,
+    home, launcher, cache, logs, keyPath, envPath, mode,
     runDir: (run) => join(home, '.local', 'state', 'pit-view', 'runs', String(run.id)),
     cleanup: async () => {
       launcher.close()
@@ -184,10 +192,10 @@ const setup = async ({ config = {}, key = fakeKey, env = {} }: { config?: Partia
 const request = { repo: scenario.repo, number: 104, command: 'review-pr', args: ['104', '--no-post'], label: 'Review', runner: 'hermes' as const, model: 'kimi-code' }
 // the variables the /bin/sh wrapper in front of the fake adds for itself
 const shellAdded: ReadonlySet<string> = new Set(['PWD', 'SHLVL', '_', 'OLDPWD', '__CF_USER_TEXT_ENCODING'])
-type Call = { argv: string[], cwd: string, envKeys: string[], keyIsTheFile: boolean, request: string, queryMode: number }
+type Call = { argv: string[], cwd: string, envKeys: string[], request: string, queryMode: number }
 const callOf = async (dir: string): Promise<Call> => JSON.parse(await readFile(join(dir, 'fake-call.json'), 'utf8')) as Call
 
-test('a hermes review starts through the launcher on the registry entry named, in the run\'s folder, with its request in the query file, the key in the one variable, and ends done with the result its prompt wrote', async () => {
+test('a hermes review starts through the launcher on the registry entry named, in the run\'s folder, with its request in the query file, no key in its environment, and ends done with the result its prompt wrote', async () => {
   const h = await setup()
   try {
     const run = await h.launcher.start(request)
@@ -203,8 +211,7 @@ test('a hermes review starts through the launcher on the registry entry named, i
     ])
     assert.equal(call.request, `/review-pr 104 --no-post --emit-json=${dir}`)
     assert.equal(call.cwd, join(h.home, 'dev', 'orbit'))
-    assert.equal(call.keyIsTheFile, true, 'the key in the file reaches the child, not the server\'s own variable')
-    assert.deepEqual(call.envKeys.filter((name) => !name.startsWith('GIT_CONFIG') && !shellAdded.has(name)), ['HOME', 'LANG', 'OPENROUTER_API_KEY', 'PATH', 'USER'])
+    assert.deepEqual(call.envKeys.filter((name) => !name.startsWith('GIT_CONFIG') && !shellAdded.has(name)), ['HOME', 'LANG', 'PATH', 'USER'], 'the server\'s own OPENROUTER_API_KEY and both files\' keys reach no child')
     assert.equal(call.envKeys.filter((name) => name.startsWith('GIT_CONFIG')).length, 7)
     // the stream's session id becomes the row's, with the resume line
     assert.match(final.sessionId ?? '', /^local-/)
@@ -276,28 +283,92 @@ test('the fix session, the update session, and a review in tandem never run unde
   }
 })
 
-test('a hermes launch with no key file, an empty one, or one with the wrong shape fails with a plain note naming the file and never a key, and spawns nothing', async () => {
-  const h = await setup({ key: null })
+test('a hermes launch never refuses over the key: with no key file, no profile .env, an empty or malformed one, or a mode that is too wide, it starts, ends done, and carries no note', async () => {
+  const h = await setup({ key: null, profileKey: null })
   try {
-    const run = await h.launcher.start(request)
-    assert.equal(run.status, 'failed')
-    assert.match(run.note ?? '', /^hermesKey: .*~\/\.config\/pit-view\/openrouter\.json/)
-    assert.equal(run.pid, null)
-    assert.deepEqual(await readdir(h.runDir(run)).then((names) => names.includes('fake-call.json')), false)
+    const none = await h.launcher.start(request)
+    assert.equal(none.status, 'running')
+    assert.equal((await h.launcher.settled(none.id)).note, null)
     await mkdir(dirname(h.keyPath), { recursive: true })
     await writeFile(h.keyPath, JSON.stringify({ apiKey: '' }), { mode: 0o600 })
+    await mkdir(dirname(h.envPath), { recursive: true })
+    await writeFile(h.envPath, 'OPENROUTER_API_KEY=\n', { mode: 0o600 })
     const empty = await h.launcher.start(request)
-    assert.match(empty.note ?? '', /^hermesKey: .*openrouter\.json/)
+    assert.equal((await h.launcher.settled(empty.id)).note, null)
     await writeFile(h.keyPath, JSON.stringify({ apiKey: fakeKey, other: 1 }), { mode: 0o600 })
+    await writeFile(h.envPath, `OPENROUTER_API_KEY=${otherKey}\n`, { mode: 0o644 })
+    await chmod(h.envPath, 0o644)
     const shaped = await h.launcher.start(request)
-    assert.match(shaped.note ?? '', /^hermesKey: .*openrouter\.json/)
-    assert.doesNotMatch(JSON.stringify([run, empty, shaped, h.logs]), new RegExp(fakeKey))
+    const final = await h.launcher.settled(shaped.id)
+    assert.equal(final.status, 'done', final.note ?? '')
+    assert.equal(final.note, null, 'a side that cannot be read makes the comparison unknown, which warns of nothing')
+    assert.doesNotMatch(JSON.stringify([none, empty, shaped, h.logs]), new RegExp(`${fakeKey}|${otherKey}`))
   } finally {
     await h.cleanup()
   }
 })
 
-test('a hermes run that ends with no valid result fails like any run and keeps the tail of its output, with the key taken out of it', async () => {
+test('a hermes launch whose two keys differ starts anyway and says so on the run, naming both files and both 8-character prefixes and no key; in sync, it says nothing', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    const run = await h.launcher.start(request)
+    assert.equal(run.status, 'running')
+    const warning = run.note ?? ''
+    assert.match(warning, /~\/\.config\/pit-view\/openrouter\.json/)
+    assert.match(warning, /~\/\.hermes\/profiles\/pitview\/\.env/)
+    assert.ok(warning.includes(keyPrefix(fakeKey)) && warning.includes(keyPrefix(otherKey)), warning)
+    assert.doesNotMatch(warning, new RegExp(`${fakeKey}|${otherKey}|${h.home}`))
+    const final = await h.launcher.settled(run.id)
+    assert.equal(final.status, 'done', final.note ?? '')
+    assert.equal(final.note, warning, 'the warning stays on the run that finished')
+    assert.equal((await callOf(h.runDir(run))).argv.includes('chat'), true)
+    await writeFile(h.envPath, `OPENROUTER_API_KEY=${fakeKey}\n`, { mode: 0o600 })
+    const same = await h.launcher.start(request)
+    assert.equal(same.note, null)
+    assert.equal((await h.launcher.settled(same.id)).note, null)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a hermes run that differs and then fails keeps the noResult note as it is, with both keys taken out of its stderr tail', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    await h.mode('noresult')
+    const run = await h.launcher.start(request)
+    const final = await h.launcher.settled(run.id)
+    assert.equal(final.status, 'failed')
+    assert.match(final.note ?? '', /^noResult: no result\.json; exit code 1; last event: /)
+    assert.match(final.note ?? '', /auth failed for \[key\] and \[key\]/)
+    assert.doesNotMatch(final.note ?? '', new RegExp(`${fakeKey}|${otherKey}`))
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('nothing in a hermes launch writes either key file: bytes and modification times are as planted after a run, a failed run, and a warning run', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    const before = await Promise.all([h.keyPath, h.envPath].map(async (path) => ({ path, bytes: await readFile(path), mtime: (await stat(path)).mtimeMs, mode: (await stat(path)).mode })))
+    for (const mode of ['ok', 'noresult']) {
+      await h.mode(mode)
+      await h.launcher.settled((await h.launcher.start(request)).id)
+    }
+    for (const file of before) {
+      assert.deepEqual(await readFile(file.path), file.bytes, file.path)
+      const after = await stat(file.path)
+      assert.equal(after.mtimeMs, file.mtime, file.path)
+      assert.equal(after.mode, file.mode, file.path)
+    }
+    // and no file was made beside them
+    assert.deepEqual(await readdir(dirname(h.keyPath)), ['openrouter.json'])
+    assert.deepEqual(await readdir(dirname(h.envPath)), ['.env'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a hermes run that ends with no valid result fails like any run and keeps the tail of its output, with both keys taken out of it', async () => {
   const h = await setup()
   try {
     await h.mode('noresult')
@@ -306,7 +377,7 @@ test('a hermes run that ends with no valid result fails like any run and keeps t
     assert.equal(final.status, 'failed')
     assert.match(final.note ?? '', /^noResult: no result\.json; exit code 1; last event: /)
     assert.match(final.note ?? '', /stderr: .*Error: the model did not answer/s)
-    assert.match(final.note ?? '', /auth failed for \[key\]/)
+    assert.match(final.note ?? '', /auth failed for \[key\] and sk-or-v1-PLANTEDstalestalestalestalestale0b1d2e/)
     assert.doesNotMatch(final.note ?? '', new RegExp(fakeKey))
   } finally {
     await h.cleanup()
@@ -323,13 +394,13 @@ const walk = async (dir: string): Promise<string[]> => {
   return found
 }
 
-test('a planted key is in no log line, request.json, run row, report, or drawer view, and the key file is the only file under home that holds it', async () => {
-  const h = await setup()
+test('planted keys are in no log line, request.json, run row, report, or drawer view, and only the two key files under home hold them; the prefixes of their hashes may appear, the keys never', async () => {
+  const h = await setup({ profileKey: otherKey })
   try {
     const run = await h.launcher.start(request)
     const final = await h.launcher.settled(run.id)
     assert.equal(final.status, 'done')
-    const planted = new RegExp(fakeKey)
+    const planted = new RegExp(`${fakeKey}|${otherKey}`)
     const request_json = await readFile(join(h.runDir(run), 'request.json'), 'utf8')
     assert.doesNotMatch(request_json, planted)
     assert.doesNotMatch(h.logs.join('\n'), planted)
@@ -341,7 +412,7 @@ test('a planted key is in no log line, request.json, run row, report, or drawer 
       if (path.endsWith('hermes.cjs')) continue
       if (planted.test(await readFile(path, 'utf8').catch(() => ''))) holders.push(path)
     }
-    assert.deepEqual(holders, [h.keyPath])
+    assert.deepEqual(holders.sort(), [h.envPath, h.keyPath].sort())
     assert.equal((await stat(h.keyPath)).mode & 0o777, 0o600)
   } finally {
     await h.cleanup()

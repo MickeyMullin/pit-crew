@@ -203,16 +203,10 @@
       <h2 id="openrouter-heading" class="card-title">OpenRouter key</h2>
       <div class="field-grid">
         <div class="field">
-          <span class="field-label">Key</span>
-          <p id="openrouter-status" class="hint" aria-live="polite">Reading…</p>
-          <label for="openrouter-key">New key</label>
-          <input id="openrouter-key" class="input mono" type="password" autocomplete="off" spellcheck="false" aria-describedby="openrouter-hint">
-          <p id="openrouter-hint" class="hint">Pit View's own key for Hermes runs, kept in its own file in the config folder and never in the settings file. It is passed to the Hermes process alone and is never shown again. Replace or clear it here; these buttons act at once, apart from Save.</p>
-          <p id="openrouter-error" class="field-error" hidden></p>
-          <div class="field-actions">
-            <button id="openrouter-replace" type="button" class="button button-small">Replace</button>
-            <button id="openrouter-clear" type="button" class="button button-small">Clear</button>
-          </div>
+          <p id="openrouter-keyFile" class="hint" aria-live="polite">Reading…</p>
+          <p id="openrouter-profileEnv" class="hint" aria-live="polite"></p>
+          <p id="openrouter-sync" class="hint" aria-live="polite"></p>
+          <p class="hint">Pit View only reads these two files and never writes either. To change the key, edit <code>~/.config/pit-view/openrouter.json</code> and the <code>OPENROUTER_API_KEY</code> line in the Hermes profile's <code>.env</code> by hand.</p>
         </div>
       </div>
     </section>
