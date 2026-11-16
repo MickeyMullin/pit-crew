@@ -18,13 +18,14 @@ import type { Cache } from './cache.ts'
 import { createClients, keepsSchedule } from './clients.ts'
 import type { ClientState, Clients } from './clients.ts'
 import { autoConcurrencyProblem, cacheFile, ConfigError, configFile, expandHome, extraInstructionsProblem, readConfig, runnerNames, saveConfig, stateDir, tildePath, validateConfig } from './config.ts'
-import type { Clock, Config, RunnerName } from './config.ts'
+import type { Clock, Config, RunnerName, RunRunner } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner, WriteLimits } from './github.ts'
 import { latestReviewsOf, markedStack } from './derive.ts'
 import { chooseExtraInstructions, createLauncher, createPostGuard, createReviewLine, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest, withExtraInstructions } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, PostGuard, Procs, Queueing, Spawn, StartKind } from './launcher.ts'
 import { modelsSaveProblem, modelsView } from './models.ts'
+import { clearOpenRouterKey, keyProblem, openRouterFileName, readOpenRouterKey, writeOpenRouterKey } from './openrouter.ts'
 import { renderMarkdown } from './markdown.ts'
 import { createNotifier, noDeliver, systemDeliver, systemExec } from './notify.ts'
 import type { Deliver } from './notify.ts'
@@ -254,6 +255,9 @@ const authPage = (res: ServerResponse, status: number, title: string, message: s
   res.end(html)
 }
 
+// the runners a start request may name: hermes only with a registry id for its model, which the launcher checks
+const askableRunners: readonly RunRunner[] = [...runnerNames, 'hermes']
+
 // why a start or stop was refused, as an HTTP status
 const launchStatus: Readonly<Record<LaunchErrorCode, number>> = {
   noClone: 422,
@@ -265,6 +269,7 @@ const launchStatus: Readonly<Record<LaunchErrorCode, number>> = {
   tandemRunner: 400,
   fixRunner: 400,
   updateRunner: 400,
+  hermesModel: 400,
   notRunning: 409,
   notRereadable: 409,
   rereadRefused: 422,
@@ -443,6 +448,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   const line = createReviewLine({ config: effective, timers, log, onQueueing: () => poller.queueingChanged() })
   // the posts in flight: the post path holds a PR, and the launcher admits no run of a held PR
   const posts = createPostGuard(() => schedulerRef?.released())
+  // Pit View's OpenRouter key: a file of its own beside config.json, never read into the config (section 8 of DESIGN.md, The OpenRouter key)
+  const openRouterKeyFile = join(dirname(options.configPath), openRouterFileName)
   const launcher = createLauncher({
     cache,
     posts,
@@ -458,6 +465,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     home,
     stateDir: options.stateDir,
     env: options.launch.env,
+    openRouterKeyFile,
     newSessionId: options.launch.newSessionId,
     onWatch: (run) => {
       poller.runWatched(run)
@@ -497,6 +505,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     home,
     stateDir: options.stateDir,
     env: options.launch.env,
+    openRouterKeyFile,
     newSessionId: options.launch.newSessionId,
     onWatch: (sweep) => sweeps.set(sweep),
     onChange: (sweep) => {
@@ -657,16 +666,17 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   const startRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
     requireToken(req)
     const number = prNumber(raw)
-    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex", "repo": "owner/name", "viewer": "login", "checkComments": true | false, "extraInstructions": "text" }'
+    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex" | "hermes", "model": "registry id, with hermes only", "repo": "owner/name", "viewer": "login", "checkComments": true | false, "extraInstructions": "text" }'
     const length = Number(req.headers['content-length'] ?? 0)
     const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
-    const { runner: asked, kind: askedKind, repo: confirmedRepo, viewer: confirmed, checkComments, extraInstructions: box, ...rest } = body as Record<string, unknown>
+    const { runner: asked, model: askedModel, kind: askedKind, repo: confirmedRepo, viewer: confirmed, checkComments, extraInstructions: box, ...rest } = body as Record<string, unknown>
     if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
     // the page always names the repository its confirmation showed; a start that does not is from an older page and is refused rather than guessed at
     if (typeof confirmedRepo !== 'string') throw new HttpError(400, `repo is required and must be a string; ${usage}`)
     if (confirmed !== undefined && typeof confirmed !== 'string') throw new HttpError(400, 'viewer must be a string')
-    if (asked !== undefined && !runnerNames.includes(asked as RunnerName)) throw new HttpError(400, 'runner must be claude or codex')
+    if (asked !== undefined && !askableRunners.includes(asked as RunRunner)) throw new HttpError(400, 'runner must be claude, codex, or hermes')
+    if (askedModel !== undefined && typeof askedModel !== 'string') throw new HttpError(400, 'model must be a registry id, a string')
     if (askedKind !== undefined && !startKinds.includes(askedKind as StartKind)) throw new HttpError(400, 'kind must be default, tandem, stack or fix')
     if (checkComments !== undefined && typeof checkComments !== 'boolean') throw new HttpError(400, 'checkComments must be true or false')
     if (box !== undefined && typeof box !== 'string') throw new HttpError(400, 'extraInstructions must be a string')
@@ -674,8 +684,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (boxProblem !== null) throw new HttpError(400, `extraInstructions ${boxProblem}`)
     const kind = (askedKind ?? 'default') as StartKind
     // a tandem primary launches its secondary in the background, which only Claude can do
-    if (kind === 'tandem' && asked === 'codex') throw new HttpError(400, 'Review in tandem runs with Claude only; send runner claude or leave it out')
-    if (kind === 'fix' && asked === 'codex') throw new HttpError(400, 'Fix session runs with Claude only; send runner claude or leave it out')
+    if (kind === 'tandem' && (asked === 'codex' || asked === 'hermes')) throw new HttpError(400, 'Review in tandem runs with Claude only; send runner claude or leave it out')
+    if (kind === 'fix' && (asked === 'codex' || asked === 'hermes')) throw new HttpError(400, 'Fix session runs with Claude only; send runner claude or leave it out')
     const config = effective()
     // the repository the viewer confirmed must still be the one in effect: a run posts or pushes on GitHub, and a PR number means another PR in another repository
     if (confirmedRepo !== config.repo) throw new HttpError(409, `the repository is now ${config.repo}, not ${confirmedRepo}; the confirmation was for ${confirmedRepo}, so nothing was started`)
@@ -696,7 +706,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (box !== undefined && option.extraInstructions === undefined) throw new HttpError(422, `Extra instructions are offered only on a review, a re-review, a self-review, a tandem review, or a stack review, and this start of #${number} is not one`)
     const extra = option.extraInstructions === undefined ? null : chooseExtraInstructions(box as string | undefined, config.extraReviewInstructions)
     // a tandem or fix start without a runner is Claude's, whatever the configured default is
-    const runner = asked as RunnerName | undefined ?? (kind === 'tandem' || kind === 'fix' ? 'claude' : undefined)
+    const runner = asked as RunRunner | undefined ?? (kind === 'tandem' || kind === 'fix' ? 'claude' : undefined)
     try {
       const run = await launcher.start(withExtraInstructions({
         repo: config.repo,
@@ -705,6 +715,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
         args,
         label: option.label,
         ...(runner === undefined ? {} : { runner }),
+        ...(askedModel === undefined ? {} : { model: askedModel as string }),
       }, extra))
       json(res, 200, runView(run))
     } catch (error) {
@@ -769,13 +780,14 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   // the Dependabot sweep (section 8 of DESIGN.md, Sweeps): the repository's sweep, started with the same token, Host, Origin, and content-type rules as a run; the body may name the runner, the repository, and the viewer, the last two as the confirmation showed them, and nothing else
   const startSweep = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     requireToken(req)
-    const usage = 'send { "runner": "claude" | "codex", "repo": "owner/name", "viewer": "login" } or no body'
+    const usage = 'send { "runner": "claude" | "codex" | "hermes", "model": "registry id, with hermes only", "repo": "owner/name", "viewer": "login" } or no body'
     const length = Number(req.headers['content-length'] ?? 0)
     const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
-    const { runner: asked, repo: confirmed, viewer: confirmedViewer, ...rest } = body as Record<string, unknown>
+    const { runner: asked, model: askedModel, repo: confirmed, viewer: confirmedViewer, ...rest } = body as Record<string, unknown>
     if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
-    if (asked !== undefined && !runnerNames.includes(asked as RunnerName)) throw new HttpError(400, 'runner must be claude or codex')
+    if (asked !== undefined && !askableRunners.includes(asked as RunRunner)) throw new HttpError(400, 'runner must be claude, codex, or hermes')
+    if (askedModel !== undefined && typeof askedModel !== 'string') throw new HttpError(400, 'model must be a registry id, a string')
     if (confirmed !== undefined && typeof confirmed !== 'string') throw new HttpError(400, 'repo must be a string')
     if (confirmedViewer !== undefined && typeof confirmedViewer !== 'string') throw new HttpError(400, 'viewer must be a string')
     const { repo, viewer } = effective()
@@ -783,7 +795,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (confirmed !== undefined && confirmed !== repo) throw new HttpError(409, `the repository is now ${repo}, not ${confirmed}; the confirmation was for ${confirmed}, so nothing was started`)
     staleViewer(confirmedViewer, viewer)
     try {
-      json(res, 200, sweepView(await sweepLauncher.start(sweepRequest(repo, asked as RunnerName | undefined))))
+      json(res, 200, sweepView(await sweepLauncher.start({ ...sweepRequest(repo, asked as RunRunner | undefined), ...(askedModel === undefined ? {} : { model: askedModel as string }) })))
     } catch (error) {
       launchFailure(error)
     }
@@ -857,6 +869,32 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   }
 
   // a save can turn on auto-review or its posting, so it takes a direct action's Origin and token (section 10 of DESIGN.md, In the UI)
+  // whether a key is set, and what is wrong with its file when it is not usable: never the key, and never any part of the file's contents
+  const keyView = async (): Promise<{ set: boolean, problem: string | null }> => {
+    const read = await readOpenRouterKey(openRouterKeyFile, tildePath(openRouterKeyFile, home))
+    return { set: 'key' in read, problem: 'problem' in read ? read.problem : null }
+  }
+
+  // Replace writes the key file alone, and answers whether a key is set; the request's key is read here and goes nowhere else
+  const putOpenRouterKey = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    requireOrigin(req)
+    requireToken(req)
+    const body = await readJson(req)
+    if (typeof body !== 'object' || body === null || Array.isArray(body) || Object.keys(body).length !== 1 || !('apiKey' in body)) throw new HttpError(400, 'send { "apiKey": "the key" } and nothing else')
+    const problem = keyProblem((body as { apiKey: unknown }).apiKey)
+    if (problem !== null) throw new HttpError(400, `apiKey: ${problem}`)
+    await writeOpenRouterKey(openRouterKeyFile, (body as { apiKey: string }).apiKey)
+    json(res, 200, await keyView())
+  }
+
+  const deleteOpenRouterKey = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    requireOrigin(req)
+    requireToken(req)
+    await noBody(req)
+    await clearOpenRouterKey(openRouterKeyFile)
+    json(res, 200, await keyView())
+  }
+
   const putConfig = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     requireOrigin(req)
     requireToken(req)
@@ -1034,6 +1072,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     // the effective model registry and slots, read-only, for the Settings page (section 1 of DESIGN.md, Configuration)
     { method: 'GET', pattern: /^\/api\/models$/, handle: (_req, res) => json(res, 200, modelsView(effective().models)) },
     { method: 'GET', pattern: /^\/api\/instance$/, handle: async (_req, res) => json(res, 200, { name: options.instance ?? '', configPath: tildePath(options.configPath, home), pid: process.pid, loginAgent: { installed: await options.launch.fs.exists(loginAgentFile(home)) } }) },
+    { method: 'GET', pattern: /^\/api\/openrouter-key$/, handle: async (_req, res) => json(res, 200, await keyView()) },
+    { method: 'PUT', pattern: /^\/api\/openrouter-key$/, handle: (req, res) => putOpenRouterKey(req, res) },
+    { method: 'DELETE', pattern: /^\/api\/openrouter-key$/, handle: (req, res) => deleteOpenRouterKey(req, res) },
     { method: 'GET', pattern: /^\/api\/config$/, handle: (_req, res) => json(res, 200, stored) },
     { method: 'PUT', pattern: /^\/api\/config$/, handle: (req, res) => putConfig(req, res) },
     { method: 'GET', pattern: /^\/api\/people\/suggestions$/, handle: (_req, res) => json(res, 200, suggestions()) },

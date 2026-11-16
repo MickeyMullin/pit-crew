@@ -199,6 +199,24 @@
       </div>
     </section>
 
+    <section id="openrouter" class="card settings-card" aria-labelledby="openrouter-heading">
+      <h2 id="openrouter-heading" class="card-title">OpenRouter key</h2>
+      <div class="field-grid">
+        <div class="field">
+          <span class="field-label">Key</span>
+          <p id="openrouter-status" class="hint" aria-live="polite">Reading…</p>
+          <label for="openrouter-key">New key</label>
+          <input id="openrouter-key" class="input mono" type="password" autocomplete="off" spellcheck="false" aria-describedby="openrouter-hint">
+          <p id="openrouter-hint" class="hint">Pit View's own key for Hermes runs, kept in its own file in the config folder and never in the settings file. It is passed to the Hermes process alone and is never shown again. Replace or clear it here; these buttons act at once, apart from Save.</p>
+          <p id="openrouter-error" class="field-error" hidden></p>
+          <div class="field-actions">
+            <button id="openrouter-replace" type="button" class="button button-small">Replace</button>
+            <button id="openrouter-clear" type="button" class="button button-small">Clear</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section id="models" class="card settings-card" aria-labelledby="models-heading">
       <h2 id="models-heading" class="card-title">Models</h2>
       <p id="models-hint" class="hint">No start reads these slots yet: a start still uses the models set under Agent and the runner chosen in the drawer. The text the dashboard posts (the Post it offer and the post of a stored report) is refused when it names any model here or in the built-in table, a vendor or runner, a term for AI, or a review mode; a review that posts for itself is governed by the review prompt, not by this check.</p>

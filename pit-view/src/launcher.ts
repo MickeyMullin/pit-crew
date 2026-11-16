@@ -4,15 +4,16 @@ import { closeSync, openSync, watch as watchDir } from 'node:fs'
 import { mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import type { Cache, NewRun, NewSweep, Origin, QueueReason, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
-import { expandHome, normalizeExtraInstructions, tildePath } from './config.ts'
-import type { AgentSettings, Clock, Config, ExtraInstructions, RunnerName } from './config.ts'
+import { defaultHermesProfile, expandHome, normalizeExtraInstructions, tildePath } from './config.ts'
+import type { AgentSettings, Clock, Config, ExtraInstructions, RunnerName, RunRunner } from './config.ts'
 import { ciStateOf, isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
 import type { CiReading } from './derive.ts'
 import type { Stack } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
 import type { Gh, RawOpenPr, Runner } from './github.ts'
 import { resolveModels, roleFor } from './models.ts'
-import type { RequestModels, RunModels } from './models.ts'
+import type { ModelEntry, RequestModels, RunModels } from './models.ts'
+import { readOpenRouterKey } from './openrouter.ts'
 import type { Timers } from './poller.ts'
 import { prReportName, reportHash } from './reports.ts'
 import type { ReportInfo } from './reports.ts'
@@ -448,10 +449,13 @@ export type LaunchSpec = {
   worktreesDir: string
   // Codex only: the git folders a run in a linked worktree writes, in place of <cwd>/.git, whose .git is a file there
   gitRoots?: readonly string[]
+  // Hermes only: the registry entry's provider and model, and the Hermes profile the run starts under
+  hermes?: { provider: string, model: string }
+  hermesProfile?: string
 }
 
-// what to run, and the one stdin line to write (null when stdin is closed from the start)
-export type Invocation = { command: string, args: string[], stdin: string | null }
+// what to run, and the one stdin line to write (null when stdin is closed from the start). A runner that reads its request from a file names it here: the launcher writes the file into the run directory before the spawn
+export type Invocation = { command: string, args: string[], stdin: string | null, promptFile?: { path: string, text: string } }
 
 // a skill or slash command invocation with the run directory appended, as the prompts expect it
 export const requestText = (prefix: '/' | '$', command: string, args: readonly string[], runDir: string): string =>
@@ -501,6 +505,26 @@ export const codexInvocation = (spec: LaunchSpec): Invocation => ({
   stdin: null,
 })
 
+// how many tool turns a hermes run may take; Hermes ends the run when it is reached, and the run then fails for want of a result like any run that ends without one
+export const hermesMaxTurns = 120
+export const hermesPromptFileName = 'prompt.txt'
+const hermesTailLength = 600
+
+// Hermes under its own profile: the request is a file in the run directory, never an argument and never stdin; the registry entry's provider and model are passed as they are written there; only the terminal and file tools are enabled; and the key is not here, since a command line is recorded and shown (it travels in the child's environment alone). The request is the slash form the Hermes skills answer to
+export const hermesInvocation = (spec: LaunchSpec): Invocation => {
+  if (spec.hermes === undefined) throw new Error('a hermes run needs a hermes entry from the model registry')
+  const path = join(spec.runDir, hermesPromptFileName)
+  return {
+    command: 'hermes',
+    args: [
+      '-p', spec.hermesProfile ?? defaultHermesProfile, 'chat', '--query-file', path, '--oneshot', '--provider', spec.hermes.provider, '--model', spec.hermes.model,
+      '-t', 'terminal,file', '--max-turns', String(hermesMaxTurns), '--format', 'stream-json',
+    ],
+    stdin: null,
+    promptFile: { path, text: requestText('/', spec.command, spec.args, spec.runDir) },
+  }
+}
+
 // a word the shell reads back as itself: bare when safe, single-quoted otherwise
 export const shellWord = (word: string): string =>
   /^[A-Za-z0-9_.,:/=@%+-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`
@@ -518,7 +542,7 @@ export type RunnerEntry = {
   resume: (cwd: string, sessionId: string, spec: LaunchSpec, home: string) => string
 }
 
-export const runners: Readonly<Record<RunnerName, RunnerEntry>> = {
+export const runners: Readonly<Record<RunRunner, RunnerEntry>> = {
   claude: {
     invocation: claudeInvocation,
     resume: (cwd, sessionId) => `cd ${shellPath(cwd)} && claude --resume ${shellWord(sessionId)}`,
@@ -529,11 +553,19 @@ export const runners: Readonly<Record<RunnerName, RunnerEntry>> = {
     resume: (cwd, sessionId, spec, home) =>
       `cd ${shellPath(cwd)} && codex resume ${shellWord(sessionId)} ${[...codexModelArgs(spec), ...codexSandboxArgs(spec)].map((arg) => arg.startsWith('/') ? shellPath(tildePath(arg, home)) : shellWord(arg)).join(' ')}`,
   },
+  // a resumed Hermes session keeps its own model, and the profile is the one place its sessions live
+  hermes: {
+    invocation: hermesInvocation,
+    resume: (cwd, sessionId, spec) => `cd ${shellPath(cwd)} && hermes -p ${shellWord(spec.hermesProfile ?? defaultHermesProfile)} chat --resume ${shellWord(sessionId)}`,
+  },
 }
 
 // the child's environment, built from scratch: a server started inside an agent session must
 // not pass on that session's variables
 export const childEnvKeys = ['USER', 'LOGNAME', 'SHELL', 'LANG', 'TMPDIR', 'PATH'] as const
+
+// the one variable beyond the list above that any child gets, and only the hermes child: Pit View's own OpenRouter key, read from its file and never from the server's environment (section 8 of DESIGN.md, The OpenRouter key)
+export const hermesEnvKeys = ['OPENROUTER_API_KEY'] as const
 
 // a run's git traffic, and the credentials it carries: the command's own fetch runs inside the runner's sandbox, where an ssh identity cannot be unlocked (Codex refuses /dev/tty) and where depending on an agent's socket would make the run's success a property of what is listening outside it. Redirecting an SSH remote to HTTPS and letting gh's helper answer means no key, no socket, and no prompt is involved: the run authenticates with the same gh login the launcher already requires for its API reads, and the helper is asked for the token rather than given it
 const gitCredentialEnv = {
@@ -561,6 +593,10 @@ export const childEnv = (source: Readonly<Record<string, string | undefined>>, h
   }
   return env
 }
+
+// the hermes child's environment: the same one every runner gets, plus the key under its one name. The key is a parameter, so nothing in the server's own environment can stand in for it
+export const hermesChildEnv = (source: Readonly<Record<string, string | undefined>>, home: string, command: string, key: string): Record<string, string> =>
+  ({ ...childEnv(source, home, command), [hermesEnvKeys[0]]: key })
 
 // the run a row starts: never review-local, and --no-post on every review of the viewer's own PR
 
@@ -790,7 +826,7 @@ export type AgentCell = {
   lastReviewAt: string | null
   // the latest run, null fields when there is none
   runId: number | null
-  runner: RunnerName | null
+  runner: RunRunner | null
   command: string | null
   args: string[] | null
   status: RunStatus | null
@@ -1311,6 +1347,8 @@ export const foldStream = (state: StreamState, line: string): { state: StreamSta
     next.outstanding = outstandingTasks(event)
   }
   if (kind === 'thread.started' && typeof event.thread_id === 'string' && next.sessionId === null) next.sessionId = event.thread_id
+  // Hermes's last event names its session; its init event carries an empty id, which names nothing. Only a result with an exit code is Hermes's: Claude's session id is chosen by Pit View before the start
+  if (kind === 'result' && typeof event.exit_code === 'number' && typeof event.session_id === 'string' && event.session_id !== '' && next.sessionId === null) next.sessionId = event.session_id
   if (kind !== 'result') return { state: next, closeStdin: false }
   if (typeof event.total_cost_usd === 'number') next.costUsd = event.total_cost_usd
   const denials = Array.isArray(event.permission_denials) ? event.permission_denials : []
@@ -2075,7 +2113,7 @@ export const createPostGuard = (onRelease: () => void = () => {}): PostGuard => 
 // the launcher
 
 export type LaunchErrorCode =
-  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner' | 'updateRunner' | 'notRereadable' | 'rereadRefused'
+  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner' | 'updateRunner' | 'hermesModel' | 'notRereadable' | 'rereadRefused'
 
 export class LaunchError extends Error {
   override name = 'LaunchError'
@@ -2094,7 +2132,9 @@ export type StartRequest = {
   args: string[]
   label: string
   // the configured default when left out
-  runner?: RunnerName
+  runner?: RunRunner
+  // a registry id, and only with runner hermes: the entry whose provider and model the run starts with
+  model?: string
   // cloneDir when left out; phase 4 passes its worktree
   cwd?: string
   // set by withExtraInstructions alone, with the flag it adds to args: the launch of a manual start writes this text to the run directory and records it. A scheduled review's launch reads the standing default itself instead, and what is here is only what its row shows until then
@@ -2183,6 +2223,18 @@ export const probeRunDir = async (dir: string, fs: Pick<LauncherFs, 'writeFile' 
   await fs.rm(probe)
 }
 
+// a hermes launch with no usable key: the message names the file and what is wrong with it, and never a key
+export class HermesKeyProblem extends Error {
+  override name = 'HermesKeyProblem'
+}
+
+// the registry entry a hermes run starts with: one that names the hermes runner, by its id, in the registry in effect (the owner's, or the built-in table). Nothing else starts under hermes
+export const hermesEntry = (config: Pick<Config, 'models'>, id: string | undefined): ModelEntry => {
+  const entry = id === undefined ? undefined : resolveModels(config.models).registry.find((candidate) => candidate.id === id)
+  if (entry === undefined || entry.runner !== 'hermes') throw new LaunchError('hermesModel', `Hermes starts only for a hermes entry in the model registry; ${id === undefined ? 'no model was named' : `${clip(id, 60)} is not one`}`)
+  return entry
+}
+
 // raised by the probe, and by nothing else on the start path, so the failure keeps its own note
 export class UnwritableRunDir extends Error {
   readonly dir: string
@@ -2224,6 +2276,8 @@ export type LauncherOptions<T extends Session = Run> = {
   // the posts in flight, shared with the post path; the sweep launcher is given none, since a sweep is not a run of any PR
   posts?: PostGuard
   log?: (line: string) => void
+  // the file Pit View's OpenRouter key is in (section 8 of DESIGN.md, The OpenRouter key); a hermes run is refused when it is not given or holds no key
+  openRouterKeyFile?: string
   // how often a run's files are read when the folder cannot be watched, and the safety
   // net when it can; a recovered run's liveness is checked as often
   pollMs?: number
@@ -2366,6 +2420,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   const member = line.join(() => [...live.values()].flatMap((entry) => entry.slot === null ? [] : [entry.slot]))
   const waiters = new Map<number, ((run: T) => void)[]>()
   // runs between their running row and their watch, each with whether a stop was asked meanwhile; the stop is carried out once the process is watched
+  // the key a live hermes run was started with, so what it printed can be cleared of it; held in memory until the run settles
+  const keys = new Map<number, string>()
   const launching = new Map<number, boolean>()
   // starts between their checks and their row
   const starting = new Set<string>()
@@ -2563,6 +2619,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       home,
       sessionId: run.sessionId,
       ...runModels(config.agent),
+      ...(run.runner === 'hermes' ? { hermesProfile: config.agent.hermesProfile ?? defaultHermesProfile } : {}),
       reportsDir: await resolved(join(home, 'agents', 'output')),
       worktreesDir: await resolved(join(home, 'agents', 'worktrees')),
     }
@@ -2668,6 +2725,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (path !== null) reportExists = await fs.exists(expandHome(path, home)).catch(() => false)
       finished = await finishedReport(parsed.value)
     }
+    const lastEvent = await hermesTail(entry, parsed)
     const judgement = judge({
       stopped: entry.stopping,
       restarted,
@@ -2677,7 +2735,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       denials: entry.stream.denials,
       postDenied: entry.stream.deniedPosts?.every((pr) => pr === (started as Partial<Run> | undefined)?.number) ?? false,
       mayPost: started?.command !== undefined && started.args !== undefined && mayPost(started.command, started.args),
-      lastEvent: entry.stream.lastEvent,
+      lastEvent,
     })
     // from when a scheduled run's outcome is recorded as done or stopped, its resume command names the clone, whether or not its worktree then goes
     const leaving = (judgement.status === 'done' || judgement.status === 'stopped') && started?.origin === 'auto' && started.worktree !== null
@@ -2694,6 +2752,24 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     // a review or a sweep that ended, however it ended, frees its slot for the next in line
     if (entry.slot !== null) line.admit()
     return run
+  }
+
+  // a hermes run that ended with no valid result keeps the tail of what it printed on stderr in its note, since Hermes says there why it stopped. The key is taken out of it first: the one this run started with, and the one in the file now
+  const hermesTail = async (entry: Live, parsed: Parsed<RunResultJson> | null): Promise<string | null> => {
+    const started = keys.get(entry.id)
+    keys.delete(entry.id)
+    if (entry.row.runner !== 'hermes' || parsed?.ok === true) return entry.stream.lastEvent
+    const secrets = [started]
+    const keyFile = options.openRouterKeyFile
+    if (keyFile !== undefined) {
+      const read = await readOpenRouterKey(keyFile).catch(() => null)
+      if (read !== null && 'key' in read) secrets.push(read.key)
+    }
+    const stderr = await fs.readFrom(join(entry.dir, 'stderr.log'), 0).catch(() => Buffer.alloc(0))
+    const tail = stderr.toString('utf8').trim().replace(/\s*\n\s*/g, ' | ').slice(-hermesTailLength)
+    let text = `${entry.stream.lastEvent ?? 'none'}${tail === '' ? '' : `; stderr: ${tail}`}`
+    for (const secret of secrets) if (secret !== undefined && secret !== '') text = text.split(secret).join('[key]')
+    return text
   }
 
   // a process that proved gone, with no exit seen, ends the run the way an observed exit does
@@ -2861,12 +2937,24 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     let modelsOnRow = false
     let stdin: string | null
     let resume: string | null
+    // Pit View's OpenRouter key, read for a hermes run and held only until the spawn
+    let hermesKey: string | null = null
     try {
       await fs.mkdir(dir)
       await probeRunDir(dir, fs).catch((reason: unknown) => {
         throw new UnwritableRunDir(dir, reason)
       })
       spec = await specFor(run, dir)
+      if (runner === 'hermes') {
+        const entry = hermesEntry(config, request.model)
+        spec = { ...spec, hermes: { provider: entry.provider, model: entry.model } }
+        const keyFile = options.openRouterKeyFile
+        const shown = keyFile === undefined ? '~/.config/pit-view/openrouter.json' : tildePath(keyFile, home)
+        const read = keyFile === undefined ? { missing: true as const } : await readOpenRouterKey(keyFile, shown)
+        if ('problem' in read) throw new HermesKeyProblem(read.problem)
+        if ('missing' in read) throw new HermesKeyProblem(`${shown} holds no OpenRouter key; add one in Settings`)
+        hermesKey = read.key
+      }
       // made before the spawn, so nothing that builds it can throw once a process exists; Codex's is written once its session id is read from the stream, so it is left out here
       resume = sessionId === null ? null : resumeFor(run, sessionId, spec)
       // a manual start keeps the text confirmed for it and answers to no default. A scheduled review answers to the standing default in effect at its spawn, whatever it was built with, and this launch is the one place every scheduled start passes through
@@ -2884,7 +2972,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         stdin = invocation.stdin
         // the models the command line above was built from, read from the same spec, so the record cannot disagree with the run
         models = {
-          roles: [roleFor(resolveModels(options.config().models), run.command.startsWith('review-') ? 'reviewer' : 'session', runner, runner === 'claude' ? spec.claudeModel : spec.codexModel ?? null)],
+          roles: [roleFor(resolveModels(options.config().models), run.command.startsWith('review-') ? 'reviewer' : 'session', runner, runner === 'claude' ? spec.claudeModel : runner === 'hermes' ? spec.hermes?.model ?? null : spec.codexModel ?? null)],
           degraded: false,
         }
         record = {
@@ -2901,6 +2989,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         // before the spawn, so a run never carries the flag without its file; a write refused fails the start here. A scheduled run with no text takes away what an earlier pass, or a launch the cap took back, wrote in this folder
         if (extra !== null) await fs.writeFile(join(dir, extraInstructionsFile), `${extra.text}\n`)
         else if (scheduledText) await fs.rm(join(dir, extraInstructionsFile))
+        if (invocation.promptFile !== undefined) await fs.writeFile(invocation.promptFile.path, `${invocation.promptFile.text}\n`)
         await fs.writeFile(join(dir, 'request.json'), `${JSON.stringify({ ...record, pid: null, pidStartedAt: null }, null, 2)}\n`)
       } while (textNow()?.text !== extra?.text)
       // the last thing before the spawn, with nothing awaited between this reading and it: a review or a sweep starts only for the repository and the viewer its start was confirmed for, and only while it still fits, under the config in effect now
@@ -2930,7 +3019,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         command: invocation.command,
         args: invocation.args,
         cwd,
-        env: childEnv(options.env, home, run.command),
+        env: hermesKey === null ? childEnv(options.env, home, run.command) : hermesChildEnv(options.env, home, run.command, hermesKey),
         stdoutPath: join(dir, 'stream.jsonl'),
         stderrPath: join(dir, 'stderr.log'),
         stdin: stdin === null ? 'ignore' : 'pipe',
@@ -2938,6 +3027,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     } catch (error) {
       const note = error instanceof UnwritableRunDir
         ? `permissionDenied: ${tildePath(error.dir, home)} cannot be written: ${messageOf(error.reason)}`
+        : error instanceof HermesKeyProblem ? `hermesKey: ${error.message}`
+        : error instanceof LaunchError ? `${error.code}: ${error.message}`
         : `spawnFailed: ${messageOf(error)}`
       launching.delete(run.id)
       log(`${noun} ${run.id}: cannot start: ${note}`)
@@ -2946,6 +3037,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       await prune()
       return run
     }
+    if (hermesKey !== null) keys.set(run.id, hermesKey)
     // from here the process exists: nothing is awaited and nothing may throw until it is watched, so it is never left running unwatched, uncounted, or out of Stop's reach
     const pid = child.pid
     // the pid goes to request.json first and then to the row, each write on its own, so one refused write never leaves a restart without it; the file's write is begun here and awaited only after the watch
@@ -2994,8 +3086,24 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return store.get(run.id) ?? run
   }
 
-  const start = async (request: StartRequest): Promise<T> => {
+  // a hermes start is made review only here, where every start passes: its --no-post goes before the extra-instructions flag, which stays last. Whatever is not a hermes start passes unchanged, but a model named on one is refused, so a registry id never picks a runner by accident
+  const hermesRequest = (asked: StartRequest, config: Config): StartRequest => {
+    const runner = asked.runner ?? config.agent.runner
+    if (runner !== 'hermes') {
+      if (asked.model !== undefined) throw new LaunchError('hermesModel', 'A model is named only for a hermes start')
+      return asked
+    }
+    // a command that cannot run under hermes is refused by the check that follows, with its own reason
+    if (claudeOnly(asked.command, asked.args)) return asked
+    hermesEntry(config, asked.model)
+    if (!mayPost(asked.command, asked.args)) return asked
+    const flagged = asked.args.includes(extraInstructionsFlag)
+    return { ...asked, args: [...asked.args.filter((arg) => arg !== extraInstructionsFlag), '--no-post', ...(flagged ? [extraInstructionsFlag] : [])] }
+  }
+
+  const start = async (asked: StartRequest): Promise<T> => {
     const config = options.config()
+    const request = hermesRequest(asked, config)
     // a tandem primary launches its secondary in the background, and the fix and update sessions are pinned to Claude; the runner is the one asked for or the configured default, so no caller gets around this
     if (claudeOnly(request.command, request.args) && (request.runner ?? config.agent.runner) !== 'claude') {
       if (isTandemRun(request.args)) throw new LaunchError('tandemRunner', 'Review in tandem runs with Claude only; send runner claude or leave it out')

@@ -2,7 +2,7 @@
 // the Agent cell's words and requests: what each state says, the running timer, the requests with
 // the per-start token, how a refusal reads, and what changes are announced; pure, with every
 // clock reading passed in. The drawer's own words are in drawerview.ts
-import type { RunnerName } from '../src/config.ts'
+import type { RunnerName, RunRunner } from '../src/config.ts'
 import type { AgentCell, AgentResult, PostForm, RunnerModels, RunView, StartKind, StartOption, StepSlot, StoredOffer } from '../src/launcher.ts'
 import type { OpenRow } from '../src/derive.ts'
 import { mergeOffered } from './mergeoffer.ts'
@@ -12,7 +12,8 @@ export type { AgentCell, AgentResult, PostForm, RunnerModels, RunnerName, RunVie
 
 export const runnerNames: readonly RunnerName[] = ['claude', 'codex']
 
-export const runnerLabels: Readonly<Record<RunnerName, string>> = { claude: 'Claude Code', codex: 'Codex' }
+// every runner a run can have, since the drawer names the runner of any run in its history; only claude and codex are offered as a start
+export const runnerLabels: Readonly<Record<RunRunner, string>> = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes' }
 
 // the progress bar's labels, in the order the steps run. fix-pr records the same five slots with
 // meanings of its own (section 8, the fix command); every other command's are a review's

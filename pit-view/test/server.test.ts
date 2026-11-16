@@ -1,6 +1,6 @@
 // test/server.test.ts
 import assert from 'node:assert/strict'
-import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -10,6 +10,7 @@ import { openCache } from '../src/cache.ts'
 import type { Config } from '../src/config.ts'
 import type { Notice } from '../src/notify.ts'
 import type { Patch, View } from '../src/poller.ts'
+import { writeOpenRouterKey } from '../src/openrouter.ts'
 import { hostAllowed, originAllowed, PortInUseError, resolveRuntime, startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
 import { iso } from '../src/time.ts'
@@ -2550,5 +2551,118 @@ test('a models value that is not a plain object is refused by PUT /api/config na
     } finally {
       await hand.cleanup()
     }
+  }
+})
+
+// the OpenRouter key (section 8 of DESIGN.md, The OpenRouter key): a file of its own, set, replaced, and cleared through three routes that answer only whether a key is set
+const plantedKey = 'sk-or-v1-PLANTEDfakefakefakefakefakefake77aa'
+const keyRoute = (h: Harness): string => `${h.base}/api/openrouter-key`
+const keyHeaders = (h: Harness): Record<string, string> => ({ Origin: h.server.url, 'x-pit-view-token': h.server.token })
+const keyFile = (h: Harness): string => join(h.home, '.config', 'pit-view', 'openrouter.json')
+
+test('the OpenRouter key routes answer only whether a key is set: set, replace, and clear write the key file alone, and no answer carries the key', async () => {
+  const h = await setup()
+  try {
+    assert.deepEqual((await getJson<unknown>(keyRoute(h))).body, { set: false, problem: null })
+    const first = await send(keyRoute(h), 'PUT', { apiKey: plantedKey }, keyHeaders(h))
+    assert.equal(first.status, 200)
+    assert.deepEqual(first.body, { set: true, problem: null })
+    assert.deepEqual(JSON.parse(await readFile(keyFile(h), 'utf8')), { apiKey: plantedKey })
+    assert.equal((await stat(keyFile(h))).mode & 0o777, 0o600)
+    const second = await send(keyRoute(h), 'PUT', { apiKey: `${plantedKey}-2` }, keyHeaders(h))
+    assert.equal(second.status, 200)
+    assert.deepEqual((await getJson<unknown>(keyRoute(h))).body, { set: true, problem: null })
+    assert.doesNotMatch(JSON.stringify([first, second, await getJson<unknown>(keyRoute(h))]), /PLANTED/)
+    const cleared = await send(keyRoute(h), 'DELETE', undefined, keyHeaders(h))
+    assert.deepEqual(cleared.body, { set: false, problem: null })
+    await assert.rejects(readFile(keyFile(h), 'utf8'), /ENOENT/)
+    // the config file was never touched by any of it
+    assert.doesNotMatch(await readFile(h.configPath, 'utf8'), /PLANTED|apiKey|openrouter/i)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the OpenRouter key routes refuse a write without the token or the Origin, a body that is not exactly { apiKey }, and a key that is empty or has whitespace, naming the field and never the key', async () => {
+  const h = await setup()
+  try {
+    assert.equal((await send(keyRoute(h), 'PUT', { apiKey: plantedKey }, { Origin: h.server.url })).status, 403)
+    assert.equal((await send(keyRoute(h), 'PUT', { apiKey: plantedKey }, { 'x-pit-view-token': h.server.token })).status, 403)
+    assert.equal((await send(keyRoute(h), 'DELETE', undefined, { Origin: h.server.url })).status, 403)
+    for (const body of [{}, { apiKey: '' }, { apiKey: 'has space' }, { apiKey: 7 }, { apiKey: plantedKey, extra: 1 }, [plantedKey], plantedKey]) {
+      const refused = await send(keyRoute(h), 'PUT', body, keyHeaders(h))
+      assert.equal(refused.status, 400, JSON.stringify(body))
+      assert.doesNotMatch(JSON.stringify(refused.body), /PLANTED/)
+    }
+    await assert.rejects(readFile(keyFile(h), 'utf8'), /ENOENT/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a key file with the wrong mode is reported as a problem that names the file and never its contents, and is not offered as set', async () => {
+  const h = await setup({ files: { '.config/pit-view/openrouter.json': JSON.stringify({ apiKey: plantedKey }) } })
+  try {
+    await chmod(keyFile(h), 0o644)
+    const view = await getJson<{ set: boolean, problem: string | null }>(keyRoute(h))
+    assert.equal(view.body.set, false)
+    assert.match(view.body.problem ?? '', /openrouter\.json.*0644/)
+    assert.doesNotMatch(JSON.stringify(view.body), /PLANTED/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('saving settings through the real save path leaves openrouter.json byte for byte as it was, and neither GET /api/config, GET /api/models, nor a saved config ever holds the key', async () => {
+  const h = await setup({ files: { '.config/pit-view/openrouter.json': `${JSON.stringify({ apiKey: plantedKey })}\n` } })
+  try {
+    const before = await readFile(keyFile(h))
+    const modeBefore = (await stat(keyFile(h))).mode
+    const config = await getJson<Config>(`${h.base}/api/config`)
+    for (const change of [{}, { refreshSeconds: 120 }, { agent: { runner: 'codex', claudeModel: 'opus' } }, { models: { slots: { stack: 'opus' } } }]) {
+      assert.equal((await saveConfigAs(h.server, { ...config.body, ...change })).status, 200)
+      assert.deepEqual(await readFile(keyFile(h)), before)
+      assert.equal((await stat(keyFile(h))).mode, modeBefore)
+    }
+    // a key smuggled into a save is dropped or refused, never stored beside the settings
+    const smuggled = await saveConfigAs(h.server, { ...config.body, openRouterKey: plantedKey })
+    assert.ok(smuggled.status === 400 || !(await readFile(h.configPath, 'utf8')).includes('PLANTED'))
+    for (const url of ['/api/config', '/api/models', '/api/instance', '/api/openrouter-key']) {
+      assert.doesNotMatch(JSON.stringify((await getJson<unknown>(`${h.base}${url}`)).body), /PLANTED/, url)
+    }
+    assert.doesNotMatch(await readFile(h.configPath, 'utf8'), /PLANTED/)
+    assert.deepEqual(await readFile(keyFile(h)), before)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a start may name hermes with a registry id: the run is hermes, its child gets the key in the one variable, and no answer or run view carries the key; no model, an unknown one, and a tandem or fix start are refused', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    await writeOpenRouterKey(keyFile(h), plantedKey)
+    const url = `${h.base}/api/prs/106/runs`
+    const refused = [
+      await send(url, 'POST', { repo: scenario.repo, runner: 'hermes' }, token(h)),
+      await send(url, 'POST', { repo: scenario.repo, runner: 'hermes', model: 'ghost' }, token(h)),
+      await send(url, 'POST', { repo: scenario.repo, runner: 'hermes', model: 'sonnet' }, token(h)),
+      await send(url, 'POST', { repo: scenario.repo, runner: 'hermes', model: 7 }, token(h)),
+      await send(url, 'POST', { repo: scenario.repo, runner: 'claude', model: 'kimi-code' }, token(h)),
+      await send(url, 'POST', { repo: scenario.repo, runner: 'hermes', model: 'kimi-code', kind: 'tandem' }, token(h)),
+      await send(url, 'POST', { repo: scenario.repo, runner: 'hermes', model: 'kimi-code', kind: 'fix' }, token(h)),
+    ]
+    assert.deepEqual(refused.map((answer) => answer.status), [400, 400, 400, 400, 400, 400, 400])
+    assert.equal(h.launch.children.length, 0)
+    const started = await send(url, 'POST', { repo: scenario.repo, runner: 'hermes', model: 'kimi-code' }, token(h))
+    assert.equal(started.status, 200, JSON.stringify(started.body))
+    assert.equal(started.body.runner, 'hermes')
+    const child = h.launch.children[0]!
+    assert.equal(child.request.command, 'hermes')
+    assert.equal(child.request.env.OPENROUTER_API_KEY, plantedKey)
+    assert.ok(child.request.args.includes('moonshotai/kimi-k2.7-code'))
+    assert.doesNotMatch(JSON.stringify([started.body, (await getJson<unknown>(url)).body, refused.map((answer) => answer.body)]), /PLANTED/)
+  } finally {
+    await h.cleanup()
   }
 })

@@ -1,0 +1,43 @@
+{"type": "system", "subtype": "init", "model": "vendor/model-name", "session_id": "", "timestamp": 1700000000000}
+{"type": "tool_use", "name": "terminal", "tool_call_id": "call_01", "input": {"command": "ls"}, "timestamp": 1700000000100}
+{"type": "tool_result", "name": "terminal", "tool_call_id": "call_01", "output": "{\"output\": \"file-a.txt\\nfile-b.txt\\nfile-c.txt\", \"exit_code\": 0, \"error\": null}", "duration_ms": 441, "is_error": false, "timestamp": 1700000000200}
+{"type": "tool_use", "name": "terminal", "tool_call_id": "call_02", "input": {"command": "printenv GIT_CONFIG_COUNT; git config --get core.hooksPath"}, "timestamp": 1700000000300}
+{"type": "tool_result", "name": "terminal", "tool_call_id": "call_02", "output": "{\"output\": \"\", \"exit_code\": 1, \"error\": null, \"exit_code_meaning\": \"Non-zero exit (often normal — e.g. 'git diff' returns 1 when files differ)\"}", "duration_ms": 134, "is_error": true, "timestamp": 1700000000400}
+{"type": "text", "text": "\n\nThe", "timestamp": 1700000000500}
+{"type": "text", "text": " directory", "timestamp": 1700000000600}
+{"type": "text", "text": " listing", "timestamp": 1700000000700}
+{"type": "text", "text": " shows", "timestamp": 1700000000800}
+{"type": "text", "text": " ", "timestamp": 1700000000900}
+{"type": "text", "text": "3", "timestamp": 1700000001000}
+{"type": "text", "text": " files", "timestamp": 1700000001100}
+{"type": "text", "text": ".\n\n", "timestamp": 1700000001200}
+{"type": "text", "text": "G", "timestamp": 1700000001300}
+{"type": "text", "text": "IT", "timestamp": 1700000001400}
+{"type": "text", "text": "_CONFIG", "timestamp": 1700000001500}
+{"type": "text", "text": "_COUNT", "timestamp": 1700000001600}
+{"type": "text", "text": ":", "timestamp": 1700000001700}
+{"type": "text", "text": " \"\"", "timestamp": 1700000001800}
+{"type": "text", "text": " (", "timestamp": 1700000001900}
+{"type": "text", "text": "no", "timestamp": 1700000002000}
+{"type": "text", "text": " output", "timestamp": 1700000002100}
+{"type": "text", "text": ")\n", "timestamp": 1700000002200}
+{"type": "text", "text": "core", "timestamp": 1700000002300}
+{"type": "text", "text": ".h", "timestamp": 1700000002400}
+{"type": "text", "text": "ooks", "timestamp": 1700000002500}
+{"type": "text", "text": "Path", "timestamp": 1700000002600}
+{"type": "text", "text": ":", "timestamp": 1700000002700}
+{"type": "text", "text": " \"\"", "timestamp": 1700000002800}
+{"type": "text", "text": " (", "timestamp": 1700000002900}
+{"type": "text", "text": "no", "timestamp": 1700000003000}
+{"type": "text", "text": " output", "timestamp": 1700000003100}
+{"type": "text", "text": ")\n\n", "timestamp": 1700000003200}
+{"type": "text", "text": "The", "timestamp": 1700000003300}
+{"type": "text", "text": " second", "timestamp": 1700000003400}
+{"type": "text", "text": " command", "timestamp": 1700000003500}
+{"type": "text", "text": " exited", "timestamp": 1700000003600}
+{"type": "text", "text": " with", "timestamp": 1700000003700}
+{"type": "text", "text": " status", "timestamp": 1700000003800}
+{"type": "text", "text": " ", "timestamp": 1700000003900}
+{"type": "text", "text": "1", "timestamp": 1700000004000}
+{"type": "text", "text": ".", "timestamp": 1700000004100}
+{"type": "result", "session_id": "local-0000000000000000000000000000000000000000000000000000000000000000", "exit_code": 0, "text": "The directory listing shows 3 files.\n\nGIT_CONFIG_COUNT: \"\" (no output)\ncore.hooksPath: \"\" (no output)\n\nThe second command exited with status 1.", "tokens": {"input": 49987, "output": 91, "total": 50078, "cache_read": 33024, "cache_write": 0}, "duration_ms": 10147, "timestamp": 1700000004200}

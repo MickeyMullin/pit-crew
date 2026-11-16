@@ -45,7 +45,7 @@ export type SignInFiles = { clientId: string, clientSecret: string, key: Buffer 
 export type SignInState = { open: true, files: SignInFiles } | { open: false, reason: string }
 
 // reads one of the two files only when it is the owner's own plain file of mode 0600 or stricter, read through the descriptor that was checked, so the check and the read are of the same file
-const readGuarded = async (path: string, shown: string): Promise<{ text: string } | { missing: true } | { problem: string }> => {
+export const readGuarded = async (path: string, shown: string): Promise<{ text: string } | { missing: true } | { problem: string }> => {
   let handle
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)

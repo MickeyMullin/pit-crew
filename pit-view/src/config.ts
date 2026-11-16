@@ -52,6 +52,12 @@ export type AutoReviewSettings = {
 export type RunnerName = 'claude' | 'codex'
 export const runnerNames: readonly RunnerName[] = ['claude', 'codex']
 
+// every runner a run can have been started with: hermes is never the configured default and starts only for a registry entry that names it (section 8 of DESIGN.md, The hermes runner)
+export type RunRunner = RunnerName | 'hermes'
+
+// the Hermes profile the hermes runner runs under, a folder of its own inside the owner's Hermes installation
+export const defaultHermesProfile = 'pitview'
+
 export const defaultClaudeModel = 'sonnet'
 
 // the owner's extra review instructions (section 8 of DESIGN.md, Extra instructions): what a run used, and whether it came from Settings or was typed for this run
@@ -78,6 +84,8 @@ export type AgentSettings = {
   claudeModel: string
   // passed to Codex as -m when set; Codex otherwise uses its own configured model
   codexModel?: string
+  // the Hermes profile every hermes run starts under (hermes -p <profile>); pitview when left out
+  hermesProfile?: string
 }
 
 export type Config = {
@@ -326,7 +334,7 @@ const modelPattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/
 const toAgent = (value: unknown): AgentSettings => {
   if (value === undefined) return { runner: 'claude', claudeModel: defaultClaudeModel }
   if (!isObject(value)) return fail('config.agent must be an object such as { "runner": "claude" }')
-  onlyKeys(value, ['runner', 'claudeModel', 'codexModel'], 'agent')
+  onlyKeys(value, ['runner', 'claudeModel', 'codexModel', 'hermesProfile'], 'agent')
   const agent: AgentSettings = { runner: oneOf(value, 'runner', runnerNames, 'agent'), claudeModel: defaultClaudeModel }
   if (value.claudeModel !== undefined) {
     const model = str(value, 'claudeModel', 'agent').trim()
@@ -341,6 +349,11 @@ const toAgent = (value: unknown): AgentSettings => {
       if (!modelPattern.test(model)) fail('agent.codexModel must be a model name such as gpt-6.1-terra, with no spaces')
       agent.codexModel = model
     }
+  }
+  if (value.hermesProfile !== undefined) {
+    const profile = str(value, 'hermesProfile', 'agent')
+    if (!/^[a-z0-9]{1,32}$/.test(profile)) fail('agent.hermesProfile must be lowercase letters and digits, such as pitview')
+    agent.hermesProfile = profile
   }
   return agent
 }

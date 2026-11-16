@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { SQLInputValue, SQLOutputValue } from 'node:sqlite'
-import type { Clock, ExtraInstructions, RunnerName } from './config.ts'
+import type { Clock, ExtraInstructions, RunRunner } from './config.ts'
 import type { RunModels } from './models.ts'
 import type { ClosedResult, GhErrorKind, OpenPage, RawOpenPr } from './github.ts'
 import type { RunResultJson, StepSlot } from './launcher.ts'
@@ -107,7 +107,7 @@ export type Session = {
   args: string[]
   // what the Agent cell calls it: Review, Re-review, Self-review
   label: string
-  runner: RunnerName
+  runner: RunRunner
   // the session's working directory and the run directory, both written with ~
   cwd: string
   dir: string
@@ -311,7 +311,7 @@ const toSession = (row: Row): Session => {
     command: str(row, 'command'),
     args: JSON.parse(str(row, 'args')) as string[],
     label: str(row, 'label'),
-    runner: str(row, 'runner') as RunnerName,
+    runner: str(row, 'runner') as RunRunner,
     cwd: str(row, 'cwd'),
     dir: str(row, 'dir'),
     sessionId: strOrNull(row, 'session_id'),

@@ -1,6 +1,6 @@
 // src/sweeps.ts
 import type { Cache, Sweep } from './cache.ts'
-import type { Config, RunnerName } from './config.ts'
+import type { Config, RunnerName, RunRunner } from './config.ts'
 import { doneText, modelLabels, stepsOf } from './launcher.ts'
 import type { CiState, PostForm, Priority, Queueing, Recommendation, RunnerModels, StartRequest, StepSlot, SweepResult } from './launcher.ts'
 
@@ -13,7 +13,7 @@ export const sweepLabel = 'Dependabot sweep'
 export const sweepArgs = (repo: string): string[] => [repo, '--parallel', '1']
 
 // a sweep has no PR; the number is ignored by the sweeps store and never written anywhere
-export const sweepRequest = (repo: string, runner?: RunnerName): StartRequest => ({
+export const sweepRequest = (repo: string, runner?: RunRunner): StartRequest => ({
   repo,
   number: 0,
   command: sweepCommand,
