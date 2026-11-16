@@ -1460,9 +1460,9 @@ test('with no start time on record for a launched run, Stop signals it from its 
 
 test('Stop while a run settles after its observed exit sends no signal, even when ps cannot say who holds the pid now', async () => {
   const reads = gate()
-  const launch = fakeLaunch({ fs: { readFile: async (path) => {
+  const launch = fakeLaunch({ fs: { readOwn: async (path) => {
     if (path.endsWith('result.json')) await reads.wait()
-    return systemFs.readFile(path)
+    return systemFs.readOwn(path)
   } } })
   const h = await harness({ launch })
   const { run, child, pid, launcher } = await launchedRun(h)

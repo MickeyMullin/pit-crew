@@ -1,7 +1,7 @@
 // src/launcher.ts
 import { spawn as spawnChild } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { closeSync, openSync, watch as watchDir } from 'node:fs'
+import { closeSync, constants, openSync, watch as watchDir } from 'node:fs'
 import { chmod, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, join, resolve, sep } from 'node:path'
 import type { Cache, NewRun, NewSweep, Origin, QueueReason, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
@@ -1614,6 +1614,8 @@ export const systemSpawn: Spawn = spawnWith({
   spawn: (command, args, options) => spawnChild(command, args, options),
 })
 
+export type OwnRead = { kind: 'absent' } | { kind: 'unsafe' } | { kind: 'file', text: string }
+
 export type LauncherFs = {
   mkdir: (path: string) => Promise<void>
   writeFile: (path: string, text: string) => Promise<void>
@@ -1621,6 +1623,10 @@ export type LauncherFs = {
   replaceFile: (path: string, text: string) => Promise<void>
   // null when the file does not exist
   readFile: (path: string) => Promise<string | null>
+  // a file in a run's own folder, which the child controls: read only when it is a regular file with one link, opened without following a link, so a symbolic link or a hard link that may lead outside is never read
+  readOwn: (path: string) => Promise<OwnRead>
+  // a new file made exclusively and never through an existing path or link; fails when the name exists
+  createFile: (path: string, text: string) => Promise<void>
   // the bytes from offset to the end; empty when the file does not exist yet
   readFrom: (path: string, offset: number) => Promise<Buffer>
   exists: (path: string) => Promise<boolean>
@@ -1665,16 +1671,37 @@ export const systemFs: LauncherFs = {
       throw error
     }
   },
-  readFrom: async (path, offset) => {
+  readOwn: async (path) => {
     let handle: Awaited<ReturnType<typeof open>>
     try {
-      handle = await open(path, 'r')
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     } catch (error) {
-      if (missing(error)) return Buffer.alloc(0)
+      if (missing(error)) return { kind: 'absent' }
+      if (['ELOOP', 'EMLINK'].includes((error as NodeJS.ErrnoException).code ?? '')) return { kind: 'unsafe' }
       throw error
     }
     try {
-      const { size } = await handle.stat()
+      const info = await handle.stat()
+      if (!info.isFile() || info.nlink > 1) return { kind: 'unsafe' }
+      return { kind: 'file', text: await handle.readFile('utf8') }
+    } finally {
+      await handle.close()
+    }
+  },
+  createFile: (path, text) => writeFile(path, text, { encoding: 'utf8', flag: 'wx', mode: 0o600 }),
+  readFrom: async (path, offset) => {
+    let handle: Awaited<ReturnType<typeof open>>
+    try {
+      // a link, or a file with more than one link, in a run's folder is the child's doing and is read as absent
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    } catch (error) {
+      if (missing(error) || ['ELOOP', 'EMLINK'].includes((error as NodeJS.ErrnoException).code ?? '')) return Buffer.alloc(0)
+      throw error
+    }
+    try {
+      const info = await handle.stat()
+      if (!info.isFile() || info.nlink > 1) return Buffer.alloc(0)
+      const { size } = info
       if (size <= offset) return Buffer.alloc(0)
       const buffer = Buffer.alloc(size - offset)
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset)
@@ -2761,7 +2788,9 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       const real = await fs.realpath(named)
       if (real !== join(await fs.realpath(resolve(named, '..')), basename(named))) return false
       if (!real.startsWith(folder + sep)) return false
-      return (await stat(real)).isFile()
+      const info = await stat(real)
+      // a file with another link may be the same file as one outside the folder, so it is no report here
+      return info.isFile() && info.nlink === 1
     } catch {
       return false
     }
@@ -2781,7 +2810,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     const inside = path !== null && hermes && await inReports(expandHome(path, home))
     if (hermes) await clearReport(value, id, secrets)
     // a hermes child has no sandbox and may name any file, so a path outside the reports folder is never opened: it has no hash
-    const text = path === null || (hermes && !inside) ? null : await fs.readFile(expandHome(path, home)).catch(() => null)
+    const text = path === null || (hermes && !inside) ? null : hermes ? await ownText(expandHome(path, home)) : await fs.readFile(expandHome(path, home)).catch(() => null)
     return { reportHash: text === null ? null : reportHash(text) }
   }
 
@@ -2793,7 +2822,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     // a server shutting down leaves the run recorded as running, for recovery to find
     if (closed) return null
     const secrets = entry.row.runner === 'hermes' ? await hermesSecrets(entry.id) : []
-    const text = await fs.readFile(join(entry.dir, 'result.json')).catch(() => null)
+    const text = await ownText(join(entry.dir, 'result.json'))
     // a hermes child may write a key into any field of a valid result, so the result is cleared of every whole key, in the text and then in every string of what was parsed, before anything judges, stores, shows, or logs it
     let parsed = text === null ? null : clearedResult(parseResult(secrets.reduce((kept, secret) => kept.split(secret).join('[key]'), text)), secrets)
     // a launch of one kind takes only its own kind of result: a review's result in a sweep's folder is no result
@@ -2885,17 +2914,39 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     for (const name of names) await clearPath(join(entry.dir, name), name, entry.id, secrets)
   }
 
-  // one file rewritten in place with every whole key replaced, by the rule above; an absent file is left alone
+  // the text of a file in a run's folder, or the report, null when it is absent, a link, a file with more than one link, or unreadable: a link the child planted is never followed
+  const ownText = async (path: string): Promise<string | null> => {
+    const read = await fs.readOwn(path).catch((): OwnRead => ({ kind: 'absent' }))
+    return read.kind === 'file' ? read.text : null
+  }
+
+  // a path the child may have made a link, or a link to a file outside, taken out of the way: the entry itself is removed, which never touches what it leads to, and a notice is made in its place as a new file. Each step that fails is logged once and not tried again
+  const replaceEntry = async (path: string, name: string, id: number): Promise<void> => {
+    try {
+      await fs.rm(path)
+    } catch (failure) {
+      log(`${noun} ${id}: cannot remove ${name}: ${messageOf(failure)}`)
+      return
+    }
+    await fs.createFile(path, keyNotice).catch((failure: unknown) => log(`${noun} ${id}: cannot write a notice in place of ${name}: ${messageOf(failure)}`))
+  }
+
+  // one file rewritten in place with every whole key replaced, by the rule above; an absent file is left alone. A file that is a link, is not a regular file, or has more than one link is never read or written through: it is replaced by a notice. A rewrite that fails removes the entry first and then makes the notice exclusively, so nothing is written through an existing path
   const clearPath = async (path: string, name: string, id: number, secrets: readonly string[], atEnd = true): Promise<void> => {
     if (secrets.length === 0) return
     try {
-      const text = await fs.readFile(path)
-      if (text === null) return
-      const kept = withoutKeys(text, secrets, atEnd)
-      if (kept !== text) await fs.replaceFile(path, kept)
+      const read = await fs.readOwn(path)
+      if (read.kind === 'absent') return
+      if (read.kind === 'unsafe') {
+        log(`${noun} ${id}: ${name} is a link or has more than one link, so it is replaced without being read`)
+        await replaceEntry(path, name, id)
+        return
+      }
+      const kept = withoutKeys(read.text, secrets, atEnd)
+      if (kept !== read.text) await fs.replaceFile(path, kept)
     } catch (error) {
       log(`${noun} ${id}: cannot take a key out of ${name}, so it is replaced: ${messageOf(error)}`)
-      await fs.writeFile(path, keyNotice).catch(() => fs.rm(path)).catch((failure: unknown) => log(`${noun} ${id}: cannot remove ${name}: ${messageOf(failure)}`))
+      await replaceEntry(path, name, id)
     }
   }
 
@@ -3426,7 +3477,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       const dir = expandHome(run.dir, home)
       let request: RequestFile = {}
       try {
-        request = JSON.parse(await fs.readFile(join(dir, 'request.json')) ?? '{}') as RequestFile
+        request = JSON.parse(await ownText(join(dir, 'request.json')) ?? '{}') as RequestFile
       } catch {
         request = {}
       }
@@ -3499,7 +3550,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       // a hermes child may have written a key into what it wrote since: result.json and events.jsonl are rewritten without any, and the result is cleared like the settle path clears it, in the text and then in every string of what was parsed
       const secrets = run.runner === 'hermes' ? await hermesSecrets(id) : []
       await clearLogs({ dir, id }, secrets, ['result.json', 'events.jsonl'])
-      const text = await fs.readFile(join(dir, 'result.json')).catch(() => null)
+      const text = await ownText(join(dir, 'result.json'))
       if (text === null) return refuse(`result.json is missing from ${tildePath(dir, home)}`)
       const parsed = clearedResult(parseResult(text), secrets)
       if (!parsed.ok) return refuse(parsed.error)
@@ -3529,7 +3580,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       // the first time a failed re-read replaces the note, the note recorded at exit moves to its own field, so a later finish by hand can still tell why the run first stopped; an original with no note is kept as an empty string, so firstNote stays set and a later failure cannot be copied in as the original
       if (note !== run.note && (run as Partial<Run>).firstNote === null) changes.firstNote = run.note ?? ''
       // the later steps too: every line of events.jsonl, folded from the start
-      const eventsText = await fs.readFile(join(dir, 'events.jsonl')).catch(() => null)
+      const eventsText = await ownText(join(dir, 'events.jsonl'))
       const events = (eventsText === null ? '' : withoutKeys(eventsText, secrets, false)).split('\n').map(parseStepEvent).filter((event) => event !== null)
       const latest = events.at(-1)
       if (latest !== undefined) {

@@ -2,7 +2,7 @@
 // the hermes runner (section 8 of DESIGN.md, Launching runs, The hermes runner): its command line and resume line, the stream it prints, the environment its child gets, which models it may start with, and what is refused. The end-to-end tests run the real launcher over a small fake hermes executable on a temp PATH and a recorded stream with invented content, so no model is ever called
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { chmod, lstat, mkdir, readdir, readFile, realpath, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { chmod, link, lstat, mkdir, readdir, readFile, realpath, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { openCache } from '../src/cache.ts'
@@ -136,6 +136,18 @@ const leak = () => {
     process.stderr.write('auth failed for ' + key.slice(0, half)); sleep(40); process.stderr.write(key.slice(half) + '\\n')
     process.stdout.write('{"type":"tool","text":"' + key.slice(0, half)); sleep(40); process.stdout.write(key.slice(half) + '"}\\n')
   }
+}
+if (mode.startsWith('plant ')) {
+  // 'plant <name> <symlink|hardlink>': the run's ordinary files, with keys on both logs, and then, as it exits, <name> (or the report) replaced by a link to the file outside-key.txt in HOME
+  const [, name, kind] = mode.split(' ')
+  leak()
+  process.on('exit', () => {
+    const target = path.join(process.env.HOME, 'outside-key.txt')
+    const file = name === 'report' ? path.join(process.env.HOME, 'agents', 'output', 'PR-104.md') : path.join(dir, name)
+    fs.rmSync(file, { force: true })
+    if (kind === 'symlink') fs.symlinkSync(target, file)
+    else fs.linkSync(target, file)
+  })
 }
 if (mode === 'leakwait') {
   // the test changes the configured profile while this waits
@@ -674,12 +686,9 @@ test('a log whose rewrite fails is replaced by a one-line notice, and when even 
       replaceFile: async () => {
         throw new Error('disk full')
       },
-      writeFile: async (path, text) => {
+      createFile: async (path, text) => {
         if (failing === 'both' && /stderr\.log$/.test(path)) throw new Error('read-only')
-        await writeFile(path, text, 'utf8')
-      },
-      rm: async (path) => {
-        await systemFs.rm(path)
+        await systemFs.createFile(path, text)
       },
     },
   })
@@ -914,9 +923,9 @@ test('a report that cannot be rewritten is replaced by a one-line notice, and on
       replaceFile: async () => {
         throw new Error('disk full')
       },
-      writeFile: async (path, text) => {
+      createFile: async (path, text) => {
         if (failing === 'both' && /PR-104\.md$/.test(path)) throw new Error('read-only')
-        await writeFile(path, text, 'utf8')
+        await systemFs.createFile(path, text)
       },
     },
   })
@@ -1072,5 +1081,144 @@ test('a re-read that is refused because result.json has not changed still takes 
     assert.match(text, /left behind \[key\] and \[key\]/)
   } finally {
     await h.cleanup()
+  }
+})
+
+// a fake key file outside every folder Pit View keeps, with both fake keys in it, planted long ago so any write or read-for-write shows in its bytes, its modification time, or its link count
+const plantOutside = async (home: string): Promise<string> => {
+  const outside = join(home, 'outside-key.txt')
+  await writeFile(outside, `{"apiKey":"${fakeKey}"} ${otherKey}\n`, { mode: 0o600 })
+  await utimes(outside, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'))
+  return outside
+}
+const fingerprint = async (path: string): Promise<{ text: string, mtime: number, mode: number }> => ({ text: await readFile(path, 'utf8'), mtime: (await stat(path)).mtimeMs, mode: (await stat(path)).mode })
+
+// what is left at a planted name: nothing, or a regular file with one link, and never the link itself
+const notALink = async (path: string, label: string): Promise<void> => {
+  const info = await lstat(path).catch(() => null)
+  if (info !== null) assert.ok(info.isFile() && info.nlink === 1, `${label} is still a link`)
+}
+
+for (const rewrite of ['works', 'fails'] as const) {
+  for (const kind of ['symlink', 'hardlink']) {
+    for (const name of ['result.json', 'events.jsonl', 'stderr.log', 'stream.jsonl', 'report']) {
+      test(`a child that makes ${name} a ${kind} to a file outside is never followed at settle, with the rewrite ${rewrite === 'works' ? 'working' : 'failing'}: the outside file is untouched, no key stays in anything Pit View keeps, and the link is gone or a regular notice`, async () => {
+        const h = await setup({ profileKey: otherKey, fs: rewrite === 'fails' ? { replaceFile: async () => { throw new Error('disk full') } } : {} })
+        try {
+          const outside = await plantOutside(h.home)
+          const before = await fingerprint(outside)
+          const linksBefore = (await stat(outside)).nlink
+          await h.mode(`plant ${name} ${kind}`)
+          const run = await h.launcher.start(request)
+          const final = await h.launcher.settled(run.id)
+          assert.deepEqual(await fingerprint(outside), before, 'the outside file is as planted')
+          // a link left in a run's folder is removed, which gives back the link the child made; a hard link the child made to the report stays, since that name is no report
+          assert.equal((await stat(outside)).nlink, linksBefore + (kind === 'hardlink' && name === 'report' ? 1 : 0), 'its link count is as expected')
+          const dir = h.runDir(run)
+          if (name === 'report') {
+            // a report that is a link or has another link is no report in the folder: it is neither read, hashed, nor changed
+            assert.equal(final.reportHash, null)
+          } else {
+            await notALink(join(dir, name), name)
+          }
+          for (const file of (await readdir(dir)).filter((entry) => entry !== name || name === 'report')) {
+            const info = await lstat(join(dir, file))
+            if (info.isFile() && info.nlink === 1) holdsNoPiece(await readFile(join(dir, file), 'utf8'), file)
+          }
+          holdsNoPiece(JSON.stringify([final, runView(final), h.cache.getRun(run.id), h.logs]), 'the row, the drawer, or the log')
+          assert.deepEqual((await readdir(dir)).filter((entry) => /tmp/.test(entry)), [], 'no temporary file is left')
+        } finally {
+          await h.cleanup()
+        }
+      })
+    }
+  }
+}
+
+for (const rewrite of ['works', 'fails'] as const) {
+  for (const kind of ['symlink', 'hardlink']) {
+    for (const name of ['result.json', 'events.jsonl', 'report']) {
+      test(`a child that makes ${name} a ${kind} to a file outside, after the run failed, is never followed by a re-read, with the rewrite ${rewrite === 'works' ? 'working' : 'failing'}`, async () => {
+        const failing: { replace: boolean } = { replace: false }
+        const h = await setup({ profileKey: otherKey, fs: { replaceFile: async (path, text) => {
+          if (failing.replace) throw new Error('disk full')
+          await systemFs.replaceFile(path, text)
+        } } })
+        try {
+          await h.mode('failsession')
+          const run = await h.launcher.start(request)
+          const failed = await h.launcher.settled(run.id)
+          assert.equal(failed.status, 'failed')
+          const dir = h.runDir(run)
+          const outside = await plantOutside(h.home)
+          const before = await fingerprint(outside)
+          const report = join(h.home, 'agents', 'output', 'PR-104.md')
+          await writeFile(report, `Reviewed commit: feat/x @ f00dfac\n${fakeKey}\n`)
+          await writeFile(join(dir, 'result.json'), JSON.stringify({
+            schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: scenario.repo, pr: 104 }, reviewed: { kind: 'commit', sha: 'f00dfacecafebeefdeadbeef0123456789abcdef' },
+            verdict: 'clean', recommendation: null, findings: [], ci: null, fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: '~/agents/output/PR-104.md', question: null, error: null,
+          }))
+          await writeFile(join(dir, 'events.jsonl'), `${JSON.stringify({ at: '2026-01-01T00:00:00Z', step: 'review', state: 'started', note: `with ${fakeKey}` })}\n`)
+          failing.replace = rewrite === 'fails'
+          const planted = name === 'report' ? report : join(dir, name)
+          await rm(planted)
+          await (kind === 'symlink' ? symlink(outside, planted) : link(outside, planted))
+          await h.launcher.reread(run.id).catch(() => {})
+          assert.deepEqual(await fingerprint(outside), before, 'the outside file is as planted')
+          if (name !== 'report') await notALink(planted, name)
+          holdsNoPiece(JSON.stringify([h.cache.getRun(run.id), h.logs]), 'the row or the log')
+          for (const file of ['result.json', 'events.jsonl']) {
+            const info = await lstat(join(dir, file)).catch(() => null)
+            if (info?.isFile() === true && info.nlink === 1) holdsNoPiece(await readFile(join(dir, file), 'utf8'), file)
+          }
+        } finally {
+          await h.cleanup()
+        }
+      })
+    }
+  }
+}
+
+test('a hard link inside the reports folder to a file outside it is no report: it is not cleared, not rewritten, not read, and has a null hash, exactly like a path outside the folder', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    const outside = await plantOutside(h.home)
+    const before = await fingerprint(outside)
+    const inside = join(h.home, 'agents', 'output', 'hard.md')
+    await link(outside, inside)
+    await writeFile(join(h.home, 'target.txt'), inside)
+    await h.mode('reportat')
+    const run = await h.launcher.start(request)
+    const final = await h.launcher.settled(run.id)
+    assert.equal(final.reportHash, null)
+    assert.deepEqual(await fingerprint(outside), before)
+    assert.deepEqual(await fingerprint(inside), before, 'the in-folder name is the same file and is untouched')
+    assert.equal((await stat(outside)).nlink, 2)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a symbolic link, a hard link, or a non-regular file in a run\'s folder reads as absent for the live read, and a regular file is read', async () => {
+  const temp = await tempDir()
+  try {
+    const outside = join(temp.dir, 'outside.txt')
+    await writeFile(outside, 'secret line\n')
+    await symlink(outside, join(temp.dir, 'sym'))
+    await link(outside, join(temp.dir, 'hard'))
+    await writeFile(join(temp.dir, 'plain'), 'plain line\n')
+    await mkdir(join(temp.dir, 'folder'))
+    assert.equal((await systemFs.readFrom(join(temp.dir, 'sym'), 0)).length, 0)
+    assert.equal((await systemFs.readFrom(join(temp.dir, 'hard'), 0)).length, 0)
+    assert.equal((await systemFs.readFrom(join(temp.dir, 'plain'), 0)).toString(), 'plain line\n')
+    assert.deepEqual(await systemFs.readOwn(join(temp.dir, 'sym')), { kind: 'unsafe' })
+    assert.deepEqual(await systemFs.readOwn(join(temp.dir, 'hard')), { kind: 'unsafe' })
+    assert.deepEqual(await systemFs.readOwn(join(temp.dir, 'folder')), { kind: 'unsafe' })
+    assert.deepEqual(await systemFs.readOwn(join(temp.dir, 'none')), { kind: 'absent' })
+    assert.deepEqual(await systemFs.readOwn(join(temp.dir, 'plain')), { kind: 'file', text: 'plain line\n' })
+    await assert.rejects(systemFs.createFile(join(temp.dir, 'sym'), 'x'), /EEXIST/)
+    assert.equal(await readFile(outside, 'utf8'), 'secret line\n')
+  } finally {
+    await temp.cleanup()
   }
 })
