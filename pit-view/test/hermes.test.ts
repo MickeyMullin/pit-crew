@@ -218,6 +218,24 @@ if (mode === 'namedreport') {
   }))
   process.exit(0)
 }
+if (mode.startsWith('sweep')) {
+  // 'sweep content|name|target': a done Dependabot sweep whose valid result names, as its summary, a file holding both keys, a file whose name holds the first key, or the path in target.txt
+  const variant = mode.split(' ')[1]
+  const folder = path.join(process.env.HOME, 'agents', 'output')
+  let named = '~/agents/output/sweep-summary.md'
+  if (variant === 'content') fs.writeFileSync(path.join(folder, 'sweep-summary.md'), '# Sweep\\nthe token was ' + allKeys[0] + ' and ' + allKeys[1] + '\\n')
+  if (variant === 'name') {
+    named = '~/agents/output/sweep-' + allKeys[0] + '.md'
+    fs.writeFileSync(path.join(folder, 'sweep-' + allKeys[0] + '.md'), '# Sweep\\nthe token was ' + allKeys[0] + ' and ' + allKeys[1] + '\\n')
+  }
+  if (variant === 'target') named = fs.readFileSync(path.join(process.env.HOME, 'target.txt'), 'utf8').trim()
+  fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify({
+    schema: 'pit-crew/sweep-result@1', command: 'review-dependabot-sweep', status: 'done', repo: '${scenario.repo}', counts: { swept: 1, fresh: 1, reused: 0, failed: 0 },
+    notPostedReason: 'noPost', rows: [], mergeOrder: [], summary: named, question: null, error: null,
+  }))
+  for (const line of lines) out(line)
+  process.exit(0)
+}
 if (mode === 'reportkey' || mode === 'sessionkey') {
   // 'reportkey': a clean review whose report holds both keys; 'sessionkey': a clean review whose last stream event names a key as its session
   const number = Number(/^\\/review-pr (\\d+)/.exec(request)[1])
@@ -1363,5 +1381,57 @@ test('a symbolic link, a hard link, or a non-regular file in a run\'s folder rea
     assert.equal(await readFile(outside, 'utf8'), 'secret line\n')
   } finally {
     await temp.cleanup()
+  }
+})
+
+const sweepAsked = (): StartRequest => ({ ...sweepRequest(scenario.repo, 'hermes'), model: 'kimi-code' })
+
+test('a key a hermes child writes into the summary file a valid sweep result names, in its content or in its file name, is taken out of the file at settle, so the row, the log, and the drawer hold no piece of it and the stored path shows [key], and the sweep has no report hash', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    const folder = join(h.home, 'agents', 'output')
+    await h.mode('sweep content')
+    const run = await h.sweeps.start(sweepAsked())
+    const final = await h.sweeps.settled(run.id)
+    assert.equal(final.status, 'done', final.note ?? '')
+    const cleared = await readFile(join(folder, 'sweep-summary.md'), 'utf8')
+    holdsNoPiece(cleared, 'the summary')
+    assert.match(cleared, /the token was \[key\] and \[key\]/)
+    holdsNoPiece(JSON.stringify([final, h.cache.getSweep(run.id), h.logs]), 'the row or the log')
+    // a key in the file name: the content is cleared, the stored path shows [key]
+    await h.mode('sweep name')
+    const second = await h.sweeps.start(sweepAsked())
+    const named = await h.sweeps.settled(second.id)
+    assert.equal(named.status, 'done', named.note ?? '')
+    holdsNoPiece(await readFile(join(folder, `sweep-${fakeKey}.md`), 'utf8'), 'the summary named with a key')
+    assert.equal((named.result as { summary?: string } | null)?.summary, '~/agents/output/sweep-[key].md')
+    holdsNoPiece(JSON.stringify([named, h.cache.getSweep(second.id), h.logs]), 'the row or the log')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a sweep summary outside the reports folder (a key file, the profile .env, a path that climbs out, a symbolic link, or a file with another link) is neither read nor rewritten: it stays byte for byte and in its modification time', async () => {
+  const h = await setup({ profileKey: otherKey })
+  try {
+    const outside = join(h.home, 'agents', 'outside.md')
+    await writeFile(outside, `held ${fakeKey} and ${otherKey}\n`)
+    const soft = join(h.home, 'agents', 'output', 'link.md')
+    await symlink(h.keyPath, soft)
+    const hard = join(h.home, 'agents', 'output', 'hard.md')
+    await link(outside, hard)
+    for (const path of [h.keyPath, h.envPath, outside]) await utimes(path, new Date('2020-01-01T00:00:00Z'), new Date('2020-01-01T00:00:00Z'))
+    const watched = [h.keyPath, h.envPath, outside]
+    const before = await Promise.all(watched.map(async (path) => ({ text: await readFile(path, 'utf8'), mtime: (await stat(path)).mtimeMs })))
+    for (const target of [h.keyPath, h.envPath, join(h.home, 'agents', 'output', '..', 'outside.md'), soft, hard]) {
+      await writeFile(join(h.home, 'target.txt'), target)
+      await h.mode('sweep target')
+      const run = await h.sweeps.start(sweepAsked())
+      await h.sweeps.settled(run.id)
+      const after = await Promise.all(watched.map(async (path) => ({ text: await readFile(path, 'utf8'), mtime: (await stat(path)).mtimeMs })))
+      assert.deepEqual(after, before, `after a sweep naming ${target}`)
+    }
+  } finally {
+    await h.cleanup()
   }
 })

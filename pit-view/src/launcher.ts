@@ -1375,11 +1375,11 @@ const clearedResult = (parsed: Parsed<RunResultJson>, secrets: readonly string[]
   return parsed.ok ? { ok: true, value: withoutKeysDeep(parsed.value, secrets) as RunResultJson } : { ok: false, error: withoutKeysDeep(parsed.error, secrets) as string }
 }
 
-// the report path of a valid review result as written, for the guarded clearing of the report only
+// the report path of a valid review result, or the summary path of a valid sweep result, as written, for the guarded clearing of that file only
 const rawReportPath = (text: string | null): string | null => {
   if (text === null) return null
   const parsed = parseResult(text)
-  return parsed.ok && parsed.value.schema === 'pit-crew/review-result@1' ? reportPath(parsed.value) : null
+  return parsed.ok && (parsed.value.schema === 'pit-crew/review-result@1' || parsed.value.schema === 'pit-crew/sweep-result@1') ? reportPath(parsed.value) : null
 }
 
 const keyNotice = 'Pit View removed the contents of this file because it could not take a key out of it.\n'
@@ -2820,20 +2820,21 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
-  // the report a valid result names, taken out of every key, only when it is a regular file inside the reports folder
+  // the report a valid review result names, or the summary a valid sweep result names, taken out of every key, only when it is a regular file inside the reports folder
   const clearReport = async (value: RunResultJson, id: number, secrets: readonly string[], named: string | null = reportPath(value)): Promise<void> => {
     const path = named
-    if (path === null || value.schema !== 'pit-crew/review-result@1' || secrets.length === 0 || !await inReports(expandHome(path, home))) return
+    if (path === null || (value.schema !== 'pit-crew/review-result@1' && value.schema !== 'pit-crew/sweep-result@1') || secrets.length === 0 || !await inReports(expandHome(path, home))) return
     await clearPath(expandHome(path, home), 'the report', id, secrets, false)
   }
 
   // the report a review finished with, recorded by its hash, so Post it can tell it from what a later run wrote to the same name. Only a run has the column, and only a review posts. A hermes child has no sandbox and may write a key into the report its result names, so for a hermes run that report is cleared of every key first and the hash is that of the cleared text
   const finishedReport = async (value: RunResultJson, id: number, secrets: readonly string[] = [], hermes = false, named: string | null = reportPath(value)): Promise<RunChanges> => {
-    if (store.schema !== null || value.schema !== 'pit-crew/review-result@1') return {}
     // the stored path is the redacted one; `named` is the path as the child wrote it, kept in memory for the guarded clearing and never stored, shown, or logged
     const path = hermes ? named : reportPath(value)
     const inside = path !== null && hermes && await inReports(expandHome(path, home))
+    // a sweep's summary file is cleared like a review's report, but a sweep has no hash column
     if (hermes) await clearReport(value, id, secrets, named)
+    if (store.schema !== null || value.schema !== 'pit-crew/review-result@1') return {}
     // a hermes child has no sandbox and may name any file, so a path outside the reports folder is never opened: it has no hash. A name that held a key is stored as [key], which names no file, so such a report has no hash either
     const text = path === null || (hermes && (!inside || path !== reportPath(value))) ? null : hermes ? await ownText(expandHome(path, home)) : await fs.readFile(expandHome(path, home)).catch(() => null)
     return { reportHash: text === null ? null : reportHash(text) }
