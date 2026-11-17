@@ -1414,6 +1414,25 @@ test('the view carries each row\'s Agent cell, and a start on the viewer\'s own 
   }
 })
 
+for (const [name, reviewed, state] of [['whose head has moved', '0123abc', 'stale'], ['at its current head', 'e37eacd', 'current']] as const) {
+  test(`a ready PR of the owner's with a self-review ${name} still offers the manual Self-review start and the server accepts it with --no-post`, async () => {
+    const h = await setup({ config: { cloneDir: '~/dev/orbit' }, files: { 'agents/output/PR-101.md': `Reviewed commit: \`fix/webhook-retry\` @ \`${reviewed}\`\n` } })
+    try {
+      await filled(h)
+      const row = rowIn((await getJson<View>(`${h.base}/api/view`)).body, 101) as MineRow
+      assert.deepEqual([row.stage === 'draft', row.selfReview.state], [false, state])
+      assert.deepEqual([row.agent?.action.kind, row.agent?.action.args], ['selfReview', ['101', '--no-post']])
+      assert.deepEqual(row.agent?.starts.find((start) => start.kind === 'default')?.args, ['101', '--no-post'])
+      const started = await send(`${h.base}/api/prs/101/runs`, 'POST', { repo: scenario.repo }, token(h))
+      assert.equal(started.status, 200)
+      assert.deepEqual([started.body.args, started.body.label, started.body.origin], [['101', '--no-post'], 'Self-review', 'manual'])
+      assert.match(h.launch.children[0]!.writes[0] ?? '', /\/review-pr 101 --no-post --emit-json=/)
+    } finally {
+      await h.cleanup()
+    }
+  })
+}
+
 // the owner's re-read of a failed run (section 8, Launching runs, Re-reading a result)
 
 test('POST /api/runs/<id>/reread needs the token and carries what the confirmation showed; a differing repository, viewer, PR, head or base is 409 and reads nothing', async () => {
