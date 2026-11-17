@@ -422,9 +422,10 @@ export const deriveIssues = (pr: RawOpenPr): Issue[] => {
   const canceled = contexts.filter(isCanceled).length
   if (canceled > 0 && failing.length === 0) issues.push({ kind: 'ciCanceled', label: `CI canceled · ${canceled}`, count: canceled })
   if (contexts.length === 0) issues.push({ kind: 'ciNotRun', label: 'CI not run' })
-  // a Blocked row always says what it needs: with nothing else to say it, the status itself does
+  // a Blocked row always says what it needs: unless a chip that genuinely explains a block is there (changes requested, conflicts, behind, failing or running CI), the status itself does. CI not run and CI canceled explain nothing about a required check or review, so the status chip follows them
   const clears = pr.mergeStateStatus === 'CLEAN' || pr.mergeStateStatus === 'HAS_HOOKS' || pr.mergeStateStatus === 'UNKNOWN'
-  if (statusChips && issues.length === 0 && !clears) issues.push(blockedByStatus(pr.mergeStateStatus))
+  const explained = issues.some((issue) => issue.kind === 'changesRequested' || issue.kind === 'conflicts' || issue.kind === 'behind' || issue.kind === 'ciFailing' || issue.kind === 'ciRunning')
+  if (statusChips && !explained && !clears) issues.push(blockedByStatus(pr.mergeStateStatus))
   return issues
 }
 
@@ -491,7 +492,8 @@ export const otherGroup = (pr: RawOpenPr, issues: readonly Issue[], merge: Merge
   if (pr.isDraft) return null
   if (groupsAsReady(pr, merge)) return 'readyToMerge'
   const has = (kind: IssueKind): boolean => issues.some((issue) => issue.kind === kind)
-  if (has('conflicts') || has('ciFailing') || has('ciNotRun')) return 'waitingOnAuthor'
+  // Conflicts here is the chip's own old test, mergeable CONFLICTING: the Conflicts chip a DIRTY status raises, like Behind and Blocked by GitHub, moves no Others row
+  if (pr.mergeable === 'CONFLICTING' || has('ciFailing') || has('ciNotRun')) return 'waitingOnAuthor'
   if (has('changesRequested') && !pushedSinceChangesRequest(pr)) return 'waitingOnAuthor'
   const review = viewerReview(pr, config)
   if (isRequestedOfViewer(pr, config) || review === undefined || review.commit?.oid !== pr.headRefOid) return 'yourMove'
