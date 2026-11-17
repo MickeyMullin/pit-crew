@@ -74,6 +74,10 @@ const usage = 'send { "action": "merge", "repo": "<owner/name shown>", "headSha"
 export const orList = (items: readonly string[]): string =>
   items.length <= 2 ? items.join(' or ') : `${items.slice(0, -1).join(', ')}, or ${items[items.length - 1]}`
 
+// one name as it is, two joined with and, three or more with the Oxford comma and and
+const andList = (items: readonly string[]): string =>
+  items.length <= 2 ? items.join(' and ') : `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`
+
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
 // the body, checked field by field: an unknown field is refused rather than ignored
@@ -180,8 +184,8 @@ const overrides = (allow: PostAllow | undefined, found: readonly string[], hash:
 const scanRefusal = (reportPath: string, hits: readonly PostedTextHit[], hash: string): ActionError => {
   const withContext = hits.slice(0, 3).map((hit) => `"${hit.term}" (${hit.context})`)
   const rest = hits.slice(3).map((hit) => `"${hit.term}"`)
-  const shown = [...withContext, ...(rest.length === 0 ? [] : [`also ${rest.join(', ')}`])]
-  const named = shown.length <= 2 ? shown.join(' and ') : `${shown.slice(0, -1).join(', ')}, and ${shown[shown.length - 1]}`
+  const shown = [...withContext, ...(rest.length === 0 ? [] : [`also ${andList(rest)}`])]
+  const named = andList(shown)
   return new ActionError('notAllowed', `the saved report ${reportPath} contains ${named}, and a posted report normally never mentions the involvement of AI, a model, a runner, or a provider; nothing was posted. Post again to post it as it is, edit that text out of the report, or start a new review`, null, { hits, reportHash: hash })
 }
 

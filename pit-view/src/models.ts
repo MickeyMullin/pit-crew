@@ -330,7 +330,7 @@ export const normalizeForScan = (text: string): string => {
 
 export type PostedTextHit = { term: string, context: string }
 
-// the first term in the text, the one that starts earliest and the longer on a tie, or null, looked for in the normalized text (normalizeForScan) and then in the literal text, since removing markers can also join what was apart. The terms are postedTextTerms plus every registry id, full slug, provider, and runner Pit View knows, the owner's registry and the built-in table both, so a name the owner removed is still never posted. A leading ~ on a slug is optional in the text. The term returned is the list's entry, lowercase, and the context is from the text it was found in. One regular expression of whole-word alternatives, with no nested repetition, runs once over each text
+// the first term in the text, the one that starts earliest and the longer on a tie, or null, looked for in the normalized text (normalizeForScan) and then in the literal text, since removing markers can also join what was apart. The terms are postedTextTerms plus every registry id, full slug, provider, and runner Pit View knows, the owner's registry and the built-in table both, so a name the owner removed still stops the first click. A leading ~ on a slug is optional in the text. The term returned is the list's entry, lowercase, and the context is from the text it was found in. One regular expression of whole-word alternatives, with no nested repetition, runs once over each text
 export const nameInText = (resolved: Pick<ResolvedModels, 'registry'>, text: string): PostedTextHit | null => {
   const { ordered, matcher } = buildMatcher(resolved)
   const find = (haystack: string): PostedTextHit | null => {

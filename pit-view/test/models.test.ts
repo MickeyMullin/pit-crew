@@ -176,7 +176,7 @@ test('nameInText scans a custom registry and the built-in table both', () => {
   const resolved = resolveModels({ registry: [{ id: 'house-model', runner: 'hermes', provider: 'openrouter', model: 'vendor/house-x1' }] })
   assert.equal(nameInText(resolved, 'by house-model')?.term, 'house-model')
   assert.equal(nameInText(resolved, 'by vendor/house-x1')?.term, 'vendor/house-x1')
-  // a name the owner removed from the registry is still a name Pit View knows, so it is never posted
+  // a name the owner removed from the registry is still a name Pit View knows, so it still stops the first click
   assert.equal(nameInText(resolved, 'by gpt-6.1-sol')?.term, 'gpt-6.1-sol')
 })
 
