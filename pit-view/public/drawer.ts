@@ -1030,7 +1030,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
               row.verdict === null ? null : tag(row.verdict.text, row.verdict.tone),
               row.tandem ? tag('Tandem', 'blue') : null,
               open,
-              copyReportButton(row.name, `copy-report:${row.name}`, options.say)),
+              copyReportButton(row.name, `copy-report:${row.name}`, options.say, () => ({ modifiedAt: row.modifiedAt }))),
             h('span', { class: 'drawer-item-meta' },
               ageSpan(row.modifiedAt, '', options.nowMs()), row.sha === null ? '' : ` · at ${row.sha}`))
         }))),

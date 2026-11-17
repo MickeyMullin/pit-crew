@@ -67,13 +67,20 @@ const installClipboard = (clipboard: Clipboard, document: { execCommand?: (comma
 }
 
 // setTimeout is recorded and never fires on its own, so the two-second revert runs only when a test runs it and nothing outlives the fake page
-type Timer = { run: () => void, ms: number }
+type Timer = { run: () => void, ms: number, cleared: boolean }
 
 const recordTimers = (): { timers: Timer[], restore: () => void } => {
   const timers: Timer[] = []
   const before = globalThis.setTimeout
-  globalThis.setTimeout = ((run: () => void, ms: number) => { timers.push({ run, ms }); return 0 }) as unknown as typeof setTimeout
-  return { timers, restore: () => { globalThis.setTimeout = before } }
+  const beforeClear = globalThis.clearTimeout
+  // a cleared timer never fires: running it does nothing, as the real one would not have
+  globalThis.setTimeout = ((run: () => void, ms: number) => {
+    const timer: Timer = { run: () => { if (!timer.cleared) run() }, ms, cleared: false }
+    timers.push(timer)
+    return timers.length
+  }) as unknown as typeof setTimeout
+  globalThis.clearTimeout = ((id: number) => { const timer = timers[id - 1]; if (timer !== undefined) timer.cleared = true }) as unknown as typeof clearTimeout
+  return { timers, restore: () => { globalThis.setTimeout = before; globalThis.clearTimeout = beforeClear } }
 }
 
 type Page = {
@@ -256,13 +263,13 @@ test('copying makes no write and no GitHub call, and does not open the report pa
 })
 
 // the panel: its own button, which reads the report the same way
-test('the report panel carries a Copy report button once the report has loaded, and it copies the same bytes', async () => {
+const withPanel = async (answer: () => Response, check: (page: { buttons: () => FakeElement[], open: () => Promise<void>, said: string[], clipboard: Clipboard, sent: Sent[] }) => Promise<void>): Promise<void> => {
   const said: string[] = []
   const clipboard: Clipboard = { written: [], refuse: false }
   const sent: Sent[] = []
   const fake = installFakeBrowser((async (input: string, init?: RequestInit) => {
     sent.push({ url: String(input), method: init?.method ?? 'GET' })
-    return served()
+    return answer()
   }) as typeof fetch)
   const restoreClipboard = installClipboard(clipboard, fake.document as unknown as { execCommand?: (command: string) => boolean })
   const recorded = recordTimers()
@@ -278,18 +285,11 @@ test('the report panel carries a Copy report button once the report has loaded, 
     root.hidden = true
     const panel = createReportPanel({ root: root as unknown as HTMLElement, nowMs: () => Date.parse('2026-10-28T15:00:00Z'), onClosed: () => undefined, say: (text) => said.push(text) })
     const buttons = (): FakeElement[] => root.querySelectorAll('button').filter((button) => button.getAttribute('aria-label') === 'Copy report')
-    panel.open('PR-101.md', null)
-    assert.equal(buttons().length, 0, 'nothing to copy while it loads')
-    await settle()
-    await settle()
-    assert.equal(buttons().length, 1)
-    sent.length = 0
-    press(buttons()[0] as FakeElement)
-    await settle()
-    await settle()
-    assert.deepEqual(clipboard.written, [raw])
-    assert.deepEqual(said, ['Report copied'])
-    assert.deepEqual(sent, [{ url: '/api/reports/PR-101.md', method: 'GET' }])
+    await check({
+      buttons,
+      open: async () => { panel.open('PR-101.md', null); await settle(); await settle() },
+      said, clipboard, sent,
+    })
   } finally {
     recorded.restore()
     if (observer === undefined) delete (globalThis as Record<string, unknown>).MutationObserver
@@ -299,6 +299,100 @@ test('the report panel carries a Copy report button once the report has loaded, 
     restoreClipboard()
     fake.restore()
   }
+}
+
+test('the report panel carries a Copy report button once the report has loaded, and it copies the same bytes', async () => {
+  await withPanel(served, async (page) => {
+    page.buttons()
+    assert.equal(page.buttons().length, 0, 'nothing to copy before it opens')
+    await page.open()
+    assert.equal(page.buttons().length, 1)
+    page.sent.length = 0
+    press(page.buttons()[0] as FakeElement)
+    await settle()
+    await settle()
+    assert.deepEqual(page.clipboard.written, [raw])
+    assert.deepEqual(page.said, ['Report copied'])
+    assert.deepEqual(page.sent, [{ url: '/api/reports/PR-101.md', method: 'GET' }])
+  })
+})
+
+// AC-5: a report that changed since it was shown is not copied. Reports on disk knows each row's modifiedAt, and the panel holds the text it loaded; the result card holds only a name, so it copies the file as it is at the click
+const changedReason = 'Could not copy PR-101.md: it changed since it was shown. Open it again to see the current text.'
+const rewritten = (): Response => json(200, { name: 'PR-101.md', modifiedAt: '2026-10-28T14:06:00Z', html: '<h1>y</h1>', raw: `${raw}one more line\n` })
+
+test('a row of Reports on disk whose report changed since the list was drawn copies nothing and says it changed', async () => {
+  await withDrawer(rewritten, async (page) => {
+    const row = page.copyButtons().find((button) => button.getAttribute('data-focus-key') === 'copy-report:PR-101.md')
+    assert.ok(row !== undefined)
+    press(row)
+    await settle()
+    await settle()
+    assert.deepEqual(page.clipboard.written, [])
+    assert.deepEqual(page.said, [changedReason])
+    assert.equal(row.getAttribute('data-copied'), null)
+    assert.equal(page.timers.length, 0)
+  })
+})
+
+test('a row whose report is unchanged since the list was drawn still copies', async () => {
+  await withDrawer(served, async (page) => {
+    const row = page.copyButtons().find((button) => button.getAttribute('data-focus-key') === 'copy-report:PR-101.md')
+    assert.ok(row !== undefined)
+    press(row)
+    await settle()
+    await settle()
+    assert.deepEqual(page.clipboard.written, [raw])
+  })
+})
+
+test('the result card has no identity of its report, so it copies the file as it is at the click', async () => {
+  await withDrawer(rewritten, async (page) => {
+    const card = page.copyButtons().find((button) => (button.getAttribute('data-focus-key') ?? '').startsWith('copy-result-report:'))
+    assert.ok(card !== undefined)
+    press(card)
+    await settle()
+    await settle()
+    assert.deepEqual(page.clipboard.written, [`${raw}one more line\n`])
+    assert.deepEqual(page.said, ['Report copied'])
+  })
+})
+
+test('the report panel copies nothing when the report on disk differs from the text it loaded, and says it changed', async () => {
+  let now = served
+  await withPanel(() => now(), async (page) => {
+    await page.open()
+    now = rewritten
+    press(page.buttons()[0] as FakeElement)
+    await settle()
+    await settle()
+    assert.deepEqual(page.clipboard.written, [])
+    assert.deepEqual(page.said, [changedReason])
+    assert.equal(page.buttons()[0]?.getAttribute('data-copied'), null)
+  })
+})
+
+test('two successful copies in a row leave one live revert timer, and the second check mark keeps its own two seconds', async () => {
+  await withDrawer(served, async (page) => {
+    const row = page.copyButtons().find((button) => button.getAttribute('data-focus-key') === 'copy-report:PR-101.md')
+    assert.ok(row !== undefined)
+    press(row)
+    await settle()
+    await settle()
+    press(row)
+    await settle()
+    await settle()
+    const live = page.timers.filter((timer) => !timer.cleared)
+    assert.equal(page.timers.length, 2)
+    assert.equal(live.length, 1, 'the first click\'s timer was cleared')
+    // the first timer firing late (were it live) must not end the second check mark
+    page.timers[0]?.run()
+    assert.equal(row.getAttribute('data-copied'), 'true')
+    assert.equal(row.querySelectorAll('rect').length, 0)
+    live[0]?.run()
+    assert.equal(row.getAttribute('data-copied'), null)
+    assert.equal(row.querySelectorAll('rect').length, 2)
+  })
 })
 
 test('the stylesheet gives the button the theme\'s color and a focus ring, and ties its hit area to the Open buttons\' own values', async () => {
