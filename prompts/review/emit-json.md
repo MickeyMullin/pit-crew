@@ -103,7 +103,7 @@ The sweep's response, `pit-crew/sweep-result@1`:
 The fix's response, `pit-crew/fix-result@1`:
 
 - This schema applies only to `prompts/fix/fix-pr.md`, which loads this file when its invocation carries the flag. That prompt says what each of the five steps above covers in a fix, and where each is recorded; its step meanings replace the single-review ones above, so a fix records `consolidate` for making the fixes and running the checks rather than skipping it as `no tandem review`, and `post` for the push.
-- `fix-pr`'s stops to ask (a request that needs judgment, a local branch holding unpushed commits, a failed check, checks that cannot run, a fix that needs a file outside its rules) are stops to ask under "Stopping to ask" below. Its instructions to stop and say so are failures under "Failing" below, and so is a refused push other than the first refusal by a pre-push hook that names a formatting fix, which `fix-pr` formats and pushes once more (see its "Pushing"): for `fix-pr`, the rule that a failed post is not a failure of the run does not apply.
+- `fix-pr`'s stops to ask (a request that needs judgment, a local branch holding unpushed commits, a failed check, checks that cannot run, a fix or a formatter that needs a file outside its rules) are stops to ask under "Stopping to ask" below. Its instructions to stop and say so are failures under "Failing" below, and so is a refused push other than the first refusal by a pre-push hook that names a formatting fix, which `fix-pr` formats and pushes once more (see its "Pushing"): for `fix-pr`, the rule that a failed post is not a failure of the run does not apply.
 - `result.json` is written as the run's last act, under the rules above: after the report is written and updated, after any push, and after the worktree is removed. Every field is always present, with null where it does not apply:
 
 ```json
@@ -146,7 +146,7 @@ The fix's response, `pit-crew/fix-result@1`:
 - `pushed`: `{ "branch": "<branch>", "head": "<full SHA of the new head>", "commits": [ { "sha": "<full SHA>", "subject": "<subject line>" } ] }`, the commits in the order made, when the push landed; otherwise null.
 - `notPushedReason`: null when the push landed. Otherwise exactly one of:
   - `"nothingToFix"`: triage left no request to fix, and the run finished `"done"`.
-  - `"awaitingAnswer"`: the run stopped to ask before touching code, or because a fix needs a file outside its rules.
+  - `"awaitingAnswer"`: the run stopped to ask before touching code, or because a fix needs a file outside its rules, or because a formatter changed a file outside the files its rules allow (everything it did is discarded and nothing is pushed).
   - `"checksFailed"`: a check failed, including a commit hook that refused a commit.
   - `"checksNotRun"`: the checks could not run, so the fix is unverified, including a dependency install that failed before any fix was made.
   - `"pushFailed"`: the push was refused and is not made again: the format-and-retry could not be made or did not help (a formatter the repository does not define, a failed install, or a hook whose message names no formatting fix), the push is still refused after it, or the refusal is another kind (a moved branch or a denied permission). `status` is `"failed"`, and git's error goes in `error`.
@@ -159,7 +159,7 @@ The fix's response, `pit-crew/fix-result@1`:
 The update's response, `pit-crew/update-result@1`:
 
 - This schema applies only to `prompts/update/update-pr.md`, which loads this file when its invocation carries the flag. That prompt says what each of the five steps above covers in an update, and where each is recorded; its step meanings replace the single-review ones above, so an update records `review` for choosing the method, `consolidate` for the rebase or merge with its conflicts and checks, `writeReport` always as `skipped` (it writes no report file), and `post` for the push.
-- `update-pr`'s stops to ask (a conflict that needs judgment, a failed check, or checks that cannot run) are stops to ask under "Stopping to ask" below. Its instructions to stop and say so are failures under "Failing" below, and so is a refused push other than the first refusal by a pre-push hook that names a formatting fix, which `update-pr` formats and pushes once more (see its "Pushing"): for `update-pr`, the rule that a failed post is not a failure of the run does not apply.
+- `update-pr`'s stops to ask (a conflict that needs judgment, a formatter that changes a file outside the PR's files, a failed check, or checks that cannot run) are stops to ask under "Stopping to ask" below. Its instructions to stop and say so are failures under "Failing" below, and so is a refused push other than the first refusal by a pre-push hook that names a formatting fix, which `update-pr` formats and pushes once more (see its "Pushing"): for `update-pr`, the rule that a failed post is not a failure of the run does not apply.
 - `result.json` is written as the run's last act, under the rules above: after any push, and after the worktree is removed. Every field is always present, with null where it does not apply:
 
 ```json
@@ -195,7 +195,7 @@ The update's response, `pit-crew/update-result@1`:
 - `pushed`: `{ "branch": "<branch>", "head": "<full SHA of the new head>", "forced": <true for a rebase, pushed with --force-with-lease; false for a merge> }` when the push landed; otherwise null.
 - `notPushedReason`: null when the push landed. Otherwise exactly one of:
   - `"upToDate"`: the head already contained the upstream SHA, and the run finished `"done"`.
-  - `"awaitingAnswer"`: the run stopped to ask about a conflict.
+  - `"awaitingAnswer"`: the run stopped to ask about a conflict, or because a formatter changed a file outside the files the PR changes against the upstream SHA (everything it did is discarded and nothing is pushed).
   - `"checksFailed"`: a check failed after conflicts were resolved.
   - `"checksNotRun"`: the checks could not run.
   - `"pushFailed"`: the push was refused and is not made again: the format-and-retry could not be made or did not help (a formatter the repository does not define, a failed install, or a hook whose message names no formatting fix), the push is still refused after it, or the refusal is another kind (a moved branch or a denied permission). `status` is `"failed"`, and git's error goes in `error`.

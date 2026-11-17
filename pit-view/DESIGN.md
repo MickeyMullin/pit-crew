@@ -944,7 +944,7 @@ A sweep stop is a failure. A sweep with nothing to sweep ends `done` with every 
 | `requests` | `[ { "id" (the thread's or review's node id), "kind": "thread" \| "review", "author", "path" (null for a review), "line" (the thread's line, or its original line when outdated; null for a review), "outdated", "url", "summary", "triage": "needsJudgment" \| "noChange" \| "disagree" \| "outOfScope" \| "clear", "outcome": "fixed" \| "notFixed" \| "awaitingAnswer", "commits": [full SHAs] } ]`, in the report's order; `fixed` means a commit answers it, pushed or not |
 | `checks` | `[ { "name" (the command as run), "result": "passed" \| "failed" \| "notRun" } ]`; `[]` when nothing was fixed |
 | `pushed` | `{ "branch", "head" (full SHA), "commits": [ { "sha", "subject" } ] }` when the push landed; otherwise null |
-| `notPushedReason` | null when pushed; otherwise `nothingToFix`, `awaitingAnswer` (a stop to ask before touching code, or a fix needing a file outside its rules), `checksFailed`, `checksNotRun` or `pushFailed`; also null when the run failed before deciding the push |
+| `notPushedReason` | null when pushed; otherwise `nothingToFix`, `awaitingAnswer` (a stop to ask before touching code, a fix needing a file outside its rules, or a formatter changing a file outside the files its rules allow), `checksFailed`, `checksNotRun` or `pushFailed`; also null when the run failed before deciding the push |
 | `worktree` | the worktree's path, written with `~`, when the run left one behind (unpushed commits, or a removal that refused); otherwise null |
 | `report` | `~/agents/output/FIX-<n>.md`; null when none was written, as at a stop before touching code |
 | `question`, `error` | as `review-result`; `error` also carries git's error for a refused push |
@@ -964,7 +964,7 @@ As built (P2.6, server half), Pit View's reading of a fix result:
 | `nothingToFix` | "Nothing to fix" |
 | `checksFailed` (the owner discarded the commits at the stop) | "Not pushed · checks failed" |
 | `checksNotRun` (likewise) | "Not pushed · checks not run" |
-| `awaitingAnswer` (discarded after a fix needed a file outside its rules) | "Not pushed" |
+| `awaitingAnswer` (discarded after a fix needed a file outside its rules, or a formatter changed one) | "Not pushed" |
 | `pushFailed` (outside the contract, which makes a push refused for good, after the one format-and-retry where it applies, `failed`) | "Not pushed · push refused" |
 
 - **Summary**: the cell's `result` for a fix run carries what the drawer shows without reading `result.json` again:
@@ -1009,7 +1009,7 @@ Every triage and outcome key is always present, zero or not; `pushed` is null wh
 | `conflicts` | `[ { "path", "resolution" } ]`, each file whose conflict the run resolved, with one line on how |
 | `checks` | as `fix-result@1`; `[]` when no conflict was resolved |
 | `pushed` | `{ "branch", "head" (full SHA), "forced" }` when the push landed, `forced` true for a rebase pushed with `--force-with-lease` and false for a merge; otherwise null |
-| `notPushedReason` | null when pushed; otherwise `upToDate`, `awaitingAnswer` (a conflict needs judgment), `checksFailed`, `checksNotRun`, or `pushFailed`; also null when the run failed before deciding the push |
+| `notPushedReason` | null when pushed; otherwise `upToDate`, `awaitingAnswer` (a conflict needs judgment, or a formatter changed a file outside the files the PR changes against the upstream SHA), `checksFailed`, `checksNotRun`, or `pushFailed`; also null when the run failed before deciding the push |
 | `worktree` | the worktree's path, written with `~`, when the run left one behind; otherwise null |
 | `question`, `error` | as `review-result`; `error` also carries git's error for a refused push |
 

@@ -103,10 +103,36 @@ test('the push-only-once statements in both prompts say a refused hook push does
   }
 })
 
-test('emit-json treats a push still refused after the format and retry as the failed push', async () => {
-  const emit = await read('prompts/review/emit-json.md')
-  assert.match(emit, /still refused after the one format-and-retry/)
-})
+// the Update and Fix result schemas' own status lines, each read on its own so removing the qualification from one cannot hide behind the other
+const emitLine = (emit: string, section: string, needle: string): string => {
+  const from = emit.indexOf(section)
+  assert.ok(from >= 0, `${section} is present`)
+  const line = emit.slice(from).split('\n').find((l) => l.includes(needle))
+  assert.ok(line, `${needle} is present after ${section}`)
+  return line
+}
+
+const schemas = [
+  { name: 'update', section: 'The update\'s response, `pit-crew/update-result@1`:', awaiting: /the run stopped to ask about a conflict, or because a formatter changed a file outside the files the PR changes against the upstream SHA/ },
+  { name: 'fix', section: 'The fix\'s response, `pit-crew/fix-result@1`:', awaiting: /or because a fix needs a file outside its rules, or because a formatter changed a file outside the files its rules allow/ },
+]
+
+for (const { name, section, awaiting } of schemas) {
+  test(`emit-json treats a push still refused after the format and retry as the failed push in the ${name} schema, on that schema's own status line`, async () => {
+    const line = emitLine(await read('prompts/review/emit-json.md'), section, '- `status`:')
+    assert.match(line, /`"failed"` when it cannot complete, a push still refused after the one format-and-retry included/)
+  })
+
+  test(`emit-json says in the ${name} schema's pushFailed line that a push still refused after the format-and-retry is the failed push`, async () => {
+    const line = emitLine(await read('prompts/review/emit-json.md'), section, '- `"pushFailed"`')
+    assert.match(line, /the push is still refused after it/)
+  })
+
+  test(`emit-json defines awaitingAnswer in the ${name} schema to cover a formatter that changed a file outside the permitted set`, async () => {
+    const line = emitLine(await read('prompts/review/emit-json.md'), section, '- `"awaitingAnswer"`')
+    assert.match(line, awaiting)
+  })
+}
 
 test('the specification describes the format-and-retry wherever it says a refused push fails', async () => {
   const design = await read('pit-view/DESIGN.md')
