@@ -183,7 +183,7 @@ test('the check mark returns to the two squares after about two seconds', async 
   })
 })
 
-test('a refused clipboard falls back to the helper\'s selected textarea; when that fails too nothing is claimed and the text is offered', async () => {
+test('a refused clipboard falls back to the helper\'s selected textarea; when that fails too nothing is claimed and the refusal is announced', async () => {
   await withDrawer(served, async (page) => {
     const [first] = page.copyButtons()
     assert.ok(first !== undefined)
@@ -301,14 +301,39 @@ test('the report panel carries a Copy report button once the report has loaded, 
   }
 })
 
-test('the stylesheet gives the button the theme\'s color, a hit area as large as Open\'s, and a focus ring', async () => {
+test('the stylesheet gives the button the theme\'s color and a focus ring, and ties its hit area to the Open buttons\' own values', async () => {
   const css = await readFile(join(import.meta.dirname, '..', 'public', 'styles.css'), 'utf8')
   const rule = /\.copy-report\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
   assert.match(rule, /color:\s*var\(--ink\)|color:\s*inherit/)
-  const min = /min-width:\s*(\d+)px/.exec(rule)?.[1]
-  assert.ok(min !== undefined && Number(min) >= 36, 'at least as wide as the Open button')
-  // the button is a .button-small, 28px tall like Open
-  assert.match(css, /\.button-small\s*\{[^}]*height:\s*28px/)
   assert.match(css, /\.copy-report:focus-visible\s*\{[^}]*outline/)
   assert.ok(!/\.copy-report[^{]*\{[^}]*#[0-9a-f]{3,6}/i.test(css), 'no hard-coded color')
+  // Open (the row's and the result card's) is a .button-small; its height, padding, and widest label are custom properties the Copy rule reads, so the two cannot drift apart
+  const small = /\.button-small\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
+  assert.match(small, /height:\s*var\(--small-height\)/)
+  assert.match(small, /padding:\s*0\s+var\(--small-pad\)/)
+  assert.match(small, /--small-height:\s*28px/)
+  assert.match(small, /--small-pad:\s*10px/)
+  const label = /--open-label:\s*(\d+)ch/.exec(small)?.[1]
+  assert.ok(label !== undefined && Number(label) >= 'Open report'.length, 'the Open label allowance covers the longest Open label')
+  assert.match(rule, /min-width:\s*calc\(\s*var\(--open-label\)\s*\+\s*2\s*\*\s*var\(--small-pad\)\s*\)/)
+  assert.match(rule, /min-height:\s*var\(--small-height\)/)
+  assert.ok(!/\.copy-report\s*\{[^}]*(?:min-width|min-height):\s*\d/.test(css), 'no fixed number in the Copy rule')
+})
+
+test('on the result card Copy sits in one row with Open report, not in the column beside it', async () => {
+  await withDrawer(served, async (page) => {
+    const open = page.root.querySelectorAll('button').find((button) => button.textContent === 'Open report')
+    const card = page.copyButtons().find((button) => (button.getAttribute('data-focus-key') ?? '').startsWith('copy-result-report:'))
+    assert.ok(open !== undefined && card !== undefined)
+    const row = open.parentNode as FakeElement
+    assert.ok(card.parentNode === row, 'the two share one parent')
+    assert.match(row.getAttribute('class') ?? '', /\bdrawer-report-actions\b/)
+    assert.doesNotMatch(row.getAttribute('class') ?? '', /\bdrawer-result\b/)
+    assert.deepEqual(row.children.map((child) => child.textContent === 'Open report' ? 'open' : 'copy'), ['open', 'copy'])
+    const css = await readFile(join(import.meta.dirname, '..', 'public', 'styles.css'), 'utf8')
+    const actions = /\.drawer-report-actions\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
+    assert.match(actions, /display:\s*flex/)
+    assert.match(actions, /gap:/)
+    assert.match(actions, /align-self:\s*flex-start/)
+  })
 })

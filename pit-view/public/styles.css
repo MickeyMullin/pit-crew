@@ -921,15 +921,18 @@ button {
 }
 
 .button-small {
-  height: 28px;
-  padding: 0 10px;
+  --small-height: 28px;
+  --small-pad: 10px;
+  --open-label: 11ch;
+  height: var(--small-height);
+  padding: 0 var(--small-pad);
   font-size: 12px;
 }
 
-/* Copy report: a .button-small as tall as Open and at least as wide, its glyph in the theme's ink (stroke is currentColor); the page-wide :focus-visible ring applies, and is spelled out here so no later reset removes it */
+/* Copy report: a .button-small whose min-height and min-width are derived from the values Open uses (--small-height, --small-pad, and --open-label, the width allowed for the longest Open label, "Open report"), so it is never smaller than the Open control beside it; its glyph in the theme's ink (stroke is currentColor); the page-wide :focus-visible ring applies, and is spelled out here so no later reset removes it */
 .copy-report {
-  min-width: 40px;
-  padding: 0 10px;
+  min-width: calc(var(--open-label) + 2 * var(--small-pad));
+  min-height: var(--small-height);
   color: var(--ink);
 }
 
@@ -2073,6 +2076,13 @@ button.agent:hover {
 }
 
 .drawer-result > .button {
+  align-self: flex-start;
+}
+
+.drawer-report-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   align-self: flex-start;
 }
 

@@ -1,8 +1,6 @@
 // public/copyreport.ts
 // the Copy report button: a two-square icon that puts one report's raw Markdown on the clipboard.
-// It reads the report from the route Open uses (GET /api/reports/<name>, read-only, the same read
-// the post path makes) and copies its `raw` field untouched, through the drawer's one clipboard
-// helper (copyText). An unreadable, changed, or refused report copies nothing and says why
+// It reads the report from the route Open uses (GET /api/reports/<name>, read-only, the same read the post path makes) and copies its `raw` field untouched, through the drawer's one clipboard helper (copyText). An unreadable, changed, or refused report copies nothing and says why
 import { copyText } from './agentcell.ts'
 import { h, svg } from './dom.ts'
 import { getJson } from './runapi.ts'
