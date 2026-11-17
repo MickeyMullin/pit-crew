@@ -895,7 +895,7 @@ test('a later comment after an approval keeps the approval pip, and a comment al
     reviewRequests: { nodes: [] },
   })
   assert.deepEqual(reviewerPips(only, config).map((pip) => [pip.login, pip.state]), [['alex-mendez', 'commented']])
-  // it is not an approval: the PR stays in Awaiting review with a neutral stage
+  // it is not an approval: the PR stays in the Waiting for user action group with a neutral stage
   assert.deepEqual([mineOf(variant(only, { author: { __typename: 'User', login: scenario.viewer, avatarUrl: '' } })).group], ['awaitingReview'])
 })
 

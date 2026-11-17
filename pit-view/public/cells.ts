@@ -52,10 +52,12 @@ export const avatar = (person: PersonView, size: 'row' | 'closed' | 'pip' | 'hea
 const issueTones: Record<IssueKind, Tone> = {
   changesRequested: 'red',
   conflicts: 'amber',
+  behind: 'amber',
   ciFailing: 'red',
   ciRunning: 'amber',
   ciCanceled: 'gray',
   ciNotRun: 'gray',
+  blockedByGithub: 'amber',
 }
 
 // a failing check links to its job run, with the job name as its tooltip

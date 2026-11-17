@@ -42,8 +42,8 @@ export const openCases: Record<number, string> = {
   114: 'bot (dependabot); branch name contains lodash-4, which the default Jira pattern matches',
   115: 'bot (renovate); only canceled checks: CI canceled · 2',
   119: 'others; draft: hidden in v1',
-  120: 'mine; approved but BEHIND: awaiting review group, stage approved, merge blocked; pending Bot reviewer request',
-  104: 'mine; no reviews, a user and a team requested: awaiting review, merge needs review',
+  120: 'mine; approved but BEHIND: Waiting for user action group, stage approved, merge blocked with a Behind chip; pending Bot reviewer request',
+  104: 'mine; no reviews, a user and a team requested: Waiting for user action group, merge needs review',
 }
 
 // closed.json lists these in search order, not closedAt order

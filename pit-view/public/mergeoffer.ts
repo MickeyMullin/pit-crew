@@ -3,7 +3,7 @@
 import type { Issue, IssueKind, MergeState, MineGroup } from '../src/derive.ts'
 import type { RawOpenPr } from '../src/github.ts'
 
-// a change is requested, the PR conflicts, or a check is failing or still running: these withhold Merge whatever GitHub reports. CI not run and CI canceled do not: a repository without checks merges, and a canceled run says nothing about the head
+// a change is requested, the PR conflicts, or a check is failing or still running: these withhold Merge whatever GitHub reports. CI not run and CI canceled do not: a repository without checks merges, and a canceled run says nothing about the head. Behind and Blocked by GitHub do not either, since the merge status that raises them is never offered anyway; the Conflicts chip a DIRTY status raises does, like any other
 const withholdingIssues: readonly IssueKind[] = ['changesRequested', 'conflicts', 'ciFailing', 'ciRunning']
 
 const carries = (issues: readonly Pick<Issue, 'kind'>[], kinds: readonly IssueKind[]): boolean => issues.some((issue) => kinds.includes(issue.kind))

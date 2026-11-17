@@ -9,7 +9,7 @@ import type { ShownGroup, TableKey } from './tables.ts'
 export type MineFilters = {
   query: string
   status: 'any' | MineGroup
-  issues: 'any' | 'none' | 'changesRequested' | 'conflicts' | 'ciFailing'
+  issues: 'any' | 'none' | 'changesRequested' | 'conflicts' | 'behind' | 'ciFailing'
   selfReview: 'any' | 'current' | 'stale' | 'none'
   merge: 'any' | 'ready' | 'notReady'
   // only rows with a running run, set by the Agent runs tile
@@ -21,7 +21,7 @@ export type OthersFilters = {
   status: 'any' | OtherGroup
   // an alias, or '' for all authors
   author: string
-  issues: 'any' | 'none' | 'changesRequested' | 'conflicts' | 'ciFailing' | 'ciRunning'
+  issues: 'any' | 'none' | 'changesRequested' | 'conflicts' | 'behind' | 'ciFailing' | 'ciRunning'
   merge: 'any' | 'ready' | 'needsReview' | 'blocked'
   // only rows with a running run, set by the Agent runs tile
   running: boolean
@@ -88,6 +88,7 @@ export const mineIssueOptions: Option[] = [
   { value: 'none', label: 'No issues' },
   { value: 'changesRequested', label: 'Changes requested' },
   { value: 'conflicts', label: 'Conflicts' },
+  { value: 'behind', label: 'Behind base' },
   { value: 'ciFailing', label: 'CI failing' },
 ]
 

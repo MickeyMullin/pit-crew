@@ -29,7 +29,7 @@ export type Stack = { position: number, size: number }
 // a PR that is based on another open PR's branch but that GitHub does not mark as a stack: number is the PR it is based on, and position and size are what the stack position and size would be if the chain of base branches were a stack. It is an indication only: no Review stack, no grouping, and no stack report
 export type BasedOn = { number: number, position: number, size: number }
 
-export type IssueKind = 'changesRequested' | 'conflicts' | 'ciFailing' | 'ciRunning' | 'ciCanceled' | 'ciNotRun'
+export type IssueKind = 'changesRequested' | 'conflicts' | 'behind' | 'ciFailing' | 'ciRunning' | 'ciCanceled' | 'ciNotRun' | 'blockedByGithub'
 // anchor is the Changes requested chip's link: the review that requested changes, when its id is known
 export type Issue = { kind: IssueKind, label: string, count?: number, url?: string, tip?: string, anchor?: ActivityAnchor }
 
@@ -386,13 +386,27 @@ export const ciStateOf = (pr: RawOpenPr): CiReading => {
   return contexts.some(isCanceled) ? 'failed' : 'green'
 }
 
+// whether GitHub's merge status adds chips of its own: an approved PR with a review that counts, whose status is what reads it Blocked, and an UNSTABLE one, which reads Blocked whatever its reviews. Any other PR reads Needs approval or Needs review with no chip (deriveMerge), and a chip would turn that into Blocked
+const readsStatusChips = (pr: RawOpenPr): boolean =>
+  !pr.isDraft && (pr.mergeStateStatus === 'UNSTABLE' || (pr.reviewDecision === 'APPROVED' && countedReviews(pr).length > 0))
+
+// the chip for a Blocked PR no other chip explains: BLOCKED (a required check or review GitHub is waiting for, which the cache does not name), UNSTABLE, and any status this version does not know
+const blockedByStatus = (status: string): Issue => {
+  if (status === 'BLOCKED') return { kind: 'blockedByGithub', label: 'Blocked by branch protection', tip: 'GitHub reports the PR as blocked: a required check or review, or another branch protection rule, is not met. The PR page names which' }
+  if (status === 'UNSTABLE') return { kind: 'blockedByGithub', label: 'Non-required checks not passing', tip: 'Only checks that are not required are failing or still pending, and GitHub does not call the PR clean while they are' }
+  return { kind: 'blockedByGithub', label: 'Blocked by GitHub', tip: `GitHub reports the merge status ${status}, which blocks the merge` }
+}
+
 export const deriveIssues = (pr: RawOpenPr): Issue[] => {
   const issues: Issue[] = []
+  const statusChips = readsStatusChips(pr)
   if (pr.reviewDecision === 'CHANGES_REQUESTED') {
     const anchor = databaseAnchor('review', latestChangesRequest(pr)?.databaseId)
     issues.push(anchor === null ? { kind: 'changesRequested', label: 'Changes requested' } : { kind: 'changesRequested', label: 'Changes requested', anchor })
   }
-  if (pr.mergeable === 'CONFLICTING') issues.push({ kind: 'conflicts', label: 'Conflicts' })
+  // DIRTY is GitHub's status for a PR that cannot merge for want of a conflict resolution, even before mergeable says CONFLICTING
+  if (pr.mergeable === 'CONFLICTING' || (statusChips && pr.mergeStateStatus === 'DIRTY')) issues.push({ kind: 'conflicts', label: 'Conflicts' })
+  if (statusChips && pr.mergeStateStatus === 'BEHIND') issues.push({ kind: 'behind', label: `Behind ${pr.baseRefName}`, tip: `The branch is behind ${pr.baseRefName}: Update branch, or a rebase, brings it up to date` })
   const contexts = contextsOf(pr)
   const failing = contexts.filter(isFailing)
   const first = failing[0]
@@ -408,6 +422,9 @@ export const deriveIssues = (pr: RawOpenPr): Issue[] => {
   const canceled = contexts.filter(isCanceled).length
   if (canceled > 0 && failing.length === 0) issues.push({ kind: 'ciCanceled', label: `CI canceled · ${canceled}`, count: canceled })
   if (contexts.length === 0) issues.push({ kind: 'ciNotRun', label: 'CI not run' })
+  // a Blocked row always says what it needs: with nothing else to say it, the status itself does
+  const clears = pr.mergeStateStatus === 'CLEAN' || pr.mergeStateStatus === 'HAS_HOOKS' || pr.mergeStateStatus === 'UNKNOWN'
+  if (statusChips && issues.length === 0 && !clears) issues.push(blockedByStatus(pr.mergeStateStatus))
   return issues
 }
 
@@ -800,7 +817,7 @@ export const attentionOrder = (a: OpenRow, b: OpenRow): number => {
 const mineGroups: Omit<Group<MineGroup, MineRow>, 'rows'>[] = [
   { key: 'changesRequested', label: 'Changes requested', sub: 'your move', collapsible: false },
   { key: 'readyToMerge', label: 'Ready to merge', sub: 'approved and mergeable', collapsible: false },
-  { key: 'awaitingReview', label: 'Awaiting review', sub: 'waiting on reviewers or checks', collapsible: false },
+  { key: 'awaitingReview', label: 'Waiting for user action', sub: 'not mergeable yet, or waiting on reviewers or checks', collapsible: false },
   { key: 'drafts', label: 'Drafts', sub: 'not ready for review', collapsible: true },
 ]
 

@@ -241,8 +241,8 @@ export const createActions = (options: ActionsOptions): Actions => {
     if (!isPrimaryBase(base, defaultBranch)) {
       throw new ActionError('notAllowed', `#${number} targets ${base}, not the primary branch (${defaultBranch ?? 'master or main'}); Pit View updates only PRs that target the primary branch`)
     }
-    // the Conflicts chip's own test, on the cached PR rather than the page's word
-    if (request.action === 'resolveConflicts' && pr.mergeable !== 'CONFLICTING') {
+    // the Conflicts chip's own test, on the cached PR rather than the page's word: the chip is read from deriveIssues, so a PR GitHub reports as DIRTY (an approved one, before mergeable says CONFLICTING) is let through exactly when the page shows the chip
+    if (request.action === 'resolveConflicts' && !deriveIssues(pr).some((issue) => issue.kind === 'conflicts')) {
       throw new ActionError('notAllowed', `#${number} has no conflicts that GitHub reports; nothing was started. Update branch brings it up to date instead`)
     }
     const key = `${repo}#${number}`

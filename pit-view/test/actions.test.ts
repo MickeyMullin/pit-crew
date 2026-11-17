@@ -1382,6 +1382,19 @@ test('Resolve conflicts starts the Update session, update-pr with Claude bound t
   }
 })
 
+test('Resolve conflicts starts on an approved PR GitHub reports as DIRTY while mergeable still reads MERGEABLE, the case where the Conflicts chip comes from the merge status', async () => {
+  const h = await setup({ config: withClone, runner: ghWorld({ mergeable: { 120: 'MERGEABLE' }, mergeStates: { 120: 'DIRTY' } }) })
+  try {
+    await filled(h)
+    assert.deepEqual((await rowOf(h, 120))?.issues.map((issue) => issue.kind), ['conflicts'])
+    const started = await act(h, 120, await resolveBody(120))
+    assert.equal(started.status, 200, JSON.stringify(started.body))
+    assert.equal(h.launch.children.length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('Resolve conflicts is refused, starting nothing, on a PR the cache does not hold as conflicting, and takes the Update session\'s binding and refusals', async () => {
   const h = await setup({ config: withClone, runner: ghWorld({ mergeable: { 101: 'MERGEABLE', 120: 'UNKNOWN', 104: 'CONFLICTING' }, bases: { 104: 'release/2026-10' } }) })
   try {
