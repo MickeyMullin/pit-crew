@@ -938,7 +938,7 @@ A sweep stop is a failure. A sweep with nothing to sweep ends `done` with every 
 | --- | --- |
 | `schema` | `pit-crew/fix-result@1` |
 | `command` | `fix-pr` |
-| `status` | `done` (pushed, nothing to fix, or the owner chose to discard the commits at a stop), `failed` (with `error`; a refused push included) or `needsInput` (with `question`) |
+| `status` | `done` (pushed, nothing to fix, or the owner chose to discard the commits at a stop), `failed` (with `error`; a push still refused after the one format-and-retry, or refused for any other reason, included) or `needsInput` (with `question`) |
 | `target` | `{ "repo", "pr", "branch" }`, the PR's head branch; null when the run stopped before resolving it |
 | `head` | `{ "sha" }`, the full SHA of the PR head the run read and triaged against; null when the run stopped before reading it |
 | `requests` | `[ { "id" (the thread's or review's node id), "kind": "thread" \| "review", "author", "path" (null for a review), "line" (the thread's line, or its original line when outdated; null for a review), "outdated", "url", "summary", "triage": "needsJudgment" \| "noChange" \| "disagree" \| "outOfScope" \| "clear", "outcome": "fixed" \| "notFixed" \| "awaitingAnswer", "commits": [full SHAs] } ]`, in the report's order; `fixed` means a commit answers it, pushed or not |
@@ -965,7 +965,7 @@ As built (P2.6, server half), Pit View's reading of a fix result:
 | `checksFailed` (the owner discarded the commits at the stop) | "Not pushed · checks failed" |
 | `checksNotRun` (likewise) | "Not pushed · checks not run" |
 | `awaitingAnswer` (discarded after a fix needed a file outside its rules) | "Not pushed" |
-| `pushFailed` (outside the contract, which makes a refused push `failed`) | "Not pushed · push refused" |
+| `pushFailed` (outside the contract, which makes a push refused for good, after the one format-and-retry where it applies, `failed`) | "Not pushed · push refused" |
 
 - **Summary**: the cell's `result` for a fix run carries what the drawer shows without reading `result.json` again:
 
@@ -989,9 +989,9 @@ Every triage and outcome key is always present, zero or not; `pushed` is null wh
 
 - **Format and retry**: a push a pre-push hook refuses over formatting is formatted with the repository's own formatter, committed as one new commit, and pushed once more, in an Update session and in a Fix session alike (the hooks stay on for both, section 10, Hooks, and `hooksKeptCommands` is unchanged). It applies when the hook's message names a formatting fix, such as `Fix it with: pnpm format`. The refused push wrote nothing to GitHub, so it does not count against the one push each command makes; the retry is the one push.
   - **Which formatter**: the session runs a formatter only when the command the hook names is defined by the repository, found in its package scripts, its contributor and agent instructions, or its task-runner file, in the formatter's write mode. It never runs an arbitrary command copied out of hook output. A fresh worktree has no installed dependencies, so the session installs them first in the repo's frozen or locked mode when it has not (a Fix session already did when it created the worktree), and never in a mode that can rewrite the lockfile.
-  - **Which files**: an Update session lets the formatter change only the files the PR changes against the upstream SHA, and a Fix session only the files its own rules allow (the PR's diff and a test file covering it, never a tooling file). A formatter that changes any other file has its edits discarded and the session stops as `needsInput` with `awaitingAnswer`, naming the files, with nothing pushed and the worktree left in place.
+  - **Which files**: an Update session lets the formatter change only the files the PR changes against the upstream SHA, and a Fix session only the files its own rules allow (the PR's diff and a test file covering it, never a tooling file). A formatter that changes any other file has everything it did discarded (tracked, staged, and untracked changes alike, with `git reset --hard HEAD` and `git clean -fd`, and `git status --porcelain` confirmed empty) and the session stops as `needsInput` with `awaitingAnswer`, naming the files, with nothing pushed and the worktree left in place.
   - **The commit**: one new commit with the message `Format`, never amended into an earlier commit and never made with `--no-verify`. In an Update session it goes on top of the rebased commits, or after the merge commit, and is the only commit the command adds besides a merge commit; the retry uses the same push command, so a rebase's lease stays pinned to the head SHA the run read. In a Fix session it follows the fix commits, answers no request, appears in `pushed.commits` and in no request's `commits`, and triggers no second run of the checks.
-  - **A second refusal fails the run**: a push refused again after the formatting commit, or refused for any other reason (a moved branch, a denied permission, a hook whose message names no formatting fix, or a formatter the repository does not define), is `failed` with `pushFailed` and git's error, with the hook's message, the commands tried, and the worktree's path named, and is never retried again, never forced, and never pushed with `--no-verify`. The prompts never change, bypass, or disable the hook.
+  - **A second refusal fails the run**: a push refused again after the formatting commit, or refused for any other reason (a moved branch, a denied permission, a hook whose message names no formatting fix, a formatter the repository does not define, or a failed install), is `failed` with `pushFailed` and git's error, with the hook's message, the commands tried, and the worktree's path named, and is never retried again, never forced, and never pushed with `--no-verify`. The prompts never change, bypass, or disable the hook.
   - **In the result**: with `--emit-json`, the `post` step's `done` note names the formatting commit by its short SHA when the push followed one, and the closing message's `Push:` line says so. The result schemas are unchanged.
 
 `pit-crew/update-result@1`, pinned with `update-pr` (every field is always present, null when it does not apply):
@@ -1000,7 +1000,7 @@ Every triage and outcome key is always present, zero or not; `pushed` is null wh
 | --- | --- |
 | `schema` | `pit-crew/update-result@1` |
 | `command` | `update-pr` |
-| `status` | `done` (pushed, already up to date, or the owner chose to discard the update at a stop), `failed` (with `error`; a refused push included), or `needsInput` (with `question`) |
+| `status` | `done` (pushed, already up to date, or the owner chose to discard the update at a stop), `failed` (with `error`; a push still refused after the one format-and-retry, or refused for any other reason, included), or `needsInput` (with `question`) |
 | `target` | `{ "repo", "pr", "branch", "base" }`, the PR's head branch and the primary branch it updates from; null when the run stopped before resolving it |
 | `head` | `{ "sha" }`, the full SHA of the PR head the run read, which a rebase's lease names; null when the run stopped before reading it |
 | `upstream` | `{ "sha" }`, the full SHA of the primary branch's commit the run updated onto; null when the run stopped before reading it |

@@ -56,7 +56,7 @@ for (const { name, path, install } of prompts) {
 
   test(`${name} records the formatting commit in the post step's note`, async () => {
     const prompt = await read(path)
-    assert.match(prompt, /record `post` `done` with .*a formatting commit/)
+    assert.match(prompt, /record `post` `done` with .*the words `a formatting commit` and its short SHA/)
   })
 }
 
@@ -73,6 +73,27 @@ test('fix-pr limits the formatting commit to the PR diff and the report counts i
   const rule = formatRule(prompt)
   assert.match(rule, /only files the "Making the fixes" rules allow/)
   assert.match(rule, /answers no request/)
+  assert.match(rule, /it appears in no request's `commits` and does appear in `pushed\.commits` and in the report's Summary/)
+})
+
+for (const { name, path } of prompts) {
+  test(`${name} discards everything a formatter did outside the PR's files, tracked, staged, and untracked, and confirms the tree is clean before it stops`, async () => {
+    const rule = formatRule(await read(path))
+    assert.match(rule, /discard everything the formatter did \(`git reset --hard HEAD` and `git clean -fd`, which undo tracked, staged, and untracked changes alike/)
+    assert.match(rule, /confirm `git status --porcelain` prints nothing before it stops/)
+    assert.ok(!rule.includes('git restore .'), '`git restore .` leaves untracked files and staged changes')
+  })
+}
+
+test('emit-json excepts the first formatting-hook refusal from every statement that a refused push is a failure, and counts a failure before the retry as pushFailed', async () => {
+  const emit = await read('prompts/review/emit-json.md')
+  const lines = emit.split('\n')
+  const mentions = lines.filter((line) => /so is a refused push|cannot complete, a /.test(line))
+  assert.equal(mentions.length, 4, 'the refused-push statements are found')
+  for (const line of mentions) assert.match(line, /format-and-retry|formatting/i, line.slice(0, 80))
+  const pushFailed = lines.filter((line) => line.includes('"pushFailed"'))
+  assert.equal(pushFailed.length, 2)
+  for (const line of pushFailed) assert.match(line, /a formatter the repository does not define, a failed install, or a hook whose message names no formatting fix/)
 })
 
 test('the push-only-once statements in both prompts say a refused hook push does not count', async () => {
