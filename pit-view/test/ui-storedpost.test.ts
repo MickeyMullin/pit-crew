@@ -455,18 +455,21 @@ test('Post it, the blocked run\'s button, takes the same second click: the refus
   }, { post: () => queue.shift() ?? answer(200, { number: 101, runId: 7, posted: { form: 'approve', url: 'https://example.test/owner/name/pull/101' }, run: null }) })
 })
 
-test('a first click never sends an override, and a refusal that carries a malformed hit set is shown as text with nothing to send', async () => {
-  const queue = [answer(422, { error: 'refused over the scan', hits: 'assistant', reportHash: 'b'.repeat(64) }), answer(422, { error: 'refused over the scan', hits: [{ term: 'x' }], reportHash: 'nope' })]
+test('a first click never sends an override, a refusal that carries a malformed hit set is shown as text with nothing to send, and a well-formed refusal after them is the one that arms the second click', async () => {
+  const queue = [answer(422, { error: 'refused over the scan', hits: 'assistant', reportHash: 'b'.repeat(64) }), answer(422, { error: 'refused over the scan', hits: [{ term: 'x' }], reportHash: 'nope' }), hitRefusal([{ term: 'assistant', context: 'the assistant agreed' }], 'b'.repeat(64))]
   await withPage(cellOf(offerOf()), [runOf()], async (page) => {
     press(page.button('Approve'))
     press(page.button('Post'))
     await settle()
     press(page.button('Post'))
     await settle()
+    assert.equal(page.error(), 'Refused over the scan.')
     press(page.button('Post'))
     await settle()
     assert.deepEqual(page.posts().map((request) => request.body?.allow), [undefined, undefined, undefined])
-    assert.equal(page.error(), 'Refused over the scan.')
+    press(page.button('Post'))
+    await settle()
+    assert.deepEqual(page.posts()[3]?.body?.allow, { terms: ['assistant'], reportHash: 'b'.repeat(64) })
   }, { post: () => queue.shift() ?? answer(422, { error: 'refused over the scan' }) })
 })
 

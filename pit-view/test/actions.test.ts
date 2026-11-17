@@ -5,6 +5,7 @@ import { request } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
+import { reportHash } from '../src/reports.ts'
 import { ghArgs, orList, parseAction, postReadDeadlineMs, postWriteDeadlineMs } from '../src/actions.ts'
 import { isPrimaryBase } from '../src/derive.ts'
 import { LaunchError } from '../src/launcher.ts'
@@ -1755,10 +1756,14 @@ test('a report edited after the refusal is refused again, whatever the override 
     const { sha } = await listed(106)
     const { id } = await blockedRun(h, {}, reportAt(sha, 'No actionable findings. The assistant agreed.'))
     const shown = overrideOf((await postIt(h, id, postBody(sha))).body)
-    await writeFile(join(h.home, 'agents', 'output', 'PR-106.md'), reportAt(sha, 'No actionable findings. The assistant agreed, and Claude too.'))
+    const edited = reportAt(sha, 'No actionable findings. The assistant agreed, twice.')
+    await writeFile(join(h.home, 'agents', 'output', 'PR-106.md'), edited)
+    // the run's own hash check already refuses an edited file, so this test first lets that check pass (the run is made to own the edited text) to prove the override's own hash comparison refuses a stale hash when the hit set has not changed
+    h.server.cache.updateRun(id, { reportHash: reportHash(edited) })
     const answer = await postIt(h, id, { ...postBody(sha), allow: shown })
     assert.equal(answer.status, 422)
-    assert.match(String(answer.body.error), /has changed since run/)
+    assert.deepEqual((answer.body.hits as { term: string }[]).map((hit) => hit.term).sort(), ['assistant'])
+    assert.equal(answer.body.reportHash, reportHash(edited))
     assert.deepEqual(postsOf(h.runner), [])
     assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null)
   } finally {
