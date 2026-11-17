@@ -206,7 +206,19 @@ export const rereadRequest = (runId: number, ask: RereadAsk, token: string): Run
 
 // what Post it's confirmation showed, which the request carries back whole: the server refuses with 409 and posts nothing when any of it differs from what is in effect now
 // reviewedSha is sent only by the post button, for a stored report: the commit the report says it reviewed, which is the head only until the head moves
-export type PostAsk = { repo: string, viewer: string, number: number, headSha: string, form: PostForm, reviewedSha?: string }
+// allow is the second click's override of the scan: the terms a refusal named and the hash of the report it scanned, sent back exactly as shown (section 8, Launching runs, Posted reports carry no names)
+export type PostAllow = { terms: string[], reportHash: string }
+export type PostAsk = { repo: string, viewer: string, number: number, headSha: string, form: PostForm, reviewedSha?: string, allow?: PostAllow }
+
+// what a refused post's body offers for the next click: its hit set and the report's hash, read from the refusal as the server sent it, or null when the refusal is not one over the scan or its fields are not the shape the server sends. The page never builds an override from anything else
+export const postAllowOf = (body: unknown): PostAllow | null => {
+  if (typeof body !== 'object' || body === null) return null
+  const { hits, reportHash } = body as { hits?: unknown, reportHash?: unknown }
+  if (!Array.isArray(hits) || hits.length === 0 || typeof reportHash !== 'string' || !/^[0-9a-f]{64}$/i.test(reportHash)) return null
+  const terms = hits.map((hit) => (typeof hit === 'object' && hit !== null ? (hit as { term?: unknown }).term : undefined))
+  if (!terms.every((term): term is string => typeof term === 'string' && term !== '')) return null
+  return { terms, reportHash }
+}
 
 export const postRequest = (runId: number, ask: PostAsk, token: string): RunRequest => ({
   url: `/api/runs/${runId}/post`,

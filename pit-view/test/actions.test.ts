@@ -1641,7 +1641,6 @@ test('a report with a phrase that credits a tool or model is refused', async () 
 test('a report with a review-mode word is refused', async () => {
   await refusedPost('No actionable findings. Tandem review agreed.', 'tandem')
   await refusedPost('No actionable findings. A tandem pass agreed.', 'tandem')
-  await refusedPost('No actionable findings. The review is degraded.', 'degraded')
   await refusedPost('No actionable findings. The consolidator merged it.', 'consolidator')
 })
 
@@ -1664,6 +1663,155 @@ test('a clean report and a report with only near misses posts, and so does a bar
     assert.equal(postsOf(h.runner).length, 1)
   } finally {
     await h.cleanup()
+  }
+})
+
+test('degraded is ordinary prose: a report that uses the word posts with one Post click', async () => {
+  const h = await blockedHarness()
+  try {
+    const { sha } = await listed(106)
+    const { id } = await blockedRun(h, {}, reportAt(sha, 'Several degraded paths were traced to their readers; none is a defect.'))
+    const answer = await postIt(h, id, postBody(sha))
+    assert.equal(answer.status, 200)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// the override: the refusal names every hit with the report's hash, and a second request that carries exactly those back posts. The page is told what to send; a report or a hit set that differs is refused again
+const overrideOf = (refusal: Record<string, unknown>): { terms: string[], reportHash: string } => ({
+  terms: (refusal.hits as { term: string }[]).map((hit) => hit.term),
+  reportHash: String(refusal.reportHash),
+})
+
+test('a refused post carries the hit set and the report hash, and a second request that sends them back posts the report as it is', async () => {
+  const h = await blockedHarness()
+  try {
+    const { sha } = await listed(106)
+    const { id } = await blockedRun(h, {}, reportAt(sha, 'No actionable findings. An autonomous pass, and the assistant agreed; an LLM too.'))
+    const first = await postIt(h, id, postBody(sha))
+    assert.equal(first.status, 422)
+    assert.deepEqual((first.body.hits as { term: string }[]).map((hit) => hit.term), ['autonomous', 'assistant', 'llm'])
+    for (const hit of first.body.hits as { term: string, context: string }[]) assert.ok(hit.context.length <= 62 && hit.context.toLowerCase().includes(hit.term.toLowerCase()), hit.term)
+    assert.equal(first.body.reportHash, h.server.cache.getRun(id)?.reportHash)
+    assert.match(String(first.body.error), /Post again/)
+    assert.deepEqual(postsOf(h.runner), [])
+    assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null)
+    const second = await postIt(h, id, { ...postBody(sha), allow: overrideOf(first.body) })
+    assert.equal(second.status, 200)
+    const posts = postsOf(h.runner)
+    assert.equal(posts.length, 1)
+    assert.deepEqual(posts[0]?.args.slice(0, -1), ['pr', 'review', '106', '--repo', scenario.repo, '--approve', '--body-file'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a hard-coded vendor term is overridable too, through the stored report\'s post button as well', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(h, { report: reportAt((await listed(106)).sha, 'No actionable findings. Compared against the Claude Code docs.') })
+    const first = await postIt(h, id, storedBody(106, sha, sha, 'comment'))
+    assert.equal(first.status, 422)
+    assert.deepEqual((first.body.hits as { term: string }[]).map((hit) => hit.term), ['claude'])
+    assert.deepEqual(postsOf(h.runner), [])
+    assert.equal((await postIt(h, id, { ...storedBody(106, sha, sha, 'comment'), allow: overrideOf(first.body) })).status, 200)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('an override is refused unless it names exactly the hit set the scan finds now, in the same report', async () => {
+  const h = await blockedHarness()
+  try {
+    const { sha } = await listed(106)
+    const { id } = await blockedRun(h, {}, reportAt(sha, 'No actionable findings. The assistant agreed, and an LLM too.'))
+    const shown = overrideOf((await postIt(h, id, postBody(sha))).body)
+    assert.deepEqual(shown.terms, ['assistant', 'llm'])
+    const refused = async (allow: unknown, label: string): Promise<void> => {
+      const answer = await postIt(h, id, { ...postBody(sha), allow })
+      assert.equal(answer.status, 422, label)
+      assert.ok(Array.isArray(answer.body.hits), label)
+      assert.deepEqual(postsOf(h.runner), [], label)
+      assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null, label)
+    }
+    await refused({ ...shown, terms: ['assistant'] }, 'a subset of the hits')
+    await refused({ ...shown, terms: ['assistant', 'llm', 'claude'] }, 'a superset of the hits')
+    await refused({ ...shown, terms: ['claude'] }, 'another term')
+    await refused({ ...shown, terms: [] }, 'no terms')
+    await refused({ ...shown, reportHash: 'f'.repeat(64) }, 'another report hash')
+    // the order does not matter, and a repeated term is the same hit set
+    assert.equal((await postIt(h, id, { ...postBody(sha), allow: { ...shown, terms: ['llm', 'assistant', 'llm'] } })).status, 200)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a report edited after the refusal is refused again, whatever the override says, and posts nothing', async () => {
+  const h = await blockedHarness()
+  try {
+    const { sha } = await listed(106)
+    const { id } = await blockedRun(h, {}, reportAt(sha, 'No actionable findings. The assistant agreed.'))
+    const shown = overrideOf((await postIt(h, id, postBody(sha))).body)
+    await writeFile(join(h.home, 'agents', 'output', 'PR-106.md'), reportAt(sha, 'No actionable findings. The assistant agreed, and Claude too.'))
+    const answer = await postIt(h, id, { ...postBody(sha), allow: shown })
+    assert.equal(answer.status, 422)
+    assert.match(String(answer.body.error), /has changed since run/)
+    assert.deepEqual(postsOf(h.runner), [])
+    assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('an override gets a report no further than the scan: the reviewed-commit check, the report-hash check, and the live checks still refuse', async () => {
+  const h = await blockedHarness()
+  try {
+    const { sha } = await listed(106)
+    const { id } = await blockedRun(h, {}, `# Review\n\nReviewed commit: \`fix/x\` @ \`${otherSha.slice(0, 7)}\`\n\nThe assistant agreed.\n`)
+    const shown = overrideOf((await postIt(h, id, postBody(sha))).body)
+    const answer = await postIt(h, id, { ...postBody(sha), allow: shown })
+    assert.equal(answer.status, 422)
+    assert.match(String(answer.body.error), /is about another commit/)
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+  const reviewed = await blockedHarness({ reviews: `${scenario.viewer}\t${(await listed(106)).sha}\tAPPROVED` })
+  try {
+    const { sha } = await listed(106)
+    const { id } = await blockedRun(reviewed, {}, reportAt(sha, 'The assistant agreed.'))
+    const shown = overrideOf((await postIt(reviewed, id, postBody(sha))).body)
+    const answer = await postIt(reviewed, id, { ...postBody(sha), allow: shown })
+    assert.equal(answer.status, 422)
+    assert.deepEqual(postsOf(reviewed.runner), [])
+  } finally {
+    await reviewed.cleanup()
+  }
+})
+
+test('an unattended post is not overridden: a request without an override refuses a hit, the scan runs on every post, and nothing but the page\'s request body carries one', async () => {
+  const h = await blockedHarness()
+  try {
+    const { sha } = await listed(106)
+    const { id } = await blockedRun(h, {}, reportAt(sha, 'No actionable findings. An autonomous pass.'))
+    assert.equal((await postIt(h, id, postBody(sha))).status, 422)
+    assert.equal((await postIt(h, id, { ...postBody(sha), allow: null })).status, 400)
+    assert.deepEqual(postsOf(h.runner), [])
+    // a malformed override is a bad request and posts nothing
+    for (const allow of ['x', { terms: 'autonomous', reportHash: 'a'.repeat(64) }, { terms: ['autonomous'] }, { terms: ['autonomous'], reportHash: 'nope' }, { terms: [1], reportHash: 'a'.repeat(64) }, { terms: ['autonomous'], reportHash: 'a'.repeat(64), extra: 1 }]) {
+      assert.equal((await postIt(h, id, { ...postBody(sha), allow })).status, 400, JSON.stringify(allow))
+    }
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+  // the scheduler, the auto-review loop, and the launcher never build a post request, so no unattended path can carry the override
+  for (const file of ['autoreview.ts', 'scheduler.ts', 'launcher.ts', 'sweeps.ts']) {
+    const source = await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8').catch(() => '')
+    assert.doesNotMatch(source, /parsePost|actions\.post|\ballow\s*:\s*\{\s*terms/, file)
   }
 })
 

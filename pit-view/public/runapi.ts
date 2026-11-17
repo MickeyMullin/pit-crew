@@ -9,12 +9,13 @@ import type { RunRequest } from './agent.ts'
 export const readToken = (doc: Document): string =>
   doc.querySelector('meta[name="pit-view-token"]')?.getAttribute('content') ?? ''
 
-export type Answer<T> = { ok: true, status: number, value: T } | { ok: false, status: number, error: string | null }
+// a refusal's body comes back whole beside its message, for the one reader that acts on more than the words (a post refused over the scan carries its hit set)
+export type Answer<T> = { ok: true, status: number, value: T } | { ok: false, status: number, error: string | null, body?: unknown }
 
 const answerOf = async <T>(response: Response): Promise<Answer<T>> => {
   if (response.ok) return { ok: true, status: response.status, value: await response.json().catch(() => null) as T }
   const body = await response.json().catch(() => null) as { error?: unknown } | null
-  return { ok: false, status: response.status, error: typeof body?.error === 'string' ? body.error : null }
+  return { ok: false, status: response.status, error: typeof body?.error === 'string' ? body.error : null, body }
 }
 
 // sends a request and reads the JSON answer; never throws

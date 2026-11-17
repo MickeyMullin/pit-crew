@@ -91,13 +91,13 @@ type Page = {
 }
 
 // the real drawer on the fake page with the PR's runs read; fetch records what the page sends and answers the post and the start as the test says
-const withPage = async (agent: AgentCell, runs: RunView[], check: (page: Page) => Promise<void>, replies: { post?: Response, start?: Response } = {}): Promise<void> => {
+const withPage = async (agent: AgentCell, runs: RunView[], check: (page: Page) => Promise<void>, replies: { post?: Response | (() => Response), start?: Response } = {}): Promise<void> => {
   const sent: Sent[] = []
   const said: string[] = []
   const fake = installFakeBrowser((async (input: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
     sent.push({ url: String(input), method, headers: (init?.headers ?? {}) as Record<string, string>, body: typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : null })
-    if (method === 'POST' && String(input).endsWith('/post')) return replies.post ?? answer(200, { number: 101, runId: 7, posted: { form: 'approve', url: 'https://example.test/owner/name/pull/101' }, run: null })
+    if (method === 'POST' && String(input).endsWith('/post')) return (typeof replies.post === 'function' ? replies.post() : replies.post) ?? answer(200, { number: 101, runId: 7, posted: { form: 'approve', url: 'https://example.test/owner/name/pull/101' }, run: null })
     if (method === 'POST') return replies.start ?? answer(200, { id: 9 })
     return String(input).endsWith('/runs') ? answer(200, runs) : answer(200, [])
   }) as typeof fetch)
@@ -309,6 +309,94 @@ test('a refused post stays in the confirmation with the server\'s words, posts n
     await settle()
     assert.equal(page.error(), 'Reload the page to post reports: Pit View has restarted since this page loaded.')
   }, { post: answer(403, { error: 'bad token' }) })
+})
+
+const hitRefusal = (hits: { term: string, context: string }[], hash = 'a'.repeat(64)): Response => answer(422, {
+  error: `the saved report ~/agents/output/PR-101.md contains "${hits[0]?.term}" (${hits[0]?.context}), and a posted report normally never mentions the involvement of AI, a model, a runner, or a provider; nothing was posted. Post again to post it as it is, edit that text out of the report, or start a new review`,
+  hits,
+  reportHash: hash,
+})
+
+test('a post refused over the scan shows the term and its context, and the next Post click sends exactly that hit set and report hash back and posts', async () => {
+  const hits = [{ term: 'assistant', context: 'the assistant agreed with the retry' }, { term: 'llm', context: 'and an LLM too' }]
+  const replies = [hitRefusal(hits, 'b'.repeat(64))]
+  await withPage(cellOf(offerOf()), [runOf()], async (page) => {
+    press(page.button('Approve'))
+    press(page.button('Post'))
+    await settle()
+    assert.deepEqual(page.posts()[0]?.body, { repo, viewer: 'viewer', number: 101, headSha: head, reviewedSha: head, form: 'approve' })
+    assert.match(page.error(), /contains "assistant" \(the assistant agreed with the retry\)/)
+    assert.match(page.error(), /Post again to post it as it is/)
+    // the confirmation stays, with Post as the button that goes again
+    assert.match(page.text(), /Post the stored report/)
+    assert.deepEqual(page.said, [])
+    press(page.button('Post'))
+    await settle()
+    assert.equal(page.posts().length, 2)
+    assert.deepEqual(page.posts()[1]?.body, { repo, viewer: 'viewer', number: 101, headSha: head, reviewedSha: head, form: 'approve', allow: { terms: ['assistant', 'llm'], reportHash: 'b'.repeat(64) } })
+    assert.deepEqual(page.said, ['#101: report posted. The row is refreshing.'])
+  }, { post: () => replies.shift() ?? answer(200, { number: 101, runId: 7, posted: { form: 'approve', url: 'https://example.test/owner/name/pull/101' }, run: null }) })
+})
+
+test('the override is the second click on the same refusal only: Cancel forgets it, a refusal that is not a scan refusal clears it, and a new refusal replaces it', async () => {
+  const first = [{ term: 'assistant', context: 'the assistant agreed' }]
+  const changed = [{ term: 'assistant', context: 'the assistant agreed' }, { term: 'claude', context: 'and Claude too' }]
+  const queue = [hitRefusal(first, 'b'.repeat(64)), hitRefusal(changed, 'c'.repeat(64)), answer(422, { error: 'the saved report ~/agents/output/PR-101.md has changed since run 7 finished' }), hitRefusal(first, 'b'.repeat(64))]
+  await withPage(cellOf(offerOf()), [runOf()], async (page) => {
+    press(page.button('Approve'))
+    press(page.button('Post'))
+    await settle()
+    // the second click was shown a refusal for a different hit set, so it carries the first, the server refuses it again, and the page now holds the new set
+    press(page.button('Post'))
+    await settle()
+    assert.deepEqual(page.posts()[1]?.body?.allow, { terms: ['assistant'], reportHash: 'b'.repeat(64) })
+    assert.match(page.error(), /contains "assistant"/)
+    press(page.button('Post'))
+    await settle()
+    assert.deepEqual(page.posts()[2]?.body?.allow, { terms: ['assistant', 'claude'], reportHash: 'c'.repeat(64) })
+    assert.match(page.error(), /has changed since run 7/)
+    // a refusal with no hit set leaves nothing to send, and Cancel forgets what was shown
+    press(page.button('Post'))
+    await settle()
+    assert.equal(page.posts()[3]?.body?.allow, undefined)
+    press(page.button('Cancel'))
+    press(page.button('Approve'))
+    press(page.button('Post'))
+    await settle()
+    assert.equal(page.posts()[4]?.body?.allow, undefined)
+  }, { post: () => queue.shift() ?? answer(422, { error: 'no' }) })
+})
+
+test('Post it, the blocked run\'s button, takes the same second click: the refusal\'s hit set and hash go back, and a first click sends none', async () => {
+  const postOffer = { runId: 7, form: 'approve', report: 'PR-101.md', reportPath: '~/agents/output/PR-101.md', headSha: head, repo, viewer: 'viewer', command: `gh pr review 101 --repo ${repo} --approve --body-file ~/agents/output/PR-101.md` }
+  const blocked = { ...cellOf(null), postOffer } as unknown as AgentCell
+  const queue = [hitRefusal([{ term: 'autonomous', context: 'an autonomous pass' }], 'd'.repeat(64))]
+  await withPage(blocked, [runOf()], async (page) => {
+    press(page.button('Post it'))
+    press(page.root.querySelector('[data-focus-key="confirm-go"]') as FakeElement)
+    await settle()
+    assert.deepEqual(page.posts()[0]?.body, { repo, viewer: 'viewer', number: 101, headSha: head, form: 'approve' })
+    assert.match(page.error(), /contains "autonomous" \(an autonomous pass\)/)
+    press(page.root.querySelector('[data-focus-key="confirm-go"]') as FakeElement)
+    await settle()
+    assert.deepEqual(page.posts()[1]?.body, { repo, viewer: 'viewer', number: 101, headSha: head, form: 'approve', allow: { terms: ['autonomous'], reportHash: 'd'.repeat(64) } })
+    assert.deepEqual(page.said, ['#101: report posted. The row is refreshing.'])
+  }, { post: () => queue.shift() ?? answer(200, { number: 101, runId: 7, posted: { form: 'approve', url: 'https://example.test/owner/name/pull/101' }, run: null }) })
+})
+
+test('a first click never sends an override, and a refusal that carries a malformed hit set is shown as text with nothing to send', async () => {
+  const queue = [answer(422, { error: 'refused over the scan', hits: 'assistant', reportHash: 'b'.repeat(64) }), answer(422, { error: 'refused over the scan', hits: [{ term: 'x' }], reportHash: 'nope' })]
+  await withPage(cellOf(offerOf()), [runOf()], async (page) => {
+    press(page.button('Approve'))
+    press(page.button('Post'))
+    await settle()
+    press(page.button('Post'))
+    await settle()
+    press(page.button('Post'))
+    await settle()
+    assert.deepEqual(page.posts().map((request) => request.body?.allow), [undefined, undefined, undefined])
+    assert.equal(page.error(), 'Refused over the scan.')
+  }, { post: () => queue.shift() ?? answer(422, { error: 'refused over the scan' }) })
 })
 
 test('the button is off for a PR that left the open tables, with the reason', () => {

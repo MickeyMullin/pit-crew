@@ -8,7 +8,8 @@ import { GhError, GhTimeoutError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr, WriteLimits } from './github.ts'
 import { currentOffers, isHttpUrl, offersFix, postArgs, stackRunCover } from './launcher.ts'
 import type { Posted, PostForm, PostGuard, RunView, UpdateAction } from './launcher.ts'
-import { nameInText, resolveModels } from './models.ts'
+import { namesInText, resolveModels } from './models.ts'
+import type { PostedTextHit } from './models.ts'
 import { parseReviewedCommit, readReport, reportHash, ReportReadError } from './reports.ts'
 
 // direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs, each through gh with the viewer's own token. This module decides whether an action is allowed and what gh is asked; it never trusts the page, so every rule is checked here again. merge is always a squash into the repository's primary branch; the method is fixed, not a setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused. update writes nothing itself: it starts an agent session through the launcher, which brings the PR's branch up to date with the primary branch and pushes it. resolveConflicts is that same session, asked for on a PR the cache holds as conflicting
@@ -42,10 +43,13 @@ export class ActionError extends Error {
   code: ActionErrorCode
   // gh's error kind, for a write GitHub refused
   errorKind: GhErrorKind | null
-  constructor (code: ActionErrorCode, message: string, errorKind: GhErrorKind | null = null) {
+  // fields the refusal carries beside its message, for a page that acts on them (a post refused over the scan carries its hit set and the report hash)
+  detail: Record<string, unknown> | null
+  constructor (code: ActionErrorCode, message: string, errorKind: GhErrorKind | null = null, detail: Record<string, unknown> | null = null) {
     super(message)
     this.code = code
     this.errorKind = errorKind
+    this.detail = detail
   }
 }
 
@@ -134,23 +138,50 @@ const sameLogin = (a: string, b: string): boolean => a.toLowerCase() === b.toLow
 
 // Post it (section 8, Launching runs, Blocked post): everything its confirmation showed comes back, and nothing else is taken from the page
 // reviewedSha is set only by the post button, for a stored report
-export type PostRequest = { repo: string, viewer: string, number: number, headSha: string, form: PostForm, reviewedSha?: string }
+// the override of the scan, sent only by a click on Post that was shown a refusal: the terms that refusal named and the hash of the report it scanned. Nothing that posts unattended builds one
+export type PostAllow = { terms: string[], reportHash: string }
+export type PostRequest = { repo: string, viewer: string, number: number, headSha: string, form: PostForm, reviewedSha?: string, allow?: PostAllow }
 export type PostResult = { number: number, runId: number, posted: Posted, run: RunView | null }
 
 const formWords: Readonly<Record<PostForm, string>> = { approve: 'an approval', requestChanges: 'a request for changes', comment: 'a comment' }
 
-const postUsage = 'send { "repo": "<owner/name shown>", "viewer": "<login shown>", "number": 106, "headSha": "<full head SHA shown>", "form": "approve" | "requestChanges" | "comment" } as the confirmation showed them, and for a stored report also "reviewedSha": "<full SHA of the commit the review read>"'
+const postUsage = 'send { "repo": "<owner/name shown>", "viewer": "<login shown>", "number": 106, "headSha": "<full head SHA shown>", "form": "approve" | "requestChanges" | "comment" } as the confirmation showed them, and for a stored report also "reviewedSha": "<full SHA of the commit the review read>"; after a refusal over the scan, a second request may add "allow": { "terms": ["<each term the refusal named>"], "reportHash": "<the reportHash the refusal carried>" }'
 
 export const parsePost = (body: unknown): PostRequest => {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ActionError('badRequest', postUsage)
-  const { repo, viewer, number, headSha, form, reviewedSha, ...rest } = body as Record<string, unknown>
+  const { repo, viewer, number, headSha, form, reviewedSha, allow, ...rest } = body as Record<string, unknown>
   const extra = Object.keys(rest)[0]
   if (extra !== undefined) throw new ActionError('badRequest', `unknown field ${extra}; ${postUsage}`)
   if (typeof repo !== 'string' || repo === '' || typeof viewer !== 'string' || viewer === '' || typeof number !== 'number' || !Number.isInteger(number) || number < 1 ||
     typeof headSha !== 'string' || !/^[0-9a-f]{40}$/i.test(headSha) || (form !== 'approve' && form !== 'requestChanges' && form !== 'comment')) throw new ActionError('badRequest', postUsage)
   // present only on the post button's request, for a stored report: the full commit the report says it reviewed, which is the head only until the head moves
   if ('reviewedSha' in (body as object) && (typeof reviewedSha !== 'string' || !/^[0-9a-f]{40}$/i.test(reviewedSha))) throw new ActionError('badRequest', postUsage)
-  return { repo, viewer, number, headSha: headSha.toLowerCase(), form, ...(typeof reviewedSha === 'string' ? { reviewedSha: reviewedSha.toLowerCase() } : {}) }
+  // present only on the second click of a refused post: a short list of terms and the 64-character hash of the report that was scanned, and nothing else
+  const override = 'allow' in (body as object) ? parseAllow(allow) : undefined
+  return { repo, viewer, number, headSha: headSha.toLowerCase(), form, ...(typeof reviewedSha === 'string' ? { reviewedSha: reviewedSha.toLowerCase() } : {}), ...(override === undefined ? {} : { allow: override }) }
+}
+
+const parseAllow = (value: unknown): PostAllow => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new ActionError('badRequest', postUsage)
+  const { terms, reportHash, ...rest } = value as Record<string, unknown>
+  if (Object.keys(rest).length > 0 || !Array.isArray(terms) || terms.length > 500 || !terms.every((term) => typeof term === 'string' && term !== '' && term.length <= 300) ||
+    typeof reportHash !== 'string' || !/^[0-9a-f]{64}$/i.test(reportHash)) throw new ActionError('badRequest', postUsage)
+  return { terms: terms as string[], reportHash: reportHash.toLowerCase() }
+}
+
+// whether the override names exactly the terms the scan found now, in a report of the hash it was shown: the order and a repeated term do not matter, and a term more or fewer does
+const overrides = (allow: PostAllow | undefined, found: readonly string[], hash: string): boolean => {
+  if (allow === undefined || allow.reportHash !== hash) return false
+  const named = new Set(allow.terms)
+  return named.size === found.length && found.every((term) => named.has(term))
+}
+
+// the refusal over the scan: each term with the text around it (the first five, then a count), the way out, and the hit set and hash the page sends back on its second click
+const scanRefusal = (reportPath: string, hits: readonly PostedTextHit[], hash: string): ActionError => {
+  const shown = hits.slice(0, 5).map((hit) => `"${hit.term}" (${hit.context})`)
+  if (hits.length > shown.length) shown.push(`${hits.length - shown.length} more`)
+  const named = shown.length <= 2 ? shown.join(' and ') : `${shown.slice(0, -1).join(', ')}, and ${shown[shown.length - 1]}`
+  return new ActionError('notAllowed', `the saved report ${reportPath} contains ${named}, and a posted report normally never mentions the involvement of AI, a model, a runner, or a provider; nothing was posted. Post again to post it as it is, edit that text out of the report, or start a new review`, null, { hits, reportHash: hash })
 }
 
 // the reviews on a PR, read live just before a post, one line each: login, commit, and state
@@ -401,9 +432,9 @@ export const createActions = (options: ActionsOptions): Actions => {
         throw error
       }
       if (reportHash(report) !== run.reportHash) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} has changed since run ${id} finished, so it is no longer that run's review; nothing was posted. Start a new review to post the report as it is now`)
-      // a posted report never mentions AI involvement: every registry id and full slug, every vendor, runner, and provider name, every term for AI, every phrase that credits a tool, and the review-mode words (postedTextTerms) are looked for in the very text that gets posted, and one found refuses the post before gh is asked anything. The Post it path and the post button both come through here
-      const hit = nameInText(resolveModels(config.models), report)
-      if (hit !== null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} contains "${hit.term}" (${hit.context}), and a posted report never mentions the involvement of AI, a model, a runner, or a provider; nothing was posted. Edit that text out of the report, or start a new review`)
+      // a posted report does not mention AI involvement: every registry id and full slug, every vendor, runner, and provider name, every term for AI, every phrase that credits a tool, and the review-mode words (postedTextTerms) are looked for in the very text that gets posted, and any found refuses the post before gh is asked anything, with the whole hit set and the report's hash in the refusal. The owner's second click sends exactly that back, and the post goes on only while the scan still finds the same set in a report of the same hash. The Post it path and the post button both come through here, and nothing that posts unattended sends an override
+      const hits = namesInText(resolveModels(config.models), report)
+      if (hits.length > 0 && !overrides(request.allow, hits.map((hit) => hit.term), reportHash(report))) throw scanRefusal(offer.reportPath, hits, reportHash(report))
       const named = parseReviewedCommit(report.split('\n').slice(0, 20))
       if (named === null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} does not say which commit it reviewed; nothing was posted`)
       if (!reviewedAt.startsWith(named)) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} is about another commit (${named}); nothing was posted`)

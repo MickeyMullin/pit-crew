@@ -865,7 +865,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       json(res, 200, await actions.post(Number(raw), body))
     } catch (error) {
       if (!(error instanceof ActionError)) throw error
-      json(res, actionStatus[error.code], { error: error.message, ...(error.errorKind === null ? {} : { errorKind: error.errorKind }) })
+      json(res, actionStatus[error.code], { error: error.message, ...(error.errorKind === null ? {} : { errorKind: error.errorKind }), ...(error.detail ?? {}) })
     }
   }
 

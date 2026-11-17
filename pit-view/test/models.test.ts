@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { ConfigError, defaultConfig, validateConfig } from '../src/config.ts'
-import { builtInFallbackId, builtInRegistry, projectModels, modelsSaveProblem, modelsView, nameInText, postedTextTerms, resolveModels, resolveSlot, slotNames, slugProblem } from '../src/models.ts'
+import { builtInFallbackId, builtInRegistry, projectModels, modelsSaveProblem, modelsView, nameInText, namesInText, postedTextTerms, resolveModels, resolveSlot, slotNames, slugProblem } from '../src/models.ts'
 
 const ids = (entries: readonly { id: string }[]): string[] => entries.map((entry) => entry.id)
 
@@ -230,6 +230,35 @@ test('the review-mode word tandem is refused as a whole word anywhere, and nothi
   for (const text of ['tandem', 'In tandem.', '(Tandem)', 'a tandem pass', 'tandem-mode']) assert.equal(nameInText(resolved, text)?.term, 'tandem', text)
   for (const text of ['tandems', 'tandemly', 'autotandem']) assert.equal(nameInText(resolved, text), null, text)
   assert.ok(postedTextTerms.some((entry) => entry.term === 'tandem' && entry.kind === 'reviewMode'))
+})
+
+test('degraded is ordinary review prose and is not a posted-text term, while the other review-mode words still are', () => {
+  const resolved = resolveModels(undefined)
+  assert.equal(nameInText(resolved, 'Several degraded paths were traced to their readers.'), null)
+  assert.deepEqual(namesInText(resolved, 'A degraded path, a Degraded one, DEGRADED.'), [])
+  assert.ok(!postedTextTerms.some((entry) => entry.term === 'degraded'))
+  for (const term of ['tandem', 'consolidator']) assert.ok(postedTextTerms.some((entry) => entry.term === term && entry.kind === 'reviewMode'), term)
+})
+
+test('namesInText returns every distinct term once, in the order first found, each with its own context, and nothing for a clean report', () => {
+  const resolved = resolveModels(undefined)
+  assert.deepEqual(namesInText(resolved, 'No findings. A clean report with the agent and Claudette.'), [])
+  const hits = namesInText(resolved, 'First the assistant, then Claude, then the assistant again, and an LLM; Cla&#117;de too.')
+  assert.deepEqual(hits.map((hit) => hit.term), ['assistant', 'claude', 'llm'])
+  assert.match(hits[0]?.context ?? '', /First the assistant/)
+  assert.match(hits[1]?.context ?? '', /Claude/)
+  // the first hit agrees with nameInText, the one the refusal has always named
+  assert.equal(nameInText(resolved, 'First the assistant, then Claude.')?.term, hits[0]?.term)
+  // a term only the literal text holds is found too, after the normalized text's
+  assert.deepEqual(namesInText(resolved, 'a*i and `claude`').map((hit) => hit.term), ['ai', 'claude'])
+})
+
+test('namesInText stays linear on a report full of hits', () => {
+  const resolved = resolveModels(undefined)
+  const started = Date.now()
+  const hits = namesInText(resolved, 'an LLM said so. '.repeat(65_000))
+  assert.deepEqual(hits.map((hit) => hit.term), ['llm'])
+  assert.ok(Date.now() - started < 3_000)
 })
 
 test('the scan of a 1 MB report is linear: hostile runs of markers, brackets, entities, spaces, and digits finish quickly', () => {

@@ -8,7 +8,7 @@ import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
 import { actionBound, actionDoneText, actionOffers, actionRefusalText, actionRequest } from './actionsview.ts'
 import type { ActionConfirmModel, ActionKind, PersonChoice } from './actionsview.ts'
-import { postRequest, refusalText, rereadRequest, startRequest, stopRequest } from './agent.ts'
+import { postAllowOf, postRequest, refusalText, rereadRequest, startRequest, stopRequest } from './agent.ts'
 import type { AgentCell, PostForm, RunView, StartKind } from './agent.ts'
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
@@ -17,6 +17,7 @@ import {
   commentsCheckOn, confirmHolds, specialInstructionsSent, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
   rereadBound, resumeReadyText, returnSelector,
 } from './drawerview.ts'
+import type { PostAllow } from './agent.ts'
 import type { Confirm, DrawerModel, ExtraLine, Loadable, ModelsLine, Opener, StartConfirmModel, StopModel, StoredAskModel, StoredButtonsModel } from './drawerview.ts'
 import { formatSince } from './format.ts'
 import type { ReportPanel } from './reportpanel.ts'
@@ -93,6 +94,9 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   let confirm: Confirm | null = null
   // a start or stop request is on its way
   let busy = false
+  // the hit set and report hash the last refusal over the scan showed, which the next click on the same confirmation sends back; null when no refusal of that kind is showing, and forgotten when a confirmation opens or is canceled
+  let postAllow: PostAllow | null = null
+  const allowed = (): { allow?: PostAllow } => postAllow === null ? {} : { allow: postAllow }
   let error = ''
   // the people used for the current confirmation; review requests refresh this list every time they are asked because Settings can change while the drawer is open
   let people: PersonChoice[] | null = null
@@ -449,6 +453,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   const askPost = (): void => {
     const offer = latest()?.postOffer
     if (offer == null) return
+    postAllow = null
     confirm = { type: 'post', runId: offer.runId, repo: offer.repo, viewer: offer.viewer, headSha: offer.headSha, form: offer.form }
     confirmFrom = 'post-it'
     error = ''
@@ -460,6 +465,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   const askStoredPost = (form: PostForm): void => {
     const offer = latest()?.storedOffer
     if (offer == null || !offer.forms.includes(form) || options.rowOf(number ?? 0) === undefined) return
+    postAllow = null
     confirm = { type: 'storedPost', runId: offer.runId, repo: offer.repo, viewer: offer.viewer, headSha: offer.headSha, reviewedSha: offer.reviewedSha, form, ci: offer.ci }
     confirmFrom = `stored:${form}`
     error = ''
@@ -478,6 +484,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   const cancelConfirm = (): void => {
     const back = confirmFrom
     confirm = null
+    postAllow = null
     confirmFrom = null
     error = ''
     render()
@@ -546,7 +553,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     busy = true
     error = ''
     paintConfirm()
-    const answer = await sendRun(postRequest(asked.runId, { repo: asked.repo, viewer: asked.viewer, number: n, headSha: asked.headSha, form: asked.form }, options.token))
+    const answer = await sendRun(postRequest(asked.runId, { repo: asked.repo, viewer: asked.viewer, number: n, headSha: asked.headSha, form: asked.form, ...allowed() }, options.token))
     busy = false
     if (n !== number) return
     if (answer.ok) {
@@ -561,6 +568,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       return
     }
     error = refusalText('post', answer.status, answer.error)
+    postAllow = answer.status === 422 ? postAllowOf(answer.body) : null
     paintConfirm()
     byKey('confirm-go')?.focus({ preventScroll: true })
   }
@@ -572,7 +580,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     busy = true
     error = ''
     paintConfirm()
-    const answer = await sendRun(postRequest(asked.runId, { repo: asked.repo, viewer: asked.viewer, number: n, headSha: asked.headSha, reviewedSha: asked.reviewedSha, form: asked.form }, options.token))
+    const answer = await sendRun(postRequest(asked.runId, { repo: asked.repo, viewer: asked.viewer, number: n, headSha: asked.headSha, reviewedSha: asked.reviewedSha, form: asked.form, ...allowed() }, options.token))
     busy = false
     if (n !== number) return
     if (answer.ok) {
@@ -587,6 +595,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       return
     }
     error = refusalText('post', answer.status, answer.error)
+    postAllow = answer.status === 422 ? postAllowOf(answer.body) : null
     paintConfirm()
     byKey('confirm-go')?.focus({ preventScroll: true })
   }
