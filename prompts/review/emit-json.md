@@ -149,7 +149,7 @@ The fix's response, `pit-crew/fix-result@1`:
   - `"awaitingAnswer"`: the run stopped to ask before touching code, or because a fix needs a file outside its rules.
   - `"checksFailed"`: a check failed, including a commit hook that refused a commit.
   - `"checksNotRun"`: the checks could not run, so the fix is unverified, including a dependency install that failed before any fix was made.
-  - `"pushFailed"`: the push was refused. `status` is `"failed"`, and git's error goes in `error`.
+  - `"pushFailed"`: the push was refused, and for a pre-push hook that named a formatting fix, still refused after the one format-and-retry. `status` is `"failed"`, and git's error goes in `error`.
   - When a check failed or could not run, that reason is used over `"awaitingAnswer"`, as the report's `Push:` line does. A run the owner told to discard its commits keeps the reason of the stop it answered.
   - It is null as well when the run failed before deciding the push, as at any stop to say so; `error` says why.
 - `worktree`: the throwaway worktree's path, with the home directory written as `~`, when the run left one behind: commits not pushed, or a removal that refused. Otherwise null.
@@ -198,7 +198,7 @@ The update's response, `pit-crew/update-result@1`:
   - `"awaitingAnswer"`: the run stopped to ask about a conflict.
   - `"checksFailed"`: a check failed after conflicts were resolved.
   - `"checksNotRun"`: the checks could not run.
-  - `"pushFailed"`: the push was refused. `status` is `"failed"`, and git's error goes in `error`.
+  - `"pushFailed"`: the push was refused, and for a pre-push hook that named a formatting fix, still refused after the one format-and-retry. `status` is `"failed"`, and git's error goes in `error`.
   - A run the owner told to discard the update keeps the reason of the stop it answered. It is null as well when the run failed before deciding the push; `error` says why.
 - `worktree`: the throwaway worktree's path, with the home directory written as `~`, when the run left one behind: an update not pushed, or a removal that refused. Otherwise null.
 - `question`, `error`: as in `review-result@1`; `error` also carries git's error for a refused push.
