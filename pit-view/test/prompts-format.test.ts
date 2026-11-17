@@ -44,7 +44,7 @@ for (const { name, path, install } of prompts) {
     const prompt = await read(path)
     assert.match(prompt, /- \*\*A second refusal, or any refusal the rule above does not cover, is a failure, never retried again\.\*\*/)
     const bullet = prompt.slice(prompt.indexOf('- **A second refusal'))
-    assert.match(bullet.slice(0, bullet.indexOf('\n- ')), /the hook's message, the commands tried, and the worktree's path/)
+    assert.match(bullet.slice(0, bullet.indexOf('\n- ')), /the hook's message, the commands tried, (and )?the worktree's path/)
     assert.ok(!prompt.includes('- **A refused push is a failure, never retried.**'), 'the old blanket rule is gone')
   })
 
@@ -151,4 +151,10 @@ test('the README says the format-and-retry for both commands and no longer calls
   assert.equal(readme.match(/committed as one new `Format` commit/g)?.length, 2)
   assert.ok(!readme.includes('a refused push is a failure, never retried.'))
   assert.ok(!readme.includes('A refused push is a failure, never retried.'))
+})
+
+test('fix-pr lists what a refused push reports with one Oxford comma list of five', async () => {
+  const prompt = await read('prompts/fix/fix-pr.md')
+  assert.ok(prompt.includes("with the error, the hook's message, the commands tried, the worktree's path, and the head of the unpushed commits, and stop and say so"))
+  assert.ok(!prompt.includes("the commands tried, and the worktree's path, and the head"), 'the list is not split by a second conjunction')
 })
