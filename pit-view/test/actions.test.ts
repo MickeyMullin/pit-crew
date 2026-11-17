@@ -2623,7 +2623,7 @@ test('the post button\'s request holds the same origin and token rules as Post i
   }
 })
 
-// a stale confirmation (section 10, Posting, Which buttons show): the server derives the offer again from the PR's latest run, and a run that is not it posts nothing and makes no gh call
+// a stale confirmation (section 10, Posting, Which buttons show): the server derives the offer again from the PR's runs (its latest run, and for a stored report the earlier run it falls back to), and a run that is not it posts nothing and makes no gh call
 
 const notLatest = /no longer the latest for this PR; nothing was posted/
 
@@ -3348,7 +3348,11 @@ test('when the newer run finishes with a result its own offer replaces the earli
   const h = await blockedHarness()
   try {
     const { id, sha } = await storedRun(h)
+    // the earlier report is on offer through the stopped run first, so it is the fallback that the newer result then replaces
+    await stoppedOver(h)
+    assert.equal((await rowOf(h, 106))?.agent?.storedOffer?.runId, id)
     const newer = await newerRun(h)
+    assert.equal((await rowOf(h, 106))?.agent?.storedOffer, null)
     await newer.finish(`# Review\n\nReviewed commit: \`fix/x\` @ \`${sha.slice(0, 7)}\`\n\nAnother report.\n`)
     assert.equal((await rowOf(h, 106))?.agent?.storedOffer?.runId, newer.id)
     assert.equal((await postIt(h, id, storedBody(106, sha, sha, 'approve'))).status, 409)

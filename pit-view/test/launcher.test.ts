@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto'
 import { mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { confirmHolds, drawerModel } from '../public/drawerview.ts'
+import type { Confirm } from '../public/drawerview.ts'
 import { openCache } from '../src/cache.ts'
 import type { Run, RunChanges } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
@@ -5992,4 +5994,25 @@ test('an earlier run\'s stored report is not offered when its report is not on r
   const mine = await storedRow({}, { id: 5 }, 104)
   const mineStopped = runRow({ id: 8, number: 104, args: ['104'], status: 'stopped' })
   assert.equal(currentOffers(mine.pr, config, mineStopped, undefined, [mineStopped, mine.row]).storedOffer, null)
+})
+
+// the cell the real derivation builds, read by the drawer's real reader (the buttons and the confirmation are the page's own, not a hand-built offer)
+
+test('a stopped manual run over an auto-review\'s stored report: the cell agentCell derives, handed to the drawer\'s reader, shows Approve and Comment on the earlier run and a confirmation naming that run and the short reviewed commit', async () => {
+  const config = baseConfig()
+  const { pr, row: auto } = await storedRow({}, { id: 5 })
+  const sha = pr.headRefOid.toLowerCase()
+  const stopped = runRow({ id: 8, number: 106, args: ['106'], status: 'stopped', origin: 'manual', finishedAt: '2026-10-26T14:30:00Z', result: null, reportHash: null })
+  const cell = agentCell(pr, config, stopped, undefined, null, null, undefined, [stopped, auto])
+  assert.equal(cell.runId, 8)
+  const row = { number: 106, url: 'https://example.test/octo-example/orbit/pull/106', title: 'Invented change', author: { login: 'someone', alias: 'Someone' }, headRef: 'fix/x', baseRef: 'main', headOid: sha, headSha: sha, agent: cell } as unknown as OpenRow
+  const input = (confirm: Confirm | null): Parameters<typeof drawerModel>[0] => ({ row, cell, runs: { state: 'ready', items: [stopped, auto] }, reports: { state: 'ready', items: [] }, open: true, confirm } as unknown as Parameters<typeof drawerModel>[0])
+  const model = drawerModel(input(null))
+  assert.deepEqual(model.autoRuns.map((run) => [run.id, run.stored?.runId ?? null]), [[5, 5]])
+  assert.deepEqual(model.autoRuns[0]?.stored?.buttons.map((button) => button.text), ['Approve', 'Comment'])
+  const offer = cell.storedOffer!
+  const ask = { type: 'storedPost', runId: offer.runId, repo: offer.repo, viewer: offer.viewer, headSha: offer.headSha, reviewedSha: offer.reviewedSha, form: 'approve', ci: offer.ci } as Extract<Confirm, { type: 'storedPost' }>
+  assert.equal(confirmHolds(ask, cell as never, true), true)
+  const shown = drawerModel(input(ask)).storedAsk
+  assert.match(shown?.bound ?? '', new RegExp(`the report from run 5 reviewing ${sha.slice(0, 7)}`))
 })
