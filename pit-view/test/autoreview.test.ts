@@ -227,17 +227,29 @@ test('the others opt-in off leaves them out, and own and dependabot are off by d
   assert.deepEqual(buildQueue(queueInput(rows, { settings: settings({ others: false }) })).items, [])
 })
 
-test('own PRs qualify when not a draft and self-review is none or stale, never when current', async () => {
+test('own PRs qualify only while a draft and self-review is none or stale, never when ready or current', async () => {
   const rows = await fixtureRows()
   const own = (queue: ReturnType<typeof buildQueue>) => queue.items.filter((item) => item.kind === 'own').map((item) => item.number)
-  const queue = buildQueue(queueInput(rows, { settings: settings({ others: false, own: true }) }))
-  // 103 is a draft
-  assert.deepEqual(own(queue), [101, 102, 120, 104])
-  const current: MineRow = { ...(byNumber(rows, 104) as MineRow), selfReview: { ...(byNumber(rows, 104) as MineRow).selfReview, state: 'current' } }
-  const stale: MineRow = { ...(byNumber(rows, 101) as MineRow), selfReview: { ...(byNumber(rows, 101) as MineRow).selfReview, state: 'stale' } }
-  const swapped = rows.map((row) => row.number === 104 ? current : row.number === 101 ? stale : row)
-  assert.deepEqual(own(buildQueue(queueInput(swapped, { settings: settings({ others: false, own: true }) }))), [101, 102, 120])
-  assert.deepEqual(queue.items.find((item) => item.number === 101)?.reason, 'selfReview')
+  const on = settings({ others: false, own: true })
+  // 103 is the only draft of the viewer's; every other own PR is ready and none of them qualifies, with or without a self-review
+  const queue = buildQueue(queueInput(rows, { settings: on }))
+  assert.deepEqual(own(queue), [103])
+  assert.deepEqual(queue.items.find((item) => item.number === 103)?.reason, 'selfReview')
+  // a draft with a stale self-review qualifies, and one with a current self-review does not
+  const withState = (state: 'stale' | 'current', number: number): OpenRow[] => rows.map((row) => row.number === number ? { ...(row as MineRow), selfReview: { ...(row as MineRow).selfReview, state } } : row)
+  assert.deepEqual(own(buildQueue(queueInput(withState('stale', 103), { settings: on }))), [103])
+  assert.deepEqual(own(buildQueue(queueInput(withState('current', 103), { settings: on }))), [])
+  // a ready PR with a self-review that is stale never qualifies
+  assert.deepEqual(own(buildQueue(queueInput(withState('stale', 101), { settings: on }))), [103])
+  // a ready PR with a requested reviewer never qualifies
+  const requested = patchPr(101, { reviewRequests: { nodes: [{ requestedReviewer: { __typename: 'User', login: 'octo-reviewer' } }] } })
+  assert.equal((byNumber(rowsOf(requested), 101) as MineRow).stage === 'draft', false)
+  assert.deepEqual(own(buildQueue(queueInput(rowsOf(requested), { openPrs: requested, settings: on }))), [103])
+  // the same PR converted to a draft qualifies
+  const drafted = patchPr(101, { isDraft: true })
+  assert.deepEqual(own(buildQueue(queueInput(rowsOf(drafted), { openPrs: drafted, settings: on }))), [101, 103])
+  // marking it ready takes it back out
+  assert.deepEqual(own(buildQueue(queueInput(rowsOf(patchPr(103, { isDraft: false })), { settings: on }))), [])
 })
 
 test('reasons: requested wins, then never reviewed is new, then pushed since the review', async () => {
@@ -255,7 +267,10 @@ test('the queue is others then own then the sweep, with others flags first then 
   const all = settings({ own: true, dependabot: true })
   const queue = buildQueue(queueInput(rows, { settings: all }))
   // Your move's own order would be oldest first within each set (107 before 106); the queue is newest first
-  assert.deepEqual(numbers(queue.items), [106, 107, 113, 111, 112, 101, 102, 120, 104, 'dependabot'])
+  assert.deepEqual(numbers(queue.items), [106, 107, 113, 111, 112, 103, 'dependabot'])
+  // with the other own PRs drafts too, they follow the attention order and still sit after the others' and before the sweep
+  const drafts = [101, 102, 120, 104].reduce((prs, number) => prs.map((pr) => pr.number === number ? { ...pr, isDraft: true } : pr), [...fixturePrs])
+  assert.deepEqual(numbers(buildQueue(queueInput(rowsOf(drafts), { openPrs: drafts, settings: all })).items), [106, 107, 113, 111, 112, 101, 103, 102, 120, 104, 'dependabot'])
 })
 
 test('the queue reuses the attention rules: Requested of you ahead of unflagged, ties to the higher number', async () => {
@@ -333,9 +348,9 @@ test('a PR whose auto run ended stopped is not queued again at that head, and sa
   assert.ok(!numbers(buildQueue(queueInput(rows, { runs: [run({ id: 1, number: 113, headOid: head.slice(0, 7), status: 'stopped' })] })).items).includes(113))
   // and it holds for an own PR
   const own = settings({ others: false, own: true })
-  const mine = buildQueue(queueInput(rows, { settings: own, runs: [run({ id: 1, number: 101, headOid: byNumber(rows, 101).headSha, status: 'stopped' })] }))
-  assert.ok(!numbers(mine.items).includes(101))
-  assert.deepEqual(mine.leftForOwner, [{ number: 101, outcome: 'stopped' }])
+  const mine = buildQueue(queueInput(rows, { settings: own, runs: [run({ id: 1, number: 103, headOid: byNumber(rows, 103).headSha, status: 'stopped' })] }))
+  assert.ok(!numbers(mine.items).includes(103))
+  assert.deepEqual(mine.leftForOwner, [{ number: 103, outcome: 'stopped' }])
 })
 
 test('a stopped run is the PR\'s own and its head\'s: a new head qualifies again, and another PR is not affected', async () => {
@@ -784,6 +799,18 @@ test('a queued run whose PR became a draft is not closed: it starts, at the head
   assert.equal(rowsOf(prs).some((row) => row.number === 113), false)
   const item = { kind: 'others' as const, number: 113, reason: 'new' as const, retry: false, headSha: 'abc1234' }
   assert.deepEqual(recheckQueued(item, prs), { action: 'start', headSha: 'e'.repeat(40) })
+})
+
+test('a queued self-review whose PR was marked ready is dropped as ready, one still a draft starts, and a ready PR queued for anyone else is not affected', () => {
+  const own = { kind: 'own' as const, number: 103, reason: 'selfReview' as const, retry: false, headSha: 'abc1234' }
+  const open = (isDraft: boolean, headRefOid = 'a'.repeat(40)) => patchPr(103, { isDraft, headRefOid })
+  assert.deepEqual(recheckQueued(own, open(true)), { action: 'start', headSha: 'a'.repeat(40) })
+  assert.deepEqual(recheckQueued(own, open(false)), { action: 'drop', note: 'ready' })
+  // a PR that left the open list is still closed, whatever its kind
+  assert.deepEqual(recheckQueued(own, fixturePrs.filter((pr) => pr.number !== 103)), { action: 'drop', note: 'closed' })
+  // others' PRs are ready by definition and start
+  const others = { kind: 'others' as const, number: 113, reason: 'new' as const, retry: false, headSha: 'abc1234' }
+  assert.equal(recheckQueued(others, fixturePrs).action, 'start')
 })
 
 // the worktree sweep

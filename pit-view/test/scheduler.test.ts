@@ -100,8 +100,10 @@ type World = {
 
 const headers = (world: World): Record<string, string> => ({ 'Content-Type': 'application/json', Origin: world.server.url, 'x-pit-view-token': world.server.token })
 
-const setup = async ({ auto = {}, config = {}, now = insideHours, noKey = false, before }: {
+const setup = async ({ auto = {}, config = {}, now = insideHours, noKey = false, drafts = [], before }: {
   auto?: Partial<AutoReviewSettings>
+  // PRs the open list reports as drafts, over the fixture's own
+  drafts?: number[]
   config?: Partial<Config>
   now?: string
   noKey?: boolean
@@ -133,7 +135,13 @@ const setup = async ({ auto = {}, config = {}, now = insideHours, noKey = false,
     if (args[0] === 'api' && args[1] === 'user') return gh.login === null ? failed('gh: not logged in') : ok(`${gh.login}\n`)
     if (args[0] === 'api' && args[1] === 'graphql' && gh.hold !== null) await gh.hold
     if (args[0] === 'api' && args[1] === 'graphql' && gh.failCycle) return failed('HTTP 502: Bad Gateway')
-    return base.runner(args, options)
+    const answer = await base.runner(args, options)
+    if (drafts.length === 0 || args[0] !== 'api' || args[1] !== 'graphql' || answer.code !== 0) return answer
+    const page = JSON.parse(answer.stdout) as { data?: { repository?: { pullRequests?: { nodes?: { number: number, isDraft?: boolean }[] } } } }
+    const nodes = page.data?.repository?.pullRequests?.nodes
+    if (nodes === undefined || !nodes.some((node) => typeof node.isDraft === 'boolean')) return answer
+    for (const node of nodes) if (drafts.includes(node.number)) node.isDraft = true
+    return { ...answer, stdout: JSON.stringify(page) }
   }
   const boot = (): Promise<PitServer> => startServer({
     home,
@@ -1530,6 +1538,54 @@ test('a queued PR that closed is dropped as skipped with the note closed, counte
   }
 })
 
+// the viewer's own PR is marked ready on GitHub, as the cache next reads it
+const markReady = (world: World, number: number): void => {
+  const row = world.server.cache.readView(scenario.repo).open.find((entry) => entry.number === number)
+  assert.ok(row, `#${number} is open`)
+  world.server.cache.writePr(scenario.repo, { ...row.pr, isDraft: false }, scenario.defaultBranch)
+}
+
+test('a queued self-review whose PR was marked ready before it starts is dropped as skipped with the note ready and the line goes on; one already started finishes', async () => {
+  const world = await setup({ auto: { others: false, own: true }, drafts: [101, 102] })
+  try {
+    await tick(world)
+    const started = running(world)[0]
+    assert.ok(started)
+    assert.equal(started.reason, 'selfReview')
+    const waiting = queuedOwn(world)
+    assert.ok(waiting.length >= 2)
+    const leaving = waiting[0]!
+    const staying = waiting[1]!
+    // the running one's PR is marked ready too, and a run already started is not recalled
+    markReady(world, started.number)
+    markReady(world, leaving.number)
+    await finish(world, started)
+    assert.equal(world.server.cache.getRun(started.id)?.status, 'done')
+    const dropped = world.server.cache.getRun(leaving.id)
+    assert.equal(dropped?.status, 'skipped')
+    assert.equal(dropped?.note, 'ready')
+    assert.equal(dropped?.pid, null)
+    assert.equal(world.launch.children.some((child) => basename(child.request.cwd) === `run-${leaving.id}`), false, 'the ready PR was never started')
+    assert.equal(world.server.cache.getRun(staying.id)?.status, 'running', 'the line went on to the next draft')
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a ready PR of the owner\'s is not queued by a tick, and the owner may still start a review on it by hand', async () => {
+  const world = await setup({ auto: { others: false, own: true } })
+  try {
+    await tick(world)
+    // 103 is the only draft of the owner's in the fixture; ready ones such as 101 wait for nobody
+    assert.deepEqual(autoRuns(world).map((run) => run.number), [103])
+    const manual = await world.server.launcher.start({ repo: scenario.repo, number: 101, command: 'review-pr', args: ['101'], label: 'Review' })
+    assert.equal(manual.origin, 'manual')
+    assert.equal(manual.status, 'running')
+  } finally {
+    await world.cleanup()
+  }
+})
+
 test('a stopped auto run holds its PR at that head, and a queued one the owner takes out does too', async () => {
   const world = await setup({ auto: { concurrency: 1 } })
   try {
@@ -1848,6 +1904,9 @@ const saveAuto = async (world: World, patch: Partial<AutoReviewSettings>): Promi
   assert.equal((await fetch(`${world.server.url}/api/config`, { method: 'PUT', headers: headers(world), body: JSON.stringify({ ...stored, autoReview: { ...stored.autoReview, ...patch } }) })).status, 200)
 }
 
+// the viewer's own PRs of the fixture that are ready, so a test needing several self-reviews in line reports them as drafts
+const ownDrafts = [101, 102, 120, 104]
+
 const queuedOwn = (world: World): Run[] => autoRuns(world).filter((run) => run.status === 'queued' && run.reason === 'selfReview')
 const queuedOthers = (world: World): Run[] => autoRuns(world).filter((run) => run.status === 'queued' && run.reason !== 'selfReview')
 
@@ -1923,7 +1982,7 @@ test('within one tick, an opt-in turned off while a run is being started passes 
 })
 
 test('a queued run that fails to start does not hold the rows behind it: the next is tried, an opted-out run ahead of it is passed, and the failed row is not tried again', async () => {
-  const world = await setup({ auto: { others: true, own: true, concurrency: 3 }, config: { maxConcurrentReviews: 4 } })
+  const world = await setup({ auto: { others: true, own: true, concurrency: 3 }, config: { maxConcurrentReviews: 4 }, drafts: ownDrafts })
   const failFetch = async (target: World): Promise<void> => {
     target.git.state.fetchFailures = 2
     const before = target.git.verbs('fetch').length
@@ -1947,7 +2006,7 @@ test('a queued run that fails to start does not hold the rows behind it: the nex
   } finally {
     await world.cleanup()
   }
-  const passed = await setup({ auto: { others: true, own: true, concurrency: 1 } })
+  const passed = await setup({ auto: { others: true, own: true, concurrency: 1 }, drafts: ownDrafts })
   try {
     await tick(passed)
     const older = queuedOthers(passed)

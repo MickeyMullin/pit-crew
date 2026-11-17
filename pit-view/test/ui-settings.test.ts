@@ -679,6 +679,7 @@ test('the Auto-review card is grouped as the owner decided: the Now line, the ma
   for (const text of [
     'This setting only affects scheduler-driven auto-reviews. No effect on manually-launched reviews.',
     'Ready (non-draft) that request your review, plus pushes since your last review (automatic or manual).',
+    'A self-review of your draft PRs when the head moves. Never posts and never fixes anything.',
     '<span class="hint-lines">Off (default): Report in the PR\'s drawer to review and post.</span><span class="hint-lines">On: Posts to GitHub as approval, request for changes, or comment.</span>',
     'Manually launched sweeps always post and approve/request. (Default off.)',
     'Auto-reviews share the same concurrency pool as manually-launched agent reviews.',

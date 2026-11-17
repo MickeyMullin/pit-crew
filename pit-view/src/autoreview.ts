@@ -186,8 +186,9 @@ export type QueueResult = {
 
 const isOthersCandidate = (row: OpenRow): row is OtherRow => row.section === 'others' && row.group === 'yourMove'
 
+// an own PR is reviewed unattended only while it is a draft, before the owner asks anyone else to look; once it is ready it never qualifies, whatever its reviewers, approval, or self-review (the owner may still start a review by hand)
 const isOwnCandidate = (row: OpenRow): boolean =>
-  row.section === 'mine' && row.stage !== 'draft' && (row.selfReview.state === 'none' || row.selfReview.state === 'stale')
+  row.section === 'mine' && row.stage === 'draft' && (row.selfReview.state === 'none' || row.selfReview.state === 'stale')
 
 // others' PRs are queued flags first and then most recent activity, which is section 5's rule for every group but Your move; the group is overridden so the shared comparator applies it
 const queueOrder = (a: OtherRow, b: OtherRow): number => attentionOrder({ ...a, group: 'bots' }, { ...b, group: 'bots' })
@@ -269,13 +270,15 @@ export const sweepHoldOf = (sweeps: readonly AutoSweep[]): 'needsInput' | 'faile
   return sweepFailures(sweeps) >= 2 ? 'failedTwice' : null
 }
 
-// the check before a queued run starts: a PR that left the open list closed and is dropped, and one still there, a draft included, runs and records the head it is at now, which may have moved. It moves that one run to the new head and asks for no other, so it never gives a PR a second live run
-export type Recheck = { action: 'start', headSha: string | null } | { action: 'drop', note: 'closed' }
+// the check before a queued run starts: a PR that left the open list closed and is dropped, and one still there, a draft included, runs and records the head it is at now, which may have moved. It moves that one run to the new head and asks for no other, so it never gives a PR a second live run. A queued self-review whose PR has since been marked ready no longer qualifies and is dropped as ready, which is no start tried; a self-review already started is not recalled
+export type Recheck = { action: 'start', headSha: string | null } | { action: 'drop', note: 'closed' | 'ready' }
 
 export const recheckQueued = (item: QueueItem, openPrs: readonly RawOpenPr[]): Recheck => {
   if (item.kind === 'dependabot') return { action: 'start', headSha: null }
   const pr = openPrs.find((candidate) => candidate.number === item.number)
-  return pr === undefined ? { action: 'drop', note: 'closed' } : { action: 'start', headSha: pr.headRefOid }
+  if (pr === undefined) return { action: 'drop', note: 'closed' }
+  if (item.kind === 'own' && !pr.isDraft) return { action: 'drop', note: 'ready' }
+  return { action: 'start', headSha: pr.headRefOid }
 }
 
 // the daily limit and the slots a tick may fill
@@ -743,7 +746,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
 
   // one queued row started as the settings now say, or dropped; what became of it decides whether the pass goes on (startQueued)
   const startRun = async (run: Run, settings: Config, open: readonly RawOpenPr[]): Promise<StartOutcome> => {
-    const recheck = recheckQueued({ kind: 'others', number: run.number, reason: 'new', retry: false, headSha: run.headOid ?? '' }, open)
+    const recheck = recheckQueued({ kind: run.reason === 'selfReview' ? 'own' : 'others', number: run.number, reason: 'new', retry: false, headSha: run.headOid ?? '' }, open)
     if (recheck.action === 'drop') {
       launcher.skipQueued(run.id, recheck.note)
       return 'dropped'
