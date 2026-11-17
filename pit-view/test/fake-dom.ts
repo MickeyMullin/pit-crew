@@ -44,6 +44,7 @@ export type FakeElement = {
   dispatch: (type: string) => void
   focus: () => void
   setSelectionRange: (start: number, end: number) => void
+  select: () => void
   scrollIntoView: () => void
   matches: (compound: Compound) => boolean
   querySelector: (selector: string) => FakeElement | null
@@ -276,6 +277,10 @@ const makeElement = (doc: FakeDocument, tag: string): FakeElement => {
     setSelectionRange: (start, end) => {
       element.selectionStart = start
       element.selectionEnd = end
+    },
+    select: () => {
+      element.selectionStart = 0
+      element.selectionEnd = element.value.length
     },
     scrollIntoView: () => undefined,
     matches,

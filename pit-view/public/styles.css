@@ -926,6 +926,18 @@ button {
   font-size: 12px;
 }
 
+/* Copy report: a .button-small as tall as Open and at least as wide, its glyph in the theme's ink (stroke is currentColor); the page-wide :focus-visible ring applies, and is spelled out here so no later reset removes it */
+.copy-report {
+  min-width: 40px;
+  padding: 0 10px;
+  color: var(--ink);
+}
+
+.copy-report:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
 .button-danger {
   height: 32px;
   padding: 0 14px;
@@ -2101,6 +2113,10 @@ button.agent:hover {
   margin-left: auto;
 }
 
+.drawer-item-main .copy-report {
+  margin-left: 0;
+}
+
 .drawer-item-meta {
   color: var(--muted);
   font-size: 12px;
@@ -2322,6 +2338,10 @@ button.agent:hover {
   gap: 12px;
   padding: 8px 16px;
   border-bottom: 1px solid var(--line-row);
+}
+
+.report-copy {
+  margin-left: auto;
 }
 
 .report-body {

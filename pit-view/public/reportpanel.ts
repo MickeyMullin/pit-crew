@@ -3,6 +3,7 @@
 // sanitized HTML in a sandboxed iframe whose document reportview.ts builds) or Raw (the Markdown
 // as text in a <pre>). It sits to the left of the drawer at desktop widths and over it at phone
 // width (styles.css); Escape and the focus return are handled by the page and the drawer
+import { copyReportButton } from './copyreport.ts'
 import { formatSince } from './format.ts'
 import { h, setText, svg } from './dom.ts'
 import { getJson } from './runapi.ts'
@@ -62,6 +63,9 @@ export const createReportPanel = (options: ReportPanelOptions): ReportPanel => {
   const close = h('button', { type: 'button', class: 'icon-button report-close', 'aria-label': 'Close report', title: 'Close report' },
     svg([['path', { d: 'M6 6l12 12' }], ['path', { d: 'M18 6L6 18' }]], { size: 14, stroke: '2.4' }))
   const segmented = h('div', { class: 'segmented', role: 'group', 'aria-label': 'Report view' })
+  // the Copy report button, once the report has loaded; it reads the report again through the route Open uses
+  const copySlot = h('span', { class: 'report-copy' })
+  let copyFor: string | null = null
   const body = h('div', { class: 'report-body' })
   // the next stop after the rendered report: keys pressed inside a sandboxed iframe never reach this
   // page, so Tab out of it lands on a Close that Escape and Enter work on
@@ -72,7 +76,7 @@ export const createReportPanel = (options: ReportPanelOptions): ReportPanel => {
     h('div', { class: 'report-head' },
       h('div', { class: 'report-titles' }, heading, sub),
       close),
-    h('div', { class: 'report-bar' }, segmented),
+    h('div', { class: 'report-bar' }, segmented, copySlot),
     body,
     foot)
 
@@ -131,6 +135,10 @@ export const createReportPanel = (options: ReportPanelOptions): ReportPanel => {
   const paintHead = (): void => {
     setText(heading, name ?? '')
     setText(sub, load.state === 'ready' ? reportSub(load.report.modifiedAt, age) : '')
+    const wanted = load.state === 'ready' ? load.report.name : null
+    if (wanted === copyFor) return
+    copyFor = wanted
+    copySlot.replaceChildren(...(wanted === null ? [] : [copyReportButton(wanted, 'copy-panel-report', options.say)]))
   }
 
   const open = (wanted: string, back: string | null): void => {
