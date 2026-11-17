@@ -3270,3 +3270,118 @@ test('a stored report whose mark is set is not offered again and reads as a post
     await h.cleanup()
   }
 })
+
+// a stopped run over a stored report (section 10, Posting, Which buttons show): the offer falls back to the newest earlier run that finished with a result, and the server judges a click by the same derivation
+
+// a manual review of the PR started over the stored report and stopped before it wrote anything
+const stoppedOver = async (h: Harness, number = 106): Promise<number> => {
+  const newer = await newerRun(h, { number })
+  h.server.launcher.stop(newer.id)
+  await h.server.launcher.settled(newer.id)
+  assert.equal(h.server.cache.getRun(newer.id)?.status, 'stopped')
+  return newer.id
+}
+
+test('a manual review stopped over an auto-review\'s stored report leaves the post buttons on that report, and a click on the shown button posts it', async () => {
+  const behavior: Behavior = { bodies: [] }
+  const h = await blockedHarness(behavior)
+  try {
+    const { id, sha } = await storedRun(h)
+    const stopped = await stoppedOver(h)
+    const agent = (await rowOf(h, 106))?.agent
+    assert.equal(agent?.runId, stopped)
+    assert.equal(agent?.status, 'stopped')
+    assert.equal(agent?.storedOffer?.runId, id)
+    assert.deepEqual(agent?.storedOffer?.forms, ['approve', 'comment'])
+    assert.equal(agent?.storedOffer?.reviewedSha, sha)
+    const answer = await postIt(h, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(answer.status, 200)
+    assert.equal(postsOf(h.runner).length, 1)
+    assert.match(behavior.bodies?.[0]?.text ?? '', /No actionable findings/)
+    assert.equal(h.server.cache.getRun(id)?.postAttemptedAt === null, false)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('with the report fallen back to, a click bound to the stopped run, to an old head, or to another commit is refused and posts nothing', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(h)
+    const stopped = await stoppedOver(h)
+    // the stopped run has nothing to post, and the stored report on offer is the earlier run's, so a click naming the stopped run is stale
+    assert.equal((await postIt(h, stopped, storedBody(106, sha, sha, 'approve'))).status, 409)
+    // a confirmation shown for a head the PR no longer has
+    const old = await postIt(h, id, storedBody(106, otherSha, sha, 'approve'))
+    assert.equal(old.status, 409)
+    // a button for a commit the report did not review
+    const wrong = await postIt(h, id, storedBody(106, sha, otherSha, 'approve'))
+    assert.equal(wrong.status, 409)
+    // the stale head asks for a refresh of the PR, which reads and writes nothing on it
+    assert.deepEqual(postsOf(h.runner), [])
+    assert.equal(h.server.cache.getRun(id)?.postAttemptedAt, null)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a newer run that is running offers nothing and refuses the earlier report; once it stops the offer and the post come back', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(h)
+    const newer = await newerRun(h)
+    assert.equal((await rowOf(h, 106))?.agent?.storedOffer, null)
+    const refused = await postIt(h, id, storedBody(106, sha, sha, 'comment'))
+    assert.equal(refused.status, 409)
+    assert.match(String(refused.body.error), notLatest)
+    assert.deepEqual(postsOf(h.runner), [])
+    h.server.launcher.stop(newer.id)
+    await h.server.launcher.settled(newer.id)
+    assert.equal((await rowOf(h, 106))?.agent?.storedOffer?.runId, id)
+    assert.equal((await postIt(h, id, storedBody(106, sha, sha, 'comment'))).status, 200)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('when the newer run finishes with a result its own offer replaces the earlier report, which is then refused', async () => {
+  const h = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(h)
+    const newer = await newerRun(h)
+    await newer.finish(`# Review\n\nReviewed commit: \`fix/x\` @ \`${sha.slice(0, 7)}\`\n\nAnother report.\n`)
+    assert.equal((await rowOf(h, 106))?.agent?.storedOffer?.runId, newer.id)
+    assert.equal((await postIt(h, id, storedBody(106, sha, sha, 'approve'))).status, 409)
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the report fallen back to is refused when its file changed since the run, and its offer is gone when the viewer has reviewed the head', async () => {
+  const changed = await blockedHarness()
+  try {
+    const { id, sha } = await storedRun(changed)
+    await stoppedOver(changed)
+    await writeFile(join(changed.home, 'agents', 'output', 'PR-106.md'), `# Review\n\nReviewed commit: \`fix/x\` @ \`${sha.slice(0, 7)}\`\n\nEdited since.\n`)
+    const answer = await postIt(changed, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(answer.status, 422)
+    assert.match(String(answer.body.error), /has changed since run/)
+    assert.deepEqual(postsOf(changed.runner), [])
+  } finally {
+    await changed.cleanup()
+  }
+  const behavior: Behavior = {}
+  const reviewed = await blockedHarness(behavior)
+  try {
+    const { id, sha } = await storedRun(reviewed)
+    await stoppedOver(reviewed)
+    assert.equal((await rowOf(reviewed, 106))?.agent?.storedOffer?.runId, id)
+    behavior.reviews = `${scenario.viewer}\t${sha}\tAPPROVED\n`
+    const answer = await postIt(reviewed, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(answer.status, 422)
+    assert.deepEqual(postsOf(reviewed.runner), [])
+  } finally {
+    await reviewed.cleanup()
+  }
+})

@@ -386,14 +386,16 @@ export const createActions = (options: ActionsOptions): Actions => {
     const run = cache.getRun(id)
     if (run === null) throw new ActionError('unknownRun', `run ${id} does not exist`)
     if (run.repo !== repo || run.number !== number) throw new ActionError('stale', `run ${id} is not a run of #${number} in ${repo}; the confirmation was for #${number}, so nothing was posted`)
-    // the offer as the cache has it at this moment, derived the way the drawer derives it: from the PR's latest run and the stack run that covers it. The requested run must be the run that offer is about, so a run another has superseded, or a stack run now covers, posts nothing, whatever report is still on disk. Everything here is synchronous, so what it answers is true until the caller next awaits
+    // the offer as the cache has it at this moment, derived the way the drawer derives it: from the PR's latest run and the stack run that covers it. The requested run must be the run that offer is about (the PR's latest run, or for a stored report the earlier run it falls back to), so a run another has superseded, or a stack run now covers, posts nothing, whatever report is still on disk. Everything here is synchronous, so what it answers is true until the caller next awaits
     const current = (): ReturnType<typeof currentOffers> => {
       const cached = cache.readView(repo)
       const row = cached.open.find((entry) => entry.number === number)
       if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched; nothing was posted`)
       const latest = cache.latestRuns(repo)
-      const offers = currentOffers(row.pr, config, latest.get(number), stackRunCover(latest.values(), cached.open.map((entry) => entry.pr)).get(number))
-      if (offers.runId !== id) throw new ActionError('stale', 'This report is no longer the latest for this PR; nothing was posted. Reload the PR to see its current state')
+      const offers = currentOffers(row.pr, config, latest.get(number), stackRunCover(latest.values(), cached.open.map((entry) => entry.pr)).get(number), cache.runsByPr(repo).get(number))
+      // a stored report's click names the run that report is from, which is an earlier run when the latest has no result of its own; a Post it click names the run the cell is about
+      const offered = request.reviewedSha === undefined ? offers.runId : offers.storedOffer?.runId ?? offers.runId
+      if (offered !== id) throw new ActionError('stale', 'This report is no longer the latest for this PR; nothing was posted. Reload the PR to see its current state')
       if (headSha !== row.pr.headRefOid.toLowerCase()) {
         refresh(repo, number)
         throw new ActionError('stale', request.reviewedSha === undefined

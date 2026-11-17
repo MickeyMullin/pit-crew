@@ -418,7 +418,7 @@ export const storedAskModel = (row: Pick<OpenRow, 'number' | 'title'>, cell: Age
     effect: `Posts the saved report ${offer.reportPath} to #${row.number} as ${words}, under your account (@${offer.viewer}), once. Pit View cannot undo it.`,
     ci: `CI now: ${ciWords[ask.ci]}`,
     headMoved: moved ? `New commits since this review: reviewed ${shortSha(offer.reviewedSha)}, now ${shortSha(offer.headSha)}. Post this report as @${offer.viewer} anyway?` : null,
-    bound: `For the head ${shortSha(offer.headSha)} in ${offer.repo}, as ${offer.viewer}${moved ? `, the report reviewing ${shortSha(offer.reviewedSha)}` : ''}.`,
+    bound: `For the head ${shortSha(offer.headSha)} in ${offer.repo}, as ${offer.viewer}, the report from run ${offer.runId} reviewing ${shortSha(offer.reviewedSha)}.`,
     confirm: moved ? 'Post anyway' : 'Post',
     busy: 'Posting…',
     fresh: !moved || start === undefined ? null : { kind: start.kind, text: 'Start a new review', disabled: start.disabled, reason: start.reason ?? starts.shared },

@@ -1161,13 +1161,30 @@ export const cellRunOf = (ownRun: Run | undefined, cover: Run | undefined): { ru
   return { run: covered ? cover : ownRun, covered }
 }
 
-// the post offers a PR has now, from the run its cell is about and nothing else. The drawer's offers and the server's check at post time both come from this one function, so a click is judged by the same derivation that showed the button: a run that is no longer the PR's latest, or that a stack run now covers, offers nothing and is not the run named here
-export const currentOffers = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, cover: Run | undefined): { runId: number | null, postOffer: PostOffer | null, storedOffer: StoredOffer | null } => {
-  const { run } = cellRunOf(ownRun, cover)
-  return { runId: run?.id ?? null, postOffer: postOffer(pr, config, run), storedOffer: storedOffer(pr, config, run) }
+// whether a finished run left a result of its own that took the PR's report file over: a done run with a result, whether or not it posted. A run that was stopped, failed, skipped, or ended with no result wrote nothing a later run can lean on
+const hasOwnResult = (run: Run): boolean => run.status === 'done' && run.result !== null
+
+// the stored report an earlier run still has on offer while the PR's latest run has no usable result (it stopped, failed, was skipped, or ended with no result): the newest earlier run that finished with a result of its own, judged by storedOffer exactly as if it were the latest. A run that finished with a result takes the report file over, so nothing behind it is offered, and a newer run that is queued, running, or waiting for an answer offers nothing at all; it gives the offer back when it ends with no result and replaces it with its own when it ends with one
+const fallbackStoredOffer = (pr: RawOpenPr, config: Config, run: Run, history: readonly Run[]): StoredOffer | null => {
+  if (['queued', 'running', 'needsInput'].includes(run.status) || hasOwnResult(run)) return null
+  for (const earlier of history) {
+    if (earlier.id >= run.id || ['stopped', 'failed', 'skipped'].includes(earlier.status) || (earlier.status === 'done' && earlier.result === null)) continue
+    return storedOffer(pr, config, earlier)
+  }
+  return null
 }
 
-export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null, cover: Run | undefined = undefined): AgentCell => {
+// the post offers a PR has now, from the run its cell is about and, for the stored report, from the newest earlier run that finished with a result when that run has none of its own. history holds the PR's runs, newest first. The drawer's offers and the server's check at post time both come from this one function, so a click is judged by the same derivation that showed the button: a run that is no longer the PR's latest, or that a stack run now covers, offers nothing unless its stored report is the one the latest run has fallen back to. runId is the run the cell is about; a stored offer carries the id of its own run
+export const currentOffers = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, cover: Run | undefined, history: readonly Run[] = []): { runId: number | null, postOffer: PostOffer | null, storedOffer: StoredOffer | null } => {
+  const { run, covered } = cellRunOf(ownRun, cover)
+  return {
+    runId: run?.id ?? null,
+    postOffer: postOffer(pr, config, run),
+    storedOffer: storedOffer(pr, config, run) ?? (run === undefined || covered ? null : fallbackStoredOffer(pr, config, run, history)),
+  }
+}
+
+export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null, cover: Run | undefined = undefined, history: readonly Run[] = []): AgentCell => {
   const mine = isMine(pr, config)
   const plan = defaultRun(pr, config)
   // the button's text; the run's own label is unchanged
@@ -1183,7 +1200,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
   }
   const { run, covered } = cellRunOf(ownRun, cover)
   if (run === undefined) return idle
-  const offers = currentOffers(pr, config, ownRun, cover)
+  const offers = currentOffers(pr, config, ownRun, cover, history)
   const shas = standingShas(run)
   const head = pr.headRefOid.toLowerCase()
   let state: AgentCell['state'] = 'done'

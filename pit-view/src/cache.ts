@@ -203,6 +203,8 @@ export type Cache = {
   runsFor: (repo: string, number: number, limit?: number) => Run[]
   // the newest run of each PR in a repo
   latestRuns: (repo: string) => Map<number, Run>
+  // every recorded run of each PR in a repo, newest first: what the stored report's fallback looks behind the latest run through
+  runsByPr: (repo: string) => Map<number, Run[]>
   // every run still recorded as running, in any repo
   runningRuns: () => Run[]
   // every run still waiting in the queue, in any repo, oldest first
@@ -841,6 +843,12 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     new Map(all('SELECT * FROM runs WHERE id IN (SELECT max(id) FROM runs WHERE repo = $repo GROUP BY number)', { repo })
       .map((row) => [int(row, 'number'), toRun(row)]))
 
+  const runsByPr = (repo: string): Map<number, Run[]> => {
+    const byPr = new Map<number, Run[]>()
+    for (const run of all('SELECT * FROM runs WHERE repo = $repo ORDER BY id DESC', { repo }).map(toRun)) byPr.set(run.number, [...byPr.get(run.number) ?? [], run])
+    return byPr
+  }
+
   const runningRuns = (): Run[] => all('SELECT * FROM runs WHERE status = \'running\' ORDER BY id').map(toRun)
 
   const queuedRuns = (): Run[] => all('SELECT * FROM runs WHERE status = \'queued\' ORDER BY id').map(toRun)
@@ -961,6 +969,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     getRun,
     runsFor,
     latestRuns,
+    runsByPr,
     runningRuns,
     queuedRuns,
     pruneRuns,

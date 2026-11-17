@@ -276,6 +276,7 @@ export const createPoller = (options: PollerOptions): Poller => {
   const snapshot = (settings: Config, reportMap: ReadonlyMap<number, ReportInfo>, queueing: Queueing = queueingNow()): Snapshot => {
     const cached = cache.readView(settings.repo)
     const runs = cache.latestRuns(settings.repo)
+    const history = cache.runsByPr(settings.repo)
     // derived on every read from the runs and the PRs as they are now, so nothing remembers which layers a stack run covered
     const cover = stackRunCover(runs.values(), cached.open.map((row) => row.pr))
     const freshness = new Map<number, Freshness>(cached.open.map((row) => [row.number, { state: row.freshness.state, fetchedAt: row.freshness.fetchedAt }]))
@@ -290,7 +291,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       reports: reportMap,
       freshness: (number) => freshness.get(number) ?? { state: 'current', fetchedAt: iso(clock.now()) },
       refresh: (number) => rowRefreshes.get(prKey(settings.repo, number)) ?? null,
-      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack, queueing, cover.get(pr.number)),
+      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack, queueing, cover.get(pr.number), history.get(pr.number)),
     })
     const rows = new Map<number, OpenRow>()
     for (const group of [...view.mine.groups, ...view.others.groups]) {
