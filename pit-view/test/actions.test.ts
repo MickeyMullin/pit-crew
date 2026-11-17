@@ -1792,6 +1792,50 @@ test('an override gets a report no further than the scan: the reviewed-commit ch
   }
 })
 
+test('the refusal names every term the override covers, with context for the first three only and the text bounded, and the override that sends them all posts', async () => {
+  const h = await blockedHarness()
+  try {
+    const { sha } = await listed(106)
+    const body = 'No actionable findings. An autonomous pass, and the assistant agreed; an LLM too, with Claude, a tandem pass, the consolidator, text written by hand, and AI generated notes.'
+    const { id } = await blockedRun(h, {}, reportAt(sha, body))
+    const first = await postIt(h, id, postBody(sha))
+    assert.equal(first.status, 422)
+    const terms = (first.body.hits as { term: string }[]).map((hit) => hit.term)
+    assert.ok(terms.length >= 8, terms.join(','))
+    const reason = String(first.body.error)
+    // every term the override will cover is named in the words the owner reads
+    for (const term of terms) assert.ok(reason.includes(`"${term}"`), `${term}: ${reason}`)
+    // the context is shown for the first three, and the whole refusal stays short
+    assert.equal(reason.split(' (').length - 1, 3, reason)
+    assert.ok(reason.length < 1200, String(reason.length))
+    assert.equal((await postIt(h, id, { ...postBody(sha), allow: { terms, reportHash: String(first.body.reportHash) } })).status, 200)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('an override is not capped at a fixed count: a valid registry that yields 501 hits is refused once and then posts', async () => {
+  const registry = Array.from({ length: 501 }, (_, index) => ({ id: `zq${index}`, runner: 'hermes', provider: 'openrouter', model: `zq${index}` }))
+  const h = await setup({ config: { ...withClone, models: { registry } }, runner: ghWorld() })
+  try {
+    const { sha } = await listed(106)
+    const { id } = await blockedRun(h, {}, reportAt(sha, `No actionable findings. ${registry.map((entry) => entry.id).join(' ')}`))
+    const first = await postIt(h, id, postBody(sha))
+    assert.equal(first.status, 422)
+    assert.equal((first.body.hits as unknown[]).length, 501)
+    assert.deepEqual(postsOf(h.runner), [])
+    const second = await postIt(h, id, { ...postBody(sha), allow: overrideOf(first.body) })
+    assert.equal(second.status, 200)
+    assert.equal(postsOf(h.runner).length, 1)
+    // the exact-set comparison is the guard: one term short is refused, whatever the size
+    const short = overrideOf(first.body)
+    short.terms.pop()
+    assert.equal((await postIt(h, id, { ...postBody(sha), allow: short })).status, 422)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('an unattended post is not overridden: a request without an override refuses a hit, the scan runs on every post, and nothing but the page\'s request body carries one', async () => {
   const h = await blockedHarness()
   try {
@@ -1815,7 +1859,7 @@ test('an unattended post is not overridden: a request without an override refuse
   }
 })
 
-test('the scan reads the owner\'s registry too, and a model the owner removed from it is still never posted', async () => {
+test('the scan reads the owner\'s registry too, and a model the owner removed from it still stops the first click', async () => {
   const models = { registry: [{ id: 'house-model', runner: 'hermes', provider: 'openrouter', model: 'vendor/house-x1' }] }
   const custom = await setup({ config: { ...withClone, models }, runner: ghWorld() })
   try {

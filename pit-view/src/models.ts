@@ -342,22 +342,21 @@ export const nameInText = (resolved: Pick<ResolvedModels, 'registry'>, text: str
   return find(normalized) ?? (normalized === text ? null : find(text))
 }
 
-// every distinct term in the text, each once with the context of its first match, in the order first found: the normalized text's terms, then any the literal text adds. This is the hit set a post's override is bound to, and its first entry is the term nameInText names. One global pass over each text, and the term of a match is looked up once per distinct matched string
+// every distinct term in the text, each once with the context of its first match, in the order first found (earliest start, the longer term on a tie): the normalized text's terms, then any the literal text adds. This is the hit set a post's override is bound to, and its first entry is the term nameInText names. Each term is looked for on its own, so terms that overlap one another or start at the same place are all found, which one combined expression cannot do; the cost is one pass over each text per listed term, linear in the report for the fixed list
 export const namesInText = (resolved: Pick<ResolvedModels, 'registry'>, text: string): PostedTextHit[] => {
-  const { ordered, matcher } = buildMatcher(resolved)
-  const global = new RegExp(matcher.source, 'giu')
+  const { ordered } = buildMatcher(resolved)
+  const patterns = ordered.map(([term, source]) => ({ term, pattern: new RegExp(`${edge.before}(?:${source})${edge.after}`, 'iu') }))
   const hits = new Map<string, PostedTextHit>()
   const collect = (haystack: string): void => {
-    const termFor = new Map<string, string>()
-    for (const found of haystack.matchAll(global)) {
-      const key = found[0].toLowerCase()
-      let term = termFor.get(key)
-      if (term === undefined) {
-        term = termOf(ordered, haystack, found)
-        termFor.set(key, term)
-      }
-      if (!hits.has(term)) hits.set(term, { term, context: contextAround(haystack, found.index, found[0].length) })
+    const found: { index: number, hit: PostedTextHit }[] = []
+    for (const { term, pattern } of patterns) {
+      if (hits.has(term)) continue
+      const match = pattern.exec(haystack)
+      if (match !== null) found.push({ index: match.index, hit: { term, context: contextAround(haystack, match.index, match[0].length) } })
     }
+    // earliest start first; patterns are in longest-first order and the sort is stable, so a longer term wins a tie
+    found.sort((a, b) => a.index - b.index)
+    for (const { hit } of found) hits.set(hit.term, hit)
   }
   const normalized = normalizeForScan(text)
   collect(normalized)

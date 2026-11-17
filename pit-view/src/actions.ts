@@ -156,7 +156,7 @@ export const parsePost = (body: unknown): PostRequest => {
     typeof headSha !== 'string' || !/^[0-9a-f]{40}$/i.test(headSha) || (form !== 'approve' && form !== 'requestChanges' && form !== 'comment')) throw new ActionError('badRequest', postUsage)
   // present only on the post button's request, for a stored report: the full commit the report says it reviewed, which is the head only until the head moves
   if ('reviewedSha' in (body as object) && (typeof reviewedSha !== 'string' || !/^[0-9a-f]{40}$/i.test(reviewedSha))) throw new ActionError('badRequest', postUsage)
-  // present only on the second click of a refused post: a short list of terms and the 64-character hash of the report that was scanned, and nothing else
+  // present only on the second click of a refused post: the list of terms the refusal named, with no count cap of its own (the exact-set comparison against the scan is the guard, and the request body limit bounds the size), and the 64-character hash of the report that was scanned, and nothing else
   const override = 'allow' in (body as object) ? parseAllow(allow) : undefined
   return { repo, viewer, number, headSha: headSha.toLowerCase(), form, ...(typeof reviewedSha === 'string' ? { reviewedSha: reviewedSha.toLowerCase() } : {}), ...(override === undefined ? {} : { allow: override }) }
 }
@@ -164,7 +164,7 @@ export const parsePost = (body: unknown): PostRequest => {
 const parseAllow = (value: unknown): PostAllow => {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new ActionError('badRequest', postUsage)
   const { terms, reportHash, ...rest } = value as Record<string, unknown>
-  if (Object.keys(rest).length > 0 || !Array.isArray(terms) || terms.length > 500 || !terms.every((term) => typeof term === 'string' && term !== '' && term.length <= 300) ||
+  if (Object.keys(rest).length > 0 || !Array.isArray(terms) || !terms.every((term) => typeof term === 'string' && term !== '' && term.length <= 300) ||
     typeof reportHash !== 'string' || !/^[0-9a-f]{64}$/i.test(reportHash)) throw new ActionError('badRequest', postUsage)
   return { terms: terms as string[], reportHash: reportHash.toLowerCase() }
 }
@@ -176,10 +176,11 @@ const overrides = (allow: PostAllow | undefined, found: readonly string[], hash:
   return named.size === found.length && found.every((term) => named.has(term))
 }
 
-// the refusal over the scan: each term with the text around it (the first five, then a count), the way out, and the hit set and hash the page sends back on its second click
+// the refusal over the scan: every term the override will cover is named, the first three each with the text around it and the rest by name alone so the text stays bounded, then the way out; the hit set and hash the page sends back on its second click ride in the body, and the page sends only terms the words name
 const scanRefusal = (reportPath: string, hits: readonly PostedTextHit[], hash: string): ActionError => {
-  const shown = hits.slice(0, 5).map((hit) => `"${hit.term}" (${hit.context})`)
-  if (hits.length > shown.length) shown.push(`${hits.length - shown.length} more`)
+  const withContext = hits.slice(0, 3).map((hit) => `"${hit.term}" (${hit.context})`)
+  const rest = hits.slice(3).map((hit) => `"${hit.term}"`)
+  const shown = [...withContext, ...(rest.length === 0 ? [] : [`also ${rest.join(', ')}`])]
   const named = shown.length <= 2 ? shown.join(' and ') : `${shown.slice(0, -1).join(', ')}, and ${shown[shown.length - 1]}`
   return new ActionError('notAllowed', `the saved report ${reportPath} contains ${named}, and a posted report normally never mentions the involvement of AI, a model, a runner, or a provider; nothing was posted. Post again to post it as it is, edit that text out of the report, or start a new review`, null, { hits, reportHash: hash })
 }

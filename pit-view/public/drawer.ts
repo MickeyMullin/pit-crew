@@ -94,9 +94,13 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   let confirm: Confirm | null = null
   // a start or stop request is on its way
   let busy = false
-  // the hit set and report hash the last refusal over the scan showed, which the next click on the same confirmation sends back; null when no refusal of that kind is showing, and forgotten when a confirmation opens or is canceled
-  let postAllow: PostAllow | null = null
-  const allowed = (): { allow?: PostAllow } => postAllow === null ? {} : { allow: postAllow }
+  // the hit set and report hash the last refusal over the scan showed, bound to the confirmation that was refused: only a click on that same confirmation (the same object, so never one opened later, even for the same PR) sends it back, and a refusal that is not over the scan, or a hit set the refusal's words do not all name, leaves nothing
+  let postAllow: { confirmation: Confirm, allow: PostAllow } | null = null
+  const allowed = (): { allow?: PostAllow } => postAllow !== null && postAllow.confirmation === confirm ? { allow: postAllow.allow } : {}
+  const keepAllow = (asked: Confirm, answer: { status: number, error: string | null, body?: unknown }): void => {
+    const allow = answer.status === 422 ? postAllowOf(answer.body, answer.error) : null
+    postAllow = allow === null ? null : { confirmation: asked, allow }
+  }
   let error = ''
   // the people used for the current confirmation; review requests refresh this list every time they are asked because Settings can change while the drawer is open
   let people: PersonChoice[] | null = null
@@ -453,7 +457,6 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   const askPost = (): void => {
     const offer = latest()?.postOffer
     if (offer == null) return
-    postAllow = null
     confirm = { type: 'post', runId: offer.runId, repo: offer.repo, viewer: offer.viewer, headSha: offer.headSha, form: offer.form }
     confirmFrom = 'post-it'
     error = ''
@@ -465,7 +468,6 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   const askStoredPost = (form: PostForm): void => {
     const offer = latest()?.storedOffer
     if (offer == null || !offer.forms.includes(form) || options.rowOf(number ?? 0) === undefined) return
-    postAllow = null
     confirm = { type: 'storedPost', runId: offer.runId, repo: offer.repo, viewer: offer.viewer, headSha: offer.headSha, reviewedSha: offer.reviewedSha, form, ci: offer.ci }
     confirmFrom = `stored:${form}`
     error = ''
@@ -484,7 +486,6 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   const cancelConfirm = (): void => {
     const back = confirmFrom
     confirm = null
-    postAllow = null
     confirmFrom = null
     error = ''
     render()
@@ -554,8 +555,12 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     error = ''
     paintConfirm()
     const answer = await sendRun(postRequest(asked.runId, { repo: asked.repo, viewer: asked.viewer, number: n, headSha: asked.headSha, form: asked.form, ...allowed() }, options.token))
-    busy = false
-    if (n !== number) return
+    // a confirmation that is no longer the one this request was sent from (the drawer was closed and reopened, or another confirmation opened) is not touched by its answer
+    if (confirm === asked) busy = false
+    if (n !== number || confirm !== asked) {
+      if (answer.ok && n === number) void loadRuns()
+      return
+    }
     if (answer.ok) {
       confirm = null
       confirmFrom = null
@@ -568,7 +573,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       return
     }
     error = refusalText('post', answer.status, answer.error)
-    postAllow = answer.status === 422 ? postAllowOf(answer.body) : null
+    keepAllow(asked, answer)
     paintConfirm()
     byKey('confirm-go')?.focus({ preventScroll: true })
   }
@@ -581,8 +586,12 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     error = ''
     paintConfirm()
     const answer = await sendRun(postRequest(asked.runId, { repo: asked.repo, viewer: asked.viewer, number: n, headSha: asked.headSha, reviewedSha: asked.reviewedSha, form: asked.form, ...allowed() }, options.token))
-    busy = false
-    if (n !== number) return
+    // a confirmation that is no longer the one this request was sent from (the drawer was closed and reopened, or another confirmation opened) is not touched by its answer
+    if (confirm === asked) busy = false
+    if (n !== number || confirm !== asked) {
+      if (answer.ok && n === number) void loadRuns()
+      return
+    }
     if (answer.ok) {
       confirm = null
       confirmFrom = null
@@ -595,7 +604,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       return
     }
     error = refusalText('post', answer.status, answer.error)
-    postAllow = answer.status === 422 ? postAllowOf(answer.body) : null
+    keepAllow(asked, answer)
     paintConfirm()
     byKey('confirm-go')?.focus({ preventScroll: true })
   }

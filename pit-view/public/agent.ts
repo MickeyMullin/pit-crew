@@ -210,13 +210,13 @@ export const rereadRequest = (runId: number, ask: RereadAsk, token: string): Run
 export type PostAllow = { terms: string[], reportHash: string }
 export type PostAsk = { repo: string, viewer: string, number: number, headSha: string, form: PostForm, reviewedSha?: string, allow?: PostAllow }
 
-// what a refused post's body offers for the next click: its hit set and the report's hash, read from the refusal as the server sent it, or null when the refusal is not one over the scan or its fields are not the shape the server sends. The page never builds an override from anything else
-export const postAllowOf = (body: unknown): PostAllow | null => {
-  if (typeof body !== 'object' || body === null) return null
+// what a refused post's body offers for the next click: its hit set and the report's hash, read from the refusal as the server sent it, or null when the refusal is not one over the scan, its fields are not the shape the server sends, or the refusal's words (the message the owner was shown) do not name every term of the hit set. The page never builds an override from anything else, and never covers a term the owner was not shown
+export const postAllowOf = (body: unknown, shown: string | null): PostAllow | null => {
+  if (typeof body !== 'object' || body === null || shown === null) return null
   const { hits, reportHash } = body as { hits?: unknown, reportHash?: unknown }
   if (!Array.isArray(hits) || hits.length === 0 || typeof reportHash !== 'string' || !/^[0-9a-f]{64}$/i.test(reportHash)) return null
   const terms = hits.map((hit) => (typeof hit === 'object' && hit !== null ? (hit as { term?: unknown }).term : undefined))
-  if (!terms.every((term): term is string => typeof term === 'string' && term !== '')) return null
+  if (!terms.every((term): term is string => typeof term === 'string' && term !== '' && shown.includes(`"${term}"`))) return null
   return { terms, reportHash }
 }
 

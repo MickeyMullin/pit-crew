@@ -88,10 +88,12 @@ type Page = {
   posts: () => Sent[]
   // every POST the page has sent
   writes: () => Sent[]
+  drawer: ReturnType<typeof createDrawer>
+  document: ReturnType<typeof installFakeBrowser>['document']
 }
 
 // the real drawer on the fake page with the PR's runs read; fetch records what the page sends and answers the post and the start as the test says
-const withPage = async (agent: AgentCell, runs: RunView[], check: (page: Page) => Promise<void>, replies: { post?: Response | (() => Response), start?: Response } = {}): Promise<void> => {
+const withPage = async (agent: AgentCell, runs: RunView[], check: (page: Page) => Promise<void>, replies: { post?: Response | (() => Response | Promise<Response>), start?: Response } = {}): Promise<void> => {
   const sent: Sent[] = []
   const said: string[] = []
   const fake = installFakeBrowser((async (input: string, init?: RequestInit) => {
@@ -136,6 +138,8 @@ const withPage = async (agent: AgentCell, runs: RunView[], check: (page: Page) =
       error: () => root.querySelector('#drawer-error')?.textContent ?? '',
       posts: () => sent.filter((request) => request.method === 'POST' && request.url.endsWith('/post')),
       writes: () => sent.filter((request) => request.method === 'POST'),
+      drawer,
+      document: fake.document,
     })
   } finally {
     fake.restore()
@@ -312,7 +316,7 @@ test('a refused post stays in the confirmation with the server\'s words, posts n
 })
 
 const hitRefusal = (hits: { term: string, context: string }[], hash = 'a'.repeat(64)): Response => answer(422, {
-  error: `the saved report ~/agents/output/PR-101.md contains "${hits[0]?.term}" (${hits[0]?.context}), and a posted report normally never mentions the involvement of AI, a model, a runner, or a provider; nothing was posted. Post again to post it as it is, edit that text out of the report, or start a new review`,
+  error: `the saved report ~/agents/output/PR-101.md contains ${hits.map((hit) => `"${hit.term}" (${hit.context})`).join(', ')}, and a posted report normally never mentions the involvement of AI, a model, a runner, or a provider; nothing was posted. Post again to post it as it is, edit that text out of the report, or start a new review`,
   hits,
   reportHash: hash,
 })
@@ -338,10 +342,10 @@ test('a post refused over the scan shows the term and its context, and the next 
   }, { post: () => replies.shift() ?? answer(200, { number: 101, runId: 7, posted: { form: 'approve', url: 'https://example.test/owner/name/pull/101' }, run: null }) })
 })
 
-test('the override is the second click on the same refusal only: Cancel forgets it, a refusal that is not a scan refusal clears it, and a new refusal replaces it', async () => {
+test('the override is the second click on the same refusal only: a refusal that is not a scan refusal clears it, and a new refusal replaces it', async () => {
   const first = [{ term: 'assistant', context: 'the assistant agreed' }]
   const changed = [{ term: 'assistant', context: 'the assistant agreed' }, { term: 'claude', context: 'and Claude too' }]
-  const queue = [hitRefusal(first, 'b'.repeat(64)), hitRefusal(changed, 'c'.repeat(64)), answer(422, { error: 'the saved report ~/agents/output/PR-101.md has changed since run 7 finished' }), hitRefusal(first, 'b'.repeat(64))]
+  const queue = [hitRefusal(first, 'b'.repeat(64)), hitRefusal(changed, 'c'.repeat(64)), answer(422, { error: 'the saved report ~/agents/output/PR-101.md has changed since run 7 finished' })]
   await withPage(cellOf(offerOf()), [runOf()], async (page) => {
     press(page.button('Approve'))
     press(page.button('Post'))
@@ -355,16 +359,83 @@ test('the override is the second click on the same refusal only: Cancel forgets 
     await settle()
     assert.deepEqual(page.posts()[2]?.body?.allow, { terms: ['assistant', 'claude'], reportHash: 'c'.repeat(64) })
     assert.match(page.error(), /has changed since run 7/)
-    // a refusal with no hit set leaves nothing to send, and Cancel forgets what was shown
+    // a refusal with no hit set leaves nothing to send
     press(page.button('Post'))
     await settle()
     assert.equal(page.posts()[3]?.body?.allow, undefined)
-    press(page.button('Cancel'))
+  }, { post: () => queue.shift() ?? answer(422, { error: 'no' }) })
+})
+
+test('Cancel forgets the override: nothing can send it after Cancel, and the next confirmation of the same PR starts without it', async () => {
+  const queue = [hitRefusal([{ term: 'assistant', context: 'the assistant agreed' }], 'b'.repeat(64))]
+  await withPage(cellOf(offerOf()), [runOf()], async (page) => {
     press(page.button('Approve'))
     press(page.button('Post'))
     await settle()
-    assert.equal(page.posts()[4]?.body?.allow, undefined)
+    press(page.button('Cancel'))
+    // with the confirmation gone there is no Post button left to carry the override, and nothing was sent by Cancel
+    assert.equal(page.root.querySelectorAll('button').filter((element) => element.textContent === 'Post').length, 0)
+    assert.equal(page.posts().length, 1)
+    press(page.button('Approve'))
+    press(page.button('Post'))
+    await settle()
+    assert.equal(page.posts().length, 2)
+    assert.equal(page.posts()[1]?.body?.allow, undefined)
   }, { post: () => queue.shift() ?? answer(422, { error: 'no' }) })
+})
+
+test('a refusal whose words do not name every term of its hit set sends no override, so the owner never authorizes a term the refusal did not show', async () => {
+  const hits = [{ term: 'assistant', context: 'the assistant agreed' }, { term: 'claude', context: 'and Claude too' }]
+  const refusal = answer(422, { error: 'the saved report ~/agents/output/PR-101.md contains "assistant" (the assistant agreed), and a posted report normally never mentions the involvement of AI; nothing was posted. Post again to post it as it is', hits, reportHash: 'b'.repeat(64) })
+  await withPage(cellOf(offerOf()), [runOf()], async (page) => {
+    press(page.button('Approve'))
+    press(page.button('Post'))
+    await settle()
+    press(page.button('Post'))
+    await settle()
+    assert.equal(page.posts()[1]?.body?.allow, undefined)
+  }, { post: () => refusal.clone() })
+})
+
+// a request still pending when the drawer closes: its answer arrives after the same PR's drawer was opened again and a new confirmation was asked
+const staleAnswer = async (open: (page: Page) => void, go: (page: Page) => void, again: (page: Page) => void, cell: AgentCell): Promise<void> => {
+  let release: (response: Response) => void = () => undefined
+  const pending = new Promise<Response>((resolve) => { release = resolve })
+  const queue: (Response | Promise<Response>)[] = [pending]
+  await withPage(cell, [runOf()], async (page) => {
+    open(page)
+    go(page)
+    await settle()
+    assert.equal(page.posts().length, 1)
+    // the opener the drawer returns focus to when it closes
+    const opener = page.document.createElement('button')
+    opener.setAttribute('data-focus-key', 'agent:101')
+    page.document.body.appendChild(opener)
+    page.drawer.close()
+    page.drawer.open(101, { key: 'agent:101', number: 101 }, 'default')
+    await settle()
+    await settle()
+    open(page)
+    release(hitRefusal([{ term: 'assistant', context: 'the assistant agreed' }], 'b'.repeat(64)))
+    await settle()
+    // the old answer neither shows its words in the new confirmation nor installs its override there
+    assert.equal(page.error(), '')
+    again(page)
+    await settle()
+    assert.equal(page.posts().length, 2)
+    assert.equal(page.posts()[1]?.body?.allow, undefined)
+  }, { post: () => queue.shift() ?? answer(422, { error: 'no' }) })
+}
+
+test('a refusal that answers a closed confirmation does not install its override into a new confirmation of the same PR, through Post', async () => {
+  await staleAnswer((page) => press(page.button('Approve')), (page) => press(page.button('Post')), (page) => press(page.button('Post')), cellOf(offerOf()))
+})
+
+test('a refusal that answers a closed confirmation does not install its override into a new confirmation of the same PR, through Post it', async () => {
+  const postOffer = { runId: 7, form: 'approve', report: 'PR-101.md', reportPath: '~/agents/output/PR-101.md', headSha: head, repo, viewer: 'viewer', command: `gh pr review 101 --repo ${repo} --approve --body-file ~/agents/output/PR-101.md` }
+  const blocked = { ...cellOf(null), postOffer } as unknown as AgentCell
+  const go = (page: Page): void => press(page.root.querySelector('[data-focus-key="confirm-go"]') as FakeElement)
+  await staleAnswer((page) => press(page.button('Post it')), go, go, blocked)
 })
 
 test('Post it, the blocked run\'s button, takes the same second click: the refusal\'s hit set and hash go back, and a first click sends none', async () => {
