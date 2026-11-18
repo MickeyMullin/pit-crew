@@ -11,7 +11,6 @@ import type { ActionConfirmModel, ActionKind, PersonChoice } from './actionsview
 import { postAllowOf, postRequest, refusalText, rereadRequest, startRequest, stopRequest } from './agent.ts'
 import type { AgentCell, PostForm, RunView, StartKind } from './agent.ts'
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
-import { copyReportButton } from './copyreport.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import {
@@ -914,12 +913,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
             h('code', { class: 'mono drawer-commit-sha' }, commit.sha), ' ', h('span', {}, commit.subject))))),
         parts.length === 0 ? null : h('dl', { class: 'drawer-facts' }, parts),
         fix?.worktree == null ? null : h('p', { class: 'drawer-notice' }, fix.worktree),
-        fix?.report == null ? null : h('div', { class: 'drawer-report-actions' },
-          reportButton(fix.report.name, fix.report.openName, 'Open report'),
-          copyReportButton(fix.report.name, `copy-result-report:${fix.report.name}`, options.say)),
-        result.report === null ? null : h('div', { class: 'drawer-report-actions' },
-          reportButton(result.report.name, result.report.openName, 'Open report'),
-          copyReportButton(result.report.name, `copy-result-report:${result.report.name}`, options.say)),
+        fix?.report == null ? null : reportButton(fix.report.name, fix.report.openName, 'Open report'),
+        result.report === null ? null : reportButton(result.report.name, result.report.openName, 'Open report'),
         postBlock(model),
         resumeBlock(result.resume, result.copyName, n),
         rereadBlock(model))
@@ -1029,8 +1024,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
               row.fix ? tag('Fix', 'gray') : null,
               row.verdict === null ? null : tag(row.verdict.text, row.verdict.tone),
               row.tandem ? tag('Tandem', 'blue') : null,
-              open,
-              copyReportButton(row.name, `copy-report:${row.name}`, options.say, () => ({ modifiedAt: row.modifiedAt }))),
+              open),
             h('span', { class: 'drawer-item-meta' },
               ageSpan(row.modifiedAt, '', options.nowMs()), row.sha === null ? '' : ` · at ${row.sha}`))
         }))),

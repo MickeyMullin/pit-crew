@@ -922,17 +922,16 @@ button {
 
 .button-small {
   --small-height: 28px;
-  --small-pad: 10px;
-  --open-label: 11ch;
   height: var(--small-height);
-  padding: 0 var(--small-pad);
+  padding: 0 10px;
   font-size: 12px;
 }
 
-/* Copy report: a .button-small whose min-height and min-width are derived from the values Open uses (--small-height, --small-pad, and --open-label, the width allowed for the longest Open label, "Open report"), so it is never smaller than the Open control beside it; its glyph in the theme's ink (stroke is currentColor); the page-wide :focus-visible ring applies, and is spelled out here so no later reset removes it */
+/* Copy report: a .button-small made square, its width and height both Open's height (--small-height), so it is never smaller than the Open control; its glyph in the theme's ink (stroke is currentColor); the page-wide :focus-visible ring applies, and is spelled out here so no later reset removes it */
 .copy-report {
-  min-width: calc(var(--open-label) + 2 * var(--small-pad));
-  min-height: var(--small-height);
+  width: var(--small-height);
+  height: var(--small-height);
+  padding: 0;
   color: var(--ink);
 }
 
@@ -2079,13 +2078,6 @@ button.agent:hover {
   align-self: flex-start;
 }
 
-.drawer-report-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  align-self: flex-start;
-}
-
 .drawer-list {
   display: flex;
   flex-direction: column;
@@ -2121,10 +2113,6 @@ button.agent:hover {
 
 .drawer-item-main .button {
   margin-left: auto;
-}
-
-.drawer-item-main .copy-report {
-  margin-left: 0;
 }
 
 .drawer-item-meta {

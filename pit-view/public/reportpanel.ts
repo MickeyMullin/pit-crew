@@ -138,7 +138,7 @@ export const createReportPanel = (options: ReportPanelOptions): ReportPanel => {
     const wanted = load.state === 'ready' ? load.report.name : null
     if (wanted === copyFor) return
     copyFor = wanted
-    copySlot.replaceChildren(...(wanted === null ? [] : [copyReportButton(wanted, 'copy-panel-report', options.say, () => load.state === 'ready' ? { raw: load.report.raw } : null)]))
+    copySlot.replaceChildren(...(wanted === null ? [] : [copyReportButton(wanted, 'copy-panel-report', options.say, () => load.state === 'ready' ? load.report.raw : null)]))
   }
 
   const open = (wanted: string, back: string | null): void => {

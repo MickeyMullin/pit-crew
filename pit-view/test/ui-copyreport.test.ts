@@ -1,5 +1,5 @@
 // test/ui-copyreport.test.ts
-// the Copy report button (section 8 of DESIGN.md, Agent drawer): on each row of Reports on disk, on the result card beside Open report, and in the report panel's bar, driven through the real public/drawer.ts and public/reportpanel.ts on the fake document in test/fake-dom.ts. The fixture report holds Markdown, tabs, a trailing newline, and non-ASCII characters, and every expected value is a literal written out here
+// the Copy report button (section 8 of DESIGN.md, Report panel): in the report panel's bar only, with none on the Agent drawer's rows of Reports on disk or its result card, driven through the real public/drawer.ts and public/reportpanel.ts on the fake document in test/fake-dom.ts. The fixture report holds Markdown, tabs, a trailing newline, and non-ASCII characters, and every expected value is a literal written out here
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -48,6 +48,15 @@ const listing = [
   { name: 'FIX-101.md', kind: 'fix', modifiedAt: '2026-10-28T14:30:00Z', sha: null, verdict: null, tandem: false },
 ]
 
+const fixCellOf = (): AgentCell => ({
+  ...cellOf(),
+  command: 'fix-pr',
+  result: {
+    kind: 'fix', requests: 1, triage: { needsJudgment: 0, noChange: 0, disagree: 0, outOfScope: 0, clear: 1 }, outcomes: { fixed: 1, notFixed: 0, awaitingAnswer: 0 },
+    pushed: null, notPushedReason: 'nothing to push', checks: [], worktree: null, report: '~/agents/output/FIX-101.md',
+  },
+} as unknown as AgentCell)
+
 const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
 
 type Clipboard = { written: string[], refuse: boolean }
@@ -83,31 +92,15 @@ const recordTimers = (): { timers: Timer[], restore: () => void } => {
   return { timers, restore: () => { globalThis.setTimeout = before; globalThis.clearTimeout = beforeClear } }
 }
 
-type Page = {
-  root: FakeElement
-  timers: Timer[]
-  sent: Sent[]
-  said: string[]
-  clipboard: Clipboard
-  copyButtons: () => FakeElement[]
-  opened: string[]
-}
-
-// a report's answer is whatever the test says; the listing and the runs are fixed
-const withDrawer = async (reportAnswer: () => Response, check: (page: Page) => Promise<void>): Promise<void> => {
+// the drawer, with the run's cell as the test says; every request is recorded
+const withDrawer = async (cell: () => AgentCell, check: (page: { root: FakeElement, sent: Sent[] }) => Promise<void>): Promise<void> => {
   const sent: Sent[] = []
-  const said: string[] = []
-  const opened: string[] = []
-  const clipboard: Clipboard = { written: [], refuse: false }
-  const recorded = recordTimers()
   const fake = installFakeBrowser((async (input: string, init?: RequestInit) => {
     sent.push({ url: String(input), method: init?.method ?? 'GET' })
     const url = String(input)
-    if (url.startsWith('/api/reports/')) return reportAnswer()
     if (url.endsWith('/reports')) return json(200, listing)
     return json(200, [])
   }) as typeof fetch)
-  const restoreClipboard = installClipboard(clipboard, fake.document as unknown as { execCommand?: (command: string) => boolean })
   try {
     const root = fake.document.createElement('aside')
     fake.document.body.appendChild(root)
@@ -115,155 +108,49 @@ const withDrawer = async (reportAnswer: () => Response, check: (page: Page) => P
       root: root as unknown as HTMLElement,
       token: 'token-1',
       nowMs: () => Date.parse('2026-10-28T15:00:00Z'),
-      rowOf: (number) => number === 101 ? rowOf() : undefined,
+      rowOf: (number) => number === 101 ? { ...rowOf(), agent: cell() } : undefined,
       repo: () => repo,
       viewer: () => 'viewer',
-      say: (text) => said.push(text),
-      reports: { open: (name) => { opened.push(name) }, close: () => undefined, isOpen: () => false, refresh: () => undefined },
+      say: () => undefined,
+      reports: { open: () => undefined, close: () => undefined, isOpen: () => false, refresh: () => undefined },
       sweepLink: () => null,
       openSweep: () => undefined,
     })
     drawer.open(101, { key: 'agent:101', number: 101 }, 'default')
     await settle()
     await settle()
-    sent.length = 0
-    await check({ root, timers: recorded.timers, sent, said, clipboard, opened, copyButtons: () => root.querySelectorAll('button').filter((button) => button.getAttribute('aria-label') === 'Copy report') })
+    await check({ root, sent })
   } finally {
-    recorded.restore()
-    restoreClipboard()
     fake.restore()
   }
 }
 
 const served = (): Response => json(200, { name: 'PR-101.md', modifiedAt: '2026-10-28T14:05:00Z', html: '<h1>x</h1>', raw })
 
-test('each row of Reports on disk and the result card carry a Copy report icon button with no text label', async () => {
-  await withDrawer(served, async (page) => {
-    const buttons = page.copyButtons()
-    // PR-101.md and FIX-101.md in the list, and the result card's report
-    assert.equal(buttons.length, 3)
-    for (const button of buttons) {
-      assert.equal(button.getAttribute('title'), 'Copy report')
-      assert.equal(button.textContent, '')
-      const icon = button.querySelector('svg')
-      assert.ok(icon !== null, 'an inline svg glyph')
-      assert.equal(icon.getAttribute('stroke'), 'currentColor')
-      assert.equal(icon.getAttribute('aria-hidden'), 'true')
-      assert.equal(icon.querySelectorAll('rect').length, 2, 'two overlapping squares')
-    }
-    // each row's Open button is still there, beside its Copy button
-    assert.equal(page.root.querySelectorAll('button').filter((button) => button.textContent === 'Open').length, 2)
-  })
-})
+const copyIn = (root: FakeElement): FakeElement[] => root.querySelectorAll('button').filter((button) => button.getAttribute('aria-label') === 'Copy report' || (button.getAttribute('data-focus-key') ?? '').startsWith('copy-'))
 
-test('a click copies the report\'s raw Markdown byte for byte, switches to a check mark for two seconds, and says "Report copied"', async () => {
-  await withDrawer(served, async (page) => {
-    const [first] = page.copyButtons()
-    assert.ok(first !== undefined)
-    press(first)
-    await settle()
-    await settle()
-    assert.deepEqual(page.clipboard.written, [raw])
-    assert.ok(page.clipboard.written[0]?.endsWith('\n'))
-    assert.ok(page.clipboard.written[0]?.includes('\tindented with a tab'))
-    assert.deepEqual(page.said, ['Report copied'])
-    // the one read it made is the one Open makes, and a GET
-    assert.deepEqual(page.sent, [{ url: '/api/reports/PR-101.md', method: 'GET' }])
-    assert.equal(first.getAttribute('data-copied'), 'true')
-    assert.equal(first.querySelectorAll('path').length >= 1 && first.querySelectorAll('rect').length === 0, true, 'a check mark replaces the squares')
-    assert.equal(first.getAttribute('aria-label'), 'Copy report')
-  })
-})
-
-test('the check mark returns to the two squares after about two seconds', async () => {
-  await withDrawer(served, async (page) => {
-    const [first] = page.copyButtons()
-    assert.ok(first !== undefined)
-    press(first)
-    await settle()
-    await settle()
-    const revert = page.timers.find((timer) => timer.ms === 2_000)
-    assert.ok(revert !== undefined, 'a 2000 ms timer')
-    revert.run()
-    assert.equal(first.getAttribute('data-copied'), null)
-    assert.equal(first.querySelectorAll('rect').length, 2)
-  })
-})
-
-test('a refused clipboard falls back to the helper\'s selected textarea; when that fails too nothing is claimed and the refusal is announced', async () => {
-  await withDrawer(served, async (page) => {
-    const [first] = page.copyButtons()
-    assert.ok(first !== undefined)
-    // the clipboard refuses, the copy command works: the textarea held the exact text
-    page.clipboard.refuse = true
-    let held = ''
-    const document = globalThis.document as unknown as { execCommand: (command: string) => boolean, body: FakeElement }
-    document.execCommand = () => {
-      held = document.body.querySelectorAll('textarea')[0]?.value ?? ''
-      return true
-    }
-    press(first)
-    await settle()
-    await settle()
-    assert.equal(held, raw)
-    assert.deepEqual(page.said, ['Report copied'])
-    page.timers.find((timer) => timer.ms === 2_000)?.run()
-    // both refused
-    document.execCommand = () => false
-    page.said.length = 0
-    press(first)
-    await settle()
-    await settle()
-    assert.equal(page.said.length, 1)
-    assert.match(page.said[0] ?? '', /^Could not copy PR-101\.md/)
-    assert.equal(first.getAttribute('data-copied'), null)
-  })
-})
-
-test('a report that cannot be read copies nothing and says why', async () => {
-  for (const [status, message, expected] of [
-    [404, 'no report named PR-101.md', 'PR-101.md is no longer in the reports folder.'],
-    [413, 'PR-101.md is larger than 512 KB', 'PR-101.md is too large to show here.'],
-    [400, 'a report is named like PR-101.md or FIX-101.md', 'Could not open PR-101.md: a report is named like PR-101.md or FIX-101.md'],
-  ] as const) {
-    await withDrawer(() => json(status, { error: message }), async (page) => {
-      const [first] = page.copyButtons()
-      assert.ok(first !== undefined)
-      press(first)
-      await settle()
-      await settle()
-      assert.deepEqual(page.clipboard.written, [])
-      assert.deepEqual(page.said, [`Could not copy: ${expected}`])
-      assert.equal(first.getAttribute('data-copied'), null)
+test('the Agent drawer carries no Copy report button: not on any row of Reports on disk, not on the result card, and not on a fix session\'s result', async () => {
+  for (const cell of [cellOf, fixCellOf]) {
+    await withDrawer(cell, async (page) => {
+      // Open stays: one on each of the two listed reports, and Open report on the result card
+      assert.equal(page.root.querySelectorAll('button').filter((button) => button.textContent === 'Open').length, 2)
+      assert.equal(page.root.querySelectorAll('button').filter((button) => button.textContent === 'Open report').length, 1)
+      assert.deepEqual(copyIn(page.root).map((button) => button.getAttribute('data-focus-key')), [])
+      assert.equal(page.root.querySelectorAll('svg').filter((icon) => icon.querySelectorAll('rect').length === 2).length, 0, 'no two-square glyph anywhere in the drawer')
     })
   }
-  // Pit View did not answer
-  await withDrawer(() => { throw new Error('offline') }, async (page) => {
-    const [first] = page.copyButtons()
-    assert.ok(first !== undefined)
-    press(first)
-    await settle()
-    await settle()
-    assert.deepEqual(page.clipboard.written, [])
-    assert.deepEqual(page.said, ['Could not copy: Could not open PR-101.md: Pit View did not answer.'])
+})
+
+test('on the result card Open report stands alone, as before: no row of actions around it', async () => {
+  await withDrawer(cellOf, async (page) => {
+    const open = page.root.querySelectorAll('button').find((button) => button.textContent === 'Open report')
+    assert.ok(open !== undefined)
+    assert.doesNotMatch((open.parentNode as FakeElement).getAttribute('class') ?? '', /drawer-report-actions/)
   })
 })
 
-test('copying makes no write and no GitHub call, and does not open the report panel', async () => {
-  await withDrawer(served, async (page) => {
-    for (const button of page.copyButtons()) {
-      press(button)
-      await settle()
-      await settle()
-    }
-    assert.ok(page.sent.length > 0)
-    assert.ok(page.sent.every((request) => request.method === 'GET' && request.url.startsWith('/api/reports/')), JSON.stringify(page.sent))
-    assert.deepEqual(page.opened, [])
-  })
-})
-
-// the panel: its own button, which reads the report the same way
-const withPanel = async (answer: () => Response, check: (page: { buttons: () => FakeElement[], open: () => Promise<void>, said: string[], clipboard: Clipboard, sent: Sent[] }) => Promise<void>): Promise<void> => {
+// the report panel: the one place the button lives; it reads the report through the route Open uses
+const withPanel = async (answer: () => Response, check: (page: { buttons: () => FakeElement[], open: () => Promise<void>, said: string[], clipboard: Clipboard, sent: Sent[], timers: Timer[] }) => Promise<void>): Promise<void> => {
   const said: string[] = []
   const clipboard: Clipboard = { written: [], refuse: false }
   const sent: Sent[] = []
@@ -288,7 +175,7 @@ const withPanel = async (answer: () => Response, check: (page: { buttons: () => 
     await check({
       buttons,
       open: async () => { panel.open('PR-101.md', null); await settle(); await settle() },
-      said, clipboard, sent,
+      said, clipboard, sent, timers: recorded.timers,
     })
   } finally {
     recorded.restore()
@@ -301,62 +188,116 @@ const withPanel = async (answer: () => Response, check: (page: { buttons: () => 
   }
 }
 
-test('the report panel carries a Copy report button once the report has loaded, and it copies the same bytes', async () => {
+test('the report panel carries a Copy report icon button once the report has loaded, with no text label, and it copies the same bytes', async () => {
   await withPanel(served, async (page) => {
-    page.buttons()
     assert.equal(page.buttons().length, 0, 'nothing to copy before it opens')
     await page.open()
     assert.equal(page.buttons().length, 1)
+    const button = page.buttons()[0] as FakeElement
+    assert.equal(button.getAttribute('title'), 'Copy report')
+    assert.equal(button.textContent, '')
+    assert.equal(button.getAttribute('data-focus-key'), 'copy-panel-report')
+    const icon = button.querySelector('svg')
+    assert.ok(icon !== null, 'an inline svg glyph')
+    assert.equal(icon.getAttribute('stroke'), 'currentColor')
+    assert.equal(icon.getAttribute('aria-hidden'), 'true')
+    assert.equal(icon.querySelectorAll('rect').length, 2, 'two overlapping squares')
     page.sent.length = 0
+    press(button)
+    await settle()
+    await settle()
+    // Markdown, a tab, a trailing newline, and non-ASCII characters, byte for byte
+    assert.deepEqual(page.clipboard.written, [raw])
+    assert.ok(page.clipboard.written[0]?.endsWith('\n'))
+    assert.ok(page.clipboard.written[0]?.includes('\tindented with a tab'))
+    assert.deepEqual(page.said, ['Report copied'])
+    // the one read it made is the one Open makes, and a GET: no write, no GitHub call
+    assert.deepEqual(page.sent, [{ url: '/api/reports/PR-101.md', method: 'GET' }])
+    assert.equal(button.getAttribute('data-copied'), 'true')
+    assert.equal(button.querySelectorAll('path').length >= 1 && button.querySelectorAll('rect').length === 0, true, 'a check mark replaces the squares')
+    assert.equal(button.getAttribute('aria-label'), 'Copy report')
+  })
+})
+
+test('the check mark returns to the two squares after about two seconds', async () => {
+  await withPanel(served, async (page) => {
+    await page.open()
+    const button = page.buttons()[0] as FakeElement
+    press(button)
+    await settle()
+    await settle()
+    const revert = page.timers.find((timer) => timer.ms === 2_000)
+    assert.ok(revert !== undefined, 'a 2000 ms timer')
+    revert.run()
+    assert.equal(button.getAttribute('data-copied'), null)
+    assert.equal(button.querySelectorAll('rect').length, 2)
+  })
+})
+
+test('a refused clipboard falls back to the helper\'s selected textarea; when that fails too nothing is claimed and the refusal is announced', async () => {
+  await withPanel(served, async (page) => {
+    await page.open()
+    const button = page.buttons()[0] as FakeElement
+    // the clipboard refuses, the copy command works: the textarea held the exact text
+    page.clipboard.refuse = true
+    let held = ''
+    const document = globalThis.document as unknown as { execCommand: (command: string) => boolean, body: FakeElement }
+    document.execCommand = () => {
+      held = document.body.querySelectorAll('textarea')[0]?.value ?? ''
+      return true
+    }
+    press(button)
+    await settle()
+    await settle()
+    assert.equal(held, raw)
+    assert.deepEqual(page.said, ['Report copied'])
+    page.timers.find((timer) => timer.ms === 2_000)?.run()
+    // both refused
+    document.execCommand = () => false
+    page.said.length = 0
+    press(button)
+    await settle()
+    await settle()
+    assert.equal(page.said.length, 1)
+    assert.match(page.said[0] ?? '', /^Could not copy PR-101\.md/)
+    assert.equal(button.getAttribute('data-copied'), null)
+  })
+})
+
+test('a report that cannot be read when the button is clicked copies nothing and says why', async () => {
+  for (const [status, message, expected] of [
+    [404, 'no report named PR-101.md', 'PR-101.md is no longer in the reports folder.'],
+    [413, 'PR-101.md is larger than 512 KB', 'PR-101.md is too large to show here.'],
+    [400, 'a report is named like PR-101.md or FIX-101.md', 'Could not open PR-101.md: a report is named like PR-101.md or FIX-101.md'],
+  ] as const) {
+    let answer = served
+    await withPanel(() => answer(), async (page) => {
+      await page.open()
+      answer = () => json(status, { error: message })
+      press(page.buttons()[0] as FakeElement)
+      await settle()
+      await settle()
+      assert.deepEqual(page.clipboard.written, [])
+      assert.deepEqual(page.said, [`Could not copy: ${expected}`])
+      assert.equal(page.buttons()[0]?.getAttribute('data-copied'), null)
+    })
+  }
+  // Pit View did not answer
+  let answer = served
+  await withPanel(() => answer(), async (page) => {
+    await page.open()
+    answer = () => { throw new Error('offline') }
     press(page.buttons()[0] as FakeElement)
     await settle()
     await settle()
-    assert.deepEqual(page.clipboard.written, [raw])
-    assert.deepEqual(page.said, ['Report copied'])
-    assert.deepEqual(page.sent, [{ url: '/api/reports/PR-101.md', method: 'GET' }])
+    assert.deepEqual(page.clipboard.written, [])
+    assert.deepEqual(page.said, ['Could not copy: Could not open PR-101.md: Pit View did not answer.'])
   })
 })
 
-// AC-5: a report that changed since it was shown is not copied. Reports on disk knows each row's modifiedAt, and the panel holds the text it loaded; the result card holds only a name, so it copies the file as it is at the click
+// a report that changed since it was shown is not copied: the panel holds the text it loaded and compares the fresh read's raw with it
 const changedReason = 'Could not copy PR-101.md: it changed since it was shown. Open it again to see the current text.'
 const rewritten = (): Response => json(200, { name: 'PR-101.md', modifiedAt: '2026-10-28T14:06:00Z', html: '<h1>y</h1>', raw: `${raw}one more line\n` })
-
-test('a row of Reports on disk whose report changed since the list was drawn copies nothing and says it changed', async () => {
-  await withDrawer(rewritten, async (page) => {
-    const row = page.copyButtons().find((button) => button.getAttribute('data-focus-key') === 'copy-report:PR-101.md')
-    assert.ok(row !== undefined)
-    press(row)
-    await settle()
-    await settle()
-    assert.deepEqual(page.clipboard.written, [])
-    assert.deepEqual(page.said, [changedReason])
-    assert.equal(row.getAttribute('data-copied'), null)
-    assert.equal(page.timers.length, 0)
-  })
-})
-
-test('a row whose report is unchanged since the list was drawn still copies', async () => {
-  await withDrawer(served, async (page) => {
-    const row = page.copyButtons().find((button) => button.getAttribute('data-focus-key') === 'copy-report:PR-101.md')
-    assert.ok(row !== undefined)
-    press(row)
-    await settle()
-    await settle()
-    assert.deepEqual(page.clipboard.written, [raw])
-  })
-})
-
-test('the result card has no identity of its report, so it copies the file as it is at the click', async () => {
-  await withDrawer(rewritten, async (page) => {
-    const card = page.copyButtons().find((button) => (button.getAttribute('data-focus-key') ?? '').startsWith('copy-result-report:'))
-    assert.ok(card !== undefined)
-    press(card)
-    await settle()
-    await settle()
-    assert.deepEqual(page.clipboard.written, [`${raw}one more line\n`])
-    assert.deepEqual(page.said, ['Report copied'])
-  })
-})
 
 test('the report panel copies nothing when the report on disk differs from the text it loaded, and says it changed', async () => {
   let now = served
@@ -369,17 +310,18 @@ test('the report panel copies nothing when the report on disk differs from the t
     assert.deepEqual(page.clipboard.written, [])
     assert.deepEqual(page.said, [changedReason])
     assert.equal(page.buttons()[0]?.getAttribute('data-copied'), null)
+    assert.equal(page.timers.length, 0)
   })
 })
 
 test('two successful copies in a row leave one live revert timer, and the second check mark keeps its own two seconds', async () => {
-  await withDrawer(served, async (page) => {
-    const row = page.copyButtons().find((button) => button.getAttribute('data-focus-key') === 'copy-report:PR-101.md')
-    assert.ok(row !== undefined)
-    press(row)
+  await withPanel(served, async (page) => {
+    await page.open()
+    const button = page.buttons()[0] as FakeElement
+    press(button)
     await settle()
     await settle()
-    press(row)
+    press(button)
     await settle()
     await settle()
     const live = page.timers.filter((timer) => !timer.cleared)
@@ -387,47 +329,40 @@ test('two successful copies in a row leave one live revert timer, and the second
     assert.equal(live.length, 1, 'the first click\'s timer was cleared')
     // the first timer firing late (were it live) must not end the second check mark
     page.timers[0]?.run()
-    assert.equal(row.getAttribute('data-copied'), 'true')
-    assert.equal(row.querySelectorAll('rect').length, 0)
+    assert.equal(button.getAttribute('data-copied'), 'true')
+    assert.equal(button.querySelectorAll('rect').length, 0)
     live[0]?.run()
-    assert.equal(row.getAttribute('data-copied'), null)
-    assert.equal(row.querySelectorAll('rect').length, 2)
+    assert.equal(button.getAttribute('data-copied'), null)
+    assert.equal(button.querySelectorAll('rect').length, 2)
   })
 })
 
-test('the stylesheet gives the button the theme\'s color and a focus ring, and ties its hit area to the Open buttons\' own values', async () => {
+// the button's size is the stylesheet's: equal width and height, never smaller than Open's height
+const sizeOf = (rule: string, property: 'width' | 'height', small: string): number | null => {
+  const value = new RegExp(`(?:^|[;\\s])${property}:\\s*([^;]+);`).exec(rule)?.[1]?.trim()
+  if (value === undefined) return null
+  if (value === 'var(--small-height)') return Number(/--small-height:\s*(\d+)px/.exec(small)?.[1])
+  const px = /^(\d+)px$/.exec(value)?.[1]
+  return px === undefined ? null : Number(px)
+}
+
+test('the stylesheet makes the button square, never smaller than Open, in the theme\'s color with a focus ring', async () => {
   const css = await readFile(join(import.meta.dirname, '..', 'public', 'styles.css'), 'utf8')
   const rule = /\.copy-report\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
   assert.match(rule, /color:\s*var\(--ink\)|color:\s*inherit/)
   assert.match(css, /\.copy-report:focus-visible\s*\{[^}]*outline/)
   assert.ok(!/\.copy-report[^{]*\{[^}]*#[0-9a-f]{3,6}/i.test(css), 'no hard-coded color')
-  // Open (the row's and the result card's) is a .button-small; its height, padding, and widest label are custom properties the Copy rule reads, so the two cannot drift apart
+  // Open (the row's and the result card's) is a .button-small, 28px high
   const small = /\.button-small\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
   assert.match(small, /height:\s*var\(--small-height\)/)
-  assert.match(small, /padding:\s*0\s+var\(--small-pad\)/)
-  assert.match(small, /--small-height:\s*28px/)
-  assert.match(small, /--small-pad:\s*10px/)
-  const label = /--open-label:\s*(\d+)ch/.exec(small)?.[1]
-  assert.ok(label !== undefined && Number(label) >= 'Open report'.length, 'the Open label allowance covers the longest Open label')
-  assert.match(rule, /min-width:\s*calc\(\s*var\(--open-label\)\s*\+\s*2\s*\*\s*var\(--small-pad\)\s*\)/)
-  assert.match(rule, /min-height:\s*var\(--small-height\)/)
-  assert.ok(!/\.copy-report\s*\{[^}]*(?:min-width|min-height):\s*\d/.test(css), 'no fixed number in the Copy rule')
-})
-
-test('on the result card Copy sits in one row with Open report, not in the column beside it', async () => {
-  await withDrawer(served, async (page) => {
-    const open = page.root.querySelectorAll('button').find((button) => button.textContent === 'Open report')
-    const card = page.copyButtons().find((button) => (button.getAttribute('data-focus-key') ?? '').startsWith('copy-result-report:'))
-    assert.ok(open !== undefined && card !== undefined)
-    const row = open.parentNode as FakeElement
-    assert.ok(card.parentNode === row, 'the two share one parent')
-    assert.match(row.getAttribute('class') ?? '', /\bdrawer-report-actions\b/)
-    assert.doesNotMatch(row.getAttribute('class') ?? '', /\bdrawer-result\b/)
-    assert.deepEqual(row.children.map((child) => child.textContent === 'Open report' ? 'open' : 'copy'), ['open', 'copy'])
-    const css = await readFile(join(import.meta.dirname, '..', 'public', 'styles.css'), 'utf8')
-    const actions = /\.drawer-report-actions\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
-    assert.match(actions, /display:\s*flex/)
-    assert.match(actions, /gap:/)
-    assert.match(actions, /align-self:\s*flex-start/)
-  })
+  const openHeight = sizeOf(small, 'height', small)
+  assert.equal(openHeight, 28)
+  const width = sizeOf(rule, 'width', small)
+  const height = sizeOf(rule, 'height', small)
+  assert.ok(width !== null && height !== null, 'the rule sets both a width and a height')
+  assert.equal(width, height, 'square')
+  assert.ok(height >= openHeight, 'never smaller than Open\'s height')
+  // the square needs no side padding of its own, and nothing is computed from Open's label any more
+  assert.match(rule, /padding:\s*0\s*;/)
+  assert.ok(!/min-width/.test(rule) && !/--open-label/.test(css), 'no min-width and no widest-label allowance')
 })
