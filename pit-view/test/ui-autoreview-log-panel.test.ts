@@ -183,7 +183,8 @@ test('Escape, the close button, and Close each shut the log and put focus back o
       assert.equal(panel.isOpen(), true)
       shut()
       assert.equal(root.hidden, true)
-      assert.equal(document.activeElement, header)
+      // by id, not the element itself: a failing comparison of two fake elements would make assert print their whole cyclic tree
+      assert.equal(document.activeElement?.id, header.getAttribute('id'))
     }
     // another key does nothing
     panel.open()
