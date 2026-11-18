@@ -162,6 +162,26 @@ test('outside hours and off: the closed window is one line until a tick runs, an
   }
 })
 
+test('a window that closes after a tick is dated from its close: the night is one outsideHours line from 18:00 until the window opens', async () => {
+  // Monday 17:40 in New York, so the tick at 17:55 is the last the window allows
+  const world = await setup({ now: '2026-10-26T21:40:00Z', auto: { dailyLimit: 0 } })
+  try {
+    await tick(world)
+    assert.deepEqual(tickLines(await entries(world)).map((line) => [line.decision, line.reason]), [['checked', 'queued']])
+    // the night passes, and Tuesday 09:00 brings the first tick of the day
+    world.time.advance(Date.parse('2026-10-27T13:00:00Z') - Date.parse('2026-10-26T21:55:00Z'))
+    await world.server.scheduler.idle()
+    const night = tickLines(await entries(world)).filter((line) => line.reason === 'outsideHours')
+    assert.equal(night.length, 1)
+    assert.equal(night[0]?.at, '2026-10-26T22:00:00Z')
+    assert.equal(night[0]?.lastAt, '2026-10-27T13:00:00Z')
+    // newest first: the morning's tick, whose waiting runs from the evening find no room, then the night, then the evening's tick
+    assert.deepEqual(tickLines(await entries(world)).map((line) => [line.decision, line.reason]), [['skipped', 'capFull'], ['skipped', 'outsideHours'], ['checked', 'queued']])
+  } finally {
+    await world.cleanup()
+  }
+})
+
 test('a queued PR that closed is dropped before start with the reason, and a queued self-review whose PR was marked ready too', async () => {
   const world = await setup({ auto: { others: false, own: true }, drafts: [101, 102] })
   try {

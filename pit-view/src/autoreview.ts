@@ -553,6 +553,8 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
   let armed: { at: number, handle: unknown } | null = null
   // when the window closes after the last tick it allows, so the log can date the closed window once it is seen closed
   let closesAt: number | null = null
+  // whether the log holds a closed window not yet seen open again, so the reopening can end its stretch
+  let closedSeen = false
   let ticking: { id: number, done: Promise<void> } | null = null
   // counts the ticks that have begun: a pass records it with the snapshot it takes, and a pass never acts on a snapshot older than the latest tick's beginning
   let tickEpoch = 0
@@ -1081,8 +1083,13 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     if (auto !== undefined) {
       const at = clock.now()
       // no tick runs while off or outside the window, so the log notes the stretch here, a closed window from when it closed; a repeat extends its line
-      if (!auto.enabled) logDecision({ repo: settings.repo, lane: 'tick', decision: 'skipped', reason: 'off', at: iso(at) })
-      else if (!isActiveAt(auto.activeHours, at, timeZone)) logDecision({ repo: settings.repo, lane: 'tick', decision: 'skipped', reason: 'outsideHours', at: iso(closesAt !== null && closesAt <= at ? closesAt : at) })
+      if (!auto.enabled) {
+        logDecision({ repo: settings.repo, lane: 'tick', decision: 'skipped', reason: 'off', at: iso(at) })
+        closedSeen = false
+      } else if (!isActiveAt(auto.activeHours, at, timeZone)) {
+        logDecision({ repo: settings.repo, lane: 'tick', decision: 'skipped', reason: 'outsideHours', at: iso(closesAt !== null && closesAt <= at ? closesAt : at) })
+        closedSeen = true
+      } else noteReopened(settings.repo, auto, at)
       closesAt = null
       let due: number | null = null
       if (isActiveAt(auto.activeHours, at, timeZone)) {
@@ -1114,14 +1121,21 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     announce()
   }
 
+  // the window is open again after a closed stretch: the stretch goes in the log, from when the window closed to now, before the tick that ends it
+  const noteReopened = (repo: string, auto: AutoReviewSettings, at: number): void => {
+    if (auto.enabled && closesAt !== null && closesAt <= at) {
+      logDecision({ repo, lane: 'tick', decision: 'skipped', reason: 'outsideHours', at: iso(closesAt) })
+      closesAt = null
+      closedSeen = true
+    }
+    if (auto.enabled && closedSeen) logDecision({ repo, lane: 'tick', decision: 'skipped', reason: 'outsideHours', at: iso(at) })
+    closedSeen = false
+  }
+
   const fire = (wanted: number): void => {
     const settings = config()
     const auto = settings.autoReview
-    // the window closed after the last tick and has opened again: the closed stretch goes in the log before the tick that ends it
-    if (auto !== undefined && auto.enabled && closesAt !== null && closesAt <= clock.now() && isActiveAt(auto.activeHours, clock.now(), timeZone)) {
-      logDecision({ repo: settings.repo, lane: 'tick', decision: 'skipped', reason: 'outsideHours', at: iso(closesAt) })
-      closesAt = null
-    }
+    if (auto !== undefined && isActiveAt(auto.activeHours, clock.now(), timeZone)) noteReopened(settings.repo, auto, clock.now())
     // only a due time reached, while on and inside the window, ticks; a wait cut short by the longest timer or a disabled clock plans again
     if (stopped || auto === undefined || !auto.enabled || clock.now() < wanted || !isActiveAt(auto.activeHours, clock.now(), timeZone)) return plan()
     try {

@@ -1,5 +1,5 @@
 // test/ui-autoreview-log-panel.test.ts
-// the auto-review log panel, the real public/autoreviewlog.ts against the fake document in test/fake-dom.ts: it reads the log when it opens, its heading takes focus, its three filters are labeled selects, a run link closes it and opens that run's drawer, a closed PR's run is text, the empty and failed states, Escape and Close put focus back on the header button, and a change in the scheduler's state reads the log again. The Settings page's line names the days the config keeps, and the page's markup and wiring are read from the sources. Every fixture is invented, and every expected string is written out here
+// the auto-review log panel, the real public/autoreviewlog.ts against the fake document in test/fake-dom.ts: it reads the log when it opens, its heading takes focus, its three filters are labeled selects, a run link closes it and opens that run's drawer, a closed PR's run is text, the empty and failed states, Escape and Close put focus back on the header button, and a change in the scheduler's state reads the log again. The Settings page's line names the days the config keeps, and the page's markup and wiring, the documents' default days, and the panel's styles are read from the sources. Every fixture is invented, and every expected string is written out here
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
@@ -259,4 +259,24 @@ test('the page holds the log as a hidden, labeled panel beside the drawers, and 
   assert.match(app, /sweepDrawer\.open\(\{ key: 'auto-review-button' \}, \{ sweepId: link\.id \}\)/)
   assert.match(app, /drawer\.open\(link\.number, \{ key: 'auto-review-button', number: link\.number \}\)/)
   assert.match(app, /logPanel\.update\(\)/)
+})
+
+// the documents and the stylesheet say what the code does, so neither can drift from it unnoticed
+
+test('DESIGN.md, the README, and the Settings line name the default days the server keeps, and the panel\'s classes are styled', async () => {
+  const { autoReviewLogDays } = await import('../src/autoreviewlog.ts')
+  const { logRetentionLine } = await import('../public/autoreviewlogview.ts')
+  const design = readFileSync(new URL('../DESIGN.md', import.meta.url), 'utf8')
+  const row = design.split('\n').find((line) => line.startsWith('| `autoReviewLogDays` |')) ?? ''
+  assert.equal(row.split(' | ')[2], String(autoReviewLogDays))
+  assert.match(design, /^#### The log$/m)
+  assert.ok(design.includes(`the log's line, "${logRetentionLine(autoReviewLogDays)}"`), 'the Auto-review card footer quotes the Settings line at the default')
+  assert.ok(design.includes(`\`{ "days": ${autoReviewLogDays}, "entries": [...] }\``))
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  assert.ok(readme.includes(`keeps ${autoReviewLogDays} days by default`))
+  assert.ok(readme.includes('`autoReviewLogDays` (a whole number from 1 to 365)'))
+  const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8')
+  for (const name of ['auto-log-filters', 'auto-log-filter', 'auto-log-body', 'auto-log-list', 'auto-log-line', 'auto-log-meta', 'auto-log-when', 'auto-log-title', 'auto-log-details', 'auto-log-muted']) {
+    assert.match(css, new RegExp(`\\.${name}[ ,{]`), `.${name} has a rule`)
+  }
 })
