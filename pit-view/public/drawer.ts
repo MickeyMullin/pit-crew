@@ -14,7 +14,7 @@ import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import {
-  commentsCheckOn, confirmHolds, specialInstructionsSent, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
+  cellOfRun, commentsCheckOn, confirmHolds, specialInstructionsSent, defaultRunner, drawerModel, escapeTarget, focusKeySelector, goneRow, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
   rereadBound, resumeReadyText, returnSelector,
 } from './drawerview.ts'
 import type { PostAllow } from './agent.ts'
@@ -48,7 +48,8 @@ export type DrawerOptions = {
 export type Drawer = {
   // ask, when given, opens that start's confirmation at once (the banner's Fix session), if the
   // PR offers it and it can run now; otherwise the drawer opens as usual and says why. 'merge' (the Agent cell's Merge button) asks the Squash and merge confirmation the same way, when the row offers it
-  open: (number: number, opener: Opener, ask?: StartKind | 'merge') => void
+  // show, when given, opens the card of that run, whether or not it is the PR's newest, and opens a PR that is no longer open on it, under the title given (the auto-review log's run links)
+  open: (number: number, opener: Opener, ask?: StartKind | 'merge', show?: { runId: number, title: string | null }) => void
   close: () => void
   // after every draw: take the live row, refetch what changed, bring the elements up to date
   update: () => void
@@ -90,6 +91,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   let last: OpenRow | null = null
   let opener: Opener | null = null
   let runs: Loadable<RunView> = { state: 'loading' }
+  // the run the auto-review log asked to see, or null for the PR's newest
+  let shown: number | null = null
   let reports: Loadable<ReportListing> = { state: 'loading' }
   let confirm: Confirm | null = null
   // a start or stop request is on its way
@@ -1035,7 +1038,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   // the row's cell, or for a PR that left the open tables the newest run read from the server
   const latest = (): AgentCell | null => {
     if (number === null || last === null) return null
-    return options.rowOf(number) === undefined ? latestCell(last.agent, runs) : last.agent
+    return cellOfRun(options.rowOf(number) === undefined ? latestCell(last.agent, runs) : last.agent, runs, shown)
   }
 
   const current = (): DrawerModel | null => {
@@ -1199,10 +1202,12 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     render()
   }
 
-  const open = (n: number, from: Opener, ask?: StartKind | 'merge'): void => {
-    const row = options.rowOf(n)
+  const open = (n: number, from: Opener, ask?: StartKind | 'merge', show?: { runId: number, title: string | null }): void => {
+    // a PR that is no longer open opens only for a run the log named
+    const row = options.rowOf(n) ?? (show === undefined ? undefined : goneRow(n, show.title, `https://github.com/${options.repo()}/pull/${n}`))
     if (row === undefined) return
     opener = from
+    shown = show?.runId ?? null
     if (number !== n) {
       if (number !== null) options.reports.close()
       number = n
@@ -1238,6 +1243,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     if (n === null) return
     number = null
     last = null
+    shown = null
     confirm = null
     busy = false
     actionNote = ''

@@ -50,7 +50,7 @@ export const createAutoReviewLogPanel = ({ root, nowMs, view, isOpen, openRun, r
   const labels: Record<typeof filterKeys[number], string> = { pr: 'PR', decision: 'Decision', day: 'Day' }
   const filterBar = h('div', { class: 'auto-log-filters', role: 'group', 'aria-label': 'Filter the log' },
     filterKeys.map((key) => h('div', { class: 'auto-log-filter' }, h('label', { for: selects[key].id }, labels[key]), selects[key])))
-  const clear = h('button', { type: 'button', class: 'button button-small' }, 'Clear filters')
+  const clear = h('button', { type: 'button', class: 'button button-small', 'data-auto-log-key': 'clear' }, 'Clear filters')
   const body = h('div', { class: 'auto-log-body' })
   const foot = h('div', { class: 'report-foot' },
     h('span', { class: 'report-hint' }, 'Esc closes this panel'),
@@ -78,7 +78,7 @@ export const createAutoReviewLogPanel = ({ root, nowMs, view, isOpen, openRun, r
     const run = line.run
     let runPart: HTMLElement | null = null
     if (run !== null && run.opens) {
-      const button = h('button', { type: 'button', class: 'link-button mono', 'aria-label': run.name, title: run.name, 'data-auto-log-run': `${run.kind}-${run.id}` }, run.text)
+      const button = h('button', { type: 'button', class: 'link-button mono', 'aria-label': run.name, title: run.name, 'data-auto-log-run': `${run.kind}-${run.id}`, 'data-auto-log-key': run.key }, run.text)
       button.addEventListener('click', () => {
         close()
         openRun(run)
@@ -95,21 +95,32 @@ export const createAutoReviewLogPanel = ({ root, nowMs, view, isOpen, openRun, r
         line.note === null ? null : h('span', {}, line.note),
         line.count === null ? null : h('span', {}, line.count),
         line.head === null ? null : h('span', { class: 'mono', title: 'Head' }, line.head),
+        line.model === null ? null : h('span', { 'data-auto-log-model': '', title: 'The model that ran the review' }, `Model: ${line.model}`),
         runPart))
+  }
+
+  // every repaint replaces what the body holds, and a replaced control loses focus: the one that had it is found again by its key, which is unique to it (a line's link by its line, the buttons by name)
+  const repaint = (...children: (Node | string)[]): void => {
+    const focused = document.activeElement instanceof HTMLElement && body.contains(document.activeElement) ? document.activeElement.getAttribute('data-auto-log-key') : null
+    body.replaceChildren(...children)
+    if (focused === null) return
+    for (const candidate of body.querySelectorAll<HTMLElement>('[data-auto-log-key]')) {
+      if (candidate.getAttribute('data-auto-log-key') === focused) candidate.focus({ preventScroll: true })
+    }
   }
 
   const paint = (): void => {
     if (root.hidden) return
     if (load.state === 'loading') {
       setText(sub, 'Loading…')
-      body.replaceChildren(h('p', { class: 'auto-note', role: 'status' }, 'Loading the log…'))
+      repaint(h('p', { class: 'auto-note', role: 'status' }, 'Loading the log…'))
       return
     }
     if (load.state === 'error') {
-      const retry = h('button', { type: 'button', class: 'button button-small' }, 'Try again')
+      const retry = h('button', { type: 'button', class: 'button button-small', 'data-auto-log-key': 'retry' }, 'Try again')
       retry.addEventListener('click', () => void read())
       setText(sub, '')
-      body.replaceChildren(h('div', {}, h('p', { class: 'auto-note', role: 'alert' }, 'The log could not be loaded.'), retry))
+      repaint(h('div', {}, h('p', { class: 'auto-note', role: 'alert' }, 'The log could not be loaded.'), retry))
       return
     }
     const model = logModel(load.entries, filters, { nowMs: nowMs(), days: load.days, isOpen })
@@ -121,10 +132,7 @@ export const createAutoReviewLogPanel = ({ root, nowMs, view, isOpen, openRun, r
     const lines = model.empty === null
       ? h('ol', { class: 'auto-log-list', 'aria-labelledby': 'auto-log-heading' }, model.lines.map(lineItem))
       : h('p', { class: 'auto-note' }, model.empty)
-    // the focused run link survives a repaint: it is found again by its run
-    const focused = document.activeElement instanceof HTMLElement && body.contains(document.activeElement) ? document.activeElement.dataset.autoLogRun ?? null : null
-    body.replaceChildren(model.filtered ? h('div', { class: 'auto-log-clear' }, clear) : '', lines)
-    if (focused !== null) body.querySelector<HTMLElement>(`[data-auto-log-run="${focused}"]`)?.focus({ preventScroll: true })
+    repaint(model.filtered ? h('div', { class: 'auto-log-clear' }, clear) : '', lines)
   }
 
   const read = async (): Promise<void> => {

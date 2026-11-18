@@ -47,10 +47,28 @@ export const headerModel = (row: OpenRow): HeaderModel => ({
   number: row.number,
   url: row.url,
   heading: `Agent for #${row.number}`,
-  author: `${row.author.alias} · @${row.author.login}`,
+  // a PR the auto-review log opened after it closed has neither an author nor refs to show
+  author: row.author.login === '' ? '' : `${row.author.alias} · @${row.author.login}`,
   title: row.title,
-  refs: `${row.headRef} → ${row.baseRef} · head ${shortSha(row.headOid)}`,
+  refs: row.headRef === '' ? '' : `${row.headRef} → ${row.baseRef} · head ${shortSha(row.headOid)}`,
 })
+
+// the row of a PR that is no longer open, for a run the auto-review log names: the title the log kept and the PR's address, and an idle cell with no start to offer, so the drawer has the run's own card, its previous runs, and its reports, and nothing it could start or change
+export const goneRow = (number: number, title: string | null, url: string): OpenRow => ({
+  number,
+  url,
+  title: title ?? '',
+  author: { login: '', alias: '' },
+  headRef: '', baseRef: '', headOid: '', headSha: '',
+  section: 'others',
+  agent: {
+    state: 'idle', label: 'Review', action: { kind: 'review', label: 'Review', command: 'review-pr', args: [String(number)], runner: 'claude' }, starts: [],
+    models: { claude: '', codex: '' }, lastReviewAt: null,
+    runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
+    steps: [], tandem: false, commit: null, finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null,
+    extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,
+  },
+} as unknown as OpenRow)
 
 export const goneText = (number: number): string => `#${number} is no longer open`
 
@@ -1020,6 +1038,13 @@ export const cellFromRun = (cell: AgentCell, run: RunView): AgentCell => {
     postOffer: cell.runId === run.id ? cell.postOffer : null,
     storedOffer: cell.runId === run.id ? cell.storedOffer : null,
   }
+}
+
+// the cell to show when the log asked for one run: that run's own card, built from the runs read for the PR, unless it is the run the cell already shows (the row's own cell knows more of it), and the cell as it stands while the runs load or when the run is no longer on the list
+export const cellOfRun = (cell: AgentCell | null, runs: Loadable<RunView>, runId: number | null): AgentCell | null => {
+  if (cell === null || runId === null || cell.runId === runId || runs.state !== 'ready') return cell
+  const run = runs.items.find((candidate) => candidate.id === runId)
+  return run === undefined ? cell : cellFromRun(cell, run)
 }
 
 // the newest run is the first of the list; a row's own run wins when it is newer

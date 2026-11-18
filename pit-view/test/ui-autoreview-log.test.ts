@@ -23,7 +23,7 @@ const entry = (patch: Partial<LogEntry>): LogEntry => {
   nextId -= 1
   return {
     id: nextId, repo: 'octo-example/orbit', lane: 'pr', number: 106, title: 'feat(nav): an invented change', decision: 'queued', reason: 'pushed', note: null,
-    head: 'cccc3334444', run: null, tick: 12, at: '2026-11-02T14:30:00Z', lastAt: '2026-11-02T14:30:00Z', count: 1, ...patch,
+    head: 'cccc3334444', run: null, model: null, tick: 12, at: '2026-11-02T14:30:00Z', lastAt: '2026-11-02T14:30:00Z', count: 1, ...patch,
   }
 }
 
@@ -103,17 +103,32 @@ test('a line keeps the order the server gives, newest first, with its time, its 
   assert.equal(model.summary, 'Kept for 14 days, newest first. 3 lines.')
 })
 
-test('the run id is a link that opens the PR\'s Agent drawer while the PR is open, and a sweep\'s opens the sweep drawer', () => {
+test('the run id is a link that opens its PR\'s Agent drawer, open or closed, with a key of its own for each line, and a sweep\'s opens the sweep drawer', () => {
   const lines = logModel([
     entry({ run: { kind: 'run', id: 42 } }),
     entry({ number: 97, run: { kind: 'run', id: 17 } }),
     entry({ lane: 'sweep', number: null, title: null, reason: 'dependabot', head: null, run: { kind: 'sweep', id: 7 } }),
+    entry({ decision: 'started', run: { kind: 'run', id: 42 } }),
     entry({ decision: 'skipped', reason: 'alreadyReviewed' }),
   ], noFilters, reading).lines
-  assert.deepEqual(lines[0]?.run, { kind: 'run', id: 42, number: 106, text: 'run 42', name: 'Open the Agent drawer of #106, run 42', opens: true })
-  assert.deepEqual(lines[1]?.run, { kind: 'run', id: 17, number: 97, text: 'run 17', name: 'Run 17: #97 is no longer open, so its drawer cannot open', opens: false })
-  assert.deepEqual(lines[2]?.run, { kind: 'sweep', id: 7, number: null, text: 'sweep 7', name: 'Open the sweep drawer at sweep 7', opens: true })
-  assert.equal(lines[3]?.run, null)
+  assert.deepEqual(lines[0]?.run, { kind: 'run', id: 42, key: `line-${lines[0]?.id}`, number: 106, title: 'feat(nav): an invented change', closed: false, text: 'run 42', name: 'Open the Agent drawer of #106, run 42', opens: true })
+  assert.deepEqual(lines[1]?.run, { kind: 'run', id: 17, key: `line-${lines[1]?.id}`, number: 97, title: 'feat(nav): an invented change', closed: true, text: 'run 17', name: 'Open the Agent drawer of #97, run 17 (the PR is closed)', opens: true })
+  assert.deepEqual(lines[2]?.run, { kind: 'sweep', id: 7, key: `line-${lines[2]?.id}`, number: null, title: null, closed: false, text: 'sweep 7', name: 'Open the sweep drawer at sweep 7', opens: true })
+  // two lines of one run are two links with two keys
+  assert.notEqual(lines[0]?.run?.key, lines[3]?.run?.key)
+  assert.equal(lines[4]?.run, null)
+})
+
+test('a PR skipped because a post for it is in flight reads in the owner\'s words', () => {
+  const [line] = logModel([entry({ decision: 'skipped', reason: 'postInFlight' })], noFilters, reading).lines
+  assert.equal(line?.text, 'Skipped: a post for it is in flight')
+})
+
+test('a line carries the model the entry names, and none for an entry without one, including one stored before the log kept models', () => {
+  const old = entry({ decision: 'started' }) as Partial<LogEntry>
+  delete old.model
+  const lines = logModel([entry({ decision: 'finished', reason: 'done', model: 'sonnet (Claude Code)' }), entry({ decision: 'skipped', reason: 'alreadyReviewed' }), old as LogEntry], noFilters, reading).lines
+  assert.deepEqual(lines.map((line) => line.model), ['sonnet (Claude Code)', null, null])
 })
 
 test('the filters: by PR, by decision, and by day, each offering only what the log holds, and together', () => {

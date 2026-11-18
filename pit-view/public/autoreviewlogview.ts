@@ -20,11 +20,12 @@ export type LogReading = {
   timeZone?: string
   // how many days the log keeps
   days: number
-  // whether a PR is open, so its drawer can open
+  // whether a PR is open: a closed PR's run link still opens its drawer, which then says the PR is no longer open
   isOpen: (number: number) => boolean
 }
 
-export type LogRunLink = LogRun & { number: number | null, text: string, name: string, opens: boolean }
+// key is unique to the line, so a run that has several lines (queued, started, finished) has a link on each that focus can tell apart; title and closed are what the drawer needs to open a PR that is no longer open
+export type LogRunLink = LogRun & { key: string, number: number | null, title: string | null, closed: boolean, text: string, name: string, opens: boolean }
 
 export type LogLine = {
   id: number
@@ -37,6 +38,8 @@ export type LogLine = {
   tone: 'normal' | 'warn'
   count: string | null
   head: string | null
+  // the model that ran the review, for a line of a run that spawned; null for the rest and for a line stored before the log kept it
+  model: string | null
   run: LogRunLink | null
 }
 
@@ -77,6 +80,7 @@ const reasonWords: Readonly<Record<string, string>> = {
   queued: 'queued new runs',
   alreadyReviewed: 'already reviewed at this head',
   inFlight: 'an auto-review run is already queued or running',
+  postInFlight: 'a post for it is in flight',
   ownersRun: 'your own run of it is in flight',
   stoppedAtHead: 'you stopped its run at this head',
   postUnknown: 'its last run may have posted',
@@ -132,15 +136,20 @@ const subjectOf = (entry: LogEntry): string => {
 
 const runLink = (entry: LogEntry, reading: LogReading): LogRunLink | null => {
   if (entry.run === null) return null
-  if (entry.run.kind === 'sweep') return { ...entry.run, number: null, text: `sweep ${entry.run.id}`, name: `Open the sweep drawer at sweep ${entry.run.id}`, opens: true }
+  const key = `line-${entry.id}`
+  if (entry.run.kind === 'sweep') return { ...entry.run, key, number: null, title: null, closed: false, text: `sweep ${entry.run.id}`, name: `Open the sweep drawer at sweep ${entry.run.id}`, opens: true }
   const number = entry.number
-  const opens = number !== null && reading.isOpen(number)
+  // a PR that is no longer open still opens its drawer, on the run asked for, with starts and actions off
+  const closed = number !== null && !reading.isOpen(number)
   return {
     ...entry.run,
+    key,
     number,
+    title: entry.title,
+    closed,
     text: `run ${entry.run.id}`,
-    name: opens ? `Open the Agent drawer of #${number}, run ${entry.run.id}` : `Run ${entry.run.id}: #${number ?? '?'} is no longer open, so its drawer cannot open`,
-    opens,
+    name: number === null ? `Run ${entry.run.id}: its PR is not known, so its drawer cannot open` : `Open the Agent drawer of #${number}, run ${entry.run.id}${closed ? ' (the PR is closed)' : ''}`,
+    opens: number !== null,
   }
 }
 
@@ -157,6 +166,7 @@ const lineOf = (entry: LogEntry, reading: LogReading): LogLine => {
     tone: entry.decision === 'failed' || entry.decision === 'failedTwice' || (entry.lane === 'tick' && entry.decision === 'skipped' && entry.reason !== null && warnReasons.has(entry.reason)) ? 'warn' : 'normal',
     count: entry.count > 1 && !(entry.reason !== null && uncounted.has(entry.reason)) ? `${entry.count} times` : null,
     head: entry.head === null ? null : shortSha(entry.head),
+    model: entry.model ?? null,
     run: runLink(entry, reading),
   }
 }

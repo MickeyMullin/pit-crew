@@ -24,7 +24,7 @@ const entry = (patch: Partial<LogEntry>): LogEntry => {
   nextId -= 1
   return {
     id: nextId, repo: 'octo-example/orbit', lane: 'pr', number: 106, title: 'feat(nav): an invented change', decision: 'queued', reason: 'pushed', note: null,
-    head: 'cccc3334444', run: null, tick: 12, at: '2026-11-02T14:30:00Z', lastAt: '2026-11-02T14:30:00Z', count: 1, ...patch,
+    head: 'cccc3334444', run: null, model: null, tick: 12, at: '2026-11-02T14:30:00Z', lastAt: '2026-11-02T14:30:00Z', count: 1, ...patch,
   }
 }
 
@@ -111,20 +111,86 @@ test('opening the log reads it, focuses its heading, and lists its lines newest 
   })
 })
 
-test('a run link closes the log and opens that run\'s drawer; a closed PR\'s run is text, and a sweep opens the sweep drawer', async () => {
+test('a run link closes the log and opens that run\'s drawer, a closed PR\'s run opens it too, and a sweep opens the sweep drawer', async () => {
   await withPanel({ status: 200, value: { days: 14, entries: entries() } }, async ({ root, panel, opened }) => {
     panel.open()
     await settle()
     const links = root.querySelectorAll('button[data-auto-log-run]')
-    assert.deepEqual(links.map((link) => link.getAttribute('aria-label')), ['Open the Agent drawer of #106, run 41', 'Open the sweep drawer at sweep 7'])
-    assert.deepEqual(texts(root, '.auto-log-muted'), ['run 40'])
+    assert.deepEqual(links.map((link) => link.getAttribute('aria-label')), ['Open the Agent drawer of #106, run 41', 'Open the Agent drawer of #99, run 40 (the PR is closed)', 'Open the sweep drawer at sweep 7'])
+    assert.deepEqual(texts(root, '.auto-log-muted'), [])
     press(links[0] as FakeElement)
     assert.equal(root.hidden, true)
-    assert.deepEqual(opened.map((link) => [link.kind, link.id, link.number]), [['run', 41, 106]])
+    assert.deepEqual(opened.map((link) => [link.kind, link.id, link.number, link.closed, link.title]), [['run', 41, 106, false, 'feat(nav): an invented change']])
+    panel.open()
+    await settle()
+    press(root.querySelector('button[data-auto-log-run="run-40"]') as FakeElement)
+    assert.deepEqual(opened.map((link) => [link.kind, link.id, link.number, link.closed]).slice(1), [['run', 40, 99, true]])
     panel.open()
     await settle()
     press(root.querySelector('button[data-auto-log-run="sweep-7"]') as FakeElement)
-    assert.deepEqual(opened.map((link) => [link.kind, link.id, link.number]), [['run', 41, 106], ['sweep', 7, null]])
+    assert.deepEqual(opened.map((link) => [link.kind, link.id, link.number]).slice(2), [['sweep', 7, null]])
+  })
+})
+
+test('a repaint leaves focus on the control that had it: a line\'s own run link among several lines of one run, Clear filters, and Try again', async () => {
+  const lines = [
+    entry({ decision: 'finished', reason: 'done', note: 'Approved · not posted', run: { kind: 'run', id: 41 } }),
+    entry({ decision: 'started', reason: 'pushed', run: { kind: 'run', id: 41 } }),
+    entry({ decision: 'queued', reason: 'pushed', run: { kind: 'run', id: 41 } }),
+  ]
+  await withPanel({ status: 200, value: { days: 14, entries: lines } }, async ({ root, document, panel }) => {
+    panel.open()
+    await settle()
+    const keys = root.querySelectorAll('button[data-auto-log-run]').map((link) => link.getAttribute('data-auto-log-key'))
+    assert.equal(new Set(keys).size, 3, 'each line has a key of its own')
+    // the middle line's link, though the first two share its run
+    const middle = root.querySelectorAll('button[data-auto-log-run]')[1] as FakeElement
+    middle.focus()
+    assert.equal(document.activeElement?.getAttribute('data-auto-log-key'), keys[1])
+    panel.update()
+    assert.equal(document.activeElement?.getAttribute('data-auto-log-key'), keys[1])
+    // Clear filters, with a filter on
+    const decision = root.querySelector('#auto-log-decision') as FakeElement
+    decision.value = 'started'
+    decision.dispatch('change')
+    const clearButton = [...root.querySelectorAll('button')].find((button) => button.textContent === 'Clear filters') as FakeElement
+    clearButton.focus()
+    panel.update()
+    assert.equal(document.activeElement?.getAttribute('data-auto-log-key'), 'clear')
+  })
+  await withPanel({ status: 500, value: { error: 'invented failure' } }, async ({ root, document, panel }) => {
+    panel.open()
+    await settle()
+    const retry = [...root.querySelectorAll('button')].find((button) => button.textContent === 'Try again') as FakeElement
+    retry.focus()
+    panel.update()
+    assert.equal(document.activeElement?.getAttribute('data-auto-log-key'), 'retry')
+    assert.notEqual(document.activeElement, null)
+  })
+})
+
+test('a line shows the model that ran the review, and a line without one, or one stored before the log kept models, shows none', async () => {
+  const lines = [
+    entry({ decision: 'finished', reason: 'done', note: 'Approved · not posted', run: { kind: 'run', id: 41 }, model: 'sonnet (Claude Code)' }),
+    entry({ decision: 'finished', reason: 'done', note: 'Clean', run: { kind: 'run', id: 40 }, model: 'primary: sonnet (Claude Code) · secondary: gpt-6.1-terra (Codex)' }),
+    entry({ decision: 'skipped', reason: 'alreadyReviewed' }),
+    // a line stored before the field existed has no model key at all
+    (() => {
+      const old = entry({ decision: 'started', reason: 'pushed', run: { kind: 'run', id: 39 } }) as Partial<LogEntry>
+      delete old.model
+      return old as LogEntry
+    })(),
+  ]
+  await withPanel({ status: 200, value: { days: 14, entries: lines } }, async ({ root, panel }) => {
+    panel.open()
+    await settle()
+    assert.deepEqual(texts(root, '[data-auto-log-model]'), ['Model: sonnet (Claude Code)', 'Model: primary: sonnet (Claude Code) · secondary: gpt-6.1-terra (Codex)'])
+    assert.equal(texts(root, '.auto-log-text').length, 4)
+    // the filters still work with an entry that has no model
+    const decision = root.querySelector('#auto-log-decision') as FakeElement
+    decision.value = 'started'
+    decision.dispatch('change')
+    assert.equal(texts(root, '.auto-log-text').length, 1)
   })
 })
 
@@ -257,9 +323,12 @@ test('the page holds the log as a hidden, labeled panel beside the drawers, and 
   assert.match(menu, /'data-auto-log': '', 'data-focus-key': 'auto-log'/)
   assert.match(menu, /closest\('button\[data-auto-log\]'\) !== null\) \{\n\s+close\(\)\n\s+onLog\(\)/)
   const app = readFileSync(new URL('../public/app.ts', import.meta.url), 'utf8')
-  assert.match(app, /sweepDrawer\.open\(\{ key: 'auto-review-button' \}, \{ sweepId: link\.id \}\)/)
-  assert.match(app, /drawer\.open\(link\.number, \{ key: 'auto-review-button', number: link\.number \}\)/)
-  assert.match(app, /logPanel\.update\(\)/)
+  assert.ok(app.includes('openRun: openLoggedRun({ drawer, sweepDrawer, seedRuns }),'))
+  assert.ok(app.includes('logPanel.update()'))
+  // the opener returns focus to the same button, whichever drawer it opens
+  const opener = readFileSync(new URL('../public/autoreviewlogopen.ts', import.meta.url), 'utf8')
+  assert.ok(opener.includes("sweepDrawer.open({ key: 'auto-review-button' }, { sweepId: link.id })"))
+  assert.ok(opener.includes("drawer.open(link.number, { key: 'auto-review-button', number: link.number }, undefined, { runId: link.id, title: link.title })"))
 })
 
 // the documents and the stylesheet say what the code does, so neither can drift from it unnoticed
@@ -273,7 +342,12 @@ test('DESIGN.md, the README, and the Settings line name the default days the ser
   assert.match(design, /^#### The log$/m)
   assert.ok(design.includes(`the log's line, "${logRetentionLine(autoReviewLogDays)}"`), 'the Auto-review card footer quotes the Settings line at the default')
   assert.ok(design.includes(`\`{ "days": ${autoReviewLogDays}, "entries": [...] }\``))
+  // the model each line names is stated where the log is: the storage table, the log section, and the README
+  assert.ok(design.includes('`run_id`, `model` (the model that ran the review, as text, or null)'))
+  assert.ok(design.includes('- **The model.** A line of a scheduled run that started, finished, failed, or stopped names the model that ran the review'))
+  assert.ok(design.includes('`model` (text or null), `tick`, `at`, `lastAt`, and `count`'))
   const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  assert.ok(readme.includes('names the model that ran the review (a tandem run, its pair)'))
   assert.ok(readme.includes(`keeps ${autoReviewLogDays} days by default`))
   assert.ok(readme.includes('`autoReviewLogDays` (a whole number from 1 to 365)'))
   const css = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8')

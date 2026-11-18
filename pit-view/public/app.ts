@@ -6,6 +6,7 @@ import type { Patch, View } from '../src/poller.ts'
 import { announcements } from './agent.ts'
 import { tickTimers, updateAgentCells } from './agentcell.ts'
 import { createAutoReviewLogPanel } from './autoreviewlog.ts'
+import { openLoggedRun } from './autoreviewlogopen.ts'
 import { createAutoReviewMenu } from './autoreviewmenu.ts'
 import { byId, setText } from './dom.ts'
 import { createDrawer } from './drawer.ts'
@@ -429,11 +430,7 @@ const logPanel = createAutoReviewLogPanel({
   nowMs,
   view: () => feed.view,
   isOpen: (number) => feed.view !== null && findOpenRow(feed.view, number) !== undefined,
-  openRun: (link) => {
-    seedRuns()
-    if (link.kind === 'sweep') sweepDrawer.open({ key: 'auto-review-button' }, { sweepId: link.id })
-    else if (link.number !== null) drawer.open(link.number, { key: 'auto-review-button', number: link.number })
-  },
+  openRun: openLoggedRun({ drawer, sweepDrawer, seedRuns }),
   returnTo: () => document.getElementById('auto-review-button'),
 })
 
