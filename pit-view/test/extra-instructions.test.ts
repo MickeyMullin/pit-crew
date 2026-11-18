@@ -87,7 +87,7 @@ const send = async (h: Harness, method: string, path: string, body?: unknown): P
 }
 
 const start = (h: Harness, number: number, ask: Record<string, unknown> = {}): Promise<{ status: number, body: Record<string, unknown> }> =>
-  send(h, 'POST', `/api/prs/${number}/runs`, { repo: scenario.repo, ...ask })
+  send(h, 'POST', `/api/prs/${number}/runs`, { repo: scenario.repo, kind: 'default', ...ask })
 
 const runDir = (h: Harness, id: unknown): string => join(h.stateDir, 'runs', String(id))
 const fileOf = (h: Harness, id: unknown): string => join(runDir(h, id), 'extra-instructions.txt')
@@ -240,9 +240,9 @@ test('the starts a row offers name the standing default and the flag on review s
   try {
     const offered = { standing: 'skip fixtures', flag }
     const own = await cellOf(h, 104)
-    assert.deepEqual(own.starts.map((option) => [option.kind, option.extraInstructions]), [['default', offered], ['tandem', offered], ['fix', undefined]])
+    assert.deepEqual(own.starts.map((option) => [option.kind, option.extraInstructions]), [['tandem', offered], ['default', offered], ['fix', undefined]])
     const others = await cellOf(h, 113)
-    assert.deepEqual(others.starts.map((option) => [option.kind, option.extraInstructions]), [['default', offered], ['tandem', offered]])
+    assert.deepEqual(others.starts.map((option) => [option.kind, option.extraInstructions]), [['tandem', offered], ['default', offered]])
     const stacked = await cellOf(h, 111)
     assert.deepEqual(stacked.starts.find((option) => option.kind === 'stack')?.extraInstructions, offered)
     const dependabot = await cellOf(h, 114)
@@ -474,13 +474,13 @@ test('an unattended review of someone else\'s PR or the viewer\'s own takes the 
     const runs = h.server.cache.allRuns().filter((run) => run.origin === 'auto' && run.status === 'running')
     assert.ok(runs.length >= 2, `${runs.length} runs`)
     for (const run of runs) {
-      assert.deepEqual(run.args, [String(run.number), '--no-post', flag])
+      assert.deepEqual(run.args, [String(run.number), '--tandem', '--no-post', flag])
       assert.deepEqual(run.extraInstructions, { text: 'skip fixtures', source: 'default' })
       assert.equal(await readFile(fileOf(h, run.id), 'utf8'), 'skip fixtures\n')
       assert.deepEqual((await requestOf(h, run.id)).extraInstructions, { text: 'skip fixtures', source: 'default' })
     }
     for (const child of h.launch.children) {
-      assert.match(claudeRequest(child), /^\/review-pr \d+ --no-post --extra-instructions --emit-json=/)
+      assert.match(claudeRequest(child), /^\/review-pr \d+ --tandem --no-post --extra-instructions --emit-json=/)
       assertNotOnCommandLine(child, ['skip fixtures'])
     }
   } finally {
@@ -502,7 +502,7 @@ test('a queued unattended review takes the text in effect when it starts, and ta
     await tick(h)
     const started = h.server.cache.getRun(waiting.id)
     assert.equal(started?.status, 'running')
-    assert.deepEqual(started?.args, [String(waiting.number), '--no-post'])
+    assert.deepEqual(started?.args, [String(waiting.number), '--tandem', '--no-post'])
     assert.equal(started?.extraInstructions, null)
     assert.equal(await exists(fileOf(h, waiting.id)), false)
   } finally {
@@ -558,7 +558,7 @@ const childOf = (h: Harness, id: number): FakeChild => {
 const autoRunning = (h: Harness): Run[] => h.server.cache.allRuns().filter((run) => run.origin === 'auto' && run.status === 'running')
 
 // every record of what a run was spawned under, each against the one text expected: its arguments in the row, the process, and request.json, the file's bytes, and the column
-const assertSpawnedUnder = async (h: Harness, run: Run | undefined, text: string | null, before: readonly string[] = [String(run?.number), '--no-post'], runner: 'claude' | 'codex' = 'claude'): Promise<void> => {
+const assertSpawnedUnder = async (h: Harness, run: Run | undefined, text: string | null, before: readonly string[] = [String(run?.number), '--tandem', '--no-post'], runner: 'claude' | 'codex' = 'claude'): Promise<void> => {
   assert.ok(run)
   const stored = h.server.cache.getRun(run.id)
   assert.equal(stored?.status, 'running')
@@ -632,21 +632,33 @@ for (const step of ['fetch', 'add']) {
   })
 }
 
+// a scheduled human review is a tandem on Claude, so a Codex command line is reached by a queued row that is not one, started the way the scheduler starts a row
+const codexRow = async (h: Harness, save: () => Promise<void>): Promise<Run | undefined> => {
+  const tick = h.server.cache.createTick(scenario.repo)
+  const request = { repo: scenario.repo, number: 900, command: 'review-pr', args: ['900', '--no-post'], label: 'Review', runner: 'codex' as const }
+  const row = h.server.launcher.queueScheduled(request, join(h.home, 'dev', 'orbit'), { tick: tick.id, reason: 'new', headOid: 'abc1234', posting: false })
+  const gate = armGate(h, 'rev-parse')
+  const starting = h.server.launcher.startScheduled(row.id, request, { args: request.args, posting: false }, async () => join(h.stateDir, 'worktrees', `run-${row.id}`))
+  await gate.entered()
+  await save()
+  gate.release()
+  await starting
+  return h.server.cache.getRun(row.id) ?? undefined
+}
+
 test('a default changed during the launch\'s own last git step reaches a Codex command line, in its argv and in request.json', async () => {
-  const h = await schedulerSetup(onePerTick, { extraReviewInstructions: 'old text', agent: { runner: 'codex', claudeModel: 'sonnet' } })
+  const h = await schedulerSetup(onePerTick, { extraReviewInstructions: 'old text' })
   try {
-    await startWhileHeld(h, 'rev-parse', () => saveDefault(h, 'new text'))
-    await assertSpawnedUnder(h, autoRunning(h)[0], 'new text', undefined, 'codex')
+    await assertSpawnedUnder(h, await codexRow(h, () => saveDefault(h, 'new text')), 'new text', ['900', '--no-post'], 'codex')
   } finally {
     await h.cleanup()
   }
 })
 
 test('a default cleared during the launch\'s own last git step takes the flag off a Codex command line', async () => {
-  const h = await schedulerSetup(onePerTick, { extraReviewInstructions: 'old text', agent: { runner: 'codex', claudeModel: 'sonnet' } })
+  const h = await schedulerSetup(onePerTick, { extraReviewInstructions: 'old text' })
   try {
-    await startWhileHeld(h, 'rev-parse', () => saveDefault(h, ''))
-    await assertSpawnedUnder(h, autoRunning(h)[0], null, undefined, 'codex')
+    await assertSpawnedUnder(h, await codexRow(h, () => saveDefault(h, '')), null, ['900', '--no-post'], 'codex')
   } finally {
     await h.cleanup()
   }

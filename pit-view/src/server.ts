@@ -683,10 +683,9 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (box !== undefined && typeof box !== 'string') throw new HttpError(400, 'extraInstructions must be a string')
     const boxProblem = box === undefined ? null : extraInstructionsProblem(box as string)
     if (boxProblem !== null) throw new HttpError(400, `extraInstructions ${boxProblem}`)
-    const kind = (askedKind ?? 'default') as StartKind
     // a tandem primary launches its secondary in the background, which only Claude can do
-    if (kind === 'tandem' && (asked === 'codex' || asked === 'hermes')) throw new HttpError(400, 'Review in tandem runs with Claude only; send runner claude or leave it out')
-    if (kind === 'fix' && (asked === 'codex' || asked === 'hermes')) throw new HttpError(400, 'Fix session runs with Claude only; send runner claude or leave it out')
+    if (askedKind === 'tandem' && (asked === 'codex' || asked === 'hermes')) throw new HttpError(400, 'Review in tandem runs with Claude only; send runner claude or leave it out')
+    if (askedKind === 'fix' && (asked === 'codex' || asked === 'hermes')) throw new HttpError(400, 'Fix session runs with Claude only; send runner claude or leave it out')
     const config = effective()
     // the repository the viewer confirmed must still be the one in effect: a run posts or pushes on GitHub, and a PR number means another PR in another repository
     if (confirmedRepo !== config.repo) throw new HttpError(409, `the repository is now ${config.repo}, not ${confirmedRepo}; the confirmation was for ${confirmedRepo}, so nothing was started`)
@@ -696,9 +695,12 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (row === undefined) throw new HttpError(422, `#${number} is not an open PR in ${config.repo} that Pit View has fetched`)
     // the stack is GitHub's marker on the cached PR; a base branch that is another PR's never makes one
     const stack = markedStack(row.pr)
+    // a start that names no kind is the first one offered, the tandem review, except that a runner that cannot run a tandem takes the plain review
+    const offered = startOptions(row.pr, config, stack, false)
+    const kind = (askedKind ?? (asked === 'codex' || asked === 'hermes' ? 'default' : offered[0]?.kind ?? 'default')) as StartKind
     const refusal = notOffered(kind, row.pr, config, stack)
     if (refusal !== null) throw new HttpError(422, refusal)
-    const option = startOptions(row.pr, config, stack, false).find((candidate) => candidate.kind === kind)
+    const option = offered.find((candidate) => candidate.kind === kind)
     if (option === undefined) throw new HttpError(422, `${kind} is not offered for #${number}`)
     // the comments check rides on a Self-review alone: the option carries the args it runs with, and no other start has them
     const args = checkComments === true ? option.checkCommentsArgs : option.args

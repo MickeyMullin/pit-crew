@@ -691,14 +691,15 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     return path
   }
 
-  const othersArgs = (number: number, noPost: boolean): string[] => [String(number), ...(noPost ? ['--no-post'] : [])]
+  // a review of a human's PR, or the viewer's own, is a tandem; --tandem goes before --no-post, as a manual start's does, and --check-comments is never added
+  const othersArgs = (number: number, noPost: boolean, tandem: boolean): string[] => [String(number), ...(tandem ? ['--tandem'] : []), ...(noPost ? ['--no-post'] : [])]
 
   const sweepArgsNow = (repo: string, settings: AutoReviewSettings): string[] => [...(sweepRequest(repo).args), ...(settings.post.dependabot ? [] : ['--no-post'])]
 
   // what each PR's run is built with is decided here alone, from the settings in effect: a run of the viewer's own PR always takes --no-post, and any other takes it unless post.others is on. A switch turned off after this is the launcher's to catch, at the spawn
   const runArgs = (pr: RawOpenPr | undefined, number: number, reason: QueueReason | null, settings: Config): string[] => {
     const own = reason === 'selfReview' || (pr !== undefined && isMine(pr, settings))
-    return othersArgs(number, own || settings.autoReview?.post.others !== true)
+    return othersArgs(number, own || settings.autoReview?.post.others !== true, pr === undefined || !isDependabot(pr))
   }
 
   // what a queued or preparing row shows of the standing extra instructions, as last read here. It decides nothing about the process: the launcher reads the default again at the spawn and settles the row, as it does for a posting switch. A sweep's arguments never come through here
@@ -716,7 +717,8 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       const pr = open.find((candidate) => candidate.number === item.number)
       if (pr === undefined) continue
       const args = runArgs(pr, item.number, item.reason, settings)
-      const request = underStandingText({ repo: settings.repo, number: item.number, command: 'review-pr', args, label: defaultRun(pr, settings).label }, settings)
+      // a tandem primary runs on Claude only, whatever runner is configured
+      const request = underStandingText({ repo: settings.repo, number: item.number, command: 'review-pr', args, label: defaultRun(pr, settings).label, runner: 'claude' }, settings)
       // a post in flight for the PR refuses the row; nothing is lost, since the next tick derives what to queue from the board again and finds the PR as it then stands
       try {
         launcher.queueScheduled(request, clone, { tick, reason: item.reason, headOid: item.headSha, posting: mayPost('review-pr', args) })

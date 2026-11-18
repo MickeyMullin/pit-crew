@@ -302,7 +302,8 @@ test('the page has the Models card with a registry table, a fallback choice, and
 test('the hint is reduced to the posted-text name check and to no start reading the slots yet', async () => {
   const html = await publicFile('settings.html')
   const hint = html.slice(html.indexOf('id="models-hint"'), html.indexOf('</p>', html.indexOf('id="models-hint"'))).replace(/<[^>]+>/g, '')
-  assert.match(hint, /no start reads these slots yet/i)
+  assert.match(hint, /no start passes these models yet/i)
+  assert.match(hint, /auto-review of people pair, which must have a primary on Claude and two different models/)
   assert.match(hint, /the Post it offer and the post of a stored report/)
   assert.match(hint, /governed by the review prompt/)
   assert.match(hint, /stops the first Post click/)

@@ -1318,8 +1318,9 @@ test('starting and stopping a run need the token as well as the Host and Origin 
     assert.equal(started.status, 200)
     assert.equal(started.body.status, 'running')
     assert.equal(started.body.command, 'review-pr')
-    assert.deepEqual(started.body.args, ['106'])
-    assert.equal(started.body.label, 'Re-review')
+    // a start that names no kind is the first one offered, the tandem review
+    assert.deepEqual(started.body.args, ['106', '--tandem'])
+    assert.equal(started.body.label, 'Tandem re-review')
     assert.equal(started.body.runner, 'claude')
     assert.equal(started.body.cwd, '~/dev/orbit')
     assert.equal(h.launch.children.length, 1)
@@ -1398,17 +1399,17 @@ test('the view carries each row\'s Agent cell, and a start on the viewer\'s own 
   try {
     await filled(h)
     const view = (await getJson<View>(`${h.base}/api/view`)).body
-    assert.deepEqual([rowIn(view, 106)?.agent?.state, rowIn(view, 106)?.agent?.action.label], ['idle', 'Re-review'])
-    assert.deepEqual(rowIn(view, 113)?.agent?.action, { kind: 'review', label: 'Review', command: 'review-pr', args: ['113'], runner: 'claude' })
-    assert.deepEqual(rowIn(view, 101)?.agent?.action.args, ['101', '--no-post'])
+    assert.deepEqual([rowIn(view, 106)?.agent?.state, rowIn(view, 106)?.agent?.action.label], ['idle', 'Tandem re-review'])
+    assert.deepEqual(rowIn(view, 113)?.agent?.action, { kind: 'review', label: 'Tandem review', command: 'review-pr', args: ['113', '--tandem'], runner: 'claude' })
+    assert.deepEqual(rowIn(view, 101)?.agent?.action.args, ['101', '--tandem', '--no-post'])
     assert.equal(rowIn(view, 114)?.agent?.action.command, 'review-dependabot')
     const own = await send(`${h.base}/api/prs/101/runs`, 'POST', { repo: scenario.repo }, token(h))
     assert.equal(own.status, 200)
-    assert.deepEqual(own.body.args, ['101', '--no-post'])
-    assert.equal(own.body.label, 'Self-review')
-    assert.match(h.launch.children[0]!.writes[0] ?? '', /\/review-pr 101 --no-post --emit-json=/)
+    assert.deepEqual(own.body.args, ['101', '--tandem', '--no-post'])
+    assert.equal(own.body.label, 'Tandem self-review')
+    assert.match(h.launch.children[0]!.writes[0] ?? '', /\/review-pr 101 --tandem --no-post --emit-json=/)
     const after = rowIn((await getJson<View>(`${h.base}/api/view`)).body, 101)
-    assert.deepEqual([after?.agent?.state, after?.agent?.runId, after?.agent?.label], ['running', Number(own.body.id), 'Self-review'])
+    assert.deepEqual([after?.agent?.state, after?.agent?.runId, after?.agent?.label], ['running', Number(own.body.id), 'Tandem self-review'])
   } finally {
     await h.cleanup()
   }
@@ -1421,9 +1422,9 @@ for (const [name, reviewed, state] of [['whose head has moved', '0123abc', 'stal
       await filled(h)
       const row = rowIn((await getJson<View>(`${h.base}/api/view`)).body, 101) as MineRow
       assert.deepEqual([row.stage === 'draft', row.selfReview.state], [false, state])
-      assert.deepEqual([row.agent?.action.kind, row.agent?.action.args], ['selfReview', ['101', '--no-post']])
+      assert.deepEqual([row.agent?.action.kind, row.agent?.action.args], ['selfReview', ['101', '--tandem', '--no-post']])
       assert.deepEqual(row.agent?.starts.find((start) => start.kind === 'default')?.args, ['101', '--no-post'])
-      const started = await send(`${h.base}/api/prs/101/runs`, 'POST', { repo: scenario.repo }, token(h))
+      const started = await send(`${h.base}/api/prs/101/runs`, 'POST', { repo: scenario.repo, kind: 'default' }, token(h))
       assert.equal(started.status, 200)
       assert.deepEqual([started.body.args, started.body.label, started.body.origin], [['101', '--no-post'], 'Self-review', 'manual'])
       assert.match(h.launch.children[0]!.writes[0] ?? '', /\/review-pr 101 --no-post --emit-json=/)
@@ -1691,10 +1692,10 @@ test('the view\'s Agent cell lists the starts a row offers, and the run list car
     await filled(h)
     const view = (await getJson<View>(`${h.base}/api/view`)).body
     const kinds = (number: number): string[] => (rowIn(view, number)?.agent?.starts ?? []).map((start) => start.kind)
-    assert.deepEqual(kinds(113), ['default', 'tandem'])
-    assert.deepEqual(kinds(111), ['default', 'tandem', 'stack'])
+    assert.deepEqual(kinds(113), ['tandem', 'default'])
+    assert.deepEqual(kinds(111), ['tandem', 'default', 'stack'])
     assert.deepEqual(kinds(114), ['default'])
-    assert.deepEqual(rowIn(view, 111)?.agent?.starts[0], {
+    assert.deepEqual(rowIn(view, 111)?.agent?.starts.find((start) => start.kind === 'default'), {
       kind: 'default', label: 'Review', button: 'Review PR', command: 'review-pr', args: ['111'], runners: ['claude', 'codex'],
       posts: { kind: 'review', text: 'Posts its report to the PR as @vera-quill: an approval, a request for changes, or a comment, per the findings.' },
       repo: scenario.repo,
@@ -1748,7 +1749,7 @@ test('a fix session starts only on the viewer\'s own PR: fix-pr with Claude, nev
       viewer: 'vera-quill',
       unavailable: null,
     })
-    assert.deepEqual([rowIn(view, 101)?.agent?.action.kind, rowIn(view, 101)?.agent?.action.args], ['selfReview', ['101', '--no-post']])
+    assert.deepEqual([rowIn(view, 101)?.agent?.action.kind, rowIn(view, 101)?.agent?.action.args], ['selfReview', ['101', '--tandem', '--no-post']])
 
     // refusals come before anything runs
     const others = await send(url(113), 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))
@@ -1803,7 +1804,8 @@ test('the comments check rides on a Self-review start as a boolean: true adds --
     const refusals: [number, Record<string, unknown>][] = [
       [113, {}], [113, { kind: 'default' }], [113, { kind: 'tandem' }], [113, { kind: 'stack' }],
       [106, {}], [114, {}], [115, {}],
-      [104, { kind: 'tandem' }], [104, { kind: 'stack' }], [104, { kind: 'fix' }],
+      // a Self-review that names no kind is the tandem one, which takes no comments check
+      [104, {}], [104, { kind: 'tandem' }], [104, { kind: 'stack' }], [104, { kind: 'fix' }],
     ]
     for (const [number, ask] of refusals) {
       const refused = await send(url(number), 'POST', { repo: scenario.repo, checkComments: true, ...ask }, token(h))
@@ -1819,20 +1821,20 @@ test('the comments check rides on a Self-review start as a boolean: true adds --
     assert.deepEqual([checked.body.command, checked.body.args, checked.body.label, checked.body.tandem], ['review-pr', ['104', '--no-post', '--check-comments'], 'Self-review', false])
     assert.match(lastWrite(h), /"\/review-pr 104 --no-post --check-comments --emit-json=[^"]+"/)
     await stop(checked.body)
-    const codex = await send(url(101), 'POST', { repo: scenario.repo, runner: 'codex', checkComments: true }, token(h))
+    const codex = await send(url(101), 'POST', { repo: scenario.repo, kind: 'default', runner: 'codex', checkComments: true }, token(h))
     assert.deepEqual([codex.status, codex.body.runner, codex.body.args], [200, 'codex', ['101', '--no-post', '--check-comments']])
     assert.ok(h.launch.children.at(-1)?.request.args.some((arg) => arg.startsWith('$review-pr 101 --no-post --check-comments --emit-json=')))
     await stop(codex.body)
 
     // off, or not sent, is today's start, on any PR
-    const off = await send(url(104), 'POST', { repo: scenario.repo, checkComments: false }, token(h))
+    const off = await send(url(104), 'POST', { repo: scenario.repo, kind: 'default', checkComments: false }, token(h))
     assert.deepEqual([off.status, off.body.args, off.body.label], [200, ['104', '--no-post'], 'Self-review'])
     assert.match(lastWrite(h), /"\/review-pr 104 --no-post --emit-json=[^"]+"/)
     await stop(off.body)
-    const unchanged = await send(url(104), 'POST', { repo: scenario.repo }, token(h))
+    const unchanged = await send(url(104), 'POST', { repo: scenario.repo, kind: 'default' }, token(h))
     assert.deepEqual([unchanged.status, unchanged.body.args], [200, ['104', '--no-post']])
     await stop(unchanged.body)
-    const others = await send(url(113), 'POST', { repo: scenario.repo, checkComments: false }, token(h))
+    const others = await send(url(113), 'POST', { repo: scenario.repo, kind: 'default', checkComments: false }, token(h))
     assert.deepEqual([others.status, others.body.args], [200, ['113']])
     assert.match(lastWrite(h), /"\/review-pr 113 --emit-json=[^"]+"/)
     await stop(others.body)
@@ -1840,7 +1842,7 @@ test('the comments check rides on a Self-review start as a boolean: true adds --
     // the feed offers it on the Self-review start alone, and the row's own action stays as it was
     const view = (await getJson<View>(`${h.base}/api/view`)).body
     assert.deepEqual((rowIn(view, 104)?.agent?.starts ?? []).map((start) => [start.kind, start.checkCommentsArgs]).filter(([, args]) => args !== undefined), [['default', ['104', '--no-post', '--check-comments']]])
-    assert.deepEqual(rowIn(view, 104)?.agent?.action.args, ['104', '--no-post'])
+    assert.deepEqual(rowIn(view, 104)?.agent?.action.args, ['104', '--tandem', '--no-post'])
     assert.ok((rowIn(view, 113)?.agent?.starts ?? []).every((start) => start.checkCommentsArgs === undefined))
   } finally {
     await h.cleanup()
@@ -1854,12 +1856,12 @@ test('a checked Self-review meets the review cap as an unchecked one does: it qu
     const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
     const first = await send(url(113), 'POST', { repo: scenario.repo }, token(h))
     assert.equal(first.body.status, 'running')
-    const queued = await send(url(104), 'POST', { repo: scenario.repo, checkComments: true }, token(h))
+    const queued = await send(url(104), 'POST', { repo: scenario.repo, kind: 'default', checkComments: true }, token(h))
     assert.deepEqual([queued.status, queued.body.status, queued.body.args], [200, 'queued', ['104', '--no-post', '--check-comments']])
     assert.equal(h.launch.children.length, 1)
     // the button that asks for it reads Queue, as for an unchecked one
     const view = (await getJson<View>(`${h.base}/api/view`)).body
-    assert.equal(rowIn(view, 101)?.agent?.starts[0]?.button, 'Queue self-review')
+    assert.equal(rowIn(view, 101)?.agent?.starts.find((start) => start.kind === 'default')?.button, 'Queue self-review')
     const settled = h.server.launcher.settled(Number(first.body.id))
     await send(`${h.base}/api/runs/${first.body.id}/stop`, 'POST', undefined, token(h))
     await settled

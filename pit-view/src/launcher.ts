@@ -12,7 +12,7 @@ import type { CiReading } from './derive.ts'
 import type { Stack } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
 import type { Gh, RawOpenPr, Runner } from './github.ts'
-import { resolveModels, roleFor } from './models.ts'
+import { resolveModels, roleFor, tandemPairProblem } from './models.ts'
 import type { ModelEntry, RequestModels, RunModels } from './models.ts'
 import { keyStatus, profileEnvPath, readOpenRouterKey, readProfileEnvKey } from './openrouter.ts'
 import type { KeyRead } from './openrouter.ts'
@@ -596,7 +596,7 @@ export const childEnv = (source: Readonly<Record<string, string | undefined>>, h
   return env
 }
 
-// the run a row starts: never review-local, and --no-post on every review of the viewer's own PR
+// the run a row starts: never review-local, and --no-post on every review of the viewer's own PR. A review, a re-review, and a self-review start in tandem by default, the plain single-model review being the later entry (section 8 of DESIGN.md, Agent cell); a Dependabot review has no tandem mode and stays single
 
 export type RunKind = 'review' | 'reReview' | 'selfReview'
 export type DefaultRun = { kind: RunKind, label: string, command: 'review-pr' | 'review-dependabot', args: string[] }
@@ -604,7 +604,8 @@ export type DefaultRun = { kind: RunKind, label: string, command: 'review-pr' | 
 // review-dependabot refuses a branch that is not Dependabot's, so other bots get review-pr
 export const isDependabot = (pr: RawOpenPr): boolean => (pr.author?.login ?? '').toLowerCase().includes('dependabot')
 
-export const defaultRun = (pr: RawOpenPr, config: Config): DefaultRun => {
+// the plain, single-model review of a PR: the entry after the tandem one, and the whole of a Dependabot review
+export const singleRun = (pr: RawOpenPr, config: Config): DefaultRun => {
   const number = String(pr.number)
   // unanswered changes requested still offers Self-review here: Fix session is never the default
   if (isMine(pr, config)) return { kind: 'selfReview', label: 'Self-review', command: 'review-pr', args: [number, '--no-post'] }
@@ -615,6 +616,15 @@ export const defaultRun = (pr: RawOpenPr, config: Config): DefaultRun => {
     command: isDependabot(pr) ? 'review-dependabot' : 'review-pr',
     args: [number],
   }
+}
+
+const tandemLabels: Readonly<Record<RunKind, string>> = { review: 'Tandem review', reReview: 'Tandem re-review', selfReview: 'Tandem self-review' }
+
+// the run the Agent cell's idle button and the drawer's first Start entry start: the same review in tandem, except for a Dependabot review, which stays single. --tandem goes before --no-post; the review-pr prompt reads either flag wherever it stands
+export const defaultRun = (pr: RawOpenPr, config: Config): DefaultRun => {
+  const single = singleRun(pr, config)
+  if (single.command !== 'review-pr') return single
+  return { ...single, label: tandemLabels[single.kind], args: [String(pr.number), '--tandem', ...single.args.slice(1)] }
 }
 
 // extra review instructions (section 8 of DESIGN.md, Extra instructions): never on a command line, where quoting, length, and flag-like words would corrupt the invocation. The text goes to this file in the run directory, and the request carries the flag, which prompts/review/extra-instructions.md reads
@@ -685,7 +695,7 @@ export const claudeOnly = (command: string, args: readonly string[]): boolean =>
 
 // null when the kind is offered for this PR, otherwise why it is not
 export const notOffered = (kind: StartKind, pr: RawOpenPr, config: Config, stack: Stack | null): string | null => {
-  if (kind === 'tandem' && defaultRun(pr, config).command !== 'review-pr') return `Review in tandem is not offered for #${pr.number}: review-dependabot has no tandem mode`
+  if (kind === 'tandem' && singleRun(pr, config).command !== 'review-pr') return `Review in tandem is not offered for #${pr.number}: review-dependabot has no tandem mode`
   if (kind === 'stack' && stack === null) return `Review stack is not offered for #${pr.number}: GitHub does not mark it as part of a stack`
   if (kind === 'fix' && !offersFix(pr, config)) return `Fix session is offered only on your own PRs, and #${pr.number} is not yours`
   return null
@@ -712,7 +722,7 @@ const buttons: Readonly<Record<RunKind, string>> = { review: 'Review PR', reRevi
 
 // the starts a PR offers now; busy is whether a run for it is in flight
 export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null, busy: boolean, queueing: Queueing | null = null): StartOption[] => {
-  const plan = defaultRun(pr, config)
+  const single = singleRun(pr, config)
   // a review's button says queue when a review of this PR would wait; a fix session is not a review and keeps its text
   const waits = queueing !== null && queueing[slotOf(pr, config)]
   const reviewButton = (text: string): string => waits ? queueText(text) : text
@@ -722,21 +732,21 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
     : config.cloneDir === undefined ? `set cloneDir in the config to your local clone of ${config.repo} before starting a run` : null
   const extraBox = (command: string): Pick<StartOption, 'extraInstructions'> =>
     takesExtraInstructions(command) ? { extraInstructions: { standing: config.extraReviewInstructions, flag: extraInstructionsFlag } } : {}
-  const options: StartOption[] = [{
-    kind: 'default', label: plan.label, button: reviewButton(buttons[plan.kind]), command: plan.command, args: plan.args,
-    runners: ['claude', 'codex'], posts: postsFor(plan.command, plan.args, viewer), repo, viewer, unavailable,
-    ...(plan.kind === 'selfReview' ? { checkCommentsArgs: [...plan.args, '--check-comments'] } : {}),
-    ...extraBox(plan.command),
-  }]
+  const options: StartOption[] = []
+  // the tandem review leads, the plain one follows it; the Comments check box is offered by the plain Self-review alone
   if (notOffered('tandem', pr, config, stack) === null) {
-    // --tandem goes before --no-post; the review-pr prompt reads either flag wherever it stands
-    const args = [String(pr.number), '--tandem', ...plan.args.slice(1)]
-    const label = plan.kind === 'selfReview' ? 'Tandem self-review' : plan.kind === 'reReview' ? 'Tandem re-review' : 'Tandem review'
+    const plan = defaultRun(pr, config)
     options.push({
-      kind: 'tandem', label, button: reviewButton(`${buttons[plan.kind].replace(/ PR$/, '')} in tandem`), command: 'review-pr', args,
-      runners: ['claude'], posts: postsFor('review-pr', args, viewer), repo, viewer, unavailable, ...extraBox('review-pr'),
+      kind: 'tandem', label: plan.label, button: reviewButton(`${buttons[plan.kind].replace(/ PR$/, '')} in tandem`), command: 'review-pr', args: plan.args,
+      runners: ['claude'], posts: postsFor('review-pr', plan.args, viewer), repo, viewer, unavailable, ...extraBox('review-pr'),
     })
   }
+  options.push({
+    kind: 'default', label: single.label, button: reviewButton(buttons[single.kind]), command: single.command, args: single.args,
+    runners: ['claude', 'codex'], posts: postsFor(single.command, single.args, viewer), repo, viewer, unavailable,
+    ...(single.kind === 'selfReview' ? { checkCommentsArgs: [...single.args, '--check-comments'] } : {}),
+    ...extraBox(single.command),
+  })
   if (notOffered('stack', pr, config, stack) === null) {
     options.push({
       kind: 'stack', label: 'Review stack', button: reviewButton('Review stack'), command: 'review-stack', args: [String(pr.number)],
@@ -1188,7 +1198,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
   const mine = isMine(pr, config)
   const plan = defaultRun(pr, config)
   // the button's text; the run's own label is unchanged
-  const action: AgentAction = { ...plan, label: queueing !== null && reviewCommands.includes(plan.command) && queueing[slotOf(pr, config)] ? queueText(plan.label) : plan.label, runner: config.agent.runner }
+  const action: AgentAction = { ...plan, label: queueing !== null && reviewCommands.includes(plan.command) && queueing[slotOf(pr, config)] ? queueText(plan.label) : plan.label, runner: isTandemRun(plan.args) ? 'claude' : config.agent.runner }
   const lastReviewAt = mine ? report?.at ?? null : viewerReview(pr, config)?.submittedAt ?? null
   // the PR's own run decides what can start here, whatever the cell shows
   const ownInFlight = ownRun?.status === 'running' || ownRun?.status === 'queued'
@@ -1448,6 +1458,8 @@ export type JudgeInput = {
   postDenied?: boolean
   // the run's own command and flags allow a post
   mayPost?: boolean
+  // an unattended tandem review (a scheduled run): nobody is there to answer a stop-and-ask point, so a stop is the run failing
+  unattended?: boolean
   lastEvent: string | null
 }
 
@@ -1490,6 +1502,8 @@ export const judge = (input: JudgeInput): Judgement => {
     const blocked = blockedPost(value, input.reportExists)
     if (blocked !== null) return { status: 'done', note: null, result: blocked }
   }
+  // a failed or invalid reviewer in an unattended tandem is a stop-and-ask point in the prompt, and a scheduled run has nobody to ask: the run fails, its question the reason
+  if (value.status === 'needsInput' && input.unattended === true) return { status: 'failed', note: `unattendedStop: ${value.question}`, result: value }
   if (value.status === 'needsInput') return { status: 'needsInput', note: null, result: value }
   const path = reportPath(value)
   // a sweep with nothing to sweep writes no summary and is still done, and an update writes no report at all
@@ -2909,6 +2923,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       denials: entry.stream.denials,
       postDenied: entry.stream.deniedPosts?.every((pr) => pr === (started as Partial<Run> | undefined)?.number) ?? false,
       mayPost: started?.command !== undefined && started.args !== undefined && mayPost(started.command, started.args),
+      unattended: started?.origin === 'auto' && started.args !== undefined && isTandemRun(started.args),
       lastEvent,
     })
     // from when a scheduled run's outcome is recorded as done or stopped, its resume command names the clone, whether or not its worktree then goes
@@ -3722,6 +3737,15 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         const note = `spawnFailed: ${messageOf(error)}`
         log(`${noun} ${id}: cannot start: ${note}`)
         return end(queued, { status: 'failed', finishedAt: now(), note }, 'failed to start')
+      }
+      // a scheduled tandem whose pair cannot run one is refused here, with the reason on the row, and never started as a single review
+      if (queued.origin === 'auto' && isTandemRun(request.args)) {
+        const problem = queued.runner !== 'claude' ? 'a tandem primary runs on Claude only' : tandemPairProblem(resolveModels(config.models))
+        if (problem !== null) {
+          const note = `tandemPair: ${problem}`
+          log(`${noun} ${id}: cannot start: ${note}`)
+          return end(queued, { status: 'failed', finishedAt: now(), note }, 'refused: its tandem pair cannot run')
+        }
       }
       // as for any start: a check made before a wait is stale after it, so one that waited stays queued for a later tick
       const waited = turn.behind()

@@ -237,6 +237,14 @@ export const resolveModels = (raw: unknown): ResolvedModels => {
   return { registry, fallback, slots: { ...pairs, ...ones }, warnings }
 }
 
+// why the Human auto-review pair cannot run a tandem, or null when it can. A tandem primary runs on Claude only (it holds its stdin open and waits for the secondary's background-task notification), and the two reviewers must be different models, so a pair whose primary is not a Claude entry, or whose two entries name the same model, is refused at start and never run as a single review
+export const tandemPairProblem = (resolved: Pick<ResolvedModels, 'slots'>): string | null => {
+  const [primary, secondary] = resolved.slots.autoReviewHuman
+  if (primary.runner !== 'claude') return `the Human auto-review primary ${primary.id} runs on ${primary.runner}, and a tandem primary runs on Claude only`
+  if (primary.id === secondary.id || (primary.runner === secondary.runner && primary.model === secondary.model)) return `the Human auto-review pair names ${primary.id} twice, and a tandem needs two different models`
+  return null
+}
+
 // a slot's models under the resolution order: a per-run override, then the slot's default. The override names registry ids; one that is not in the registry is ignored, and a pair given one id overrides only its primary. The built-in default is what the slot already holds when the setting could not be read
 export const resolveSlot = <S extends SlotName>(resolved: ResolvedModels, slot: S, override?: string | readonly string[]): SlotValue<S> => {
   const named = (typeof override === 'string' ? [override] : override ?? []).map((id) => resolved.registry.find((entry) => entry.id === id) ?? null)

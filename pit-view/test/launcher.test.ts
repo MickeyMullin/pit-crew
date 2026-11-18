@@ -182,29 +182,32 @@ test('git hooks are off unless the command is exactly fix-pr or update-pr, so a 
 
 // default runs
 
-test('a row\'s default run: Review, Re-review, Self-review with --no-post, and review-dependabot for Dependabot', async () => {
+test('a row\'s default run: Tandem review, Tandem re-review, Tandem self-review with --no-post, and a single review-dependabot for Dependabot', async () => {
   const config = baseConfig()
   const prs = await fixturePrs()
   // 113: never reviewed by the viewer; 106: the viewer commented earlier
-  assert.deepEqual(defaultRun(prs.get(113)!, config), { kind: 'review', label: 'Review', command: 'review-pr', args: ['113'] })
-  assert.deepEqual(defaultRun(prs.get(106)!, config), { kind: 'reReview', label: 'Re-review', command: 'review-pr', args: ['106'] })
+  assert.deepEqual(defaultRun(prs.get(113)!, config), { kind: 'review', label: 'Tandem review', command: 'review-pr', args: ['113', '--tandem'] })
+  assert.deepEqual(defaultRun(prs.get(106)!, config), { kind: 'reReview', label: 'Tandem re-review', command: 'review-pr', args: ['106', '--tandem'] })
   // own PRs never post and never fix: 104 awaiting review, 101 with changes requested still unanswered
-  assert.deepEqual(defaultRun(prs.get(104)!, config), { kind: 'selfReview', label: 'Self-review', command: 'review-pr', args: ['104', '--no-post'] })
-  assert.deepEqual(defaultRun(prs.get(101)!, config), { kind: 'selfReview', label: 'Self-review', command: 'review-pr', args: ['101', '--no-post'] })
+  assert.deepEqual(defaultRun(prs.get(104)!, config), { kind: 'selfReview', label: 'Tandem self-review', command: 'review-pr', args: ['104', '--tandem', '--no-post'] })
+  assert.deepEqual(defaultRun(prs.get(101)!, config), { kind: 'selfReview', label: 'Tandem self-review', command: 'review-pr', args: ['101', '--tandem', '--no-post'] })
   assert.deepEqual(defaultRun(prs.get(114)!, config), { kind: 'review', label: 'Review', command: 'review-dependabot', args: ['114'] })
   // review-dependabot refuses other bots' branches, so Renovate gets an ordinary review
-  assert.deepEqual(defaultRun(prs.get(115)!, config), { kind: 'review', label: 'Review', command: 'review-pr', args: ['115'] })
+  assert.deepEqual(defaultRun(prs.get(115)!, config), { kind: 'review', label: 'Tandem review', command: 'review-pr', args: ['115', '--tandem'] })
   for (const pr of prs.values()) assert.notEqual(defaultRun(pr, config).command, 'review-local')
 })
 
 // the Agent cell
 
-test('an idle cell offers the default run with the configured runner and says when the last review was', async () => {
+test('an idle cell offers the tandem run, always with Claude, and says when the last review was', async () => {
   const config = { ...baseConfig(), agent: { runner: 'codex' as const, claudeModel: 'sonnet' } }
   const others = agentCell(await prOf(106), config, undefined, undefined)
   assert.equal(others.state, 'idle')
-  assert.equal(others.label, 'Re-review')
-  assert.deepEqual(others.action, { kind: 'reReview', label: 'Re-review', command: 'review-pr', args: ['106'], runner: 'codex' })
+  assert.equal(others.label, 'Tandem re-review')
+  // a tandem primary is Claude whatever runner is configured
+  assert.deepEqual(others.action, { kind: 'reReview', label: 'Tandem re-review', command: 'review-pr', args: ['106', '--tandem'], runner: 'claude' })
+  // a Dependabot review has no tandem, so it keeps the configured runner
+  assert.deepEqual(agentCell(await prOf(114), config, undefined, undefined).action, { kind: 'review', label: 'Review', command: 'review-dependabot', args: ['114'], runner: 'codex' })
   // the viewer's latest review of an others' PR
   const pr106 = await prOf(106)
   const viewerReview = pr106.latestReviews.nodes.find((review) => review.author?.login === scenario.viewer)
@@ -285,7 +288,7 @@ test('Clean · mark ready? only on the viewer\'s own draft, and a moved head ret
   // the head moved past the reviewed commit: the next move is the idle action again
   const moved = agentCell(await prOf(106), config, runRow({ status: 'done', result: reviewResult({ reviewed: { kind: 'commit', sha: '0123456789abcdef0123456789abcdef01234567' } }) as unknown as RunResultJson }), undefined)
   assert.equal(moved.state, 'idle')
-  assert.equal(moved.label, 'Re-review')
+  assert.equal(moved.label, 'Tandem re-review')
   assert.equal(moved.runId, 7)
   // the cell carries the commit the run record names, never the PR's current head
   assert.equal(moved.commit, '0123456789abcdef0123456789abcdef01234567')
@@ -344,30 +347,30 @@ test('an auto-review run\'s cell carries its origin, when it was queued, and whe
 
 // the starts the drawer offers
 
-test('a PR offers its default run, the same review in tandem, and a stack review only when stacked', async () => {
+test('a PR offers the tandem review first, the plain review one click after it, and a stack review only when stacked', async () => {
   const config = baseConfig()
   const stacked = { position: 2, size: 3 }
   const options = async (number: number, stack: typeof stacked | null = null) => startOptions(await prOf(number), config, stack, false)
   const summary = (list: Awaited<ReturnType<typeof options>>) => list.map((option) => [option.kind, option.label, option.button, option.command, option.args])
 
   assert.deepEqual(summary(await options(113)), [
-    ['default', 'Review', 'Review PR', 'review-pr', ['113']],
     ['tandem', 'Tandem review', 'Review in tandem', 'review-pr', ['113', '--tandem']],
+    ['default', 'Review', 'Review PR', 'review-pr', ['113']],
   ])
   assert.deepEqual(summary(await options(106, stacked)), [
-    ['default', 'Re-review', 'Re-review PR', 'review-pr', ['106']],
     ['tandem', 'Tandem re-review', 'Re-review in tandem', 'review-pr', ['106', '--tandem']],
+    ['default', 'Re-review', 'Re-review PR', 'review-pr', ['106']],
     ['stack', 'Review stack', 'Review stack', 'review-stack', ['106']],
   ])
   // the viewer's own PR never posts a review, tandem or not; its fix session pushes, so it has no --no-post
   assert.deepEqual(summary(await options(104)), [
-    ['default', 'Self-review', 'Self-review', 'review-pr', ['104', '--no-post']],
     ['tandem', 'Tandem self-review', 'Self-review in tandem', 'review-pr', ['104', '--tandem', '--no-post']],
+    ['default', 'Self-review', 'Self-review', 'review-pr', ['104', '--no-post']],
     ['fix', 'Fix session', 'Fix requested changes', 'fix-pr', ['104']],
   ])
   // review-dependabot has no tandem mode; Renovate's PRs are ordinary reviews and do
   assert.deepEqual(summary(await options(114)), [['default', 'Review', 'Review PR', 'review-dependabot', ['114']]])
-  assert.deepEqual((await options(115)).map((option) => option.kind), ['default', 'tandem'])
+  assert.deepEqual((await options(115)).map((option) => option.kind), ['tandem', 'default'])
   // nothing offered is ever review-local, review-pr's fix mode, or an unflagged review of the viewer's own PR
   for (const number of [101, 103, 104, 120]) {
     for (const option of await options(number, stacked)) {
@@ -383,20 +386,20 @@ test('only a Self-review offers the comments check, which adds --check-comments 
   const offered = async (number: number) => startOptions(await prOf(number), config, stacked, false).map((option) => [option.kind, requestText('/', option.command, option.args, '/r/1'), option.checkCommentsArgs])
   // a Self-review, then the viewer's own PR's other starts
   assert.deepEqual(await offered(104), [
-    ['default', '/review-pr 104 --no-post --emit-json=/r/1', ['104', '--no-post', '--check-comments']],
     ['tandem', '/review-pr 104 --tandem --no-post --emit-json=/r/1', undefined],
+    ['default', '/review-pr 104 --no-post --emit-json=/r/1', ['104', '--no-post', '--check-comments']],
     ['stack', '/review-stack 104 --emit-json=/r/1', undefined],
     ['fix', '/fix-pr 104 --emit-json=/r/1', undefined],
   ])
   // a review, a re-review, and a bot's review of someone else's PR offer none of it
   assert.deepEqual(await offered(113), [
-    ['default', '/review-pr 113 --emit-json=/r/1', undefined],
     ['tandem', '/review-pr 113 --tandem --emit-json=/r/1', undefined],
+    ['default', '/review-pr 113 --emit-json=/r/1', undefined],
     ['stack', '/review-stack 113 --emit-json=/r/1', undefined],
   ])
   assert.deepEqual(await offered(106), [
-    ['default', '/review-pr 106 --emit-json=/r/1', undefined],
     ['tandem', '/review-pr 106 --tandem --emit-json=/r/1', undefined],
+    ['default', '/review-pr 106 --emit-json=/r/1', undefined],
     ['stack', '/review-stack 106 --emit-json=/r/1', undefined],
   ])
   assert.deepEqual(await offered(114), [
@@ -407,7 +410,7 @@ test('only a Self-review offers the comments check, which adds --check-comments 
   assert.deepEqual(updateRequest(scenario.repo, 104, 'a'.repeat(40), 'update').args, ['104', `--head=${'a'.repeat(40)}`])
   assert.deepEqual(sweepRequest(scenario.repo, 'claude').args, [scenario.repo, '--parallel', '1'])
   // the same start with the option on, as each runner receives it; what it does on GitHub does not change
-  const [self] = startOptions(await prOf(104), config, null, false)
+  const self = startOptions(await prOf(104), config, null, false).find((option) => option.kind === 'default')
   assert.deepEqual(self?.args, ['104', '--no-post'])
   const checked = self?.checkCommentsArgs ?? []
   assert.equal(requestText('/', 'review-pr', checked, '/r/1'), '/review-pr 104 --no-post --check-comments --emit-json=/r/1')
@@ -3977,7 +3980,7 @@ test('a run\'s start, steps and settling each patch its row, with consecutive ve
     await poller.idle()
     const before = (await poller.view()).others.groups.flatMap((group) => group.rows).find((row) => row.number === 106)!
     assert.equal(before.agent?.state, 'idle')
-    assert.equal(before.agent?.label, 'Re-review')
+    assert.equal(before.agent?.label, 'Tandem re-review')
     const from = patches.length
     const run = await launcher.start(request())
     await launcher.flushed()
@@ -4046,8 +4049,8 @@ test('a fix session is offered on every own open PR, drafts included, Claude onl
   assert.notEqual(notOffered('fix', await prOf(114), botViewer, null), null)
   // the default stays Self-review, changes requested or not, and the fix comes last
   const cell = agentCell(await prOf(101), config, undefined, undefined)
-  assert.deepEqual([cell.action.kind, cell.action.command, cell.action.args, cell.label], ['selfReview', 'review-pr', ['101', '--no-post'], 'Self-review'])
-  assert.deepEqual(cell.starts.map((option) => option.kind), ['default', 'tandem', 'fix'])
+  assert.deepEqual([cell.action.kind, cell.action.command, cell.action.args, cell.label], ['selfReview', 'review-pr', ['101', '--tandem', '--no-post'], 'Tandem self-review'])
+  assert.deepEqual(cell.starts.map((option) => option.kind), ['tandem', 'default', 'fix'])
   // while a run is in flight, the fix is as unavailable as the rest
   assert.ok(agentCell(await prOf(101), config, runRow({ number: 101 }), undefined).starts.every((option) => option.unavailable?.includes('in flight')))
 })
@@ -4175,7 +4178,7 @@ test('a finished fix stays done while the PR\'s head is the one it pushed, or th
   // the cached row still has the head the run read until the PR is next fetched
   assert.equal(agentCell(at(fixHead), config, pushed, undefined).state, 'done')
   const moved = agentCell(at(other), config, pushed, undefined)
-  assert.deepEqual([moved.state, moved.label, moved.runId, moved.text], ['idle', 'Self-review', 7, 'Fixed · pushed 2 commits'])
+  assert.deepEqual([moved.state, moved.label, moved.runId, moved.text], ['idle', 'Tandem self-review', 7, 'Fixed · pushed 2 commits'])
   // nothing pushed: the head it read
   const nothing = fixRun(nothingToFix())
   assert.equal(agentCell(at(fixHead), config, nothing, undefined).state, 'done')
@@ -4630,14 +4633,14 @@ test('the default button reads as before with room, and says queue at the cap; a
     const cell = agentCell(await prOf(number), config, undefined, undefined, null, queueing)
     return [cell.action.label, cell.label, cell.starts[0]!.button, cell.starts[0]!.label]
   }
-  assert.deepEqual(await labels(106, roomFor), ['Re-review', 'Re-review', 'Re-review PR', 'Re-review'])
-  assert.deepEqual(await labels(106, null), ['Re-review', 'Re-review', 'Re-review PR', 'Re-review'])
+  assert.deepEqual(await labels(106, roomFor), ['Tandem re-review', 'Tandem re-review', 'Re-review in tandem', 'Tandem re-review'])
+  assert.deepEqual(await labels(106, null), ['Tandem re-review', 'Tandem re-review', 'Re-review in tandem', 'Tandem re-review'])
   // the run's own label does not change, only the text of the buttons that start it
-  assert.deepEqual(await labels(106, noRoom), ['Queue re-review', 'Re-review', 'Queue re-review PR', 'Re-review'])
-  assert.deepEqual(await labels(101, noRoom), ['Queue self-review', 'Self-review', 'Queue self-review', 'Self-review'])
+  assert.deepEqual(await labels(106, noRoom), ['Queue tandem re-review', 'Tandem re-review', 'Queue re-review in tandem', 'Tandem re-review'])
+  assert.deepEqual(await labels(101, noRoom), ['Queue tandem self-review', 'Tandem self-review', 'Queue self-review in tandem', 'Tandem self-review'])
   // a self-review the setting lets in starts at once, so its plain label stays while a review of another's PR queues
-  assert.deepEqual(await labels(101, { review: true, selfReview: false }), ['Self-review', 'Self-review', 'Self-review', 'Self-review'])
-  assert.deepEqual(await labels(106, { review: true, selfReview: false }), ['Queue re-review', 'Re-review', 'Queue re-review PR', 'Re-review'])
+  assert.deepEqual(await labels(101, { review: true, selfReview: false }), ['Tandem self-review', 'Tandem self-review', 'Self-review in tandem', 'Tandem self-review'])
+  assert.deepEqual(await labels(106, { review: true, selfReview: false }), ['Queue tandem re-review', 'Tandem re-review', 'Queue re-review in tandem', 'Tandem re-review'])
 })
 
 test('the tandem and stack buttons say queue at the cap, and the fix button never does', async () => {
@@ -4721,30 +4724,30 @@ test('every open row\'s buttons follow the cap as reviews start and finish and a
   try {
     poller.refresh('manual')
     await poller.idle()
-    assert.equal(await buttonOf(113), 'Review')
+    assert.equal(await buttonOf(113), 'Tandem review')
     const first = await launcher.start(request(106))
     // one of two: room remains, so no other row's patch is needed
-    assert.equal(await buttonOf(113), 'Review')
+    assert.equal(await buttonOf(113), 'Tandem review')
     await launcher.start(request(118, { label: 'Review' }))
     await launcher.flushed()
     // at the cap: the patch that announced the second review carries the other rows with the queue wording
-    assert.equal(latest(113), 'Queue review')
-    assert.equal(await buttonOf(113), 'Queue review')
+    assert.equal(latest(113), 'Queue tandem review')
+    assert.equal(await buttonOf(113), 'Queue tandem review')
     // the cap saved higher: the same rows go back, with no reload
     const before = h.settings.current
     h.settings.current = { ...before, maxConcurrentReviews: 3 }
     await poller.configChanged(before)
     await launcher.flushed()
-    assert.equal(latest(113), 'Review')
+    assert.equal(latest(113), 'Tandem review')
     const lowered = h.settings.current
     h.settings.current = { ...lowered, maxConcurrentReviews: 2 }
     await poller.configChanged(lowered)
-    assert.equal(latest(113), 'Queue review')
+    assert.equal(latest(113), 'Queue tandem review')
     // a review finishing frees a slot
     h.launch.children[0]!.exit(1)
     await launcher.settled(first.id)
     await launcher.flushed()
-    assert.equal(latest(113), 'Review')
+    assert.equal(latest(113), 'Tandem review')
   } finally {
     launcher.close()
     poller.stop()
@@ -4784,17 +4787,17 @@ test('a page loaded while a config save is rescanning does not stop the open pag
     await launcher.start(request(118, { label: 'Review' }))
     await launcher.flushed()
     // the open pages hold the queue wording
-    assert.equal(latest(113), 'Queue review')
+    assert.equal(latest(113), 'Queue tandem review')
     // a save that raises the cap and moves the reports directory yields during the rescan
     const before = h.settings.current
     h.settings.current = { ...before, maxConcurrentReviews: 3, reportsDir: join(h.home, 'other-reports') }
     const saving = poller.configChanged(before)
     // a fresh page loads in the middle, and reads the new answer
     const loaded = await poller.view()
-    assert.equal(loaded.others.groups.flatMap((group) => group.rows).find((entry) => entry.number === 113)?.agent?.action.label, 'Review')
+    assert.equal(loaded.others.groups.flatMap((group) => group.rows).find((entry) => entry.number === 113)?.agent?.action.label, 'Tandem review')
     await saving
     // the pages that were already open still get the row
-    assert.equal(latest(113), 'Review')
+    assert.equal(latest(113), 'Tandem review')
   } finally {
     launcher.close()
     poller.stop()
@@ -4862,7 +4865,7 @@ test('a cap saved with a new reports directory, a page loaded during the rescan,
     await r.launcher.start(request(106))
     await r.launcher.start(request(118, { label: 'Review' }))
     await r.launcher.flushed()
-    assert.equal(open.labels().get(113), 'Queue review')
+    assert.equal(open.labels().get(113), 'Queue tandem review')
     const before = r.h.settings.current
     r.h.settings.current = { ...before, maxConcurrentReviews: 3, reportsDir: join(r.h.home, 'other-reports') }
     // the save's rescan waits on a promise this test resolves, so the order below is the order that happens
@@ -4875,7 +4878,7 @@ test('a cap saved with a new reports directory, a page loaded during the rescan,
       saved = true
     })
     const mid = await r.load()
-    assert.equal(mid.labels().get(113), 'Review')
+    assert.equal(mid.labels().get(113), 'Tandem review')
     // a third review fills the raised cap while the save is still waiting on its rescan
     await r.launcher.start(request(113, { label: 'Review' }))
     assert.equal(saved, false, 'the third review started before the save resumed')
@@ -4981,7 +4984,7 @@ test('the buttons settle once a review has finished launching, though the review
     await launcher.flushed()
     // two of three are running and none is being launched: the answer is room, and the pages were told so
     assert.deepEqual(launcher.queueing(), roomFor)
-    assert.equal(latest(113), 'Review')
+    assert.equal(latest(113), 'Tandem review')
   } finally {
     launcher.close()
     poller.stop()
@@ -5018,10 +5021,10 @@ test('a change of the queue answer, whichever repository the run is in, patches 
     await poller.view()
     answer = noRoom
     poller.queueingChanged()
-    assert.equal(latest(113), 'Queue review')
+    assert.equal(latest(113), 'Queue tandem review')
     answer = roomFor
     poller.queueingChanged()
-    assert.equal(latest(113), 'Review')
+    assert.equal(latest(113), 'Tandem review')
   } finally {
     poller.stop()
     await h.cleanup()
@@ -5236,7 +5239,7 @@ test('a review whose two settlement writes both fail still frees its slot, and t
     const open = await r.load()
     const running = await r.launcher.start(request(106))
     await r.launcher.flushed()
-    assert.equal(open.labels().get(113), 'Queue review')
+    assert.equal(open.labels().get(113), 'Queue tandem review')
     broken = true
     r.h.launch.children[0]!.exit(1)
     const ended = await within(r.launcher.settled(running.id))
@@ -5245,7 +5248,7 @@ test('a review whose two settlement writes both fail still frees its slot, and t
     assert.deepEqual(r.launcher.queueing(), roomFor)
     await r.launcher.flushed()
     assert.equal(ended.id, running.id)
-    assert.equal(open.labels().get(113), 'Review')
+    assert.equal(open.labels().get(113), 'Tandem review')
   } finally {
     r.launcher.close()
     r.poller.stop()

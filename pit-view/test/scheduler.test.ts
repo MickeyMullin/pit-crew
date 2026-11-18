@@ -10,6 +10,7 @@ import { defaultAutoReview, toAutoRun, toAutoSweep } from '../src/autoreview.ts'
 import type { AutoReviewSettings } from '../src/autoreview.ts'
 import type { Run, Sweep } from '../src/cache.ts'
 import type { Config } from '../src/config.ts'
+import type { Deliver, Notice } from '../src/notify.ts'
 import type { Runner } from '../src/github.ts'
 import type { Patch } from '../src/poller.ts'
 import { startServer } from '../src/server.ts'
@@ -100,7 +101,7 @@ type World = {
 
 const headers = (world: World): Record<string, string> => ({ 'Content-Type': 'application/json', Origin: world.server.url, 'x-pit-view-token': world.server.token })
 
-const setup = async ({ auto = {}, config = {}, now = insideHours, noKey = false, drafts = [], before }: {
+const setup = async ({ auto = {}, config = {}, now = insideHours, noKey = false, drafts = [], before, deliver }: {
   auto?: Partial<AutoReviewSettings>
   // PRs the open list reports as drafts, over the fixture's own
   drafts?: number[]
@@ -108,6 +109,8 @@ const setup = async ({ auto = {}, config = {}, now = insideHours, noKey = false,
   now?: string
   noKey?: boolean
   before?: (world: { home: string, clone: string, git: ReturnType<typeof fakeGit> }) => Promise<void> | void
+  // what a notification reaches, with the server's notifier in front of it
+  deliver?: Deliver
 } = {}): Promise<World> => {
   const { dir: home, cleanup: removeHome } = await tempDir()
   const clone = join(home, 'dev', 'orbit')
@@ -157,6 +160,7 @@ const setup = async ({ auto = {}, config = {}, now = insideHours, noKey = false,
     launch: launch.deps,
     log: () => {},
     pageSize: scenario.pageSize,
+    ...(deliver === undefined ? {} : { deliver }),
   })
   const world: World = {
     server: await boot(),
@@ -461,8 +465,7 @@ test('with post.others off no run starts without --no-post, and the command line
     await tick(world)
     assert.equal(world.launch.children.length, 2)
     for (const child of world.launch.children) {
-      assert.match(stdinOf(child), /\/review-pr \d+ --no-post --emit-json=/)
-      assert.doesNotMatch(stdinOf(child), /--tandem/)
+      assert.match(stdinOf(child), /\/review-pr \d+ --tandem --no-post --emit-json=/)
     }
     for (const run of running(world)) {
       assert.ok(run.args.includes('--no-post'))
@@ -479,7 +482,7 @@ test('with post.others on an others run omits --no-post, and a run queued before
     await tick(world)
     const started = running(world)[0]
     assert.ok(started)
-    assert.deepEqual(started.args, [String(started.number)])
+    assert.deepEqual(started.args, [String(started.number), '--tandem'])
     assert.equal(started.posting, true)
     assert.doesNotMatch(stdinOf(world.launch.children[0]!), /--no-post/)
     const waiting = autoRuns(world).filter((run) => run.status === 'queued')
@@ -506,7 +509,7 @@ test('with post.others on an others run omits --no-post, and a run queued before
     await tick(world)
     const third = running(world)[0]
     assert.ok(third)
-    assert.deepEqual(third.args, [String(third.number)])
+    assert.deepEqual(third.args, [String(third.number), '--tandem'])
     assert.equal(third.posting, true)
   } finally {
     await world.cleanup()
@@ -520,12 +523,156 @@ test('an own PR run always carries --no-post, whatever post.others says', async 
     const started = running(world)[0]
     assert.ok(started)
     assert.equal(started.reason, 'selfReview')
-    assert.equal(started.label, 'Self-review')
+    assert.equal(started.label, 'Tandem self-review')
     assert.ok(started.args.includes('--no-post'))
     assert.equal(started.posting, false)
     assert.match(stdinOf(world.launch.children[0]!), /--no-post --emit-json=/)
   } finally {
     await world.cleanup()
+  }
+})
+
+// the tandem an auto-review starts (section 10 of DESIGN.md, Launching)
+
+const notified = { enabled: true, kinds: ['runFinished', 'runNeedsInput'] as ('runFinished' | 'runNeedsInput')[] }
+
+const recorder = (): { notices: Notice[], deliver: Deliver } => {
+  const notices: Notice[] = []
+  return { notices, deliver: async (notice) => void notices.push(notice) }
+}
+
+test('an auto-started review of a human PR is a tandem on Claude whatever runner is configured, with --no-post and never --check-comments', async () => {
+  const world = await setup({ config: { agent: { runner: 'codex', claudeModel: 'sonnet' } } })
+  try {
+    await tick(world)
+    const started = running(world)[0]
+    assert.ok(started)
+    assert.deepEqual([started.command, started.runner, started.label], ['review-pr', 'claude', 'Tandem re-review'])
+    assert.deepEqual(started.args, [String(started.number), '--tandem', '--no-post'])
+    assert.equal(world.launch.children[0]?.request.command, 'claude')
+    assert.match(stdinOf(world.launch.children[0]!), new RegExp(`/review-pr ${started.number} --tandem --no-post --emit-json=`))
+    for (const run of autoRuns(world)) assert.equal(run.args.includes('--check-comments'), false)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('an auto-started tandem with posting on still passes --tandem, and its self-review of an own draft is a tandem that never posts', async () => {
+  const world = await setup({ auto: { own: true, others: false, post: { others: true, dependabot: true } }, drafts: [101] })
+  try {
+    await tick(world)
+    const own = running(world)[0]
+    assert.ok(own)
+    assert.deepEqual([own.reason, own.label, own.args, own.posting], ['selfReview', 'Tandem self-review', [String(own.number), '--tandem', '--no-post'], false])
+  } finally {
+    await world.cleanup()
+  }
+  const others = await setup({ auto: { post: { others: true, dependabot: true } } })
+  try {
+    await tick(others)
+    const posting = running(others)[0]
+    assert.ok(posting)
+    assert.deepEqual([posting.args, posting.posting], [[String(posting.number), '--tandem'], true])
+  } finally {
+    await others.cleanup()
+  }
+})
+
+test('a scheduled Dependabot sweep stays a single review: no --tandem on the sweep or in any argument it carries', async () => {
+  const world = await setup({ auto: { others: false, dependabot: true } })
+  try {
+    await tick(world)
+    const sweep = world.server.cache.allSweeps()[0]
+    assert.ok(sweep)
+    assert.equal(sweep.args.includes('--tandem'), false)
+    assert.doesNotMatch(stdinOf(world.launch.children[0]!), /--tandem/)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+const refusedPairs: [string, string[]][] = [
+  ['a primary that is not on Claude', ['gpt-6.1-terra', 'sonnet']],
+  ['a primary on Hermes', ['kimi-code', 'sonnet']],
+  ['one model named twice', ['sonnet', 'sonnet']],
+]
+
+for (const [name, pair] of refusedPairs) {
+  test(`a Human auto-review pair with ${name} is refused at start with a visible notification, and no single review is started in its place`, async () => {
+    const seen = recorder()
+    const world = await setup({ config: { models: { slots: { autoReviewHuman: pair } }, notifications: notified }, deliver: seen.deliver })
+    try {
+      await tick(world)
+      const rows = autoRuns(world)
+      assert.ok(rows.length > 0)
+      assert.equal(world.launch.children.length, 0)
+      assert.equal(rows.some((run) => run.status === 'running'), false)
+      for (const run of rows) {
+        assert.equal(run.status === 'failed' || run.status === 'queued', true)
+        assert.equal(run.args.includes('--tandem'), true)
+      }
+      const failed = rows.filter((run) => run.status === 'failed')
+      assert.ok(failed.length > 0)
+      for (const run of failed) assert.match(run.note ?? '', /^tandemPair: /)
+      await waitFor(() => seen.notices.length > 0)
+      assert.equal(seen.notices[0]?.subtitle, 'Review session finished')
+    } finally {
+      await world.cleanup()
+    }
+  })
+}
+
+test('a refused tandem pair is retried once like any failed run, and its second failure is recorded as failedTwice', async () => {
+  const world = await setup({ auto: { dailyLimit: 100 }, config: { models: { slots: { autoReviewHuman: ['gpt-6.1-terra', 'sonnet'] } } } })
+  try {
+    await tick(world)
+    const first = autoRuns(world).find((run) => run.status === 'failed')
+    assert.ok(first)
+    await tick(world)
+    await tick(world)
+    await tick(world)
+    const same = autoRuns(world).filter((run) => run.number === first.number)
+    assert.equal(same.length, 2)
+    assert.match([...same].sort((a, b) => b.id - a.id)[0]?.note ?? '', /^failedTwice/)
+    assert.equal(world.launch.children.length, 0)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('an unattended tandem that stops to ask notifies as a finished run and never as one that needs an answer', async () => {
+  const seen = recorder()
+  const world = await setup({ config: { notifications: notified }, deliver: seen.deliver })
+  try {
+    await tick(world)
+    const started = running(world)[0]
+    assert.ok(started)
+    await finish(world, started, { status: 'needsInput', question: 'The secondary failed: consolidate without it?', reviewed: null, verdict: null, findings: [], report: null })
+    await waitFor(() => seen.notices.length > 0)
+    assert.deepEqual(seen.notices.map((notice) => notice.subtitle), ['Review session finished'])
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a tandem review is one run and one slot: it holds one process, one place under the concurrency, and one count against the daily limit', async () => {
+  const world = await setup({ auto: { concurrency: 3, dailyLimit: 1 }, config: { maxConcurrentReviews: 3 } })
+  try {
+    await tick(world)
+    assert.equal(running(world).length, 1)
+    assert.equal(world.launch.children.length, 1)
+    assert.equal(autoRuns(world).filter((run) => run.status === 'queued').length >= 1, true)
+  } finally {
+    await world.cleanup()
+  }
+  const capped = await setup({ auto: { concurrency: 2, dailyLimit: 10 }, config: { maxConcurrentReviews: 1 } })
+  try {
+    await tick(capped)
+    assert.equal(running(capped).length, 1)
+    assert.equal(capped.launch.children.length, 1)
+    assert.equal(capped.server.launcher.queueing().review, true)
+  } finally {
+    await capped.cleanup()
   }
 })
 
@@ -590,7 +737,7 @@ test('post.others turned off while the fetch is held: the others run spawns with
     assert.equal(world.launch.children.length, 1)
     const child = world.launch.children[0]!
     assert.match(stdinOf(child), /--no-post --emit-json=/)
-    assert.deepEqual(started.args, [String(started.number), '--no-post'])
+    assert.deepEqual(started.args, [String(started.number), '--tandem', '--no-post'])
     assert.equal(started.posting, false)
     const file = await requestFileOf(child)
     assert.deepEqual(file.args, started.args)
@@ -605,7 +752,7 @@ test('post.others turned off while the worktree is added: a row queued by an ear
     await tick(world)
     const first = running(world)[0]
     assert.ok(first)
-    assert.deepEqual(first.args, [String(first.number)])
+    assert.deepEqual(first.args, [String(first.number), '--tandem'])
     const waiting = autoRuns(world).filter((run) => run.status === 'queued')
     assert.ok(waiting.length > 0)
     for (const run of waiting) assert.equal(run.posting, true)
@@ -623,24 +770,24 @@ test('post.others turned off while the worktree is added: a row queued by an ear
     assert.ok(waiting.some((run) => run.id === second.id))
     assert.equal(world.launch.children.length, 2)
     assert.match(stdinOf(world.launch.children[1]!), /--no-post --emit-json=/)
-    assert.deepEqual(second.args, [String(second.number), '--no-post'])
+    assert.deepEqual(second.args, [String(second.number), '--tandem', '--no-post'])
     assert.equal(second.posting, false)
   } finally {
     await world.cleanup()
   }
 })
 
-test('post.others turned off during the launch\'s own last awaits, after the worktree exists: the Codex command line carries --no-post, in its argv and in request.json', async () => {
+test('post.others turned off during the launch\'s own last awaits, after the worktree exists: a tandem still runs on Claude with a Codex runner configured, and carries --no-post, in its argv and in request.json', async () => {
   const world = await setup({ auto: { post: { others: true, dependabot: true } }, config: { agent: { runner: 'codex', claudeModel: 'sonnet' } } })
   try {
-    await saveWhileHeld(world, 'holdRevParse', { others: false, dependabot: true })
+    await saveWhileHeld(world, 'holdFetch', { others: false, dependabot: true })
     const started = running(world)[0]
     assert.ok(started)
     const child = world.launch.children[0]!
-    assert.equal(started.runner, 'codex')
-    assert.equal(child.request.command, 'codex')
-    assert.match(child.request.args.at(-1) ?? '', /--no-post --emit-json=/)
-    assert.deepEqual(started.args, [String(started.number), '--no-post'])
+    assert.equal(started.runner, 'claude')
+    assert.equal(child.request.command, 'claude')
+    assert.match(stdinOf(child), /--tandem --no-post --emit-json=/)
+    assert.deepEqual(started.args, [String(started.number), '--tandem', '--no-post'])
     assert.equal(started.posting, false)
     const file = await requestFileOf(child)
     assert.deepEqual(file.args, started.args)
@@ -708,7 +855,7 @@ test('a switch turned on while a run built with --no-post is held changes nothin
     await saveWhileHeld(others, 'holdFetch', { others: true, dependabot: true })
     const started = running(others)[0]
     assert.ok(started)
-    assert.deepEqual(started.args, [String(started.number), '--no-post'])
+    assert.deepEqual(started.args, [String(started.number), '--tandem', '--no-post'])
     assert.equal(started.posting, false)
     assert.match(stdinOf(others.launch.children[0]!), /--no-post --emit-json=/)
   } finally {
@@ -730,7 +877,7 @@ test('a switch turned on while a run built with --no-post is held changes nothin
     const started = running(own)[0]
     assert.ok(started)
     assert.equal(started.reason, 'selfReview')
-    assert.deepEqual(started.args, [String(started.number), '--no-post'])
+    assert.deepEqual(started.args, [String(started.number), '--tandem', '--no-post'])
     assert.equal(started.posting, false)
     assert.match(stdinOf(own.launch.children[0]!), /--no-post --emit-json=/)
   } finally {
@@ -744,7 +891,7 @@ test('an own PR run keeps --no-post once when the switch is turned off, and anot
     await saveWhileHeld(own, 'holdFetch', { others: false, dependabot: true })
     const started = running(own)[0]
     assert.ok(started)
-    assert.deepEqual(started.args, [String(started.number), '--no-post'])
+    assert.deepEqual(started.args, [String(started.number), '--tandem', '--no-post'])
   } finally {
     await own.cleanup()
   }
@@ -753,7 +900,7 @@ test('an own PR run keeps --no-post once when the switch is turned off, and anot
     await saveWhileHeld(others, 'holdFetch', { others: true, dependabot: false })
     const started = running(others)[0]
     assert.ok(started)
-    assert.deepEqual(started.args, [String(started.number)])
+    assert.deepEqual(started.args, [String(started.number), '--tandem'])
     assert.equal(started.posting, true)
     assert.doesNotMatch(stdinOf(others.launch.children[0]!), /--no-post/)
   } finally {
@@ -967,42 +1114,32 @@ test('a removal git refuses keeps the path, notes worktreeKept, lists it in the 
   }
 })
 
-test('a run that ends needsInput keeps its worktree and its resume names it, until its PR gets a new head, which the next sweep notices', async () => {
+test('an unattended tandem that stops to ask fails the run with its question as the note, never needsInput, and releases its worktree', async () => {
   const world = await setup()
   try {
     await tick(world)
     const started = running(world)[0]
     assert.ok(started)
-    const waiting = await finish(world, started, { status: 'needsInput', question: 'Which base?', reviewed: null, verdict: null, findings: [], report: null })
-    assert.equal(waiting.status, 'needsInput')
-    assert.equal(waiting.worktree, `~/.local/state/pit-view/worktrees/run-${started.id}`)
-    assert.match(waiting.resume ?? '', /worktrees\/run-/)
-    assert.deepEqual(world.git.verbs('worktree', 'remove'), [])
-    // it is left at that head, and its worktree stays through the next sweep
-    await tick(world)
-    assert.equal(world.server.cache.getRun(started.id)?.worktree, waiting.worktree)
-    assert.deepEqual(world.git.verbs('worktree', 'remove'), [])
-    // the cycle of that tick stands until the next one, which sweeps before it fetches
-    const row = world.server.cache.readView(scenario.repo).open.find((entry) => entry.number === started.number)
-    assert.ok(row)
-    world.server.cache.writePr(scenario.repo, { ...row.pr, headRefOid: 'abc1234abc1234abc1234abc1234abc1234abc12' }, scenario.defaultBranch)
-    await tick(world)
-    const after = world.server.cache.getRun(started.id)
-    assert.equal(after?.worktree, null)
-    assert.equal(after?.status, 'needsInput')
-    assert.match(after?.resume ?? '', /^cd ~\/dev\/orbit && /)
+    assert.ok(started.args.includes('--tandem'))
+    const ended = await finish(world, started, { status: 'needsInput', question: 'The secondary failed: consolidate without it?', reviewed: null, verdict: null, findings: [], report: null })
+    assert.equal(ended.status, 'failed')
+    assert.equal(ended.note, 'unattendedStop: The secondary failed: consolidate without it?')
+    assert.notEqual(world.server.cache.getRun(started.id)?.status, 'needsInput')
+    assert.equal(autoRuns(world).filter((run) => run.status === 'needsInput').length, 0)
   } finally {
     await world.cleanup()
   }
 })
 
-test('the session of a waiting run having ended, shown by a new result.json in its folder, settles its worktree without changing its recorded outcome', async () => {
+test('the session of a run that ended by stopping to ask having ended, shown by a new result.json in its folder, settles its worktree without changing its recorded outcome', async () => {
   const world = await setup()
   try {
     await tick(world)
     const started = running(world)[0]
     assert.ok(started)
+    // a scheduled tandem that stops to ask is recorded as failed, and that is the outcome that stays
     const waiting = await finish(world, started, { status: 'needsInput', question: 'Which base?', reviewed: null, verdict: null, findings: [], report: null })
+    assert.equal(waiting.status, 'failed')
     const child = world.launch.children[0]!
     await child.result(reviewResult({ target: { repo: scenario.repo, pr: started.number }, status: 'done', posted: null, notPostedReason: 'noPost', report: null }))
     await tick(world)
@@ -1757,26 +1894,29 @@ test('a sweep whose rows match the open heads is not queued again; a failed one 
 
 // a Codex run
 
-test('a Codex run in a worktree takes the clone\'s .git and the worktree\'s metadata folder as its roots, and a finished one\'s resume names the clone\'s', async () => {
-  const world = await setup({ config: { agent: { runner: 'codex', claudeModel: 'sonnet' } } })
+test('a scheduled Codex review that is not a tandem takes the clone\'s .git and the worktree\'s metadata folder as its roots, and a finished one\'s resume names the clone\'s', async () => {
+  const world = await setup({ auto: { others: false } })
   try {
-    await tick(world)
-    const started = running(world)[0]
-    assert.ok(started)
+    // a scheduled human review is a tandem on Claude, so the Codex path is reached by a queued row that is not one
+    const tickRow = world.server.cache.createTick(scenario.repo)
+    const request = { repo: scenario.repo, number: 900, command: 'review-pr', args: ['900', '--no-post'], label: 'Review', runner: 'codex' as const }
+    const row = world.server.launcher.queueScheduled(request, world.clone, { tick: tickRow.id, reason: 'new', headOid: 'abc1234', posting: false })
+    const started = await world.server.launcher.startScheduled(row.id, request, { args: request.args, posting: false }, async () => join(world.worktrees, `run-${row.id}`))
+    assert.equal(started?.status, 'running')
     const child = world.launch.children[0]!
     const args = child.request.args
     const roots = args.flatMap((arg, index) => args[index - 1] === '--add-dir' ? [arg] : [])
-    const path = join(world.worktrees, `run-${started.id}`)
+    const path = join(world.worktrees, `run-${row.id}`)
     assert.ok(roots.includes(join(world.clone, '.git')))
-    assert.ok(roots.includes(join(world.clone, '.git', 'worktrees', `run-${started.id}`)))
+    assert.ok(roots.includes(join(world.clone, '.git', 'worktrees', `run-${row.id}`)))
     assert.equal(roots.includes(join(path, '.git')), false)
     assert.ok(world.git.state.calls.some((call) => call.args[1] === path && call.args[2] === 'rev-parse' && call.args[3] === '--absolute-git-dir'))
     await child.stream({ type: 'thread.started', thread_id: 'codex-session-1' })
     await world.server.launcher.check()
-    const resumed = world.server.cache.getRun(started.id)?.resume ?? ''
-    assert.match(resumed, new RegExp(`^cd ~/\\.local/state/pit-view/worktrees/run-${started.id} && codex resume codex-session-1 `))
+    const resumed = world.server.cache.getRun(row.id)?.resume ?? ''
+    assert.match(resumed, new RegExp(`^cd ~/\\.local/state/pit-view/worktrees/run-${row.id} && codex resume codex-session-1 `))
     assert.match(resumed, /--add-dir ~\/dev\/orbit\/\.git /)
-    const done = await finish(world, started, { reviewed: { kind: 'commit', sha: started.headOid } })
+    const done = await finish(world, world.server.cache.getRun(row.id) as Run, { reviewed: { kind: 'commit', sha: 'abc1234' } })
     assert.match(done.resume ?? '', /^cd ~\/dev\/orbit && codex resume codex-session-1 /)
     assert.match(done.resume ?? '', /--add-dir ~\/dev\/orbit\/\.git /)
     assert.doesNotMatch(done.resume ?? '', /worktrees\/run-/)
