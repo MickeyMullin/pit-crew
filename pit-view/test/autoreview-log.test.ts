@@ -206,7 +206,7 @@ const run = (patch: Partial<Run>): Run => ({
   posting: false, worktree: null, extraInstructions: null, models: null, ...patch,
 } as Run)
 
-test('a session\'s status is its decision: started, finished with its outcome, failed with its note, stopped, or dropped before start with why; a queued row and a manual run are not entries', () => {
+test('a session\'s status is its decision: started, finished with its outcome, failed with its note, stopped, or dropped before start with why; a queued row and a manual run are not entries, tandem or not', () => {
   assert.deepEqual(sessionEntry('run', run({})), { repo, lane: 'pr', number: 106, decision: 'started', reason: 'pushed', note: null, head: 'cccc333', run: { kind: 'run', id: 7 }, tick: 12, at: '2026-11-02T14:01:00Z' })
   assert.equal(sessionEntry('run', run({ status: 'done', finishedAt: '2026-11-02T14:09:00Z' }))?.decision, 'finished')
   assert.equal(sessionEntry('run', run({ status: 'done', finishedAt: '2026-11-02T14:09:00Z' }))?.at, '2026-11-02T14:09:00Z')
@@ -217,6 +217,9 @@ test('a session\'s status is its decision: started, finished with its outcome, f
   assert.deepEqual(sessionEntry('run', run({ status: 'skipped', finishedAt: '2026-11-02T14:09:00Z', note: 'closed', pid: null })), { repo, lane: 'pr', number: 106, decision: 'dropped', reason: 'closed', note: null, head: 'cccc333', run: { kind: 'run', id: 7 }, tick: 12, at: '2026-11-02T14:09:00Z' })
   assert.equal(sessionEntry('run', run({ status: 'queued' })), null)
   assert.equal(sessionEntry('run', run({ origin: 'manual', tick: null })), null)
+  // what is logged follows the run's origin, not its command: a scheduled tandem review is logged, a tandem the owner started is not
+  assert.equal(sessionEntry('run', run({ args: ['106', '--tandem', '--no-post'] }))?.decision, 'started')
+  assert.equal(sessionEntry('run', run({ args: ['106', '--tandem', '--no-post'], origin: 'manual', tick: null })), null)
   // a sweep has no PR and no head
   const sweep = sessionEntry('sweep', { ...run({ reason: 'dependabot' }), number: undefined } as unknown as Run)
   assert.deepEqual([sweep?.lane, sweep?.number, sweep?.head, sweep?.run], ['sweep', null, null, { kind: 'sweep', id: 7 }])

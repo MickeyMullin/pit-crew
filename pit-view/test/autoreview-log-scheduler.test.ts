@@ -351,7 +351,7 @@ test('without the setting the log keeps 14 days, and it survives a restart', asy
   }
 })
 
-test('the log changes nothing the scheduler decides: the same ticks with and without it record the same ticks and runs', async () => {
+test('the log changes nothing the scheduler decides: the same ticks with and without it record the same ticks and runs, and make the same gh calls', async () => {
   const play = async (autoReviewLog: boolean): Promise<unknown> => {
     const world = await setup({ auto: { own: true, concurrency: 1, dailyLimit: 3 }, autoReviewLog })
     try {
@@ -370,10 +370,29 @@ test('the log changes nothing the scheduler decides: the same ticks with and wit
       const runs = world.server.cache.allRuns().map((run) => [run.number, run.status, run.reason, run.headOid, run.note, run.args, run.tick, run.queuedAt, run.startedAt, run.finishedAt])
       const view = world.server.scheduler.view()
       // each world has its own temporary home, which is all that may differ
-      return JSON.parse(JSON.stringify({ ticks, runs, view, children: world.launch.children.map((child) => child.request.args) }).replaceAll(world.home, '~'))
+      return JSON.parse(JSON.stringify({ ticks, runs, view, children: world.launch.children.map((child) => child.request.args), gh: world.gh.calls }).replaceAll(world.home, '~'))
     } finally {
       await world.cleanup()
     }
   }
   assert.deepEqual(await play(true), await play(false))
+})
+
+test('reading the log is a read: no gh call, no write, and no change to the scheduler\'s state', async () => {
+  const world = await setup({ auto: { own: true } })
+  try {
+    await tick(world)
+    const calls = world.gh.calls.length
+    const view = JSON.stringify(world.server.scheduler.view())
+    const count = (): number => Number(world.server.cache.db.prepare('SELECT count(*) AS n FROM autoreview_log').get()?.n)
+    const lines = count()
+    assert.ok(lines > 0)
+    for (let read = 0; read < 3; read += 1) assert.ok((await entries(world)).length > 0)
+    await world.server.scheduler.idle()
+    assert.equal(world.gh.calls.length, calls)
+    assert.equal(count(), lines)
+    assert.equal(JSON.stringify(world.server.scheduler.view()), view)
+  } finally {
+    await world.cleanup()
+  }
 })

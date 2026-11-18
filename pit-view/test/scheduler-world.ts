@@ -56,7 +56,8 @@ export type World = {
   time: FakeTime
   launch: FakeLaunch
   git: ReturnType<typeof fakeGit>
-  gh: { login: string | null }
+  // the login gh answers, and every gh call the server made, in order
+  gh: { login: string | null, calls: string[][] }
   home: string
   configPath: string
   restart: () => Promise<void>
@@ -86,8 +87,9 @@ export const setup = async ({ auto = {}, config = {}, now = insideHours, drafts 
   const launch = fakeLaunch()
   launch.deps.git = git.runner
   const base = fixtureRunner()
-  const gh = { login: scenario.viewer as string | null }
+  const gh = { login: scenario.viewer as string | null, calls: [] as string[][] }
   const runner: Runner = async (args, options) => {
+    gh.calls.push([...args])
     if (args[0] === 'api' && args[1] === 'user') return gh.login === null ? failed('gh: not logged in') : ok(`${gh.login}\n`)
     const answer = await base.runner(args, options)
     if (drafts.length === 0 || args[0] !== 'api' || args[1] !== 'graphql' || answer.code !== 0) return answer
