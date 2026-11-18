@@ -528,3 +528,19 @@ test('a refusal because the report is no longer the latest stays in the confirma
   const gone = cellOf(null)
   assert.equal(confirmHolds({ type: 'storedPost', runId: 7, repo, viewer: 'viewer', headSha: head, reviewedSha: head, form: 'approve', ci: 'green' } as unknown as Confirm, gone, true), false)
 })
+
+// the offer of an earlier run, behind a latest run that stopped: the drawer's real reader puts the buttons on the earlier run's row, and the confirmation names that run and its reviewed commit
+
+test('with the latest run stopped, the buttons sit on the earlier auto-review run it falls back to, and the confirmation names that run and the commit it reviewed', async () => {
+  const stopped = { ...cellOf(offerOf({ runId: 5, reviewedSha: earlier })), runId: 8, status: 'stopped', origin: 'manual', result: null, args: ['101'], text: 'Stopped', commit: null } as unknown as AgentCell
+  const runs = [runOf({ id: 8, status: 'stopped', origin: 'manual', result: null, args: ['101'], reportHash: null }), runOf({ id: 5, headOid: earlier.slice(0, 7) }, { reviewed: { kind: 'commit', sha: earlier } })]
+  const model = drawerModel({ row: rowOf(stopped), cell: stopped, runs: { state: 'ready', items: runs }, reports: { state: 'ready', items: [] }, open: true, confirm: null } as unknown as Parameters<typeof drawerModel>[0])
+  assert.deepEqual(model.autoRuns.map((run) => [run.id, run.stored?.runId ?? null]), [[5, 5]])
+  assert.deepEqual(model.autoRuns[0]?.stored?.buttons.map((button) => button.text), ['Approve', 'Comment'])
+  const ask = { type: 'storedPost', runId: 5, repo, viewer: 'viewer', headSha: head, reviewedSha: earlier, form: 'approve', ci: 'green' } as Extract<Confirm, { type: 'storedPost' }>
+  assert.equal(confirmHolds(ask, stopped, true), true)
+  assert.equal(confirmHolds({ ...ask, runId: 8 }, stopped, true), false)
+  const shown = drawerModel({ row: rowOf(stopped), cell: stopped, runs: { state: 'ready', items: runs }, reports: { state: 'ready', items: [] }, open: true, confirm: ask } as unknown as Parameters<typeof drawerModel>[0]).storedAsk
+  assert.match(shown?.bound ?? '', /the report from run 5 reviewing 3a91c0d/)
+  assert.match(shown?.heading ?? '', /^Post the stored report on #101 as /)
+})

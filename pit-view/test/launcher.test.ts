@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto'
 import { mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { confirmHolds, drawerModel } from '../public/drawerview.ts'
+import type { Confirm } from '../public/drawerview.ts'
 import { openCache } from '../src/cache.ts'
 import type { Run, RunChanges } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
@@ -5920,4 +5922,117 @@ test('the offers a PR has now come from one derivation that the cell and the ser
   // your own PR is offered nothing, however fresh the run
   const mine = await storedRow({}, {}, 104)
   assert.equal(currentOffers(mine.pr, config, mine.row, undefined).storedOffer, null)
+})
+
+// the stored report's fallback (section 10, Posting): a latest run with no usable result gives the offer back to the newest earlier run that finished with one, through the real offers
+
+test('a latest run that stopped, failed, or ended with no result leaves the offer with the newest earlier auto-review run whose stored report is still valid, named by run and reviewed commit', async () => {
+  const config = baseConfig()
+  const { pr, row: auto } = await storedRow({}, { id: 5 })
+  const sha = pr.headRefOid.toLowerCase()
+  for (const status of ['stopped', 'failed', 'done'] as const) {
+    const latest = runRow({ id: 8, number: 106, args: ['106'], status, finishedAt: '2026-10-26T14:30:00Z', result: null })
+    const offers = currentOffers(pr, config, latest, undefined, [latest, auto])
+    assert.equal(offers.runId, 8, status)
+    assert.equal(offers.storedOffer?.runId, 5, status)
+    assert.equal(offers.storedOffer?.reviewedSha, sha, status)
+    assert.deepEqual(offers.storedOffer?.forms, ['approve', 'comment'], status)
+    const cell = agentCell(pr, config, latest, undefined, null, null, undefined, [latest, auto])
+    assert.equal(cell.runId, 8, status)
+    assert.deepEqual(cell.storedOffer, offers.storedOffer, status)
+  }
+  // the earlier run's own offer is unchanged by being offered from behind
+  assert.deepEqual(currentOffers(pr, config, auto, undefined, [auto]).storedOffer, currentOffers(pr, config, runRow({ id: 8, status: 'stopped' }), undefined, [runRow({ id: 8, status: 'stopped' }), auto]).storedOffer)
+})
+
+test('the latest run keeps priority when it has its own offer, and a newer run that is queued, running, or waiting for an answer offers nothing', async () => {
+  const config = baseConfig()
+  const { pr, row: auto } = await storedRow({}, { id: 5 })
+  const own = (await storedRow({}, { id: 8 })).row
+  assert.equal(currentOffers(pr, config, own, undefined, [own, auto]).storedOffer?.runId, 8)
+  for (const status of ['queued', 'running', 'needsInput'] as const) {
+    const latest = runRow({ id: 8, number: 106, args: ['106'], status })
+    assert.equal(currentOffers(pr, config, latest, undefined, [latest, auto]).storedOffer, null, status)
+    assert.equal(agentCell(pr, config, latest, undefined, null, null, undefined, [latest, auto]).storedOffer, null, status)
+  }
+  // a stack run that covers the PR is in flight, so it offers nothing either
+  const stopped = runRow({ id: 8, number: 106, args: ['106'], status: 'stopped' })
+  const stack = runRow({ id: 9, number: 112, command: 'review-stack', args: ['112'], status: 'running' })
+  assert.equal(currentOffers(pr, config, stopped, stack, [stopped, auto]).storedOffer, null)
+  // a run that finished with a result of its own, even one that posted, took the report file over: nothing older is offered behind it
+  const posted = (await storedRow({ posted: { form: 'approve', url: 'https://example.test/x' }, notPostedReason: null }, { id: 7, origin: 'manual', args: ['106'] })).row
+  const lastStopped = runRow({ id: 9, number: 106, args: ['106'], status: 'stopped' })
+  assert.equal(currentOffers(pr, config, lastStopped, undefined, [lastStopped, posted, auto]).storedOffer, null)
+  assert.equal(currentOffers(pr, config, posted, undefined, [posted, auto]).storedOffer, null)
+  // a stopped run between skips to the one behind it
+  const between = runRow({ id: 6, number: 106, args: ['106'], status: 'stopped' })
+  assert.equal(currentOffers(pr, config, lastStopped, undefined, [lastStopped, between, auto]).storedOffer?.runId, 5)
+})
+
+test('an earlier run\'s stored report is not offered when its report is not on record, its post began, the viewer has reviewed this head, or the PR is the viewer\'s; a moved head is still offered, with both commits named', async () => {
+  const config = baseConfig()
+  const stopped = runRow({ id: 8, number: 106, args: ['106'], status: 'stopped' })
+  const offered = async (patch: Record<string, unknown>, run: Partial<Run> = {}): Promise<ReturnType<typeof currentOffers>['storedOffer']> => {
+    const { pr, row } = await storedRow(patch, { id: 5, ...run })
+    return currentOffers(pr, config, stopped, undefined, [stopped, row]).storedOffer
+  }
+  assert.ok(await offered({}) !== null)
+  // no report hash, a post begun, a report path that is not the PR's own, a reviewed commit that is not a full SHA
+  assert.equal(await offered({}, { reportHash: null }), null)
+  assert.equal(await offered({}, { postAttemptedAt: '2026-10-26T14:10:00Z' }), null)
+  assert.equal(await offered({ report: '~/agents/output/PR-999.md' }), null)
+  assert.equal(await offered({ reviewed: { kind: 'commit', sha: 'abc1234' } }), null)
+  // the head moved after the review: still offered, as today, with the reviewed and current commits both on the offer so the confirmation warns
+  const moved = await offered({ reviewed: { kind: 'commit', sha: '0123456789abcdef0123456789abcdef01234567' } })
+  assert.equal(moved?.reviewedSha, '0123456789abcdef0123456789abcdef01234567')
+  assert.notEqual(moved?.reviewedSha, moved?.headSha)
+  // the viewer already approved this head
+  const { pr, row } = await storedRow({}, { id: 5 })
+  const approved: RawOpenPr = { ...pr, latestReviews: { nodes: [{ author: { login: scenario.viewer }, state: 'APPROVED', submittedAt: '2026-10-20T10:00:00Z', commit: { oid: pr.headRefOid } }] } } as unknown as RawOpenPr
+  assert.equal(currentOffers(approved, config, stopped, undefined, [stopped, row]).storedOffer, null)
+  // your own PR is offered nothing
+  const mine = await storedRow({}, { id: 5 }, 104)
+  const mineStopped = runRow({ id: 8, number: 104, args: ['104'], status: 'stopped' })
+  assert.equal(currentOffers(mine.pr, config, mineStopped, undefined, [mineStopped, mine.row]).storedOffer, null)
+})
+
+// the cell the real derivation builds, read by the drawer's real reader (the buttons and the confirmation are the page's own, not a hand-built offer)
+
+test('a stopped manual run over an auto-review\'s stored report: the cell agentCell derives, handed to the drawer\'s reader, shows Approve and Comment on the earlier run and a confirmation naming that run and the short reviewed commit', async () => {
+  const config = baseConfig()
+  const { pr, row: auto } = await storedRow({}, { id: 5 })
+  const sha = pr.headRefOid.toLowerCase()
+  const stopped = runRow({ id: 8, number: 106, args: ['106'], status: 'stopped', origin: 'manual', finishedAt: '2026-10-26T14:30:00Z', result: null, reportHash: null })
+  const cell = agentCell(pr, config, stopped, undefined, null, null, undefined, [stopped, auto])
+  assert.equal(cell.runId, 8)
+  const row = { number: 106, url: 'https://example.test/octo-example/orbit/pull/106', title: 'Invented change', author: { login: 'someone', alias: 'Someone' }, headRef: 'fix/x', baseRef: 'main', headOid: sha, headSha: sha, agent: cell } as unknown as OpenRow
+  const input = (confirm: Confirm | null): Parameters<typeof drawerModel>[0] => ({ row, cell, runs: { state: 'ready', items: [stopped, auto] }, reports: { state: 'ready', items: [] }, open: true, confirm } as unknown as Parameters<typeof drawerModel>[0])
+  const model = drawerModel(input(null))
+  assert.deepEqual(model.autoRuns.map((run) => [run.id, run.stored?.runId ?? null]), [[5, 5]])
+  assert.deepEqual(model.autoRuns[0]?.stored?.buttons.map((button) => button.text), ['Approve', 'Comment'])
+  const offer = cell.storedOffer!
+  const ask = { type: 'storedPost', runId: offer.runId, repo: offer.repo, viewer: offer.viewer, headSha: offer.headSha, reviewedSha: offer.reviewedSha, form: 'approve', ci: offer.ci } as Extract<Confirm, { type: 'storedPost' }>
+  assert.equal(confirmHolds(ask, cell as never, true), true)
+  const shown = drawerModel(input(ask)).storedAsk
+  assert.match(shown?.bound ?? '', new RegExp(`the report from run 5 reviewing ${sha.slice(0, 7)}`))
+})
+
+test('an earlier run that has no result of its own (waiting for an answer, queued, or running) is skipped like a stopped one, so the newest earlier run that finished with a result keeps the offer, through the real derivation and the drawer\'s reader', async () => {
+  const config = baseConfig()
+  const { pr, row: auto } = await storedRow({}, { id: 5 })
+  const sha = pr.headRefOid.toLowerCase()
+  const stopped = runRow({ id: 8, number: 106, args: ['106'], status: 'stopped', origin: 'manual', finishedAt: '2026-10-26T14:30:00Z', result: null, reportHash: null })
+  for (const status of ['needsInput', 'queued', 'running'] as const) {
+    const between = runRow({ id: 6, number: 106, args: ['106'], status, origin: 'manual', result: null, reportHash: null })
+    const history = [stopped, between, auto]
+    const offers = currentOffers(pr, config, stopped, undefined, history)
+    assert.equal(offers.runId, 8, status)
+    assert.equal(offers.storedOffer?.runId, 5, status)
+    const cell = agentCell(pr, config, stopped, undefined, null, null, undefined, history)
+    assert.deepEqual(cell.storedOffer, offers.storedOffer, status)
+    const row = { number: 106, url: 'https://example.test/octo-example/orbit/pull/106', title: 'Invented change', author: { login: 'someone', alias: 'Someone' }, headRef: 'fix/x', baseRef: 'main', headOid: sha, headSha: sha, agent: cell } as unknown as OpenRow
+    const model = drawerModel({ row, cell, runs: { state: 'ready', items: history }, reports: { state: 'ready', items: [] }, open: true, confirm: null } as unknown as Parameters<typeof drawerModel>[0])
+    assert.equal(model.autoRuns.find((run) => run.id === 5)?.stored?.runId, 5, status)
+    assert.deepEqual(model.autoRuns.find((run) => run.id === 5)?.stored?.buttons.map((button) => button.text), ['Approve', 'Comment'], status)
+  }
 })
