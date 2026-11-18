@@ -2033,6 +2033,19 @@ const sweepsUrl = (h: Harness): string => `${h.base}/api/sweeps`
 const writeSweepSummary = (h: Harness): Promise<void> =>
   mkdir(join(h.home, 'agents', 'output'), { recursive: true }).then(() => writeFile(join(h.home, 'agents', 'output', 'dependabot-sweep-octo-example-orbit-2026-10-26.md'), '# sweep\n'))
 
+test('a Dependabot sweep started through the server is never a tandem: no --tandem on its row, its request, or the line the process is given', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    const started = await send(sweepsUrl(h), 'POST', { repo: scenario.repo }, { ...token(h), Origin: h.base })
+    assert.equal(started.status, 200)
+    assert.doesNotMatch(JSON.stringify(started.body), /--tandem/)
+    assert.match(lastWrite(h), /\/review-dependabot-sweep /)
+    assert.doesNotMatch(lastWrite(h), /--tandem/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('starting a sweep needs the token and the Host, Origin, and content-type checks, takes only a runner, and is one per repository', async () => {
   const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
   try {

@@ -1028,6 +1028,19 @@ test('a recovered run rebuilds its steps from the whole of events.jsonl', async 
   }
 })
 
+test('an Update session started through the launcher is never a tandem: no --tandem on its row, its request, or the line the process is given', async () => {
+  const h = await harness()
+  try {
+    const update = await h.launcher.start(updateRequest(scenario.repo, 102, 'a'.repeat(40)))
+    assert.equal(update.status, 'running')
+    assert.equal(isTandemRun(update.args), false)
+    assert.match(h.launch.children[0]!.writes.join('\n'), /\/update-pr 102 --head=/)
+    assert.doesNotMatch(h.launch.children[0]!.writes.join('\n'), /--tandem/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a scheduled tandem whose reviewer stops to ask settles as failed with the question as its reason, and the same stop in a manual tandem stays a stop to ask', async () => {
   const h = await harness()
   try {
@@ -1042,6 +1055,8 @@ test('a scheduled tandem whose reviewer stops to ask settles as failed with the 
     child.exit(0)
     const unattended = await settled
     assert.deepEqual([unattended.status, unattended.note, unattended.result?.question], ['failed', 'unattendedStop: The secondary failed: consolidate without it?', 'The secondary failed: consolidate without it?'])
+    // the failed row keeps the worktree the start recorded, for the scheduler's sweep to remove once the session has ended
+    assert.equal(unattended.worktree, `~/agents/worktrees/run-${queued.id}`)
     // the same stop, started by hand, waits for the owner
     const manual = await h.launcher.start(request(106, { args: ['106', '--tandem'] }))
     const second = h.launch.children.at(-1)!

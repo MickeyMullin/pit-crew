@@ -767,9 +767,9 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     return await afterStart('sweep', started)
   }
 
-  // a start the cap took back at the last moment leaves its row queued with a fresh worktree, which goes, since it starts over when it next fits. What the row is now says how the pass goes on: running, it goes on; still queued, the cap or the login held it back, which holds for every row behind it, so the pass ends; failed, the row has left the line and counts toward the pass's bound; any other end (stopped by the owner) leaves the line and the pass goes on
+  // a start the cap took back at the last moment leaves its row queued with a fresh worktree, which goes, since it starts over when it next fits; a tandem refused at the spawn for its pair leaves its row failed with a worktree no process ever used, which goes too. What the row is now says how the pass goes on: running, it goes on; still queued, the cap or the login held it back, which holds for every row behind it, so the pass ends; failed, the row has left the line and counts toward the pass's bound; any other end (stopped by the owner) leaves the line and the pass goes on
   const afterStart = async (kind: WorktreeKind, session: Session | null): Promise<StartOutcome> => {
-    if (session?.status === 'queued' && session.worktree !== null) await remove(kind, session.id, expandHome(session.worktree, home))
+    if (session !== null && session.worktree !== null && (session.status === 'queued' || (session.status === 'failed' && session.note?.startsWith('tandemPair:') === true))) await remove(kind, session.id, expandHome(session.worktree, home))
     if (session?.status === 'running') return 'running'
     if (session?.status === 'queued') return 'queued'
     return session?.status === 'failed' ? 'failed' : 'dropped'

@@ -274,6 +274,7 @@ const launchStatus: Readonly<Record<LaunchErrorCode, number>> = {
   notRunning: 409,
   notRereadable: 409,
   rereadRefused: 422,
+  tandemPair: 422,
 }
 
 // why a direct action was refused, as an HTTP status

@@ -2265,7 +2265,7 @@ export const createPostGuard = (onRelease: () => void = () => {}): PostGuard => 
 // the launcher
 
 export type LaunchErrorCode =
-  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner' | 'updateRunner' | 'hermesModel' | 'notRereadable' | 'rereadRefused'
+  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner' | 'updateRunner' | 'hermesModel' | 'notRereadable' | 'rereadRefused' | 'tandemPair'
 
 export class LaunchError extends Error {
   override name = 'LaunchError'
@@ -3242,6 +3242,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         const current = options.config()
         const why = unbound(request.repo, admitted.viewer, current)
         if (why !== null) throw new Error(`not started: ${why}`)
+        const pairNote = tandemRefusal(run, request, current)
+        if (pairNote !== null) throw new LaunchError('tandemPair', pairNote.slice('tandemPair: '.length))
         if (!line.fitsAtSpawn(admitted.attempt, admitted.slot, current)) return notStarted(run, request, admitted, queuedSince ?? run.startedAt)
         // the row says what the process is about to be told, and a start the cap took back above leaves its row as it was
         if (scheduledText) run = store.update(run.id, { args: argsUnderText(run.args, extra), extraInstructions: extra })
@@ -3713,6 +3715,13 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return run
   }
 
+  // why a scheduled tandem cannot run on the pair in this config, as the note its row carries, or null when it can run or is no scheduled tandem. Read twice: when its start begins, and again as the last thing before its spawn, after the awaits between them
+  const tandemRefusal = (run: Pick<Session, 'origin' | 'runner'>, request: StartRequest, at: Config): string | null => {
+    if (run.origin !== 'auto' || !isTandemRun(request.args)) return null
+    const problem = run.runner !== 'claude' ? 'a tandem primary runs on Claude only' : tandemPairProblem(resolveModels(at.models))
+    return problem === null ? null : `tandemPair: ${problem}`
+  }
+
   const startScheduled = async (id: number, request: StartRequest, changes: RunChanges, prepare: (run: T) => Promise<string>): Promise<T | null> => {
     const queued = store.get(id)
     if (queued === null || queued.status !== 'queued') return queued
@@ -3739,13 +3748,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         return end(queued, { status: 'failed', finishedAt: now(), note }, 'failed to start')
       }
       // a scheduled tandem whose pair cannot run one is refused here, with the reason on the row, and never started as a single review
-      if (queued.origin === 'auto' && isTandemRun(request.args)) {
-        const problem = queued.runner !== 'claude' ? 'a tandem primary runs on Claude only' : tandemPairProblem(resolveModels(config.models))
-        if (problem !== null) {
-          const note = `tandemPair: ${problem}`
-          log(`${noun} ${id}: cannot start: ${note}`)
-          return end(queued, { status: 'failed', finishedAt: now(), note }, 'refused: its tandem pair cannot run')
-        }
+      const early = tandemRefusal(queued, request, config)
+      if (early !== null) {
+        log(`${noun} ${id}: cannot start: ${early}`)
+        return end(queued, { status: 'failed', finishedAt: now(), note: early }, 'refused: its tandem pair cannot run')
       }
       // as for any start: a check made before a wait is stale after it, so one that waited stays queued for a later tick
       const waited = turn.behind()

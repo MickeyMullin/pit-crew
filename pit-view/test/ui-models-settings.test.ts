@@ -299,7 +299,7 @@ test('the page has the Models card with a registry table, a fallback choice, and
   assert.doesNotMatch(source, /fieldId\('models'\)|parseModels|JSON\.parse/)
 })
 
-test('the hint is reduced to the posted-text name check and to no start reading the slots yet', async () => {
+test('the hint is reduced to the posted-text name check, and says only the auto-review pair check reads a slot, with no launch model chosen from one', async () => {
   const html = await publicFile('settings.html')
   const hint = html.slice(html.indexOf('id="models-hint"'), html.indexOf('</p>', html.indexOf('id="models-hint"'))).replace(/<[^>]+>/g, '')
   assert.match(hint, /no start passes these models yet/i)

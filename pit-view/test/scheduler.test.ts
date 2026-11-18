@@ -622,6 +622,65 @@ for (const [name, pair] of refusedPairs) {
   })
 }
 
+// the pair is checked again at the spawn: the first check precedes the identity check, the clone check, the wait for a turn, and the worktree, and a pair saved while those run must not start a tandem
+
+const savePair = async (world: World, ids: string[]): Promise<void> => {
+  const stored = await (await fetch(`${world.server.url}/api/config`)).json() as Config
+  const body = JSON.stringify({ ...stored, models: { slots: { autoReviewHuman: ids } } })
+  assert.equal((await fetch(`${world.server.url}/api/config`, { method: 'PUT', headers: headers(world), body })).status, 200)
+}
+
+const lateRefusals: [string, string[]][] = [
+  ['a primary that is not on Claude', ['gpt-6.1-terra', 'sonnet']],
+  ['the same model twice', ['sonnet', 'sonnet']],
+]
+
+for (const [name, pair] of lateRefusals) {
+  test(`a Human auto-review pair saved with ${name} while the worktree is made is refused at the spawn: the reason on the row, a notification, no process, and the worktree released`, async () => {
+    const seen = recorder()
+    const world = await setup({ config: { notifications: notified }, deliver: seen.deliver })
+    try {
+      const held = Promise.withResolvers<void>()
+      world.git.state.holdFetch = held.promise
+      world.time.advance(15 * minute)
+      await waitFor(() => world.git.verbs('fetch').length === 1)
+      await savePair(world, pair)
+      held.resolve()
+      await world.server.scheduler.idle()
+      assert.equal(world.launch.children.length, 0)
+      assert.equal(running(world).length, 0)
+      const failed = autoRuns(world).filter((run) => run.status === 'failed')
+      assert.ok(failed.length > 0)
+      for (const run of failed) {
+        assert.match(run.note ?? '', /^tandemPair: /)
+        assert.equal(run.worktree, null)
+      }
+      assert.equal(world.git.state.worktrees.size, 0)
+      await waitFor(() => seen.notices.length > 0)
+      assert.equal(seen.notices[0]?.subtitle, 'Review session finished')
+    } finally {
+      await world.cleanup()
+    }
+  })
+}
+
+test('a Human auto-review pair that stays valid while the worktree is made still starts the tandem', async () => {
+  const world = await setup()
+  try {
+    const held = Promise.withResolvers<void>()
+    world.git.state.holdFetch = held.promise
+    world.time.advance(15 * minute)
+    await waitFor(() => world.git.verbs('fetch').length === 1)
+    await savePair(world, ['opus', 'gpt-6.1-terra'])
+    held.resolve()
+    await world.server.scheduler.idle()
+    assert.equal(world.launch.children.length, 1)
+    assert.ok(running(world)[0]?.args.includes('--tandem'))
+  } finally {
+    await world.cleanup()
+  }
+})
+
 test('a refused tandem pair is retried once like any failed run, and its second failure is recorded as failedTwice', async () => {
   const world = await setup({ auto: { dailyLimit: 100 }, config: { models: { slots: { autoReviewHuman: ['gpt-6.1-terra', 'sonnet'] } } } })
   try {
@@ -1131,7 +1190,7 @@ test('a removal git refuses keeps the path, notes worktreeKept, lists it in the 
   }
 })
 
-test('an unattended tandem that stops to ask fails the run with its question as the note, never needsInput, and releases its worktree', async () => {
+test('an unattended tandem that stops to ask fails the run with its question as the note, never needsInput, and keeps its worktree until its session ends', async () => {
   const world = await setup()
   try {
     await tick(world)
@@ -1141,6 +1200,9 @@ test('an unattended tandem that stops to ask fails the run with its question as 
     const ended = await finish(world, started, { status: 'needsInput', question: 'The secondary failed: consolidate without it?', reviewed: null, verdict: null, findings: [], report: null })
     assert.equal(ended.status, 'failed')
     assert.equal(ended.note, 'unattendedStop: The secondary failed: consolidate without it?')
+    // a failed row's worktree is the owner's to see until its session ends; the next test pins the release
+    assert.equal(ended.worktree, `~/.local/state/pit-view/worktrees/run-${started.id}`)
+    assert.equal(world.git.verbs('worktree', 'remove').length, 0)
     assert.notEqual(world.server.cache.getRun(started.id)?.status, 'needsInput')
     assert.equal(autoRuns(world).filter((run) => run.status === 'needsInput').length, 0)
   } finally {

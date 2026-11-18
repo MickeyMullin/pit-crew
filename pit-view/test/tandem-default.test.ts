@@ -27,7 +27,7 @@ const prOf = (number: number): RawOpenPr => {
 }
 const stacked = { position: 2, size: 3 }
 
-// the PRs of the fixture: 113 never reviewed by the viewer, 106 reviewed before, 104 the viewer's own awaiting review, 114 Dependabot's
+// the PRs of the fixture: 113 never reviewed by the viewer, 106 reviewed before, 104 the viewer's own awaiting review, and 114 Dependabot's
 const kindsOf = (number: number, stack: typeof stacked | null = null): string[] => startOptions(prOf(number), config, stack, false).map((option) => option.kind)
 
 test('the first start of a review, a re-review, and a self-review is the tandem one, with the plain review next, and the idle button and the first drawer button agree', () => {
@@ -68,8 +68,8 @@ test('the queue wording follows the first start: Queue tandem review on the idle
 })
 
 // the real drawer on the fake page: the Start button pressed, then the confirmation's own button; fetch records what the page sends
-const startThroughDrawer = async (number: number, press1: 'tandem' | 'default'): Promise<{ command: string, sent: { url: string, body: Record<string, unknown> | null }[] }> => {
-  const cell = agentCell(prOf(number), config, undefined, undefined)
+const startThroughDrawer = async (number: number, press1: 'tandem' | 'default' | 'stack' | 'fix', stack: typeof stacked | null = null): Promise<{ command: string, sent: { url: string, body: Record<string, unknown> | null }[] }> => {
+  const cell = agentCell(prOf(number), config, undefined, undefined, stack)
   const sent: { url: string, body: Record<string, unknown> | null }[] = []
   const fake = installFakeBrowser((async (input: string, init?: RequestInit) => {
     if (init?.method === 'POST') {
@@ -153,3 +153,30 @@ test('a stop to ask in a run nobody attends is a failed run carrying the questio
   assert.deepEqual([judged(true).status, judged(true).note], ['failed', 'unattendedStop: The secondary failed: consolidate without it?'])
   assert.deepEqual([judged(false).status, judged(false).note], ['needsInput', null])
 })
+
+// the starts that are never a tandem, pressed in the real drawer on the real reader: the confirmation's command and the request the page sends carry no --tandem, and a Dependabot PR's drawer offers no tandem entry
+
+// a Dependabot PR is offered one review and no tandem entry; a stack review and a fix session sit beside the tandem review of a PR that has one, so for those the entry pressed is what carries no --tandem
+const noTandemEntry = (number: number): void => {
+  const cell = agentCell(prOf(number), config, undefined, undefined)
+  assert.equal(cell.starts.some((start) => start.kind === 'tandem'), false, `#${number} offers no tandem entry`)
+  assert.equal(startsModel(cell, true, number).buttons.some((button) => button.kind === 'tandem'), false, `#${number} drawer shows no tandem button`)
+}
+
+for (const [name, number, pressed, stack, command, kind] of [
+  ['a Dependabot review', 114, 'default', null, '/review-dependabot 114', 'default'],
+  ['a stack review', 104, 'stack', stacked, '/review-stack 104', 'stack'],
+  ['a fix session', 104, 'fix', stacked, '/fix-pr 104', 'fix'],
+] as const) {
+  test(`${name} pressed in the real drawer confirms and sends no --tandem, and its own entry is not a tandem one`, async () => {
+    if (number === 114) noTandemEntry(number)
+    const entry = agentCell(prOf(number), config, undefined, undefined, stack).starts.find((start) => start.kind === pressed)
+    assert.ok(entry, `#${number} offers ${pressed}`)
+    assert.equal(isTandemRun(entry.args), false)
+    const result = await startThroughDrawer(number, pressed, stack)
+    assert.equal(result.command.startsWith(command), true, result.command)
+    assert.doesNotMatch(result.command, /--tandem/)
+    assert.deepEqual(result.sent.map((request) => [request.url, request.body?.kind]), [[`/api/prs/${number}/runs`, kind]])
+    assert.doesNotMatch(JSON.stringify(result.sent), /--tandem|"tandem"/)
+  })
+}
