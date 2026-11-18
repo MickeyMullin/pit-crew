@@ -40,6 +40,8 @@ A person entry looks like this; `avatar` is `initials`, `github`, or an image pa
 
 The cache is kept in `~/.local/state/pit-view/cache.sqlite` (`pit-view-dev` for `pnpm dev`). Review reports are read from `reportsDir` (default `~/agents/output`) and never written.
 
+The auto-review log, a list of what the scheduler decided and why, lives in the same cache file and keeps 14 days by default. To change that, set `autoReviewLogDays` (a whole number from 1 to 365) in the config file; Settings names the days but has no field for them. Open the log with Log in the header's Auto-review menu (section 10 of DESIGN.md, The log).
+
 ## Tests
 
 Tests use `node:test` with injected dependencies: a fake `gh` runner that replays the JSON under `test/fixtures/`, and temporary directories. They never run the real `gh` or touch the real config, cache or reports folder. The fixtures are invented; `test/fixtures/scenario.ts` describes the world they share and what each PR in them exercises.

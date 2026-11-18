@@ -121,6 +121,8 @@ export type Config = {
   models?: unknown
   notifications?: Notifications
   autoReview?: AutoReviewSettings
+  // how many days the auto-review log keeps; absent means autoReviewLogDays in src/autoreviewlog.ts
+  autoReviewLogDays?: number
 }
 
 export class ConfigError extends Error {
@@ -244,8 +246,16 @@ const personKeys = ['login', 'alias', 'initials', 'color', 'avatar'] as const
 const ticketKeys = ['enabled', 'kind', 'name', 'source', 'pattern', 'baseUrl', 'linkTemplate'] as const
 const configKeys = [
   'repo', 'viewer', 'people', 'tickets', 'refreshSeconds', 'idleMinutes', 'todayStartsAt',
-  'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'extraReviewInstructions', 'allowedHosts', 'cloneDir', 'agent', 'models', 'notifications', 'autoReview',
+  'bots', 'reportsDir', 'density', 'timeFormat', 'showAgentColumn', 'maxConcurrentReviews', 'selfReviewOverCap', 'extraReviewInstructions', 'allowedHosts', 'cloneDir', 'agent', 'models', 'notifications', 'autoReview', 'autoReviewLogDays',
 ] as const
+
+// the days the auto-review log may keep: at least one, and at most a year
+export const logDaysRange = { min: 1, max: 365 } as const
+
+const toLogDays = (value: unknown): number =>
+  Number.isInteger(value) && (value as number) >= logDaysRange.min && (value as number) <= logDaysRange.max
+    ? value as number
+    : fail(`config.autoReviewLogDays must be a whole number of days from ${logDaysRange.min} to ${logDaysRange.max}`)
 
 // a bare DNS name: dot-separated labels of letters, digits and inner hyphens, with no scheme,
 // port, path or wildcard
@@ -445,6 +455,7 @@ export const validateConfig = (input: unknown): Config => {
   if (input.models !== undefined) config.models = projectModels(input.models)
   if (input.notifications !== undefined) config.notifications = toNotifications(input.notifications)
   if (input.autoReview !== undefined) config.autoReview = toAutoReview(input.autoReview)
+  if (input.autoReviewLogDays !== undefined) config.autoReviewLogDays = toLogDays(input.autoReviewLogDays)
   return config
 }
 

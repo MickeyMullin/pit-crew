@@ -5,6 +5,7 @@ import type { Config } from '../src/config.ts'
 import type { Patch, View } from '../src/poller.ts'
 import { announcements } from './agent.ts'
 import { tickTimers, updateAgentCells } from './agentcell.ts'
+import { createAutoReviewLogPanel } from './autoreviewlog.ts'
 import { createAutoReviewMenu } from './autoreviewmenu.ts'
 import { byId, setText } from './dom.ts'
 import { createDrawer } from './drawer.ts'
@@ -188,6 +189,7 @@ const draw = (): void => {
     autoReviewMenu.update()
     drawer.update()
     sweepDrawer.update()
+    logPanel.update()
     reportPanel.refresh()
   } catch (error) {
     console.error('pit-view: the agent drawer could not update', error)
@@ -403,6 +405,12 @@ const autoReviewMenu = createAutoReviewMenu({
   token: readToken(document),
   nowMs,
   view: () => feed.view,
+  // the log takes the drawer's place: neither drawer shows beside it
+  onLog: () => {
+    drawer.close()
+    sweepDrawer.close()
+    logPanel.open()
+  },
 })
 
 // the sweep drawer is the repository's, not one PR's: the bot group's Run sweep and status open it, and so does the broom beside a Dependabot PR's agent button. It and the PR drawer never show together
@@ -415,6 +423,20 @@ const sweepDrawer = createSweepDrawer({
   reports: reportPanel,
 })
 
+// the auto-review log (section 10 of DESIGN.md, The log): opened from the header's Auto-review menu, it sits where the drawers sit and shows apart from them. A run link closes it and opens that run's drawer, whose close puts focus back on the header's Auto-review button
+const logPanel = createAutoReviewLogPanel({
+  root: byId('auto-log'),
+  nowMs,
+  view: () => feed.view,
+  isOpen: (number) => feed.view !== null && findOpenRow(feed.view, number) !== undefined,
+  openRun: (link) => {
+    seedRuns()
+    if (link.kind === 'sweep') sweepDrawer.open({ key: 'auto-review-button' }, { sweepId: link.id })
+    else if (link.number !== null) drawer.open(link.number, { key: 'auto-review-button', number: link.number })
+  },
+  returnTo: () => document.getElementById('auto-review-button'),
+})
+
 document.addEventListener('click', (event) => {
   const target = event.target instanceof Element ? event.target : null
   const sweep = target?.closest<HTMLButtonElement>('button[data-sweep]') ?? null
@@ -422,6 +444,7 @@ document.addEventListener('click', (event) => {
   const pr = sweep.dataset.sweepPr
   const id = sweep.dataset.sweepId
   drawer.close()
+  logPanel.close()
   if (sweep.dataset.sweep === 'start') {
     // a start that cannot run now still opens the drawer, which says why
     sweepDrawer.open({ key: 'sweep-start' }, { ask: sweep.getAttribute('aria-disabled') !== 'true' })
@@ -441,8 +464,9 @@ document.addEventListener('click', (event) => {
   const fix = target?.closest<HTMLButtonElement>('button[data-fix-session]') ?? null
   if (cell !== null || banner !== null || fix !== null) {
     seedRuns()
-    // the PR drawer and the sweep drawer never show together
+    // the PR drawer and the sweep drawer never show together, nor either with the log
     sweepDrawer.close()
+    logPanel.close()
   }
   // a Merge button opens the drawer with the Squash and merge confirmation already asked; nothing is sent until that confirmation's own button
   if (cell !== null) drawer.open(Number(cell.dataset.pr), { key: `agent-open:${cell.dataset.pr}`, number: Number(cell.dataset.pr) }, cell.dataset.agentAsk === 'merge' ? 'merge' : undefined)

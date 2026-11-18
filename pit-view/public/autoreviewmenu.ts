@@ -23,9 +23,11 @@ type Deps = {
   token: string
   nowMs: () => number
   view: () => View | null
+  // Log was pressed: the popover has closed, and the auto-review log opens
+  onLog: () => void
 }
 
-export const createAutoReviewMenu = ({ root, button, popover, token, nowMs, view }: Deps): AutoReviewMenu => {
+export const createAutoReviewMenu = ({ root, button, popover, token, nowMs, view, onLog }: Deps): AutoReviewMenu => {
   let open = false
   let ticks: Tick[] = []
   let ticksFailed = false
@@ -67,6 +69,7 @@ export const createAutoReviewMenu = ({ root, button, popover, token, nowMs, view
         type: 'button', class: 'button', 'data-auto-run': '', 'data-focus-key': 'auto-run-now',
         disabled: model.runNow.disabled || running, title: model.runNow.reason,
       }, running ? 'Starting…' : 'Run now'),
+      h('button', { type: 'button', class: 'button', 'data-auto-log': '', 'data-focus-key': 'auto-log', title: 'What the scheduler decided, and why' }, 'Log'),
       h('a', { class: 'auto-settings', 'data-focus-key': 'auto-settings', href: '/settings.html#auto-review' }, 'Settings')))
     if (model.runNow.reason !== null) parts.push(h('p', { class: 'auto-note' }, model.runNow.reason))
     parts.push(h('p', { class: 'auto-note', role: 'status' }, message))
@@ -129,6 +132,11 @@ export const createAutoReviewMenu = ({ root, button, popover, token, nowMs, view
   })
 
   popover.addEventListener('click', (event) => {
+    if (event.target instanceof Element && event.target.closest('button[data-auto-log]') !== null) {
+      close()
+      onLog()
+      return
+    }
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button[data-auto-run]') : null
     if (target === null || running) return
     running = true

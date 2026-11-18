@@ -2344,6 +2344,85 @@ button.agent:hover {
   font-size: 12px;
 }
 
+/* the auto-review log: a drawer-sized panel of the scheduler's decisions, newest first, its filters above the list */
+
+.auto-log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line-row);
+}
+
+.auto-log-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.auto-log-filter .filter-select {
+  max-width: 180px;
+}
+
+.auto-log-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px 16px 24px;
+}
+
+.auto-log-clear {
+  margin-bottom: 8px;
+}
+
+.auto-log-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.auto-log-line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line-row);
+  overflow-wrap: anywhere;
+}
+
+.auto-log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.auto-log-when,
+.auto-log-title,
+.auto-log-details,
+.auto-log-muted {
+  color: var(--muted);
+}
+
+.auto-log-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auto-log-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 12px;
+}
+
 .report-frame {
   flex: 1 1 auto;
   width: 100%;
