@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
-import { autoReviewLogDays, logDaysOf, openAutoReviewLog, sessionEntry, tickEntry } from '../src/autoreviewlog.ts'
+import { autoReviewLogDays, logDaysOf, modelText, openAutoReviewLog, sessionEntry, tickEntry } from '../src/autoreviewlog.ts'
 import type { NewLogEntry } from '../src/autoreviewlog.ts'
 import { openCache, schemaVersion } from '../src/cache.ts'
 import type { Run } from '../src/cache.ts'
@@ -207,12 +207,12 @@ const run = (patch: Partial<Run>): Run => ({
 } as Run)
 
 test('a session\'s status is its decision: started, finished with its outcome, failed with its note, stopped, or dropped before start with why; a queued row and a manual run are not entries, tandem or not', () => {
-  assert.deepEqual(sessionEntry('run', run({})), { repo, lane: 'pr', number: 106, decision: 'started', reason: 'pushed', note: null, head: 'cccc333', run: { kind: 'run', id: 7 }, tick: 12, at: '2026-11-02T14:01:00Z' })
+  assert.deepEqual(sessionEntry('run', run({})), { repo, lane: 'pr', number: 106, decision: 'started', reason: 'pushed', note: null, head: 'cccc333', run: { kind: 'run', id: 7 }, model: null, tick: 12, at: '2026-11-02T14:01:00Z' })
   assert.equal(sessionEntry('run', run({ status: 'done', finishedAt: '2026-11-02T14:09:00Z' }))?.decision, 'finished')
   assert.equal(sessionEntry('run', run({ status: 'done', finishedAt: '2026-11-02T14:09:00Z' }))?.at, '2026-11-02T14:09:00Z')
   assert.equal(sessionEntry('run', run({ status: 'done', finishedAt: '2026-11-02T14:09:00Z' }))?.note, 'Done')
   assert.equal(sessionEntry('run', run({ status: 'needsInput', finishedAt: '2026-11-02T14:09:00Z' }))?.reason, 'needsInput')
-  assert.deepEqual(sessionEntry('run', run({ status: 'failed', finishedAt: '2026-11-02T14:09:00Z', note: 'worktreeFailed: git fetch failed' })), { repo, lane: 'pr', number: 106, decision: 'failed', reason: null, note: 'worktreeFailed: git fetch failed', head: 'cccc333', run: { kind: 'run', id: 7 }, tick: 12, at: '2026-11-02T14:09:00Z' })
+  assert.deepEqual(sessionEntry('run', run({ status: 'failed', finishedAt: '2026-11-02T14:09:00Z', note: 'worktreeFailed: git fetch failed' })), { repo, lane: 'pr', number: 106, decision: 'failed', reason: null, note: 'worktreeFailed: git fetch failed', head: 'cccc333', run: { kind: 'run', id: 7 }, model: null, tick: 12, at: '2026-11-02T14:09:00Z' })
   assert.equal(sessionEntry('run', run({ status: 'stopped', finishedAt: '2026-11-02T14:09:00Z' }))?.decision, 'stopped')
   assert.deepEqual(sessionEntry('run', run({ status: 'skipped', finishedAt: '2026-11-02T14:09:00Z', note: 'closed', pid: null })), { repo, lane: 'pr', number: 106, decision: 'dropped', reason: 'closed', note: null, head: 'cccc333', run: { kind: 'run', id: 7 }, tick: 12, at: '2026-11-02T14:09:00Z' })
   assert.equal(sessionEntry('run', run({ status: 'queued' })), null)
@@ -223,4 +223,78 @@ test('a session\'s status is its decision: started, finished with its outcome, f
   // a sweep has no PR and no head
   const sweep = sessionEntry('sweep', { ...run({ reason: 'dependabot' }), number: undefined } as unknown as Run)
   assert.deepEqual([sweep?.lane, sweep?.number, sweep?.head, sweep?.run], ['sweep', null, null, { kind: 'sweep', id: 7 }])
+})
+
+// the model that ran the review (AC-13)
+
+const sonnetRole = { role: 'reviewer', id: 'sonnet', runner: 'claude', provider: 'anthropic', model: 'sonnet', fallback: false, outcome: null } as const
+const codexRole = { role: 'secondary', id: 'gpt-6.1-terra', runner: 'codex', provider: 'openai', model: 'gpt-6.1-terra', fallback: false, outcome: null } as const
+
+test('the model a run records reads as its registry id and runner, a tandem run as its pair in the order recorded, and a run with no record as none', () => {
+  assert.equal(modelText({ roles: [sonnetRole], degraded: false }), 'sonnet (Claude Code)')
+  assert.equal(modelText({ roles: [{ ...sonnetRole, id: null, model: 'some/other-model', runner: 'hermes' }], degraded: false }), 'some/other-model (Hermes)')
+  assert.equal(modelText({ roles: [{ ...codexRole, id: null, model: null }], degraded: false }), 'Codex default (Codex)')
+  assert.equal(modelText({ roles: [{ ...sonnetRole, role: 'primary' }, codexRole], degraded: false }), 'primary: sonnet (Claude Code) · secondary: gpt-6.1-terra (Codex)')
+  assert.equal(modelText(null), null)
+  assert.equal(modelText(undefined), null)
+  assert.equal(modelText({ roles: [], degraded: false }), null)
+})
+
+test('a run that started, finished, failed, or stopped names the model its record holds; a dropped, queued, or model-less run, and a sweep, names none', () => {
+  const models = { roles: [sonnetRole], degraded: false }
+  for (const status of ['running', 'done', 'needsInput', 'failed', 'stopped'] as const) {
+    assert.equal(sessionEntry('run', run({ status, models, finishedAt: '2026-11-02T14:09:00Z' }))?.model, 'sonnet (Claude Code)', status)
+  }
+  // a run that failed before its spawn holds no record, and the line says nothing of a model
+  assert.equal(sessionEntry('run', run({ status: 'failed', models: null, note: 'worktreeFailed: x' }))?.model, null)
+  assert.equal(sessionEntry('run', run({ status: 'skipped', models, note: 'closed', pid: null }))?.model, undefined)
+  assert.equal(sessionEntry('run', run({ status: 'queued', models })), null)
+  // a sweep's row has no models column
+  assert.equal(sessionEntry('sweep', { ...run({ reason: 'dependabot', models }), number: undefined } as unknown as Run)?.model, null)
+})
+
+test('a line keeps its model in the cache file, and reads it back; a line that names none reads null', () => {
+  const { log, time } = memoryLog()
+  log.record({ repo, lane: 'pr', number: 106, decision: 'started', reason: 'pushed', run: { kind: 'run', id: 7 }, model: 'sonnet (Claude Code)', at: time.iso() })
+  log.record({ repo, lane: 'pr', number: 107, decision: 'skipped', reason: 'alreadyReviewed', at: time.iso() })
+  const lines = log.list(repo, 14)
+  assert.deepEqual(lines.map((line) => [line.number, line.model]).sort(), [[106, 'sonnet (Claude Code)'], [107, null]])
+})
+
+test('a log table made before the model column opens without loss: its lines read no model, new lines keep theirs, and nothing rewrites the old ones', () => {
+  const time = handClock()
+  const db = new DatabaseSync(':memory:')
+  db.exec('CREATE TABLE autoreview_log (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, lane TEXT NOT NULL, number INTEGER, title TEXT, decision TEXT NOT NULL, reason TEXT, note TEXT, head TEXT, run_kind TEXT, run_id INTEGER, tick INTEGER, at TEXT NOT NULL, last_at TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1)')
+  db.exec(`INSERT INTO autoreview_log (repo, lane, number, decision, reason, run_kind, run_id, at, last_at) VALUES ('${repo}', 'pr', 106, 'started', 'pushed', 'run', 3, '2026-11-02T13:00:00Z', '2026-11-02T13:00:00Z')`)
+  const log = openAutoReviewLog({ db, clock: time.clock })
+  assert.deepEqual(log.list(repo, 14).map((line) => [line.run?.id, line.model]), [[3, null]])
+  log.record({ repo, lane: 'pr', number: 106, decision: 'finished', reason: 'done', run: { kind: 'run', id: 3 }, model: 'sonnet (Claude Code)', at: '2026-11-02T13:30:00Z' })
+  assert.deepEqual(log.list(repo, 14).map((line) => [line.decision, line.model]), [['finished', 'sonnet (Claude Code)'], ['started', null]])
+  // opened again, the column is there already and nothing is lost
+  assert.equal(openAutoReviewLog({ db, clock: time.clock }).list(repo, 14).length, 2)
+})
+
+// the lines that name a run and skip a PR, and a stretch ended by what happened between (P2-3, P3-1)
+
+test('a skip that names a run collapses like any other repeat of the same skip about the same run, and starts a line of its own for another run or another reason', () => {
+  const { log, time } = memoryLog()
+  const skipped = (reason: string, id: number): NewLogEntry => ({ repo, lane: 'pr', number: 106, decision: 'skipped', reason, run: { kind: 'run', id }, at: time.iso() })
+  log.record(skipped('inFlight', 7))
+  time.move(15 * minute)
+  log.record(skipped('inFlight', 7))
+  time.move(15 * minute)
+  log.record(skipped('inFlight', 8))
+  time.move(15 * minute)
+  log.record(skipped('optedOut', 8))
+  assert.deepEqual(log.list(repo, 14).map((line) => [line.reason, line.run?.id, line.count]), [['optedOut', 8, 1], ['inFlight', 8, 1], ['inFlight', 7, 2]])
+})
+
+test('a fresh line starts a stretch of its own even when it repeats the newest line of its lane, and the repeats after it extend it', () => {
+  const { log, time } = memoryLog()
+  log.record(skip('off', time.iso()))
+  time.move(minute)
+  log.record({ ...skip('off', time.iso()), fresh: true })
+  time.move(minute)
+  log.record(skip('off', time.iso()))
+  assert.deepEqual(log.list(repo, 14).map((line) => [line.reason, line.count]), [['off', 2], ['off', 1]])
 })

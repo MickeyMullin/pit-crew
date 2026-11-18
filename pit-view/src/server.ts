@@ -40,7 +40,7 @@ import { clearCookie, createSignIn, githubEndpoints, loopbackNames, openLoopback
 import type { OAuthEndpoints } from './signin.ts'
 import { createSweepMemory, sweepRequest, sweepView } from './sweeps.ts'
 import type { SweepMemory } from './sweeps.ts'
-import type { Sweep } from './cache.ts'
+import type { Session, Sweep } from './cache.ts'
 
 export const defaultPort = 4791
 // a named instance's port when PIT_VIEW_PORT is unset; any other name must set it
@@ -428,6 +428,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   let queueing: (() => Queueing) | null = null
   // made below from the launchers; a run recovered before then is seen by its first sweep
   let schedulerRef: Scheduler | null = null
+  // what recovery changed before the scheduler existed, each run and sweep by its newest state: the scheduler logs their outcomes once it does, and does nothing else with them
+  const recovered = new Map<string, { kind: 'run' | 'sweep', session: Session }>()
   const poller = createPoller({
     cache,
     sweeps,
@@ -483,7 +485,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     onChange: (run) => {
       poller.runChanged(run.repo, run.number)
       updates.change(run)
-      schedulerRef?.sessionChanged('run', run)
+      if (schedulerRef === null) recovered.set(`run-${run.id}`, { kind: 'run', session: run })
+      else schedulerRef.sessionChanged('run', run)
     },
     line,
     log,
@@ -520,7 +523,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     onChange: (sweep) => {
       sweeps.set(sweep)
       poller.sweepsChanged(sweep.repo)
-      schedulerRef?.sessionChanged('sweep', sweep)
+      if (schedulerRef === null) recovered.set(`sweep-${sweep.id}`, { kind: 'sweep', session: sweep })
+      else schedulerRef.sessionChanged('sweep', sweep)
     },
     // the cache pruned old sweeps: memory drops the same ids and the feed announces the removal
     onPruned: (gone) => {
@@ -558,6 +562,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     ...(autoLog === null ? {} : { autoLog }),
   })
   schedulerRef = scheduler
+  for (const { kind, session } of recovered.values()) scheduler.recovered(kind, session)
+  recovered.clear()
   // once those runs have their outcomes recorded: a sweep, whether or not auto-review is on, and the one timer; no GitHub call
   scheduler.start()
   // a proxied host says at once whether it can sign anyone in, and the signing key is made on this first start; local only

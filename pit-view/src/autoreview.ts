@@ -462,6 +462,8 @@ export type Scheduler = {
   released: () => void
   // a run or a sweep started, stepped, or settled
   sessionChanged: (kind: WorktreeKind, session: Session) => void
+  // a run or a sweep that the restart's recovery settled before this scheduler existed: its outcome goes in the log, once, and nothing else is done with it
+  recovered: (kind: WorktreeKind, session: Session) => void
   view: () => AutoReviewView | null
   // how many sessions' last statuses it keeps, which stays bounded
   tracked: () => number
@@ -555,6 +557,8 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
   let closesAt: number | null = null
   // whether the log holds a closed window not yet seen open again, so the reopening can end its stretch
   let closedSeen = false
+  // whether auto-review has been on since the last off line, so a switch on and off again starts an off stretch of its own
+  let onSince = false
   let ticking: { id: number, done: Promise<void> } | null = null
   // counts the ticks that have begun: a pass records it with the snapshot it takes, and a pass never acts on a snapshot older than the latest tick's beginning
   let tickEpoch = 0
@@ -570,6 +574,8 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
   // the rows the start step is starting now, and the last status seen of each row, so only a row that ends is a reason to start the next
   const ownStarts = new Set<string>()
   const statuses = new Map<string, RunStatus>()
+  // the running rows whose log line has been written with the model their record names
+  const modelled = new Set<string>()
   const statusLimit = 500
 
   const track = <T>(work: Promise<T>): Promise<T> => {
@@ -588,18 +594,26 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     }
   }
 
-  // a line in the auto-review log; the log decides nothing, so a write that fails is only logged
-  const logDecision = (entry: NewLogEntry | null): void => {
-    if (entry === null || options.autoLog === undefined) return
+  // a line in the auto-review log. The log decides nothing, so it can never change what the scheduler does: nothing is built when there is no log, whatever builds the line (a lookup in the cache included) runs inside this guard, and a failure of the build or the write is one line of the server's own log
+  const logDecision = (entry: NewLogEntry | null | (() => NewLogEntry | null)): void => {
+    if (options.autoLog === undefined) return
     try {
-      options.autoLog.record(entry)
+      const line = typeof entry === 'function' ? entry() : entry
+      if (line !== null) options.autoLog.record(line)
     } catch (error) {
       log(`auto-review: cannot write the log: ${messageOf(error)}`)
     }
   }
 
+  // the PR's title as the cache has it, for a line of the log only
   const titleOf = (repo: string, number: number | undefined): string | null =>
     number === undefined ? null : cache.readView(repo).open.find((row) => row.number === number)?.pr.title ?? null
+
+  // what a scheduled run's or sweep's status says it did, with its PR's title
+  const sessionLine = (kind: WorktreeKind, session: Session): NewLogEntry | null => {
+    const entry = sessionEntry(kind, session)
+    return entry === null ? null : { ...entry, title: titleOf(session.repo, (session as Partial<Run>).number) }
+  }
 
   const cloneOf = (settings: Config): string | null => settings.cloneDir === undefined ? null : expandHome(settings.cloneDir, home)
 
@@ -771,6 +785,8 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
         if (!(error instanceof LaunchError) || error.code !== 'busy') throw error
         refused += 1
         log(`auto-review: #${item.number} not queued: ${error.message}`)
+        // the next tick finds the PR again, and says the same: one line for the stretch
+        logDecision({ repo: settings.repo, lane: 'pr', number: item.number, title: pr.title, decision: 'skipped', reason: 'postInFlight', head: item.headSha, tick, at: now() })
       }
     }
     return items.length - refused
@@ -885,7 +901,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       // one whose opt-in has been turned off since it was queued cannot start, so it is ahead of no one: it stays queued in its place, and the next that can start goes
       if (!optedIn(row.reason, auto)) {
         const pr = candidate.kind === 'run' ? row as Run : null
-        logDecision({ repo, lane: pr === null ? 'sweep' : 'pr', number: pr?.number ?? null, title: titleOf(repo, pr?.number), decision: 'skipped', reason: 'optedOut', head: pr?.headOid ?? null, run: { kind: candidate.kind, id: row.id }, tick: row.tick, at: now() })
+        logDecision(() => ({ repo, lane: pr === null ? 'sweep' : 'pr', number: pr?.number ?? null, title: titleOf(repo, pr?.number), decision: 'skipped', reason: 'optedOut', head: pr?.headOid ?? null, run: { kind: candidate.kind, id: row.id }, tick: row.tick, at: now() }))
         continue
       }
       // the row's own end is not a trigger for another pass: this one goes on, or stops, by itself
@@ -1039,7 +1055,9 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       return { repo, lane: 'pr', number, title: pr?.title ?? null, decision: 'skipped', reason, head: pr?.headRefOid ?? null, run: run === undefined ? null : { kind: 'run', id: run.id }, tick: tick.id, at: tick.startedAt }
     }
     for (const row of all) if (ownersRun(row.number) && isCandidate(row, auto, open)) logDecision(prLine(row.number, 'ownersRun', undefined))
-    for (const left of queue.skipped) logDecision(prLine(left.number, left.reason, undefined))
+    // a PR skipped for an auto run still queued or running names that run, newest first, so the line can link to it
+    const holding = (number: number): Run | undefined => [...runs].sort((a, b) => b.id - a.id).find((run) => run.origin === 'auto' && run.number === number && isLive(run))
+    for (const left of queue.skipped) logDecision(prLine(left.number, left.reason, left.reason === 'inFlight' ? holding(left.number) : undefined))
     for (const left of queue.leftForOwner) {
       if (left.outcome === 'stopped') {
         logDecision(prLine(left.number, 'stoppedAtHead', undefined))
@@ -1082,9 +1100,11 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     const auto = settings.autoReview
     if (auto !== undefined) {
       const at = clock.now()
+      if (auto.enabled) onSince = true
       // no tick runs while off or outside the window, so the log notes the stretch here, a closed window from when it closed; a repeat extends its line
       if (!auto.enabled) {
-        logDecision({ repo: settings.repo, lane: 'tick', decision: 'skipped', reason: 'off', at: iso(at) })
+        logDecision({ repo: settings.repo, lane: 'tick', decision: 'skipped', reason: 'off', at: iso(at), fresh: onSince })
+        onSince = false
         closedSeen = false
       } else if (!isActiveAt(auto.activeHours, at, timeZone)) {
         // first from when the window closed, if a tick saw it close, then to now
@@ -1221,10 +1241,11 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     const key = `${kind}-${session.id}`
     const before = statuses.get(key)
     // a new status of a scheduled run is a line of the log; a step that changes no status is not, and a run's decision is written once
-    if (before !== session.status) {
-      const entry = sessionEntry(kind, session)
-      if (entry !== null) logDecision({ ...entry, title: titleOf(session.repo, (session as Partial<Run>).number) })
-    }
+    // a running run's row names its model a moment after it is marked running, so the line written then is written again once the row has it; the log keeps one line and fills the model in
+    const spawned = session.status === 'running' && (session as Partial<Run>).models != null
+    if (before !== session.status || (spawned && !modelled.has(key))) logDecision(() => sessionLine(kind, session))
+    if (spawned) modelled.add(key)
+    else modelled.delete(key)
     statuses.delete(key)
     statuses.set(key, session.status)
     if (statuses.size > statusLimit) {
@@ -1254,6 +1275,8 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     // a post in flight let go of its PR: a queued row it held back can start now
     released: kick,
     sessionChanged,
+    // the run's decision is written once, so a later change of the same row in sessionChanged finds it written
+    recovered: (kind, session) => logDecision(() => sessionLine(kind, session)),
     view,
     tracked: () => statuses.size,
     idle: async () => {

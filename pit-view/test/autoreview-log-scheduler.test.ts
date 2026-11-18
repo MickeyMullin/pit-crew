@@ -85,6 +85,8 @@ test('a PR already reviewed at its head, and one whose auto run waits, are skipp
     assert.ok(waiting)
     const held = lines.filter((line) => line.number === waiting.number && line.decision === 'skipped')
     assert.deepEqual(held.map((line) => [line.reason, line.count]), [['inFlight', 2]])
+    // the skip names the run that caused it, so the line can link to it
+    assert.deepEqual(held.map((line) => line.run), [{ kind: 'run', id: waiting.id }])
   } finally {
     await world.cleanup()
   }
@@ -209,7 +211,7 @@ test('a queued PR that closed is dropped before start with the reason, and a que
   }
 })
 
-test('a failed run, its retry, the retry failing, and the PR left as failed twice, each a line, and a failure that cannot start is one too', async () => {
+test('a run that fails, its retry, the retry failing, and the PR left as failed twice are each a line, and failedTwice is written once however many ticks find it', async () => {
   // the owner's one draft, so the queue holds nothing else
   const world = await setup({ auto: { others: false, own: true, dailyLimit: 100 } })
   try {
@@ -392,6 +394,234 @@ test('reading the log is a read: no gh call, no write, and no change to the sche
     assert.equal(world.gh.calls.length, calls)
     assert.equal(count(), lines)
     assert.equal(JSON.stringify(world.server.scheduler.view()), view)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+// the lines the first version of the log could not write, and the log never being able to change what the scheduler does
+
+const goneProcesses = (world: World): void => {
+  for (const child of world.launch.children) world.launch.alive.delete(child.pid)
+}
+
+test('a run that ended while the server was down is logged once when it starts again, with its id, and the scheduler seeing it later adds nothing', async () => {
+  const world = await setup({ auto: { concurrency: 3 } })
+  try {
+    await tick(world)
+    const run = running(world)[0]
+    assert.ok(run)
+    goneProcesses(world)
+    await world.restart()
+    assert.equal(world.server.cache.getRun(run.id)?.status, 'failed')
+    const ended = async (): Promise<LogEntry[]> => (await entries(world)).filter((line) => line.decision === 'failed' && line.run?.kind === 'run')
+    const failedLines = await ended()
+    assert.ok(failedLines.length >= 1)
+    const mine = failedLines.filter((line) => line.run?.id === run.id)
+    assert.equal(mine.length, 1)
+    assert.match(mine[0]?.note ?? '', /^serverRestarted/)
+    assert.equal(mine[0]?.number, run.number)
+    assert.equal(mine[0]?.lane, 'pr')
+    // the scheduler meeting the same rows again, in ticks and in a change of their notes, writes nothing new
+    await tick(world)
+    await tick(world)
+    assert.equal((await ended()).length, failedLines.length)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a sweep that ended while the server was down is logged once when it starts again, with its id', async () => {
+  const world = await setup({ auto: { others: false, dependabot: true } })
+  try {
+    await tick(world)
+    const sweep = world.server.cache.allSweeps().find((candidate) => candidate.status === 'running')
+    assert.ok(sweep)
+    goneProcesses(world)
+    await world.restart()
+    assert.equal(world.server.cache.getSweep(sweep.id)?.status, 'failed')
+    const mine = ofRun(await entries(world), sweep, 'sweep').filter((line) => line.decision === 'failed')
+    assert.equal(mine.length, 1)
+    assert.equal(mine[0]?.lane, 'sweep')
+    assert.match(mine[0]?.note ?? '', /^serverRestarted/)
+    await tick(world)
+    assert.equal(ofRun(await entries(world), sweep, 'sweep').filter((line) => line.decision === 'failed').length, 1)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a PR whose post is in flight is skipped in the log with that reason when its run cannot be queued, once however many ticks find it', async () => {
+  const world = await setup()
+  try {
+    await world.server.poller.refresh('manual')
+    await world.server.poller.idle()
+    const open = world.server.cache.readView(scenario.repo).open.map((entry) => entry.number)
+    const releases = open.map((number) => world.server.posts.hold(scenario.repo, number)!)
+    await tick(world)
+    await tick(world)
+    const held = (await entries(world)).filter((line) => line.decision === 'skipped' && line.lane === 'pr')
+    assert.ok(held.length > 1)
+    assert.ok(held.every((line) => line.reason === 'postInFlight' && line.count === 2 && line.run === null && line.head !== null && line.title !== null))
+    assert.equal(new Set(held.map((line) => line.number)).size, held.length)
+    for (const release of releases) release()
+    await tick(world)
+    // queued once the post lets go: a new line, not an extension of the skip
+    const first = held[0]!
+    const mine = (await entries(world)).filter((line) => line.number === first.number)
+    assert.deepEqual(mine.map((line) => line.decision), ['queued', 'skipped'])
+  } finally {
+    await world.cleanup()
+  }
+})
+
+// the title is looked up from the cache for the log alone, and the scheduler's own reads share the method, so a test breaks only the lookup made for a log line, found by the function that makes it: at a status change, or at the start step
+const breakTitleLookup = (world: World, where: 'statusChange' | 'startStep'): { calls: () => number } => {
+  const cache = world.server.cache
+  const read = cache.readView.bind(cache)
+  let calls = 0
+  cache.readView = ((repo: string) => {
+    const stack = new Error().stack ?? ''
+    if (stack.includes('titleOf') && stack.includes('sessionChanged') === (where === 'statusChange')) {
+      calls += 1
+      throw new Error('the cache cannot be read for a title')
+    }
+    return read(repo)
+  }) as typeof cache.readView
+  return { calls: () => calls }
+}
+
+test('a log-only title lookup that throws changes nothing the scheduler does: the waiting run still starts, the statuses update, and every record matches a run without the log', async () => {
+  const play = async (mode: 'off' | 'broken'): Promise<{ record: unknown, logs: string[], broken: number }> => {
+    const world = await setup({ auto: { concurrency: 1 }, autoReviewLog: mode === 'broken' })
+    try {
+      await tick(world)
+      const lookups = breakTitleLookup(world, 'statusChange')
+      const first = running(world)[0]!
+      const waiting = autoRuns(world).filter((run) => run.status === 'queued')
+      assert.ok(waiting.length > 0)
+      await finish(world, first, { reviewed: { kind: 'commit', sha: first.headOid } })
+      // the end of the first run kicked the queue: the next waiting run started
+      assert.equal(running(world).length, 1)
+      assert.notEqual(running(world)[0]?.id, first.id)
+      assert.equal(world.server.scheduler.tracked() > 0, true)
+      await tick(world)
+      const runs = world.server.cache.allRuns().map((run) => [run.number, run.status, run.reason, run.headOid, run.note, run.args, run.tick, run.queuedAt, run.startedAt, run.finishedAt])
+      const record = JSON.parse(JSON.stringify({ ticks: world.server.cache.ticksFor(scenario.repo).map(({ id: _id, ...rest }) => rest), runs, view: world.server.scheduler.view(), children: world.launch.children.map((child) => child.request.args) }).replaceAll(world.home, '~'))
+      return { record, logs: world.logs.filter((line) => line.includes('auto-review: cannot write the log')), broken: lookups.calls() }
+    } finally {
+      await world.cleanup()
+    }
+  }
+  const without = await play('off')
+  const broken = await play('broken')
+  assert.deepEqual(broken.record, without.record)
+  // switched off, the log looks nothing up at all
+  assert.equal(without.broken, 0)
+  assert.deepEqual(without.logs, [])
+  // switched on, the lookup threw, each throw is one line in the diagnostic log, and nothing else was lost
+  assert.ok(broken.broken > 0)
+  assert.equal(broken.logs.length, broken.broken)
+})
+
+test('a title lookup that throws while a queued run is skipped as opted out does not stop the queue', async () => {
+  const world = await setup({ auto: { concurrency: 1 } })
+  try {
+    await tick(world)
+    const lookups = breakTitleLookup(world, 'startStep')
+    assert.equal((await save(world, (config) => ({ ...config, autoReview: { ...config.autoReview!, others: false } }))).status, 200)
+    await finish(world, running(world)[0]!)
+    await tick(world)
+    assert.ok(lookups.calls() > 0)
+    assert.deepEqual(world.logs.filter((line) => line.includes('cannot start the queue')), [])
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('turning auto-review on during active hours and off again before the next tick starts a new off stretch, not an extension of the earlier one', async () => {
+  const world = await setup()
+  try {
+    const turn = async (enabled: boolean): Promise<void> => {
+      assert.equal((await save(world, (config) => ({ ...config, autoReview: { ...config.autoReview!, enabled } }))).status, 200)
+    }
+    await turn(false)
+    await turn(false)
+    await turn(true)
+    await turn(false)
+    const off = tickLines(await entries(world)).filter((line) => line.reason === 'off')
+    assert.equal(off.length, 2)
+    assert.deepEqual(off.map((line) => line.count), [1, 2])
+  } finally {
+    await world.cleanup()
+  }
+})
+
+// the model that ran each review (AC-13), read from the run's record, which the launcher writes at the spawn
+
+const roleOf = (role: string, id: string, runner: 'claude' | 'codex', model: string) => ({ role, id, runner, provider: runner === 'claude' ? 'anthropic' : 'openai', model, fallback: false, outcome: null })
+
+test('a run\'s lines name the model that ran it once it has spawned: started, finished, and failed carry it, and the queued line and every skip carry none', async () => {
+  const world = await setup({ auto: { concurrency: 1 } })
+  try {
+    await tick(world)
+    const first = running(world)[0]!
+    assert.equal(world.server.cache.getRun(first.id)?.models?.roles[0]?.id, 'sonnet')
+    let lines = await entries(world)
+    const modelsOf = (run: Run): [string, string | null][] => ofRun(lines, run).map((line) => [line.decision, line.model]).sort() as [string, string | null][]
+    assert.deepEqual(modelsOf(first), [['queued', null], ['started', 'sonnet (Claude Code)']])
+    await finish(world, first, { reviewed: { kind: 'commit', sha: first.headOid } })
+    const second = running(world)[0]!
+    await failRun(world, second, 'the session gave up')
+    lines = await entries(world)
+    assert.deepEqual(modelsOf(first), [['finished', 'sonnet (Claude Code)'], ['queued', null], ['started', 'sonnet (Claude Code)']])
+    assert.deepEqual(modelsOf(second), [['failed', 'sonnet (Claude Code)'], ['queued', null], ['started', 'sonnet (Claude Code)']])
+    // lines that ran nothing: the tick's checks, the skips, and the queued lines
+    const idle = lines.filter((line) => line.decision === 'checked' || line.decision === 'skipped' || line.decision === 'queued')
+    assert.ok(idle.length > 0)
+    assert.deepEqual(idle.filter((line) => line.model !== null), [])
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a run that fails before it spawns holds no record and its line names no model', async () => {
+  const world = await setup({ auto: { others: false, own: true } })
+  try {
+    world.git.state.addFails = true
+    await tick(world)
+    const run = autoRuns(world)[0]!
+    const failedLine = ofRun(await entries(world), run).find((line) => line.decision === 'failed')
+    assert.ok(failedLine)
+    assert.equal(failedLine.model, null)
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a tandem run names its pair when its record holds the primary and the secondary, and the panel\'s data carries it', async () => {
+  const world = await setup({ auto: { others: false, own: true, concurrency: 1 } })
+  try {
+    await tick(world)
+    const run = running(world)[0]!
+    // the record as a conductor that kept both roles would leave it; the launcher itself writes the one role it starts
+    world.server.cache.updateRun(run.id, { args: [String(run.number), '--tandem', '--no-post'], models: { roles: [roleOf('primary', 'sonnet', 'claude', 'sonnet'), roleOf('secondary', 'gpt-6.1-terra', 'codex', 'gpt-6.1-terra')], degraded: false } })
+    await finish(world, run, { reviewed: { kind: 'commit', sha: run.headOid } })
+    const ended = ofRun(await entries(world), run).find((line) => line.decision === 'finished')
+    assert.equal(ended?.model, 'primary: sonnet (Claude Code) · secondary: gpt-6.1-terra (Codex)')
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a sweep\'s lines name no model, since its row records none', async () => {
+  const world = await setup({ auto: { others: false, dependabot: true } })
+  try {
+    await tick(world)
+    const sweep = world.server.cache.allSweeps()[0]!
+    const lines = ofRun(await entries(world), sweep, 'sweep')
+    assert.ok(lines.some((line) => line.decision === 'started'))
+    assert.deepEqual(lines.filter((line) => line.model !== null), [])
   } finally {
     await world.cleanup()
   }
