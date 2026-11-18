@@ -143,7 +143,7 @@ export type AutoReviewLogOptions = {
   ceiling?: number
 }
 
-// kept across a rebuild of the GitHub tables, like runs and ticks, and created when missing, so it needs no schema version of its own: a bump would drop and refetch the GitHub tables for nothing, since the log holds nothing GitHub gives back. A column added later is added to a table that lacks it (the model column below), as the runs table's later columns are; AUTOINCREMENT so a pruned id is never reused
+// kept across a rebuild of the GitHub tables, like runs and ticks, and created when missing, so it needs no schema version of its own: a bump would drop and refetch the GitHub tables for nothing, since the log is no GitHub table and what it holds of GitHub's text (a PR's title) is copied again with each line. A column added later is added to a table that lacks it (the model column below), as the runs table's later columns are; AUTOINCREMENT so a pruned id is never reused
 const logSchema = [
   'CREATE TABLE IF NOT EXISTS autoreview_log (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, lane TEXT NOT NULL, number INTEGER, title TEXT, decision TEXT NOT NULL, reason TEXT, note TEXT, head TEXT, run_kind TEXT, run_id INTEGER, tick INTEGER, at TEXT NOT NULL, last_at TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1, model TEXT)',
   'CREATE INDEX IF NOT EXISTS autoreview_log_by_lane ON autoreview_log (repo, lane, number, id)',

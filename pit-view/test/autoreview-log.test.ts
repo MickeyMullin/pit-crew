@@ -298,3 +298,15 @@ test('a fresh line starts a stretch of its own even when it repeats the newest l
   log.record(skip('off', time.iso()))
   assert.deepEqual(log.list(repo, 14).map((line) => [line.reason, line.count]), [['off', 2], ['off', 1]])
 })
+
+test('a model fills a line that has none, and a line that has one keeps it however many times its run is seen again', () => {
+  const { log, time } = memoryLog()
+  const started = (model: string | null): NewLogEntry => ({ repo, lane: 'pr', number: 106, decision: 'started', reason: 'pushed', run: { kind: 'run', id: 7 }, model, at: time.iso() })
+  log.record(started(null))
+  assert.equal(log.list(repo, 14)[0]?.model, null)
+  log.record(started('sonnet (Claude Code)'))
+  assert.equal(log.list(repo, 14)[0]?.model, 'sonnet (Claude Code)')
+  log.record(started('gpt-6.1-terra (Codex)'))
+  log.record(started(null))
+  assert.deepEqual(log.list(repo, 14).map((line) => [line.model, line.count]), [['sonnet (Claude Code)', 1]])
+})

@@ -159,3 +159,17 @@ test('a sweep\'s link opens the sweep drawer and not the Agent drawer', async ()
     assert.equal(drawer.isOpen(), false)
   })
 })
+
+test('opening the drawer on the same PR any other way shows its newest run again, not the run the log chose', async () => {
+  await withPages(async ({ panelRoot, drawerRoot, panel, drawer }) => {
+    panel.open()
+    await settle()
+    press(linkOf(panelRoot, 41))
+    await settle()
+    assert.match(resultText(drawerRoot), /no result/i)
+    drawer.open(106, { key: 'auto-review-button', number: 106 })
+    await settle()
+    assert.match(resultText(drawerRoot), /Clean/)
+    assert.doesNotMatch(resultText(drawerRoot), /no result/i)
+  })
+})
