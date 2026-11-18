@@ -1,5 +1,5 @@
 // test/autoreview-log.test.ts
-// the auto-review log's store (src/autoreviewlog.ts): one line per decision, a repeated tick-level or PR-level decision collapsed into its stretch, a run's decision written once, the days it keeps and the ceiling it never passes, and a file that survives a restart and a rebuild of the GitHub tables; and the pure builders the scheduler hands it
+// the auto-review log's store (src/autoreviewlog.ts): one line per decision, a repeated tick-level or PR-level decision collapsed into its stretch, a run's decision written once, the days it keeps, the ceiling it never passes, and a file that survives a restart and a rebuild of the GitHub tables; and the pure builders the scheduler hands it
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
