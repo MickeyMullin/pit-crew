@@ -1087,7 +1087,9 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
         logDecision({ repo: settings.repo, lane: 'tick', decision: 'skipped', reason: 'off', at: iso(at) })
         closedSeen = false
       } else if (!isActiveAt(auto.activeHours, at, timeZone)) {
-        logDecision({ repo: settings.repo, lane: 'tick', decision: 'skipped', reason: 'outsideHours', at: iso(closesAt !== null && closesAt <= at ? closesAt : at) })
+        // first from when the window closed, if a tick saw it close, then to now
+        if (closesAt !== null && closesAt <= at) logDecision({ repo: settings.repo, lane: 'tick', decision: 'skipped', reason: 'outsideHours', at: iso(closesAt) })
+        logDecision({ repo: settings.repo, lane: 'tick', decision: 'skipped', reason: 'outsideHours', at: iso(at) })
         closedSeen = true
       } else noteReopened(settings.repo, auto, at)
       closesAt = null

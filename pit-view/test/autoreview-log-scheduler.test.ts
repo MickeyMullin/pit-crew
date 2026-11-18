@@ -162,14 +162,20 @@ test('outside hours and off: the closed window is one line until a tick runs, an
   }
 })
 
-test('a window that closes after a tick is dated from its close: the night is one outsideHours line from 18:00 until the window opens', async () => {
+test('a window that closes after a tick is dated from its close: the night is one outsideHours line from 18:00 until the window opens, a save in the night included', async () => {
   // Monday 17:40 in New York, so the tick at 17:55 is the last the window allows
   const world = await setup({ now: '2026-10-26T21:40:00Z', auto: { dailyLimit: 0 } })
   try {
     await tick(world)
     assert.deepEqual(tickLines(await entries(world)).map((line) => [line.decision, line.reason]), [['checked', 'queued']])
+    // a save at 20:00 plans again inside the night: the line stays dated from the close and now reaches 20:00
+    world.time.advance(Date.parse('2026-10-27T00:00:00Z') - Date.parse('2026-10-26T21:55:00Z'))
+    await world.server.scheduler.idle()
+    assert.equal(await save(world, (config) => config).then((answer) => answer.status), 200)
+    const evening = tickLines(await entries(world)).filter((line) => line.reason === 'outsideHours')
+    assert.deepEqual(evening.map((line) => [line.at, line.lastAt]), [['2026-10-26T22:00:00Z', '2026-10-27T00:00:00Z']])
     // the night passes, and Tuesday 09:00 brings the first tick of the day
-    world.time.advance(Date.parse('2026-10-27T13:00:00Z') - Date.parse('2026-10-26T21:55:00Z'))
+    world.time.advance(Date.parse('2026-10-27T13:00:00Z') - Date.parse('2026-10-27T00:00:00Z'))
     await world.server.scheduler.idle()
     const night = tickLines(await entries(world)).filter((line) => line.reason === 'outsideHours')
     assert.equal(night.length, 1)
