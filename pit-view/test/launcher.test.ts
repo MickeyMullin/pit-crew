@@ -6016,3 +6016,23 @@ test('a stopped manual run over an auto-review\'s stored report: the cell agentC
   const shown = drawerModel(input(ask)).storedAsk
   assert.match(shown?.bound ?? '', new RegExp(`the report from run 5 reviewing ${sha.slice(0, 7)}`))
 })
+
+test('an earlier run that has no result of its own (waiting for an answer, queued, or running) is skipped like a stopped one, so the newest earlier run that finished with a result keeps the offer, through the real derivation and the drawer\'s reader', async () => {
+  const config = baseConfig()
+  const { pr, row: auto } = await storedRow({}, { id: 5 })
+  const sha = pr.headRefOid.toLowerCase()
+  const stopped = runRow({ id: 8, number: 106, args: ['106'], status: 'stopped', origin: 'manual', finishedAt: '2026-10-26T14:30:00Z', result: null, reportHash: null })
+  for (const status of ['needsInput', 'queued', 'running'] as const) {
+    const between = runRow({ id: 6, number: 106, args: ['106'], status, origin: 'manual', result: null, reportHash: null })
+    const history = [stopped, between, auto]
+    const offers = currentOffers(pr, config, stopped, undefined, history)
+    assert.equal(offers.runId, 8, status)
+    assert.equal(offers.storedOffer?.runId, 5, status)
+    const cell = agentCell(pr, config, stopped, undefined, null, null, undefined, history)
+    assert.deepEqual(cell.storedOffer, offers.storedOffer, status)
+    const row = { number: 106, url: 'https://example.test/octo-example/orbit/pull/106', title: 'Invented change', author: { login: 'someone', alias: 'Someone' }, headRef: 'fix/x', baseRef: 'main', headOid: sha, headSha: sha, agent: cell } as unknown as OpenRow
+    const model = drawerModel({ row, cell, runs: { state: 'ready', items: history }, reports: { state: 'ready', items: [] }, open: true, confirm: null } as unknown as Parameters<typeof drawerModel>[0])
+    assert.equal(model.autoRuns.find((run) => run.id === 5)?.stored?.runId, 5, status)
+    assert.deepEqual(model.autoRuns.find((run) => run.id === 5)?.stored?.buttons.map((button) => button.text), ['Approve', 'Comment'], status)
+  }
+})
