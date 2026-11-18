@@ -24,18 +24,18 @@ const h = 60 * m
 
 const options = (patch: Partial<Record<string, Partial<StartOption>>> = {}): StartOption[] => [
   {
-    kind: 'default', label: 'Re-review', button: 'Re-review PR', command: 'review-pr', args: ['101'], runners: ['claude', 'codex'],
-    posts: { kind: 'review', text: 'Posts its report to the PR as @viewer: an approval, a request for changes, or a comment, per the findings.' },
-    repo: 'octo-example/orbit',
-    viewer: 'viewer',
-    unavailable: null, ...patch.default,
-  },
-  {
     kind: 'tandem', label: 'Tandem re-review', button: 'Re-review in tandem', command: 'review-pr', args: ['101', '--tandem'], runners: ['claude'],
     posts: { kind: 'review', text: 'Posts its report to the PR as @viewer: an approval, a request for changes, or a comment, per the findings.' },
     repo: 'octo-example/orbit',
     viewer: 'viewer',
     unavailable: null, ...patch.tandem,
+  },
+  {
+    kind: 'default', label: 'Re-review', button: 'Re-review PR', command: 'review-pr', args: ['101'], runners: ['claude', 'codex'],
+    posts: { kind: 'review', text: 'Posts its report to the PR as @viewer: an approval, a request for changes, or a comment, per the findings.' },
+    repo: 'octo-example/orbit',
+    viewer: 'viewer',
+    unavailable: null, ...patch.default,
   },
   {
     kind: 'stack', label: 'Review stack', button: 'Review stack', command: 'review-stack', args: ['101'], runners: ['claude', 'codex'],
@@ -108,10 +108,10 @@ test('the header carries the PR as the row does: number, link, author, title, he
   })
 })
 
-test('an idle PR offers every start, default first, and shows no card', () => {
+test('an idle PR offers every start in the order the server gives, the tandem review first and the plain review next, and shows no card', () => {
   const model = drawerModel(input(idle()))
   assert.deepEqual(model.starts.buttons.map((button) => [button.kind, button.text, button.disabled]), [
-    ['default', 'Re-review PR', false], ['tandem', 'Re-review in tandem', false], ['stack', 'Review stack', false],
+    ['tandem', 'Re-review in tandem', false], ['default', 'Re-review PR', false], ['stack', 'Review stack', false],
   ])
   assert.equal(model.starts.shared, null)
   assert.equal(model.card, 'none')
@@ -125,7 +125,7 @@ test('a start that cannot run is disabled and says why, once when every start ha
   const noClone = 'set cloneDir in the config to your local clone of owner/name before starting a run'
   const mixed = startsModel(idle({ starts: options({ tandem: { unavailable: noClone } }) }), true, 101)
   assert.deepEqual(mixed.buttons.map((button) => [button.disabled, button.reason]), [
-    [false, null], [true, 'Set cloneDir in the config to your local clone of owner/name before starting a run.'], [false, null],
+    [true, 'Set cloneDir in the config to your local clone of owner/name before starting a run.'], [false, null], [false, null],
   ])
   assert.equal(mixed.shared, null)
 })
@@ -152,7 +152,7 @@ test('the start confirmation names the PR title, the command, the runner choice 
 })
 
 test('the runner a start opens with: the configured one, Claude for tandem, never one it does not work with', () => {
-  const [def, tandem, stack] = options() as [StartOption, StartOption, StartOption]
+  const [tandem, def, stack] = options() as [StartOption, StartOption, StartOption]
   assert.equal(defaultRunner(def, 'codex'), 'codex')
   assert.equal(defaultRunner(tandem, 'codex'), 'claude')
   assert.equal(defaultRunner(stack, 'claude'), 'claude')
@@ -531,7 +531,7 @@ test('a confirmation is dropped as soon as it cannot be built: its run ended, it
   assert.equal(confirmHolds(start, idle(), true), true)
   assert.equal(confirmHolds(start, idle(), false), false, 'the PR left the open tables')
   assert.equal(confirmHolds(start, running(), true), false, 'a run started meanwhile makes every start unavailable')
-  assert.equal(confirmHolds(start, idle({ starts: options().slice(0, 1) }), true), false, 'the start is no longer offered')
+  assert.equal(confirmHolds(start, idle({ starts: options().slice(1, 2) }), true), false, 'the start is no longer offered')
   assert.equal(confirmHolds({ ...start, kind: 'stack' }, idle(), true), true)
 })
 
@@ -1018,7 +1018,7 @@ test('a re-read confirmation is dropped when its run changed, the PR left, or th
   assert.equal(bound({ headSha: 'b'.repeat(40) }), false, 'new commits')
   assert.equal(bound({ baseRef: 'release/1' }), false, 'retargeted')
   assert.equal(bound({}, 'octo-example/other'), false, 'another repository')
-  assert.equal(bound({ agent: deniedCell({ starts: options({ default: { viewer: 'someone-else' } }) }) }), false, 'another viewer')
+  assert.equal(bound({ agent: deniedCell({ starts: options({ default: { viewer: 'someone-else' }, tandem: { viewer: 'someone-else' }, stack: { viewer: 'someone-else' } }) }) }), false, 'another viewer')
 })
 
 test('the re-read request carries the token and everything the confirmation showed', async () => {

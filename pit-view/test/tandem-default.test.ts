@@ -7,8 +7,8 @@ import type { Config } from '../src/config.ts'
 import type { OpenRow } from '../src/derive.ts'
 import type { RawOpenPr } from '../src/github.ts'
 import { agentCell, defaultRun, isTandemRun, judge, startOptions } from '../src/launcher.ts'
-import { tandemPairProblem } from '../src/models.ts'
-import { resolveModels } from '../src/models.ts'
+import { resolveModels, tandemPairProblem } from '../src/models.ts'
+import { sweepArgs, sweepCommand, sweepRequest } from '../src/sweeps.ts'
 import { cellModel } from '../public/agent.ts'
 import type { AgentCell } from '../public/agent.ts'
 import { createDrawer } from '../public/drawer.ts'
@@ -42,7 +42,7 @@ test('the first start of a review, a re-review, and a self-review is the tandem 
   }
 })
 
-test('a Dependabot review, its sweep, a stack review, a fix session, and the plain entries never carry --tandem, and only the tandem entry does', () => {
+test('a Dependabot review, a stack review, a fix session, and the plain entries never carry --tandem, only the tandem entry does, and the sweep request is the same single run it was', () => {
   assert.deepEqual(kindsOf(114), ['default'])
   assert.equal(isTandemRun(defaultRun(prOf(114), config).args), false)
   assert.equal(defaultRun(prOf(114), config).command, 'review-dependabot')
@@ -53,6 +53,11 @@ test('a Dependabot review, its sweep, a stack review, a fix session, and the pla
     }
   }
   assert.ok(kindsOf(104, stacked).includes('fix') && kindsOf(104, stacked).includes('stack'))
+  // the one builder both the manual start and the scheduler use for a sweep
+  const sweep = sweepRequest(scenario.repo)
+  assert.equal(sweep.command, sweepCommand)
+  assert.deepEqual(sweep.args, sweepArgs(scenario.repo))
+  assert.equal(isTandemRun(sweep.args), false)
 })
 
 test('the queue wording follows the first start: Queue tandem review on the idle button, Queue review in tandem first in the drawer, and the plain review one click away says queue too', () => {
@@ -62,37 +67,52 @@ test('the queue wording follows the first start: Queue tandem review on the idle
   assert.deepEqual(startsModel(cell, true, 113).buttons.map((entry) => entry.text), ['Queue review in tandem', 'Queue review PR'])
 })
 
-test('a tandem start asks for Claude and sends the tandem kind, a plain start one click away sends the default kind, through the real drawer', async () => {
-  const cell = agentCell(prOf(106), config, undefined, undefined, stacked)
+// the real drawer on the fake page: the Start button pressed, then the confirmation's own button; fetch records what the page sends
+const startThroughDrawer = async (number: number, press1: 'tandem' | 'default'): Promise<{ command: string, sent: { url: string, body: Record<string, unknown> | null }[] }> => {
+  const cell = agentCell(prOf(number), config, undefined, undefined)
   const sent: { url: string, body: Record<string, unknown> | null }[] = []
   const fake = installFakeBrowser((async (input: string, init?: RequestInit) => {
-    sent.push({ url: String(input), body: typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : null })
-    if (init?.method === 'POST') return new Response(JSON.stringify({ id: 9 }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    if (init?.method === 'POST') {
+      sent.push({ url: String(input), body: typeof init.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : null })
+      return new Response(JSON.stringify({ id: 9 }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
     return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } })
   }) as typeof fetch)
   try {
     const root = fake.document.createElement('aside')
     fake.document.body.appendChild(root)
-    const row = { number: 106, url: 'https://example.test/pull/106', title: 'Invented title', author: { login: 'casey-rowe', alias: 'Casey' }, headRef: 'feat/a', baseRef: 'main', headOid: 'a'.repeat(40), headSha: 'a'.repeat(40), agent: cell } as unknown as OpenRow
+    const row = { number, url: `https://example.test/pull/${number}`, title: 'Invented title', author: { login: 'casey-rowe', alias: 'Casey' }, headRef: 'feat/a', baseRef: 'main', headOid: 'a'.repeat(40), headSha: 'a'.repeat(40), agent: cell } as unknown as OpenRow
     const drawer = createDrawer({
-      root: root as unknown as HTMLElement, token: 't', nowMs: () => Date.now(), rowOf: (number) => number === 106 ? row : undefined, repo: () => scenario.repo, viewer: () => scenario.viewer,
+      root: root as unknown as HTMLElement, token: 't', nowMs: () => Date.now(), rowOf: (n) => n === number ? row : undefined, repo: () => scenario.repo, viewer: () => scenario.viewer,
       say: () => undefined, reports: { open: () => undefined, close: () => undefined, isOpen: () => false, refresh: () => undefined }, sweepLink: () => null, openSweep: () => undefined,
     })
-    drawer.open(106, { key: 'agent:106', number: 106 })
+    drawer.open(number, { key: `agent:${number}`, number })
     await new Promise<void>((resolve) => setImmediate(resolve))
     await new Promise<void>((resolve) => setImmediate(resolve))
-    const buttons = (): FakeElement[] => root.querySelectorAll('button').filter((button) => button.getAttribute('data-focus-key')?.startsWith('start:') === true)
-    assert.deepEqual(buttons().map((button) => button.textContent), ['Re-review in tandem', 'Re-review PR', 'Review stack'])
-    press(buttons()[0]!)
-    assert.match(root.textContent, /\/review-pr 106 --tandem/)
-    const confirm = startConfirmModel(row, cell, 'tandem', 'claude')
-    assert.equal(confirm?.runner, 'claude')
-    assert.deepEqual(confirm?.runners.map((runner) => runner.name), ['claude'])
-    const plain = startConfirmModel(row, cell, 'default', 'claude')
-    assert.doesNotMatch(plain?.command ?? '', /--tandem/)
-    assert.deepEqual(plain?.runners.map((runner) => runner.name), ['claude', 'codex'])
+    const start = root.querySelectorAll('button').filter((button) => button.getAttribute('data-focus-key') === `start:${press1}`)[0]
+    assert.ok(start, `#${number} offers the ${press1} start`)
+    press(start)
+    const command = root.querySelector('[data-confirm="command"]')?.textContent ?? ''
+    sent.length = 0
+    press(root.querySelector('[data-focus-key="confirm-go"]') as FakeElement)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    return { command, sent }
   } finally {
     fake.restore()
+  }
+}
+
+test('the real drawer confirms and sends the tandem start and the plain start of a review, a re-review, and a self-review, each with its own kind and command', async () => {
+  const expected = [
+    [113, 'tandem', '/review-pr 113 --tandem', 'tandem'], [113, 'default', '/review-pr 113', 'default'],
+    [106, 'tandem', '/review-pr 106 --tandem', 'tandem'], [106, 'default', '/review-pr 106', 'default'],
+    [104, 'tandem', '/review-pr 104 --tandem --no-post', 'tandem'], [104, 'default', '/review-pr 104 --no-post', 'default'],
+  ] as const
+  for (const [number, pressed, command, kind] of expected) {
+    const result = await startThroughDrawer(number, pressed)
+    assert.equal(result.command, command, `#${number} ${pressed} command`)
+    assert.deepEqual(result.sent.map((request) => [request.url, request.body?.kind, request.body?.runner]), [[`/api/prs/${number}/runs`, kind, 'claude']], `#${number} ${pressed} request`)
+    assert.equal(result.sent[0]?.body?.repo, scenario.repo)
   }
 })
 

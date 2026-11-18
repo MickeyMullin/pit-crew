@@ -1028,6 +1028,33 @@ test('a recovered run rebuilds its steps from the whole of events.jsonl', async 
   }
 })
 
+test('a scheduled tandem whose reviewer stops to ask settles as failed with the question as its reason, and the same stop in a manual tandem stays a stop to ask', async () => {
+  const h = await harness()
+  try {
+    const stop = reviewResult({ status: 'needsInput', question: 'The secondary failed: consolidate without it?', reviewed: null, verdict: null, findings: [], report: null })
+    const scheduled = request(106, { args: ['106', '--tandem', '--no-post'] })
+    const queued = h.launcher.queueScheduled(scheduled, join(h.home, 'dev', 'orbit'), { tick: h.cache.createTick(scenario.repo).id, reason: 'new', headOid: 'abcdef0', posting: false })
+    const started = await h.launcher.startScheduled(queued.id, scheduled, { args: scheduled.args, posting: false }, async () => join(h.home, 'agents', 'worktrees', `run-${queued.id}`))
+    assert.equal(started?.status, 'running')
+    const child = h.launch.children[0]!
+    await child.result(stop)
+    const settled = h.launcher.settled(queued.id)
+    child.exit(0)
+    const unattended = await settled
+    assert.deepEqual([unattended.status, unattended.note, unattended.result?.question], ['failed', 'unattendedStop: The secondary failed: consolidate without it?', 'The secondary failed: consolidate without it?'])
+    // the same stop, started by hand, waits for the owner
+    const manual = await h.launcher.start(request(106, { args: ['106', '--tandem'] }))
+    const second = h.launch.children.at(-1)!
+    await second.result(stop)
+    const waiting = h.launcher.settled(manual.id)
+    second.exit(0)
+    const asked = await waiting
+    assert.deepEqual([asked.status, asked.note], ['needsInput', null])
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('every outcome settles from the files: failed, needsInput, noResult, noReport and permissionDenied', async () => {
   const h = await harness()
   try {

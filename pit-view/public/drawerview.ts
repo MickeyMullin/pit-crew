@@ -54,7 +54,7 @@ export const headerModel = (row: OpenRow): HeaderModel => ({
 
 export const goneText = (number: number): string => `#${number} is no longer open`
 
-// the Start section: one button per offered start, default first. A start that cannot run says
+// the Start section: one button per offered start, in the order the server offers them (the tandem review first where one is offered, then the plain review). A start that cannot run says
 // why in the drawer's own text; when every button gives the same reason it is said once
 export type StartButton = { kind: StartKind, text: string, disabled: boolean, reason: string | null }
 export type StartsModel = { buttons: StartButton[], shared: string | null }

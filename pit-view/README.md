@@ -24,6 +24,10 @@ There are two instances, and they share nothing. The default instance is the dep
 
 The deployed app is a clone of `master` at `~/app/pit-crew`, kept running from login by the `com.mickey.pit-view` launch agent (`pnpm service:install`, `service:status`, `service:restart`, `service:uninstall`). [deploy/README.md](deploy/README.md) covers the first deployment and updates.
 
+## Starting a review
+
+The tandem review is the first Start for a review, a re-review, and a self-review, with the plain review as the next entry. Auto-review of a human's PR or of your own draft starts a tandem on Claude, and fails the run, with a notification, when the configured pair cannot run a tandem or the tandem stops to ask. The stack review and the Dependabot sweep stay single reviews. DESIGN.md, section 8, has the rules.
+
 ## Posting a review
 
 Pit View grants a review run no permission to post. A run's post goes through or is refused under your own Claude Code settings and auto mode's classifier. When the classifier refuses it, the run reads "review done, post not made," and you post the saved report with the drawer's confirmed Post it button. DESIGN.md, section 8, has the rules.

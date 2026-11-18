@@ -777,7 +777,7 @@ test('post.others turned off while the worktree is added: a row queued by an ear
   }
 })
 
-test('post.others turned off during the launch\'s own last awaits, after the worktree exists: a tandem still runs on Claude with a Codex runner configured, and carries --no-post, in its argv and in request.json', async () => {
+test('post.others turned off while the fetch is held: a tandem still runs on Claude with a Codex runner configured, and carries --no-post, in its argv and in request.json', async () => {
   const world = await setup({ auto: { post: { others: true, dependabot: true } }, config: { agent: { runner: 'codex', claudeModel: 'sonnet' } } })
   try {
     await saveWhileHeld(world, 'holdFetch', { others: false, dependabot: true })
@@ -792,6 +792,23 @@ test('post.others turned off during the launch\'s own last awaits, after the wor
     const file = await requestFileOf(child)
     assert.deepEqual(file.args, started.args)
     assert.deepEqual(file.argv, [child.request.command, ...child.request.args])
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('post.dependabot turned off during the launch\'s own last awaits, after the worktree exists: the Codex sweep\'s command line carries --no-post, in its argv and in request.json', async () => {
+  const world = await setup({ auto: { others: false, dependabot: true, post: { others: true, dependabot: true } }, config: { agent: { runner: 'codex', claudeModel: 'sonnet' } } })
+  try {
+    await saveWhileHeld(world, 'holdRevParse', { others: true, dependabot: false })
+    const sweep = world.server.cache.allSweeps()[0]
+    assert.ok(sweep)
+    const child = world.launch.children[0]!
+    assert.equal(child.request.command, 'codex')
+    assert.match(child.request.args.at(-1) ?? '', /--no-post --emit-json=/)
+    assert.deepEqual(sweep.args, [scenario.repo, '--parallel', '1', '--no-post'])
+    assert.equal(sweep.posting, false)
+    assert.deepEqual((await requestFileOf(child)).args, sweep.args)
   } finally {
     await world.cleanup()
   }
