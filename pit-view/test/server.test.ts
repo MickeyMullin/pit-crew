@@ -2041,6 +2041,9 @@ test('a Dependabot sweep started through the server is never a tandem: no --tand
     assert.doesNotMatch(JSON.stringify(started.body), /--tandem/)
     assert.match(lastWrite(h), /\/review-dependabot-sweep /)
     assert.doesNotMatch(lastWrite(h), /--tandem/)
+    const recorded = JSON.parse(await readFile(join(h.home, '.local', 'state', 'pit-view', 'sweeps', String(started.body.id), 'request.json'), 'utf8')) as { command: string, args: string[] }
+    assert.equal(recorded.command, 'review-dependabot-sweep')
+    assert.equal(recorded.args.some((arg) => arg.includes('tandem')), false)
   } finally {
     await h.cleanup()
   }

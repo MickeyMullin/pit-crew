@@ -1036,6 +1036,9 @@ test('an Update session started through the launcher is never a tandem: no --tan
     assert.equal(isTandemRun(update.args), false)
     assert.match(h.launch.children[0]!.writes.join('\n'), /\/update-pr 102 --head=/)
     assert.doesNotMatch(h.launch.children[0]!.writes.join('\n'), /--tandem/)
+    const recorded = JSON.parse(await readFile(join(h.stateDir, 'runs', String(update.id), 'request.json'), 'utf8')) as { command: string, args: string[] }
+    assert.equal(recorded.command, 'update-pr')
+    assert.equal(isTandemRun(recorded.args), false)
   } finally {
     await h.cleanup()
   }

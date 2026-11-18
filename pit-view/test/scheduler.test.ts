@@ -578,7 +578,7 @@ test('an auto-started tandem with posting on still passes --tandem, and its self
   }
 })
 
-test('a scheduled Dependabot sweep stays a single review: no --tandem on the sweep or in any argument it carries', async () => {
+test('a scheduled Dependabot sweep is never a tandem: no --tandem in its row arguments or in the line the process is given', async () => {
   const world = await setup({ auto: { others: false, dependabot: true } })
   try {
     await tick(world)
