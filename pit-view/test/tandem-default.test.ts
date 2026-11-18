@@ -122,6 +122,7 @@ test('a start on a Claude-only tandem cannot be given another runner: the confir
   assert.equal(cell.action.runner, 'claude')
   const row = { number: 113, title: 'Invented title', headRef: 'feat/b' }
   assert.equal(startConfirmModel(row, cell, 'tandem', 'codex')?.runner, 'claude')
+  assert.deepEqual(startConfirmModel(row, cell, 'tandem', 'codex')?.runners.map((offered) => offered.name), ['claude'])
   // the plain review still follows the configured runner
   assert.equal(startConfirmModel(row, cell, 'default', 'codex')?.runner, 'codex')
 })
