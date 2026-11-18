@@ -225,7 +225,7 @@ test('a session\'s status is its decision: started, finished with its outcome, f
   assert.deepEqual([sweep?.lane, sweep?.number, sweep?.head, sweep?.run], ['sweep', null, null, { kind: 'sweep', id: 7 }])
 })
 
-// the model that ran the review (AC-13)
+// the model that ran each review
 
 const sonnetRole = { role: 'reviewer', id: 'sonnet', runner: 'claude', provider: 'anthropic', model: 'sonnet', fallback: false, outcome: null } as const
 const codexRole = { role: 'secondary', id: 'gpt-6.1-terra', runner: 'codex', provider: 'openai', model: 'gpt-6.1-terra', fallback: false, outcome: null } as const
@@ -274,7 +274,7 @@ test('a log table made before the model column opens without loss: its lines rea
   assert.equal(openAutoReviewLog({ db, clock: time.clock }).list(repo, 14).length, 2)
 })
 
-// the lines that name a run and skip a PR, and a stretch ended by what happened between (P2-3, P3-1)
+// the lines that name a run and skip a PR, and a stretch ended by what happened between
 
 test('a skip that names a run collapses like any other repeat of the same skip about the same run, and starts a line of its own for another run or another reason', () => {
   const { log, time } = memoryLog()

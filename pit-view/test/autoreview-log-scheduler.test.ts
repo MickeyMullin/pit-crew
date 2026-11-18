@@ -270,7 +270,7 @@ test('a run the owner stops is a stopped line, and the next tick leaves its PR a
   }
 })
 
-test('a queued run whose opt-in was turned off is skipped with that reason, once, while it waits', async () => {
+test('a queued run whose opt-in was turned off is skipped with that reason, as one line however often the start step reaches it', async () => {
   const world = await setup({ auto: { concurrency: 1 } })
   try {
     await tick(world)
@@ -557,7 +557,7 @@ test('turning auto-review on during active hours and off again before the next t
   }
 })
 
-// the model that ran each review (AC-13), read from the run's record, which the launcher writes at the spawn
+// the model that ran each review, read from the run's record, which the launcher writes at the spawn
 
 const roleOf = (role: string, id: string, runner: 'claude' | 'codex', model: string) => ({ role, id, runner, provider: runner === 'claude' ? 'anthropic' : 'openai', model, fallback: false, outcome: null })
 
