@@ -1781,6 +1781,24 @@ test('a fix session starts only on the viewer\'s own PR: fix-pr with Claude, nev
   }
 })
 
+test('a start that names no kind is the tandem review on Claude, the plain review when the runner asked for cannot run a tandem, and the single review of a Dependabot PR', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', maxConcurrentReviews: 5 } })
+  try {
+    await filled(h)
+    const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
+    const tandem = await send(url(106), 'POST', { repo: scenario.repo }, token(h))
+    assert.deepEqual([tandem.status, tandem.body.args, tandem.body.runner, tandem.body.tandem], [200, ['106', '--tandem'], 'claude', true])
+    const codex = await send(url(113), 'POST', { repo: scenario.repo, runner: 'codex' }, token(h))
+    assert.deepEqual([codex.status, codex.body.args, codex.body.runner, codex.body.tandem], [200, ['113'], 'codex', false])
+    const dependabot = await send(url(114), 'POST', { repo: scenario.repo }, token(h))
+    assert.deepEqual([dependabot.status, dependabot.body.command, dependabot.body.args, dependabot.body.tandem], [200, 'review-dependabot', ['114'], false])
+    // asking for the tandem kind with Codex is still refused
+    assert.equal((await send(url(115), 'POST', { repo: scenario.repo, kind: 'tandem', runner: 'codex' }, token(h))).status, 400)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('the comments check rides on a Self-review start as a boolean: true adds --check-comments after --no-post, false or none is today\'s start, and nothing else can ask for it', async () => {
   const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
   try {
