@@ -1093,7 +1093,9 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     const limited = await drainForTick(repo, exempt)
     if (limited) return skip('dailyLimit', counts)
     // runs were waiting and none of them got a start: the cap or the concurrency had no room
-    const capFull = forLog(() => before !== undefined && before.size > 0 && (launcher.queueing().review || inFlight() >= auto.concurrency) && [...logWaiting()].filter((key) => before.has(key)).length === before.size) === true
+    const capFull = forLog(function capFullOf() {
+      return before !== undefined && before.size > 0 && (launcher.queueing().review || inFlight() >= auto.concurrency) && [...logWaiting()].filter((key) => before.has(key)).length === before.size
+    }) === true
     finish({ ...counts, state: 'ran' }, capFull)
   }
 

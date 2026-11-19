@@ -539,13 +539,14 @@ test('a title lookup that throws while a queued run is skipped as opted out does
   }
 })
 
-// the cap-full classification reads the queue for the log alone, and the start step's own reads share the methods, so a test breaks only the read made for the log, found by the name of the function that makes it
-const breakQueueRead = (world: World, method: 'queuedRuns' | 'queuedSweeps'): { calls: () => number } => {
+// the cap-full classification reads the queue for the log alone, once before the start step and once after it, and the start step's own reads share the methods, so a test breaks only the read made for the log, found by the names of the functions that make it
+const breakQueueRead = (world: World, method: 'queuedRuns' | 'queuedSweeps', when: 'before' | 'after'): { calls: () => number } => {
   const cache = world.server.cache
   const read = cache[method].bind(cache)
   let calls = 0
   cache[method] = (() => {
-    if ((new Error().stack ?? '').includes('logWaiting')) {
+    const stack = new Error().stack ?? ''
+    if (stack.includes('logWaiting') && stack.includes('capFullOf') === (when === 'after')) {
       calls += 1
       throw new Error('the cache cannot be read for the queue')
     }
@@ -554,12 +555,12 @@ const breakQueueRead = (world: World, method: 'queuedRuns' | 'queuedSweeps'): { 
   return { calls: () => calls }
 }
 
-for (const method of ['queuedRuns', 'queuedSweeps'] as const) {
-  test(`a log-only read of the queue that throws (${method}) does not end the tick or hold back the waiting runs, and with the log off the read is never made`, async () => {
+for (const [method, when] of [['queuedRuns', 'before'], ['queuedSweeps', 'before'], ['queuedRuns', 'after'], ['queuedSweeps', 'after']] as const) {
+  test(`a log-only read of the queue that throws (${method}, ${when} the start step) does not end the tick or hold back the waiting runs, and with the log off the read is never made`, async () => {
     const play = async (mode: 'off' | 'broken'): Promise<{ record: unknown, logs: string[], reads: number, states: (string | null)[], started: number }> => {
       const world = await setup({ auto: { concurrency: 1 }, autoReviewLog: mode === 'broken' })
       try {
-        const reads = breakQueueRead(world, method)
+        const reads = breakQueueRead(world, method, when)
         await tick(world)
         const waiting = autoRuns(world).filter((run) => run.status === 'queued')
         assert.ok(waiting.length > 0)
