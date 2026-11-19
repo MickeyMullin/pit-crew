@@ -539,6 +539,32 @@ test('a title lookup that throws while a queued run is skipped as opted out does
   }
 })
 
+test('the owner\'s-run check is asked of the launcher the same number of times with the log on as with it off, and the log still names the PR it skipped', async () => {
+  const play = async (mode: 'off' | 'on'): Promise<{ asked: number, skipped: number }> => {
+    const world = await setup({ auto: { others: false, own: true }, autoReviewLog: mode === 'on' })
+    try {
+      const manual = await world.server.launcher.start({ repo: scenario.repo, number: 103, command: 'review-pr', args: ['103', '--no-post'], label: 'Self-review' })
+      assert.equal(manual.origin, 'manual')
+      const launcher = world.server.launcher
+      const busy = launcher.busy.bind(launcher)
+      let asked = 0
+      launcher.busy = ((target) => {
+        asked += 1
+        return busy(target)
+      }) as typeof launcher.busy
+      await tick(world)
+      return { asked, skipped: mode === 'on' ? (await entries(world)).filter((line) => line.reason === 'ownersRun').length : 0 }
+    } finally {
+      await world.cleanup()
+    }
+  }
+  const off = await play('off')
+  const on = await play('on')
+  assert.ok(off.asked > 0)
+  assert.equal(on.asked, off.asked)
+  assert.equal(on.skipped, 1)
+})
+
 // the cap-full classification reads the queue for the log alone, once before the start step and once after it, and the start step's own reads share the methods, so a test breaks only the read made for the log, found by the names of the functions that make it
 const breakQueueRead = (world: World, method: 'queuedRuns' | 'queuedSweeps', when: 'before' | 'after'): { calls: () => number } => {
   const cache = world.server.cache
