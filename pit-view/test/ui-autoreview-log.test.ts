@@ -111,12 +111,29 @@ test('the run id is a link that opens its PR\'s Agent drawer, open or closed, wi
     entry({ decision: 'started', run: { kind: 'run', id: 42 } }),
     entry({ decision: 'skipped', reason: 'alreadyReviewed' }),
   ], noFilters, reading).lines
-  assert.deepEqual(lines[0]?.run, { kind: 'run', id: 42, key: `line-${lines[0]?.id}`, number: 106, title: 'feat(nav): an invented change', closed: false, text: 'run 42', name: 'Open the Agent drawer of #106, run 42', opens: true })
-  assert.deepEqual(lines[1]?.run, { kind: 'run', id: 17, key: `line-${lines[1]?.id}`, number: 97, title: 'feat(nav): an invented change', closed: true, text: 'run 17', name: 'Open the Agent drawer of #97, run 17 (the PR is closed)', opens: true })
-  assert.deepEqual(lines[2]?.run, { kind: 'sweep', id: 7, key: `line-${lines[2]?.id}`, number: null, title: null, closed: false, text: 'sweep 7', name: 'Open the sweep drawer at sweep 7', opens: true })
+  assert.deepEqual(lines[0]?.run, { kind: 'run', id: 42, key: `line-${lines[0]?.id}`, entryId: lines[0]?.id, anchor: `auto-log-entry-${lines[0]?.id}`, number: 106, title: 'feat(nav): an invented change', closed: false, text: 'run 42', name: 'Open the Agent drawer of #106, run 42', opens: true })
+  assert.deepEqual(lines[1]?.run, { kind: 'run', id: 17, key: `line-${lines[1]?.id}`, entryId: lines[1]?.id, anchor: `auto-log-entry-${lines[1]?.id}`, number: 97, title: 'feat(nav): an invented change', closed: true, text: 'run 17', name: 'Open the Agent drawer of #97, run 17 (the PR is closed)', opens: true })
+  assert.deepEqual(lines[2]?.run, { kind: 'sweep', id: 7, key: `line-${lines[2]?.id}`, entryId: lines[2]?.id, anchor: `auto-log-entry-${lines[2]?.id}`, number: null, title: null, closed: false, text: 'sweep 7', name: 'Open the sweep drawer at sweep 7', opens: true })
   // two lines of one run are two links with two keys
   assert.notEqual(lines[0]?.run?.key, lines[3]?.run?.key)
   assert.equal(lines[4]?.run, null)
+})
+
+test('each line has an anchor made from its entry\'s id, unique to the line and the same after another read, and its run link names the line it is on', () => {
+  const entries = [
+    entry({ id: 41, decision: 'finished', reason: 'done', run: { kind: 'run', id: 9 } }),
+    entry({ id: 40, decision: 'started', reason: 'new', run: { kind: 'run', id: 9 } }),
+    entry({ id: 39, lane: 'sweep', number: null, title: null, decision: 'queued', reason: 'dependabot', head: null, run: { kind: 'sweep', id: 3 } }),
+    entry({ id: 38, decision: 'skipped', reason: 'alreadyReviewed' }),
+  ]
+  const first = logModel(entries, noFilters, reading).lines
+  assert.deepEqual(first.map((line) => line.anchor), ['auto-log-entry-41', 'auto-log-entry-40', 'auto-log-entry-39', 'auto-log-entry-38'])
+  assert.equal(new Set(first.map((line) => line.anchor)).size, first.length)
+  // the same lines read again, with a count grown and a filter applied, keep their anchors
+  const again = logModel(entries.map((line) => ({ ...line, count: 5 })), { ...noFilters, pr: '106' }, reading).lines
+  assert.deepEqual(again.map((line) => line.anchor), ['auto-log-entry-41', 'auto-log-entry-40', 'auto-log-entry-38'])
+  // two lines of one run have links to their own lines
+  assert.deepEqual(first.slice(0, 3).map((line) => [line.run?.entryId, line.run?.anchor]), [[41, 'auto-log-entry-41'], [40, 'auto-log-entry-40'], [39, 'auto-log-entry-39']])
 })
 
 test('a PR skipped because a post for it is in flight reads in the owner\'s words', () => {

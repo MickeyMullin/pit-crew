@@ -323,12 +323,12 @@ test('the page holds the log as a hidden, labeled panel beside the drawers, and 
   assert.match(menu, /'data-auto-log': '', 'data-focus-key': 'auto-log'/)
   assert.match(menu, /closest\('button\[data-auto-log\]'\) !== null\) \{\n\s+close\(\)\n\s+onLog\(\)/)
   const app = readFileSync(new URL('../public/app.ts', import.meta.url), 'utf8')
-  assert.ok(app.includes('openRun: openLoggedRun({ drawer, sweepDrawer, seedRuns }),'))
+  assert.ok(app.includes('openRun: openLoggedRun({ drawer, sweepDrawer, seedRuns, backToLog: (entryId) => logPanel.restore(entryId) }),'))
   assert.ok(app.includes('logPanel.update()'))
   // the opener returns focus to the same button, whichever drawer it opens
   const opener = readFileSync(new URL('../public/autoreviewlogopen.ts', import.meta.url), 'utf8')
   assert.ok(opener.includes("sweepDrawer.open({ key: 'auto-review-button' }, { sweepId: link.id })"))
-  assert.ok(opener.includes("drawer.open(link.number, { key: 'auto-review-button', number: link.number }, undefined, { runId: link.id, title: link.title })"))
+  assert.ok(opener.includes("drawer.open(link.number, { key: 'auto-review-button', number: link.number }, undefined, { runId: link.id, title: link.title, back: { anchor: link.anchor, go: () => backToLog(link.entryId) } })"))
 })
 
 // the documents and the stylesheet say what the code does, so neither can drift from it unnoticed

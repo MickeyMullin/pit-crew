@@ -879,9 +879,12 @@ export type DrawerInput = {
   confirm: Confirm | null
   // the people the config lists, for a review request's choice; read when that is asked
   people?: readonly PersonChoice[]
+  // the run the log asked for when its card cannot be shown; the card is then none, so no other run's card stands for it
+  asked?: AskedRun | null
 }
 
 export type DrawerModel = {
+  asked: AskedRun | null
   header: HeaderModel
   gone: string | null
   starts: StartsModel
@@ -915,11 +918,13 @@ export type DrawerModel = {
 export const drawerModel = (input: DrawerInput): DrawerModel => {
   const { row, confirm } = input
   const cell = row.agent
-  const card = cell === null ? 'none' : cardKind(cell)
+  const asked = input.asked ?? null
+  const card = cell === null || asked !== null ? 'none' : cardKind(cell)
   const startAsk = confirm?.type === 'start' && cell !== null ? startConfirmModel(row, cell, confirm.kind, confirm.runner, confirm.checkComments, confirm.extraText, confirm.extraOn) : null
   const runs = input.runs
   const reports = input.reports
   return {
+    asked,
     header: headerModel(row),
     gone: input.open ? null : goneText(row.number),
     starts: cell === null ? { buttons: [], shared: null } : startsModel(cell, input.open, row.number),
@@ -1040,7 +1045,17 @@ export const cellFromRun = (cell: AgentCell, run: RunView): AgentCell => {
   }
 }
 
-// the cell to show when the log asked for one run: that run's own card, built from the runs read for the PR, unless it is the run the cell already shows (the row's own cell knows more of it), and the cell as it stands while the runs load or when the run is no longer on the list
+// what stands in place of the card when the log asked for one run and its card cannot be shown: the runs are still loading, they could not be loaded, or the run is no longer among them (finished runs are pruned apart from the log, so an old link can outlive its run). Never another run's card shown as this one's
+export type AskedRun = { runId: number, state: 'loading' | 'error' | 'missing', text: string }
+
+export const askedRun = (cell: AgentCell | null, runs: Loadable<RunView>, runId: number | null, number: number): AskedRun | null => {
+  if (runId === null || cell?.runId === runId) return null
+  if (runs.state === 'loading') return { runId, state: 'loading', text: `Loading run ${runId}…` }
+  if (runs.state === 'error') return { runId, state: 'error', text: `Run ${runId} cannot be shown: the runs of #${number} could not be loaded.` }
+  return runs.items.some((candidate) => candidate.id === runId) ? null : { runId, state: 'missing', text: `Run ${runId} is no longer listed for #${number}.` }
+}
+
+// the cell to show when the log asked for one run: that run's own card, built from the runs read for the PR, unless it is the run the cell already shows (the row's own cell knows more of it). While the runs load, when they could not be read, and when the run is no longer on the list there is no card of that run, and askedRun says so; the cell returned then is not shown as the run's
 export const cellOfRun = (cell: AgentCell | null, runs: Loadable<RunView>, runId: number | null): AgentCell | null => {
   if (cell === null || runId === null || cell.runId === runId || runs.state !== 'ready') return cell
   const run = runs.items.find((candidate) => candidate.id === runId)

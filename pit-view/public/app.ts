@@ -430,7 +430,7 @@ const logPanel = createAutoReviewLogPanel({
   nowMs,
   view: () => feed.view,
   isOpen: (number) => feed.view !== null && findOpenRow(feed.view, number) !== undefined,
-  openRun: openLoggedRun({ drawer, sweepDrawer, seedRuns }),
+  openRun: openLoggedRun({ drawer, sweepDrawer, seedRuns, backToLog: (entryId) => logPanel.restore(entryId) }),
   returnTo: () => document.getElementById('auto-review-button'),
 })
 

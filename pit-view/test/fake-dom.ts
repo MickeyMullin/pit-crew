@@ -45,7 +45,9 @@ export type FakeElement = {
   dispatch: (type: string, init?: { key?: string }) => void
   focus: () => void
   setSelectionRange: (start: number, end: number) => void
-  scrollIntoView: () => void
+  scrollIntoView: (options?: { block?: string }) => void
+  // how many times it was scrolled into view, and with which block
+  scrolled: { block: string | null }[]
   matches: (compound: Compound) => boolean
   querySelector: (selector: string) => FakeElement | null
   querySelectorAll: (selector: string) => FakeElement[]
@@ -280,7 +282,10 @@ const makeElement = (doc: FakeDocument, tag: string): FakeElement => {
       element.selectionStart = start
       element.selectionEnd = end
     },
-    scrollIntoView: () => undefined,
+    scrolled: [],
+    scrollIntoView: (options) => {
+      element.scrolled.push({ block: options?.block ?? null })
+    },
     matches,
     querySelectorAll: (selector) => {
       const compound = parseCompound(selector)

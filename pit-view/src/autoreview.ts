@@ -992,7 +992,8 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     const finish = (changes: TickChanges, capFull = false): void => {
       if (stopped) return
       const row = cache.updateTick(tick.id, { ...changes, finishedAt: now() })
-      if (row.state !== null) logDecision(() => tickEntry(row, { ...row, state: row.state }, capFull))
+      const state = row.state
+      if (state !== null) logDecision(() => tickEntry(row, { ...row, state }, capFull))
     }
     const skip = (skipReason: TickSkip, changes: TickChanges = {}): void => finish({ ...changes, state: 'skipped', skipReason })
     const first = config()

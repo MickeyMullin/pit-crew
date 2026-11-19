@@ -24,11 +24,16 @@ export type LogReading = {
   isOpen: (number: number) => boolean
 }
 
-// key is unique to the line, so a run that has several lines (queued, started, finished) has a link on each that focus can tell apart; title and closed are what the drawer needs to open a PR that is no longer open
-export type LogRunLink = LogRun & { key: string, number: number | null, title: string | null, closed: boolean, text: string, name: string, opens: boolean }
+// the id of a line's element in the panel, from the entry's own id: unique to the line, the same after every repaint, and never another line's, since the store never reuses an entry's id. The drawer's link back to the log points at it
+export const entryAnchor = (id: number): string => `auto-log-entry-${id}`
+
+// key is unique to the line, so a run that has several lines (queued, started, finished) has a link on each that focus can tell apart; title and closed are what the drawer needs to open a PR that is no longer open; entryId and anchor name the line the link is on, so the drawer can lead back to it
+export type LogRunLink = LogRun & { key: string, entryId: number, anchor: string, number: number | null, title: string | null, closed: boolean, text: string, name: string, opens: boolean }
 
 export type LogLine = {
   id: number
+  // the id of the line's element
+  anchor: string
   when: string
   // the PR's number after a hash sign, Scheduler, or Dependabot sweep
   subject: string
@@ -137,13 +142,14 @@ const subjectOf = (entry: LogEntry): string => {
 const runLink = (entry: LogEntry, reading: LogReading): LogRunLink | null => {
   if (entry.run === null) return null
   const key = `line-${entry.id}`
-  if (entry.run.kind === 'sweep') return { ...entry.run, key, number: null, title: null, closed: false, text: `sweep ${entry.run.id}`, name: `Open the sweep drawer at sweep ${entry.run.id}`, opens: true }
+  const where = { key, entryId: entry.id, anchor: entryAnchor(entry.id) }
+  if (entry.run.kind === 'sweep') return { ...entry.run, ...where, number: null, title: null, closed: false, text: `sweep ${entry.run.id}`, name: `Open the sweep drawer at sweep ${entry.run.id}`, opens: true }
   const number = entry.number
   // a PR that is no longer open still opens its drawer, on the run asked for, with starts and actions off
   const closed = number !== null && !reading.isOpen(number)
   return {
     ...entry.run,
-    key,
+    ...where,
     number,
     title: entry.title,
     closed,
@@ -158,6 +164,7 @@ const lineOf = (entry: LogEntry, reading: LogReading): LogLine => {
   const stretch = entry.lastAt !== entry.at
   return {
     id: entry.id,
+    anchor: entryAnchor(entry.id),
     when: stretch ? `${first} to ${formatCached(entry.lastAt, reading.nowMs, reading.timeZone)}` : first,
     subject: subjectOf(entry),
     title: entry.title,

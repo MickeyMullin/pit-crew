@@ -570,16 +570,16 @@ test('the owner\'s-run check is asked of the launcher once for each open PR, wit
 // the cap-full classification reads the queue for the log alone, once before the start step and once after it, and the start step's own reads share the methods, so a test breaks only the read made for the log, found by the names of the functions that make it
 const breakQueueRead = (world: World, method: 'queuedRuns' | 'queuedSweeps', when: 'before' | 'after'): { calls: () => number } => {
   const cache = world.server.cache
-  const read = cache[method].bind(cache)
+  const read = cache[method].bind(cache) as () => unknown[]
   let calls = 0
-  cache[method] = (() => {
+  ;(cache as unknown as Record<string, () => unknown[]>)[method] = (() => {
     const stack = new Error().stack ?? ''
     if (stack.includes('logWaiting') && stack.includes('capFullOf') === (when === 'after')) {
       calls += 1
       throw new Error('the cache cannot be read for the queue')
     }
     return read()
-  }) as typeof cache[typeof method]
+  }) as () => unknown[]
   return { calls: () => calls }
 }
 
