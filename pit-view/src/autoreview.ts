@@ -594,15 +594,23 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     }
   }
 
-  // a line in the auto-review log. The log decides nothing, so it can never change what the scheduler does: nothing is built when there is no log, whatever builds the line (a lookup in the cache included) runs inside this guard, and a failure of the build or the write is one line of the server's own log
-  const logDecision = (entry: NewLogEntry | null | (() => NewLogEntry | null)): void => {
-    if (options.autoLog === undefined) return
+  // work done for the auto-review log alone. The log decides nothing, so it can never change what the scheduler does: the work runs only when there is a log, and a failure of it is one line of the server's own log and no result. Any read of the cache or the launcher that only the log needs goes through here
+  const forLog = <T>(work: () => T): T | undefined => {
+    if (options.autoLog === undefined) return undefined
     try {
-      const line = typeof entry === 'function' ? entry() : entry
-      if (line !== null) options.autoLog.record(line)
+      return work()
     } catch (error) {
       log(`auto-review: cannot write the log: ${messageOf(error)}`)
+      return undefined
     }
+  }
+
+  // a line in the auto-review log: nothing is built when there is no log, and whatever builds the line (a lookup in the cache included) runs inside the guard
+  const logDecision = (entry: NewLogEntry | null | (() => NewLogEntry | null)): void => {
+    forLog(() => {
+      const line = typeof entry === 'function' ? entry() : entry
+      if (line !== null) options.autoLog?.record(line)
+    })
   }
 
   // the PR's title as the cache has it, for a line of the log only
@@ -984,7 +992,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     const finish = (changes: TickChanges, capFull = false): void => {
       if (stopped) return
       const row = cache.updateTick(tick.id, { ...changes, finishedAt: now() })
-      if (row.state !== null) logDecision(tickEntry(row, { ...row, state: row.state }, capFull))
+      if (row.state !== null) logDecision(() => tickEntry(row, { ...row, state: row.state }, capFull))
     }
     const skip = (skipReason: TickSkip, changes: TickChanges = {}): void => finish({ ...changes, state: 'skipped', skipReason })
     const first = config()
@@ -1047,14 +1055,16 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     // a run of the PR the owner has in flight would refuse a start, and a queued row would hide it from the Agent cell
     const ownersRun = (number: number): boolean => launcher.busy({ repo, number }) && !autoRuns.some((run) => run.origin === 'auto' && run.number === number && isLive(run))
     const all = poller.openRows()
-    const rows = all.filter((row) => !ownersRun(row.number))
+    // each PR is asked once, as before the log existed, and the log reuses the answer
+    const ownerHeld = new Set(all.filter((row) => ownersRun(row.number)).map((row) => row.number))
+    const rows = all.filter((row) => !ownerHeld.has(row.number))
     const queue = buildQueue({ rows, openPrs: open, settings: auto, reports, runs: autoRuns, sweeps: autoSweeps, lastSweepRows: lastSweepRowsOf(sweeps) })
     // what the tick left alone, each in the log with why
     const prLine = (number: number, reason: string, run: Run | undefined): NewLogEntry => {
       const pr = open.find((candidate) => candidate.number === number)
       return { repo, lane: 'pr', number, title: pr?.title ?? null, decision: 'skipped', reason, head: pr?.headRefOid ?? null, run: run === undefined ? null : { kind: 'run', id: run.id }, tick: tick.id, at: tick.startedAt }
     }
-    for (const row of all) if (ownersRun(row.number) && isCandidate(row, auto, open)) logDecision(prLine(row.number, 'ownersRun', undefined))
+    for (const row of all) if (ownerHeld.has(row.number)) logDecision(() => isCandidate(row, auto, open) ? prLine(row.number, 'ownersRun', undefined) : null)
     // a PR skipped for an auto run still queued or running names that run, newest first, so the line can link to it
     const holding = (number: number): Run | undefined => [...runs].sort((a, b) => b.id - a.id).find((run) => run.origin === 'auto' && run.number === number && isLive(run))
     for (const left of queue.skipped) logDecision(prLine(left.number, left.reason, left.reason === 'inFlight' ? holding(left.number) : undefined))
@@ -1077,14 +1087,14 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
     // the checks are done, so this step covers any trigger that waited for them
     startReached = true
     kickWaiting = false
-    const waiting = (): (Run | Sweep)[] => [...cache.queuedRuns(), ...cache.queuedSweeps()].filter((row) => row.origin === 'auto' && row.repo === repo && optedIn(row.reason, auto))
-    const before = new Set(waiting().map((row) => `${row.command}:${row.id}`))
+    // for the log alone, and so read only when there is one and inside its guard: a cache that cannot be read here must not end the tick before the waiting runs start. The start step's own reads are the ones it made before the log existed
+    const logWaiting = (): Set<string> => new Set([...cache.queuedRuns(), ...cache.queuedSweeps()].filter((row) => row.origin === 'auto' && row.repo === repo && optedIn(row.reason, auto)).map((row) => `${row.command}:${row.id}`))
+    const before = forLog(logWaiting)
     const limited = await drainForTick(repo, exempt)
     if (limited) return skip('dailyLimit', counts)
     // runs were waiting and none of them got a start: the cap or the concurrency had no room
-    const left = waiting().filter((row) => before.has(`${row.command}:${row.id}`))
-    const noRoom = launcher.queueing().review || inFlight() >= auto.concurrency
-    finish({ ...counts, state: 'ran' }, noRoom && before.size > 0 && left.length === before.size)
+    const capFull = forLog(() => before !== undefined && before.size > 0 && (launcher.queueing().review || inFlight() >= auto.concurrency) && [...logWaiting()].filter((key) => before.has(key)).length === before.size) === true
+    finish({ ...counts, state: 'ran' }, capFull)
   }
 
   const disarm = (): void => {
@@ -1182,7 +1192,7 @@ export const createScheduler = (options: SchedulerOptions): Scheduler => {
       log(`auto-review: tick ${tick.id} failed: ${messageOf(error)}`)
       if (!stopped) {
         const row = cache.updateTick(tick.id, { finishedAt: now(), state: 'skipped', skipReason: 'interrupted' })
-        logDecision(tickEntry(row, { ...row, state: 'skipped' }, false))
+        logDecision(() => tickEntry(row, { ...row, state: 'skipped' }, false))
       }
     }).finally(() => {
       ticking = null

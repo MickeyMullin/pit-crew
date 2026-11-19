@@ -539,6 +539,55 @@ test('a title lookup that throws while a queued run is skipped as opted out does
   }
 })
 
+// the cap-full classification reads the queue for the log alone, and the start step's own reads share the methods, so a test breaks only the read made for the log, found by the name of the function that makes it
+const breakQueueRead = (world: World, method: 'queuedRuns' | 'queuedSweeps'): { calls: () => number } => {
+  const cache = world.server.cache
+  const read = cache[method].bind(cache)
+  let calls = 0
+  cache[method] = (() => {
+    if ((new Error().stack ?? '').includes('logWaiting')) {
+      calls += 1
+      throw new Error('the cache cannot be read for the queue')
+    }
+    return read()
+  }) as typeof cache[typeof method]
+  return { calls: () => calls }
+}
+
+for (const method of ['queuedRuns', 'queuedSweeps'] as const) {
+  test(`a log-only read of the queue that throws (${method}) does not end the tick or hold back the waiting runs, and with the log off the read is never made`, async () => {
+    const play = async (mode: 'off' | 'broken'): Promise<{ record: unknown, logs: string[], reads: number, states: (string | null)[], started: number }> => {
+      const world = await setup({ auto: { concurrency: 1 }, autoReviewLog: mode === 'broken' })
+      try {
+        const reads = breakQueueRead(world, method)
+        await tick(world)
+        const waiting = autoRuns(world).filter((run) => run.status === 'queued')
+        assert.ok(waiting.length > 0)
+        const started = running(world).length
+        await finish(world, running(world)[0]!)
+        await tick(world)
+        const runs = world.server.cache.allRuns().map((run) => [run.number, run.status, run.reason, run.headOid, run.note, run.args, run.tick, run.queuedAt, run.startedAt, run.finishedAt])
+        const ticks = world.server.cache.ticksFor(scenario.repo).map(({ id: _id, ...rest }) => rest)
+        const record = JSON.parse(JSON.stringify({ ticks, runs, view: world.server.scheduler.view(), children: world.launch.children.map((child) => child.request.args) }).replaceAll(world.home, '~'))
+        return { record, logs: world.logs.filter((line) => line.includes('auto-review: cannot write the log')), reads: reads.calls(), states: ticks.map((row) => row.skipReason ?? row.state), started }
+      } finally {
+        await world.cleanup()
+      }
+    }
+    const without = await play('off')
+    const broken = await play('broken')
+    // the waiting run started, and no tick ended as interrupted
+    assert.equal(broken.started, 1)
+    assert.ok(!broken.states.includes('interrupted'))
+    assert.deepEqual(broken.record, without.record)
+    // switched off, the read is never made; switched on, each failed read is one diagnostic line and nothing else
+    assert.equal(without.reads, 0)
+    assert.deepEqual(without.logs, [])
+    assert.ok(broken.reads > 0)
+    assert.equal(broken.logs.length, broken.reads)
+  })
+}
+
 test('turning auto-review on during active hours and off again before the next tick starts a new off stretch, not an extension of the earlier one', async () => {
   const world = await setup()
   try {
