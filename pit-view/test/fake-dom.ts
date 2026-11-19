@@ -45,6 +45,7 @@ export type FakeElement = {
   dispatch: (type: string, init?: { key?: string }) => void
   focus: () => void
   setSelectionRange: (start: number, end: number) => void
+  select: () => void
   scrollIntoView: (options?: { block?: string }) => void
   // how many times it was scrolled into view, and with which block
   scrolled: { block: string | null }[]
@@ -281,6 +282,10 @@ const makeElement = (doc: FakeDocument, tag: string): FakeElement => {
     setSelectionRange: (start, end) => {
       element.selectionStart = start
       element.selectionEnd = end
+    },
+    select: () => {
+      element.selectionStart = 0
+      element.selectionEnd = element.value.length
     },
     scrolled: [],
     scrollIntoView: (options) => {
