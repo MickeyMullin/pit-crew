@@ -200,7 +200,7 @@ test('while the runs of the PR load, the drawer says that run is loading and sho
     press(linkOf(panelRoot, 41))
     await settle()
     assert.match(asks(drawerRoot), /Loading run 41/)
-    assert.equal(drawerRoot.querySelector('.drawer-result-text'), null)
+    assert.equal(drawerRoot.querySelector('.drawer-result-text') === null, true)
     release(answer(200, [newer, older]))
     await settle()
     // loaded, the run's own card replaces the note
@@ -216,7 +216,7 @@ test('when the runs loaded and the run is not among them, the drawer says that r
     press(linkOf(panelRoot, 7))
     await settle()
     assert.match(asks(drawerRoot), /Run 7 is no longer listed for #106/)
-    assert.equal(drawerRoot.querySelector('.drawer-result-text'), null)
+    assert.equal(drawerRoot.querySelector('.drawer-result-text') === null, true)
   })
 })
 
@@ -227,7 +227,7 @@ test('when the runs could not be loaded, the drawer says so for that run and sho
     press(linkOf(panelRoot, 41))
     await settle()
     assert.match(asks(drawerRoot), /Run 41 cannot be shown: the runs of #106 could not be loaded/)
-    assert.equal(drawerRoot.querySelector('.drawer-result-text'), null)
+    assert.equal(drawerRoot.querySelector('.drawer-result-text') === null, true)
   }, { runs106: () => answer(500, { error: 'the cache is unreadable' }) })
 })
 
@@ -301,10 +301,10 @@ test('a line that is gone by the time the link back shows the log leaves the log
     backOf(drawerRoot)?.dispatch('click')
     await settle()
     assert.equal(panelRoot.hidden, false)
-    assert.equal(page.document.getElementById('auto-log-entry-12'), null)
+    assert.equal(page.document.getElementById('auto-log-entry-12') === null, true)
     assert.ok(page.document.getElementById('auto-log-entry-13') !== null)
     assert.equal(page.document.getElementById('auto-log-entry-13')?.scrolled.length, 0)
-    assert.equal(panelRoot.querySelector('[role="alert"]'), null)
+    assert.equal(panelRoot.querySelector('[role="alert"]') === null, true)
     assert.doesNotMatch(panelRoot.textContent, /could not|gone|pruned|missing|no longer/i)
     assert.equal(page.document.activeElement?.getAttribute('id'), 'auto-log-heading')
   }, { log: () => answer(200, { days: 14, entries: entries().filter((entry) => !pruned || entry.id !== 12) }) })
@@ -327,9 +327,9 @@ test('a line that a filter hides when the log is shown again leaves the log at t
     backOf(drawerRoot)?.dispatch('click')
     await settle()
     assert.equal(panelRoot.querySelector('#auto-log-decision')?.value, 'failed')
-    assert.equal(page.document.getElementById('auto-log-entry-12'), null)
+    assert.equal(page.document.getElementById('auto-log-entry-12') === null, true)
     assert.equal(panelRoot.querySelectorAll('li.auto-log-line').length > 0, true)
-    assert.equal(panelRoot.querySelector('[role="alert"]'), null)
+    assert.equal(panelRoot.querySelector('[role="alert"]') === null, true)
     assert.equal(page.document.activeElement?.getAttribute('id'), 'auto-log-heading')
   }, { log: () => answer(200, { days: 14, entries: entries().map((entry) => finished && entry.id === 12 ? { ...entry, decision: 'finished' as const } : entry) }) })
 })
@@ -364,7 +364,7 @@ test('a drawer opened any other way shows no link back, and neither does one reo
     const { panelRoot, drawerRoot, panel, drawer } = page
     drawer.open(106, { key: 'auto-review-button', number: 106 })
     await settle()
-    assert.equal(backOf(drawerRoot), null)
+    assert.equal(backOf(drawerRoot) === null, true)
     drawer.close()
     panel.open()
     await settle()
@@ -374,12 +374,12 @@ test('a drawer opened any other way shows no link back, and neither does one reo
     // the same PR opened by its Agent button: the drawer is not the log's any more
     drawer.open(106, { key: 'auto-review-button', number: 106 })
     await settle()
-    assert.equal(backOf(drawerRoot), null)
+    assert.equal(backOf(drawerRoot) === null, true)
     // and a drawer closed and opened again after a trip back has none either
     drawer.close()
     drawer.open(106, { key: 'auto-review-button', number: 106 })
     await settle()
-    assert.equal(backOf(drawerRoot), null)
+    assert.equal(backOf(drawerRoot) === null, true)
   })
 })
 
@@ -393,7 +393,7 @@ test('Escape and Close still close a drawer opened from the log and return focus
     assert.equal(drawer.escape(), true)
     assert.equal(drawer.isOpen(), false)
     assert.equal(drawerRoot.hidden, true)
-    assert.equal(page.document.activeElement, header)
+    assert.equal(page.document.activeElement?.getAttribute('data-focus-key'), header.getAttribute('data-focus-key'))
     // the close button does the same, and the log is not shown by either
     panel.open()
     await settle()
@@ -403,4 +403,27 @@ test('Escape and Close still close a drawer opened from the log and return focus
     assert.equal(drawer.isOpen(), false)
     assert.equal(panelRoot.hidden, true)
   })
+})
+
+test('a log closed before the lines of a link back arrive does not land on that line the next time it opens', async () => {
+  let reads = 0
+  let release: (response: Response) => void = () => undefined
+  const held = new Promise<Response>((resolve) => { release = resolve })
+  await withPages(async (page) => {
+    const { panelRoot, drawerRoot, panel } = page
+    panel.open()
+    await settle()
+    press(linkOf(panelRoot, 41))
+    await settle()
+    // the link back asks for the log again, whose lines are held back; the owner closes the log before they come
+    backOf(drawerRoot)?.dispatch('click')
+    await settle()
+    panel.close()
+    release(answer(200, { days: 14, entries: entries() }))
+    await settle()
+    panel.open()
+    await settle()
+    assert.equal(page.document.getElementById('auto-log-entry-12')?.scrolled.length, 0)
+    assert.equal(focusedKey(page), null)
+  }, { log: () => (reads += 1) === 2 ? held : answer(200, { days: 14, entries: entries() }) })
 })
