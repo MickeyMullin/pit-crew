@@ -195,7 +195,7 @@ test('a line shows the model that ran the review, and a line without one, or one
 })
 
 test('the filters narrow the lines, mark themselves set, and Clear filters shows every line again', async () => {
-  await withPanel({ status: 200, value: { days: 14, entries: entries() } }, async ({ root, panel }) => {
+  await withPanel({ status: 200, value: { days: 14, entries: entries() } }, async ({ root, document, panel }) => {
     panel.open()
     await settle()
     const decision = root.querySelector('#auto-log-decision') as FakeElement
@@ -209,13 +209,34 @@ test('the filters narrow the lines, mark themselves set, and Clear filters shows
     pr.dispatch('change')
     assert.deepEqual(texts(root, '.auto-log-text'), [])
     assert.deepEqual(texts(root, '.auto-note'), ['No lines match these filters.'])
-    press([...root.querySelectorAll('button')].find((button) => button.textContent === 'Clear filters') as FakeElement)
+    const clear = [...root.querySelectorAll('button')].find((button) => button.textContent === 'Clear filters') as FakeElement
+    // offered while a filter is set, not hidden
+    assert.equal(clear.hidden, false)
+    press(clear)
     assert.equal(texts(root, '.auto-log-text').length, 4)
+    // the button is gone once nothing is set, so focus goes to the first filter
+    assert.equal(document.activeElement?.id, 'auto-log-pr')
     assert.equal(decision.className, 'filter-select')
     const day = root.querySelector('#auto-log-day') as FakeElement
     assert.equal(day.querySelectorAll('option')[0]?.textContent, 'All days')
     day.value = day.querySelectorAll('option')[1]?.getAttribute('value') ?? ''
     day.dispatch('change')
+    assert.equal(texts(root, '.auto-log-text').length, 4)
+  })
+})
+
+test('a log opened again from the header starts with every filter cleared, whatever was set when it was shut', async () => {
+  await withPanel({ status: 200, value: { days: 14, entries: entries() } }, async ({ root, panel }) => {
+    panel.open()
+    await settle()
+    const decision = root.querySelector('#auto-log-decision') as FakeElement
+    decision.value = 'failed'
+    decision.dispatch('change')
+    assert.equal(texts(root, '.auto-log-text').length, 1)
+    panel.close(true)
+    panel.open()
+    await settle()
+    assert.equal((root.querySelector('#auto-log-decision') as FakeElement).value, '')
     assert.equal(texts(root, '.auto-log-text').length, 4)
   })
 })

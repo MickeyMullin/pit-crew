@@ -5,7 +5,10 @@ import { test } from 'node:test'
 import type { LogEntry } from '../src/autoreviewlog.ts'
 import type { Run } from '../src/cache.ts'
 import { scenario } from './fixtures/scenario.ts'
-import { autoRuns, finish, running, saturday, save, setup, tick } from './scheduler-world.ts'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { basename, join } from 'node:path'
+import { sweepResult, sweepRow } from './helpers.ts'
+import { autoRuns, finish, minute, running, saturday, save, setup, tick } from './scheduler-world.ts'
 import type { World } from './scheduler-world.ts'
 
 const day = 24 * 60 * 60_000
@@ -315,6 +318,9 @@ test('both kinds the scheduler runs are logged: others\' PRs and the owner\'s dr
     assert.ok(sweep)
     const sweepLines = ofRun(lines, sweep, 'sweep')
     assert.deepEqual(sweepLines.map((line) => [line.lane, line.number, line.decision, line.reason]), [['sweep', null, 'queued', 'dependabot']])
+    // the sweep's line names the tick that queued it
+    assert.equal(sweepLines[0]?.tick, sweep.tick)
+    assert.notEqual(sweepLines[0]?.tick, null)
   } finally {
     await world.cleanup()
   }
@@ -616,6 +622,63 @@ for (const [method, when] of [['queuedRuns', 'before'], ['queuedSweeps', 'before
     assert.equal(broken.logs.length, broken.reads)
   })
 }
+
+test('a tick that fails part way is an interrupted skip in the log, and the diagnostic log names the tick', async () => {
+  const world = await setup()
+  try {
+    world.server.poller.openRows = () => {
+      throw new Error('the rows cannot be read')
+    }
+    await tick(world)
+    const lines = tickLines(await entries(world))
+    assert.deepEqual(lines.map((line) => [line.decision, line.reason]), [['skipped', 'interrupted']])
+    assert.equal(lines[0]?.tick, world.server.cache.latestTick(scenario.repo)?.id)
+    assert.ok(world.logs.some((line) => line.includes('failed: the rows cannot be read')))
+  } finally {
+    await world.cleanup()
+  }
+})
+
+test('a sweep left failed twice is a failedTwice line in the sweep\'s lane, naming the newest failed sweep, written once however many ticks find it', async () => {
+  const world = await setup({ auto: { others: false, dependabot: true, dailyLimit: 100 } })
+  try {
+    await tick(world)
+    const finishSweep = async (patch: Record<string, unknown>): Promise<void> => {
+      const sweep = world.server.cache.allSweeps().sort((a, b) => b.id - a.id)[0]!
+      const child = world.launch.children.find((candidate) => basename(candidate.request.cwd) === `sweep-${sweep.id}`)
+      assert.ok(child)
+      await mkdir(join(world.home, 'agents', 'output'), { recursive: true })
+      await writeFile(join(world.home, 'agents', 'output', 'sweep-summary.md'), 'A summary.\n')
+      await child.result(sweepResult({ rows: [sweepRow({ number: 114, head: world.server.cache.readView(scenario.repo).open.find((entry) => entry.number === 114)?.pr.headRefOid })], summary: '~/agents/output/sweep-summary.md', ...patch }))
+      child.exit(0)
+      await world.server.sweepLauncher.settled(sweep.id)
+      await world.server.scheduler.idle()
+    }
+    const row = world.server.cache.readView(scenario.repo).open.find((entry) => entry.number === 114)
+    assert.ok(row)
+    // a new head makes the sweep due again, and each of its two attempts fails
+    const newHead = async (head: string): Promise<void> => {
+      world.time.advance(14.5 * minute)
+      world.server.poller.refresh('manual')
+      await world.server.poller.idle()
+      world.server.cache.writePr(scenario.repo, { ...row.pr, headRefOid: head }, scenario.defaultBranch)
+      world.time.advance(0.5 * minute)
+      await world.server.scheduler.idle()
+    }
+    await finishSweep({ status: 'failed', error: 'no reviewer answered', rows: [] })
+    await newHead('fedcba9fedcba9fedcba9fedcba9fedcba9fedc')
+    assert.equal(world.server.cache.allSweeps().length, 2)
+    await finishSweep({ status: 'failed', error: 'no reviewer answered', rows: [] })
+    await newHead('fedcba9fedcba9fedcba9fedcba9fedcba9fedc')
+    await newHead('fedcba9fedcba9fedcba9fedcba9fedcba9fedc')
+    const newest = world.server.cache.allSweeps().sort((a, b) => b.id - a.id)[0]!
+    assert.match(newest.note ?? '', /^failedTwice/)
+    const twice = (await entries(world)).filter((line) => line.decision === 'failedTwice')
+    assert.deepEqual(twice.map((line) => [line.lane, line.number, line.run]), [['sweep', null, { kind: 'sweep', id: newest.id }]])
+  } finally {
+    await world.cleanup()
+  }
+})
 
 test('turning auto-review on during active hours and off again before the next tick starts a new off stretch, not an extension of the earlier one', async () => {
   const world = await setup()
