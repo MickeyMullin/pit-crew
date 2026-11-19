@@ -677,7 +677,7 @@ test('a run that fails before it spawns holds no record and its line names no mo
   }
 })
 
-test('a tandem run names its pair when its record holds the primary and the secondary, and the panel\'s data carries it', async () => {
+test('a run whose record holds the primary and the secondary (set up by hand, since the scheduler starts no tandem run) names its pair, and the panel\'s data carries it', async () => {
   const world = await setup({ auto: { others: false, own: true, concurrency: 1 } })
   try {
     await tick(world)

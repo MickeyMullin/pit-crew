@@ -1,5 +1,5 @@
 // public/autoreviewlog.ts
-// the auto-review log panel (autoreviewlogview.ts says what each line reads): opened with Log in the header's Auto-review menu, a non-modal panel on the right where the drawer sits, its lines fetched when it opens and again when the scheduler's state changes, three labeled filters, and a run link that opens that run's drawer. Escape and Close shut it and put focus back on the header's Auto-review button
+// the auto-review log panel (autoreviewlogview.ts says what each line reads): opened with Log in the header's Auto-review menu, a non-modal panel on the right where the drawer sits, its lines fetched when it opens and again when the scheduler's state changes, three labeled filters, and a run link that opens that run's drawer, whose link back shows the log again at that line (restore). Escape and Close shut it and put focus back on the header's Auto-review button
 import type { LogEntry } from '../src/autoreviewlog.ts'
 import type { View } from '../src/poller.ts'
 import { entryAnchor, logModel, noFilters } from './autoreviewlogview.ts'

@@ -230,7 +230,7 @@ test('a session\'s status is its decision: started, finished with its outcome, f
 const sonnetRole = { role: 'reviewer', id: 'sonnet', runner: 'claude', provider: 'anthropic', model: 'sonnet', fallback: false, outcome: null } as const
 const codexRole = { role: 'secondary', id: 'gpt-6.1-terra', runner: 'codex', provider: 'openai', model: 'gpt-6.1-terra', fallback: false, outcome: null } as const
 
-test('the model a run records reads as its registry id and runner, a tandem run as its pair in the order recorded, and a run with no record as none', () => {
+test('the model a run records reads as its registry id and runner, a record of both tandem roles as its pair in the order recorded, and a run with no record as none', () => {
   assert.equal(modelText({ roles: [sonnetRole], degraded: false }), 'sonnet (Claude Code)')
   assert.equal(modelText({ roles: [{ ...sonnetRole, id: null, model: 'some/other-model', runner: 'hermes' }], degraded: false }), 'some/other-model (Hermes)')
   assert.equal(modelText({ roles: [{ ...codexRole, id: null, model: null }], degraded: false }), 'Codex default (Codex)')

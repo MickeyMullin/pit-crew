@@ -3,7 +3,9 @@
 // confirmation, shows the running, waiting and finished cards, the PR's earlier runs and the
 // reports on disk, and reads the live row from the page's feed on every draw, so a patch updates
 // it in place. drawerview.ts says what every part reads; this file makes the elements, keeps the
-// confirmation's state, and moves focus
+// confirmation's state, and moves focus. Opened from a line of the auto-review log it shows the run
+// that line names, or a note in the card's place while that run is loading, could not be read, or is
+// no longer listed, and a link back to the line (DESIGN.md section 8, Drawer)
 import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
 import { actionBound, actionDoneText, actionOffers, actionRefusalText, actionRequest } from './actionsview.ts'

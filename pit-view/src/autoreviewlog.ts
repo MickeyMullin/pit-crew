@@ -43,7 +43,7 @@ export type LogEntry = {
   note: string | null
   head: string | null
   run: LogRun | null
-  // the model that ran the review, as the run's record names it at the spawn (a pair for a tandem run); null for a line that ran nothing, and for a line stored before the log kept it
+  // the model that ran the review, as the run's record names it at the spawn (a pair when a tandem run's record holds both roles); null for a line that ran nothing, and for a line stored before the log kept it
   model: string | null
   tick: number | null
   // when the line began, and when its stretch was last seen; the same for a line seen once
@@ -73,7 +73,7 @@ export type NewLogEntry = {
 
 const runnerNames: Readonly<Record<string, string>> = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes' }
 
-// what a run's record says ran the review, in the owner's words: the registry id (or the model's name, or Codex's own default) and the runner, and for a record of several roles each under its role, in the order recorded, so a tandem run reads as its pair. Null for a run with no record, which is every run that never reached its spawn
+// what a run's record says ran the review, in the owner's words: the registry id (or the model's name, or Codex's own default) and the runner, and for a record of several roles each under its role, in the order recorded, so a record that holds both roles of a tandem run reads as its pair. Null for a run with no record, which is every run that never reached its spawn
 export const modelText = (models: RunModels | null | undefined): string | null => {
   const roles = models?.roles ?? []
   if (roles.length === 0) return null
