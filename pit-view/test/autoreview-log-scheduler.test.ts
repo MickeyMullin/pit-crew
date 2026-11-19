@@ -539,8 +539,8 @@ test('a title lookup that throws while a queued run is skipped as opted out does
   }
 })
 
-test('the owner\'s-run check is asked of the launcher the same number of times with the log on as with it off, and the log still names the PR it skipped', async () => {
-  const play = async (mode: 'off' | 'on'): Promise<{ asked: number, skipped: number }> => {
+test('the owner\'s-run check is asked of the launcher once for each open PR, with the log on or off, and the log still names the PR it skipped', async () => {
+  const play = async (mode: 'off' | 'on'): Promise<{ asked: number, rows: number, skipped: number }> => {
     const world = await setup({ auto: { others: false, own: true }, autoReviewLog: mode === 'on' })
     try {
       const manual = await world.server.launcher.start({ repo: scenario.repo, number: 103, command: 'review-pr', args: ['103', '--no-post'], label: 'Self-review' })
@@ -553,15 +553,17 @@ test('the owner\'s-run check is asked of the launcher the same number of times w
         return busy(target)
       }) as typeof launcher.busy
       await tick(world)
-      return { asked, skipped: mode === 'on' ? (await entries(world)).filter((line) => line.reason === 'ownersRun').length : 0 }
+      return { asked, rows: world.server.poller.openRows().length, skipped: mode === 'on' ? (await entries(world)).filter((line) => line.reason === 'ownersRun').length : 0 }
     } finally {
       await world.cleanup()
     }
   }
   const off = await play('off')
   const on = await play('on')
-  assert.ok(off.asked > 0)
-  assert.equal(on.asked, off.asked)
+  assert.ok(off.rows > 1)
+  // one question for each PR, as the scheduler asked before the log existed
+  assert.equal(off.asked, off.rows)
+  assert.equal(on.asked, on.rows)
   assert.equal(on.skipped, 1)
 })
 
