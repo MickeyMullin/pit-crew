@@ -370,7 +370,7 @@ test('DESIGN.md, the README, and the Settings line name the default days the ser
   const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
   assert.ok(readme.includes('names the model that ran the review, as in "sonnet (Claude Code)"'))
   assert.ok(readme.includes('the pair only when the record holds both'))
-  assert.ok(readme.includes('A queued or skipped line, a drop, and every line of a sweep names none.'))
+  assert.ok(readme.includes('A queued or skipped line, a drop, and every line of a sweep name none.'))
   assert.ok(readme.includes('"Back to the auto-review log" link'))
   // the link back from a run's drawer is stated where the drawer is described, where the log is, and in the list of what a browser must still check
   assert.ok(design.includes('- **Opened from the auto-review log** (section 10, In the UI, The log)'))
