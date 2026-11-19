@@ -8,8 +8,12 @@ import type { View } from '../src/poller.ts'
 import type { AgentCell, RunView } from '../public/agent.ts'
 import { createAutoReviewLogPanel } from '../public/autoreviewlog.ts'
 import { openLoggedRun } from '../public/autoreviewlogopen.ts'
+import { defaultConfig } from '../src/config.ts'
+import { sweepStartOf, sweepView } from '../src/sweeps.ts'
+import type { SweepsView } from '../src/sweeps.ts'
 import { createDrawer } from '../public/drawer.ts'
 import { setTimeFormat } from '../public/format.ts'
+import { createSweepDrawer } from '../public/sweepdrawer.ts'
 import { installFakeBrowser, press } from './fake-dom.ts'
 import type { FakeElement } from './fake-dom.ts'
 
@@ -54,7 +58,17 @@ const entryOf = (id: number, patch: Partial<LogEntry>): LogEntry => ({
   at: '2026-10-28T13:05:00Z', lastAt: '2026-10-28T13:05:00Z', count: 1, ...patch,
 })
 
+// a sweep that ended without a result, which is all its drawer needs to be opened on
+const sweepRecord = (): Parameters<typeof sweepView>[0] => ({
+  id: 5, repo, command: 'review-dependabot-sweep', args: [repo, '--parallel', '1'], label: 'Dependabot sweep', runner: 'claude', cwd: '~/dev/orbit', dir: '~/sweeps/5', sessionId: null, pid: 4002, pidStartedAt: null,
+  startedAt: '2026-10-28T13:00:00Z', lastStepAt: null, step: null, stepState: null, steps: null, finishedAt: '2026-10-28T13:05:00Z', status: 'failed', result: null, note: 'noResult: no result.json; exit code 1; last event: none',
+  costUsd: null, resume: null, origin: 'auto', tick: 3, reason: 'requested', queuedAt: '2026-10-28T12:59:00Z', posting: false, worktree: null,
+})
+const sweepsOf = (): SweepsView => ({ start: sweepStartOf({ ...defaultConfig(), repo, viewer: 'viewer', cloneDir: '~/dev/orbit' }, false), items: [sweepView(sweepRecord())] })
+
 const entries = (): LogEntry[] => [
+  // the Dependabot sweep's line: no PR, and a link to the sweep
+  entryOf(15, { lane: 'sweep', number: null, title: null, decision: 'failed', note: 'noResult', run: { kind: 'sweep', id: 5 }, at: '2026-10-28T14:20:00Z', lastAt: '2026-10-28T14:20:00Z' }),
   // run 7 of PR 106 has been pruned from the PR's runs, while the log still keeps its line
   entryOf(14, { decision: 'started', reason: 'requested', note: null, run: { kind: 'run', id: 7 }, at: '2026-10-28T14:10:00Z', lastAt: '2026-10-28T14:10:00Z' }),
   entryOf(13, { decision: 'finished', reason: 'done', note: 'Clean · not posted', run: { kind: 'run', id: 42 }, at: '2026-10-28T14:05:00Z', lastAt: '2026-10-28T14:05:00Z' }),
@@ -63,7 +77,7 @@ const entries = (): LogEntry[] => [
 ]
 
 type Page = {
-  panelRoot: FakeElement, drawerRoot: FakeElement, header: FakeElement, panel: ReturnType<typeof createAutoReviewLogPanel>, drawer: ReturnType<typeof createDrawer>, sweepOpened: number[], urls: string[]
+  panelRoot: FakeElement, drawerRoot: FakeElement, sweepRoot: FakeElement, header: FakeElement, panel: ReturnType<typeof createAutoReviewLogPanel>, drawer: ReturnType<typeof createDrawer>, sweepDrawer: ReturnType<typeof createSweepDrawer>, sweepOpened: number[], urls: string[]
   // the scheduler's state moves on, so the panel's next update reads the log again
   bump: () => void
   document: ReturnType<typeof installFakeBrowser>['document']
@@ -91,7 +105,9 @@ const withPages = async (check: (page: Page) => Promise<void>, served: Served = 
     panelRoot.hidden = true
     const drawerRoot = doc.createElement('aside')
     drawerRoot.hidden = true
-    doc.body.append(header, panelRoot, drawerRoot)
+    const sweepRoot = doc.createElement('aside')
+    sweepRoot.hidden = true
+    doc.body.append(header, panelRoot, drawerRoot, sweepRoot)
     const drawer = createDrawer({
       root: drawerRoot as unknown as HTMLElement,
       token: 'token-1',
@@ -105,24 +121,32 @@ const withPages = async (check: (page: Page) => Promise<void>, served: Served = 
       openSweep: () => undefined,
     })
     const sweepOpened: number[] = []
+    const sweepDrawer = createSweepDrawer({
+      root: sweepRoot as unknown as HTMLElement,
+      token: 'token-1',
+      nowMs: () => Date.parse('2026-10-28T15:00:00Z'),
+      sweeps: sweepsOf,
+      say: () => undefined,
+      reports: { open: () => undefined, close: () => undefined, isOpen: () => false, refresh: () => undefined },
+    })
     const panel = createAutoReviewLogPanel({
       root: panelRoot as unknown as HTMLElement,
       nowMs: () => Date.parse('2026-10-28T15:00:00Z'),
       view: () => ({ autoReview: { state: 'idle', running: moves } }) as unknown as View,
       isOpen: (number) => number === 106,
-      openRun: openLoggedRun({ drawer, sweepDrawer: { open: (_opener, show) => { sweepOpened.push(show?.sweepId ?? -1) } }, seedRuns: () => undefined, backToLog: (entryId) => panel.restore(entryId) }),
+      openRun: openLoggedRun({ drawer, sweepDrawer: { open: (opener, show) => { sweepOpened.push(show?.sweepId ?? -1); sweepDrawer.open(opener, show) } }, seedRuns: () => undefined, backToLog: (entryId) => panel.restore(entryId) }),
       returnTo: () => header as unknown as HTMLElement,
     })
-    await check({ panelRoot, drawerRoot, header, panel, drawer, sweepOpened, urls, bump: () => { moves += 1 }, document: doc })
+    await check({ panelRoot, drawerRoot, sweepRoot, header, panel, drawer, sweepDrawer, sweepOpened, urls, bump: () => { moves += 1 }, document: doc })
   } finally {
     fake.restore()
   }
 }
 
 const resultText = (root: FakeElement): string => root.querySelector('.drawer-result-text')?.textContent ?? ''
-const linkOf = (root: FakeElement, run: number): FakeElement => {
-  const link = root.querySelector(`button[data-auto-log-run="run-${run}"]`)
-  assert.ok(link !== null, `a link for run ${run}`)
+const linkOf = (root: FakeElement, run: number, kind: 'run' | 'sweep' = 'run'): FakeElement => {
+  const link = root.querySelector(`button[data-auto-log-run="${kind}-${run}"]`)
+  assert.ok(link !== null, `a link for ${kind} ${run}`)
   return link
 }
 
@@ -446,4 +470,137 @@ test('a log that could not be read when the link back asked for it lands on the 
     assert.deepEqual(page.document.getElementById('auto-log-entry-12')?.scrolled, [{ block: 'center' }])
     assert.equal(focusedKey(page), 'line-12')
   }, { log: () => (reads += 1) === 2 ? answer(500, { error: 'the cache is unreadable' }) : answer(200, { days: 14, entries: entries() }) })
+})
+
+// the sweep drawer's link back: the same link, first in the body, for a sweep line's run link only
+
+const sweepBackOf = (sweepRoot: FakeElement): FakeElement | null => sweepRoot.querySelector('a[data-focus-key="back-to-log"]')
+
+test('a sweep drawer opened from a sweep line shows the link back first in its body, to that line, and following it closes the drawer and shows the log scrolled to the line with its run link focused', async () => {
+  await withPages(async (page) => {
+    const { panelRoot, sweepRoot, panel, sweepDrawer } = page
+    panel.open()
+    await settle()
+    press(linkOf(panelRoot, 5, 'sweep'))
+    await settle()
+    assert.equal(sweepDrawer.isOpen(), true)
+    assert.deepEqual(page.sweepOpened, [5])
+    const back = sweepBackOf(sweepRoot)
+    assert.ok(back !== null)
+    assert.equal(back.tag, 'a')
+    assert.equal(back.getAttribute('href'), '#auto-log-entry-15')
+    assert.equal(back.textContent, 'Back to the auto-review log')
+    // first in the body, before the start section
+    const body = sweepRoot.querySelector('.drawer-body')
+    assert.ok(body !== null)
+    assert.equal(body.children[0]?.contains(back), true)
+    back.dispatch('click')
+    await settle()
+    assert.equal(sweepDrawer.isOpen(), false)
+    assert.equal(sweepRoot.hidden, true)
+    assert.equal(panelRoot.hidden, false)
+    const line = page.document.getElementById('auto-log-entry-15')
+    assert.ok(line !== null)
+    assert.deepEqual(line.scrolled, [{ block: 'center' }])
+    assert.equal(focusedKey(page), 'line-15')
+  })
+})
+
+test('a sweep drawer opened any other way shows no link back: the header\'s button, a start, the PR\'s broom link, and one reopened after the log\'s', async () => {
+  await withPages(async (page) => {
+    const { panelRoot, sweepRoot, panel, sweepDrawer } = page
+    // the header's button, and the status that opens a sweep at a PR
+    sweepDrawer.open({ key: 'sweep-status' })
+    assert.equal(sweepBackOf(sweepRoot) === null, true)
+    sweepDrawer.close()
+    sweepDrawer.open({ key: 'sweep-start' }, { ask: true })
+    assert.equal(sweepBackOf(sweepRoot) === null, true)
+    sweepDrawer.close()
+    sweepDrawer.open({ key: 'sweep-link:106' }, { sweepId: 5, pr: 106 })
+    assert.equal(sweepBackOf(sweepRoot) === null, true)
+    sweepDrawer.close()
+    panel.open()
+    await settle()
+    press(linkOf(panelRoot, 5, 'sweep'))
+    await settle()
+    assert.ok(sweepBackOf(sweepRoot) !== null)
+    // the drawer still open, shown another way: it is not the log's any more
+    sweepDrawer.open({ key: 'sweep-status' })
+    assert.equal(sweepBackOf(sweepRoot) === null, true)
+  })
+})
+
+test('a sweep drawer closed after a trip from the log and opened again another way has no link back, and neither has one closed by the link itself', async () => {
+  await withPages(async (page) => {
+    const { panelRoot, sweepRoot, panel, sweepDrawer } = page
+    panel.open()
+    await settle()
+    press(linkOf(panelRoot, 5, 'sweep'))
+    await settle()
+    sweepBackOf(sweepRoot)?.dispatch('click')
+    await settle()
+    assert.equal(sweepDrawer.isOpen(), false)
+    sweepDrawer.open({ key: 'sweep-status' })
+    assert.equal(sweepBackOf(sweepRoot) === null, true)
+    // closed by Escape after the log's link, then opened another way
+    sweepDrawer.close()
+    panel.open()
+    await settle()
+    press(linkOf(panelRoot, 5, 'sweep'))
+    await settle()
+    const stale = sweepBackOf(sweepRoot)
+    assert.equal(sweepDrawer.escape(), true)
+    // the closed drawer keeps nothing of the log's line: its link, were it pressed, leads nowhere and shows no log
+    assert.equal(panelRoot.hidden, true)
+    stale?.dispatch('click')
+    await settle()
+    assert.equal(panelRoot.hidden, true)
+    assert.equal(sweepDrawer.isOpen(), false)
+    sweepDrawer.open({ key: 'sweep-status' })
+    assert.equal(sweepBackOf(sweepRoot) === null, true)
+  })
+})
+
+test('Escape and Close still close a sweep drawer opened from the log and return focus to the header\'s Auto-review button, the link back being an extra way and not the only one', async () => {
+  await withPages(async (page) => {
+    const { panelRoot, sweepRoot, panel, sweepDrawer, header } = page
+    panel.open()
+    await settle()
+    press(linkOf(panelRoot, 5, 'sweep'))
+    await settle()
+    assert.equal(sweepDrawer.escape(), true)
+    assert.equal(sweepDrawer.isOpen(), false)
+    assert.equal(sweepRoot.hidden, true)
+    assert.equal(page.document.activeElement?.getAttribute('data-focus-key'), header.getAttribute('data-focus-key'))
+    panel.open()
+    await settle()
+    press(linkOf(panelRoot, 5, 'sweep'))
+    await settle()
+    sweepRoot.querySelector('.drawer-close')?.dispatch('click')
+    assert.equal(sweepDrawer.isOpen(), false)
+    assert.equal(panelRoot.hidden, true)
+    assert.equal(page.document.activeElement?.getAttribute('data-focus-key'), header.getAttribute('data-focus-key'))
+  })
+})
+
+test('the sweep drawer\'s link back is reachable by keyboard: a real link with an address, not taken out of the tab order, and it survives the drawer\'s redraws as the same element', async () => {
+  await withPages(async (page) => {
+    const { panelRoot, sweepRoot, panel, sweepDrawer } = page
+    panel.open()
+    await settle()
+    press(linkOf(panelRoot, 5, 'sweep'))
+    await settle()
+    const back = sweepBackOf(sweepRoot)
+    assert.ok(back !== null)
+    assert.equal(back.tag, 'a')
+    assert.notEqual(back.getAttribute('href'), null)
+    assert.equal(back.getAttribute('tabindex'), null)
+    assert.equal(back.getAttribute('aria-hidden'), null)
+    back.focus()
+    assert.equal(page.document.activeElement, back)
+    // the page's patch redraws the drawer: the link stays, and keeps focus
+    sweepDrawer.update()
+    assert.equal(sweepBackOf(sweepRoot), back)
+    assert.equal(page.document.activeElement, back)
+  })
 })

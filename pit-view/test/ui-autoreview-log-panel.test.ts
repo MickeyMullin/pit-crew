@@ -348,7 +348,7 @@ test('the page holds the log as a hidden, labeled panel beside the drawers, and 
   assert.ok(app.includes('logPanel.update()'))
   // the opener returns focus to the same button, whichever drawer it opens
   const opener = readFileSync(new URL('../public/autoreviewlogopen.ts', import.meta.url), 'utf8')
-  assert.ok(opener.includes("sweepDrawer.open({ key: 'auto-review-button' }, { sweepId: link.id })"))
+  assert.ok(opener.includes("sweepDrawer.open({ key: 'auto-review-button' }, { sweepId: link.id, back: { anchor: link.anchor, go: () => backToLog(link.entryId) } })"))
   assert.ok(opener.includes("drawer.open(link.number, { key: 'auto-review-button', number: link.number }, undefined, { runId: link.id, title: link.title, back: { anchor: link.anchor, go: () => backToLog(link.entryId) } })"))
 })
 
@@ -375,7 +375,12 @@ test('DESIGN.md, the README, and the Settings line name the default days the ser
   // the link back from a run's drawer is stated where the drawer is described, where the log is, and in the list of what a browser must still check
   assert.ok(design.includes('- **Opened from the auto-review log** (section 10, In the UI, The log)'))
   assert.ok(design.includes('an id made from its entry\'s id, `auto-log-entry-<id>`'))
-  assert.ok(design.includes('the drawer\'s "Back to the auto-review log" link is reachable by Tab'))
+  assert.ok(design.includes('the Agent drawer\'s and the sweep drawer\'s "Back to the auto-review log" link is reachable by Tab'))
+  // the sweep drawer's link back is stated where the sweep drawer is described, where the Agent drawer's is, and in the README
+  assert.ok(design.includes('The sweep drawer that a sweep line opens has the same link, first in its body'))
+  assert.ok(design.includes('Opened from a sweep line in the auto-review log (section 8, Drawer, Opened from the auto-review log), it shows first in its body, before the Start section, a link'))
+  assert.ok(!design.includes('Only the Agent drawer has the link'))
+  assert.ok(readme.includes('An Agent drawer or a sweep drawer opened from the log has a "Back to the auto-review log" link'))
   assert.ok(design.includes('names the pair only when the record holds both roles'))
   assert.ok(design.includes('the test of the pair sets its record up by hand'))
   assert.ok(readme.includes(`keeps ${autoReviewLogDays} days by default`))
