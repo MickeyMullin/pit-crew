@@ -427,3 +427,23 @@ test('a log closed before the lines of a link back arrive does not land on that 
     assert.equal(focusedKey(page), null)
   }, { log: () => (reads += 1) === 2 ? held : answer(200, { days: 14, entries: entries() }) })
 })
+
+test('a log that could not be read when the link back asked for it lands on the line once Try again has brought the lines', async () => {
+  let reads = 0
+  await withPages(async (page) => {
+    const { panelRoot, drawerRoot, panel } = page
+    panel.open()
+    await settle()
+    press(linkOf(panelRoot, 41))
+    await settle()
+    backOf(drawerRoot)?.dispatch('click')
+    await settle()
+    assert.equal(panelRoot.querySelectorAll('li.auto-log-line').length, 0)
+    const retry = panelRoot.querySelector('button[data-auto-log-key="retry"]')
+    assert.ok(retry !== null)
+    press(retry)
+    await settle()
+    assert.deepEqual(page.document.getElementById('auto-log-entry-12')?.scrolled, [{ block: 'center' }])
+    assert.equal(focusedKey(page), 'line-12')
+  }, { log: () => (reads += 1) === 2 ? answer(500, { error: 'the cache is unreadable' }) : answer(200, { days: 14, entries: entries() }) })
+})

@@ -121,7 +121,6 @@ export const createAutoReviewLogPanel = ({ root, nowMs, view, isOpen, openRun, r
       return
     }
     if (load.state === 'error') {
-      landOn = null
       const retry = h('button', { type: 'button', class: 'button button-small', 'data-auto-log-key': 'retry' }, 'Try again')
       retry.addEventListener('click', () => void read())
       setText(sub, '')
