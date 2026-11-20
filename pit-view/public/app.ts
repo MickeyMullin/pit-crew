@@ -422,8 +422,6 @@ const sweepDrawer = createSweepDrawer({
   sweeps: () => feed.view === null ? null : feed.view.sweeps,
   say,
   reports: reportPanel,
-  // the post button on a PR's card reads that PR's row, whose Agent cell carries the server's offer
-  rowOf: (number) => feed.view === null ? undefined : findOpenRow(feed.view, number),
 })
 
 // the auto-review log (section 10 of DESIGN.md, The log): opened from the header's Auto-review menu, it sits where the drawers sit and shows apart from them. A run link closes it and opens that run's drawer, whose close puts focus back on the header's Auto-review button

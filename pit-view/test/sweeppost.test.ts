@@ -16,6 +16,7 @@ import type { PitServer } from '../src/server.ts'
 import { sweepOfferOf, sweepRequest } from '../src/sweeps.ts'
 import type { View } from '../src/poller.ts'
 import type { SweepOffer } from '../src/launcher.ts'
+import type { SweepsView } from '../src/sweeps.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { fakeLaunch, fakeRunner, fakeTime, fixtureRunner, ok, failed, openPage1, openPage2, sweepResult, sweepRow, tempDir } from './helpers.ts'
 import type { Call, FakeLaunch, FakeRunner } from './helpers.ts'
@@ -24,6 +25,9 @@ const repo = scenario.repo
 // #114 is Dependabot's, #101 the viewer's own, and #106 someone else's (openCases in fixtures/scenario.ts)
 const head114 = 'd6b9780883a05ddb3bb7ace1a5cb494104e1015a'
 const head101 = 'e37eacd2ed3b5053796e287306e816198192777d'
+// #119 is someone else's draft, which the open tables hide, and #103 the viewer's own draft
+const head119 = '21dd62fa47359b1f6911e71affded07049e2ef7d'
+const head103 = '6d5d12cf8046613dac1e4756218c2786690e46dc'
 const earlier = '0123456789abcdef0123456789abcdef01234567'
 
 const reportText = (sha: string, findings = 'No actionable findings.'): string => `Reviewed commit: \`dependabot/npm_and_yarn/lodash-4.17.21\` @ \`${sha.slice(0, 7)}\`\n\n## Summary\n\n${findings}\n`
@@ -185,7 +189,7 @@ const isLiveRead = (args: string[]): boolean => args[0] === 'api' && /^repos\/[^
 const isReviewsRead = (args: string[]): boolean => args[0] === 'api' && args.some((arg) => /^repos\/[^/]+\/[^/]+\/pulls\/\d+\/reviews$/.test(arg))
 const postsOf = (runner: FakeRunner): Call[] => runner.calls.filter((call) => isWrite(call.args))
 
-const heads: Record<number, string> = { 114: head114, 101: head101 }
+const heads: Record<number, string> = { 114: head114, 101: head101, 119: head119, 103: head103 }
 
 const ghWorld = (behavior: Behavior = {}): FakeRunner => {
   const base = fixtureRunner()
@@ -236,8 +240,11 @@ const restart = async (h: Harness): Promise<void> => {
   h.base = h.server.url
 }
 
-// the post button's offer the page holds for a PR
-const offerOf = async (h: Harness, number: number): Promise<SweepOffer | null | undefined> => (await rowOf(h, number))?.agent?.sweepOffer
+// the post button's offer the page holds for a PR, which comes with the sweeps whether or not the open tables show the PR; null when there is none
+const offerOf = async (h: Harness, number: number): Promise<SweepOffer | null> => {
+  const view = await (await fetch(`${h.base}/api/view`)).json() as View
+  return view.sweeps.offers?.find((offer) => offer.number === number) ?? null
+}
 
 // a sweep the scheduler started, with --no-post, still running: its reviewers have written each row's report and its review step has ended, which Pit View has seen. reviewEnd false leaves the step's end unwritten
 const reviewedSweep = async (h: Harness, reports: Record<number, string> = { 114: reportText(head114) }, reviewEnd = true): Promise<{ id: number, child: FakeLaunch['children'][number] }> => {
@@ -290,7 +297,7 @@ test('a scheduled --no-post sweep records each row\'s report by its hash and ver
     assert.equal(sweep.status, 'done')
     assert.deepEqual(h.server.cache.getSweep(sweep.id)?.rowReports, { 114: { hash: reportHash(reportText(head114)), verdict: 'clean' } })
     assert.deepEqual(h.server.cache.getSweep(sweep.id)?.postAttempts, {})
-    const offer = (await rowOf(h, 114))?.agent?.sweepOffer
+    const offer = (await offerOf(h, 114))
     assert.equal(offer?.sweepId, sweep.id)
     assert.deepEqual(offer?.forms, ['approve', 'comment'])
     assert.equal(offer?.reviewedSha, head114)
@@ -314,7 +321,7 @@ test('a sweep allowed to post records no row reports, and its rows offer nothing
     const sweep = await h.server.sweepLauncher.settled(started.id)
     assert.equal(sweep.status, 'done')
     assert.equal(h.server.cache.getSweep(sweep.id)?.rowReports, null)
-    assert.equal((await rowOf(h, 114))?.agent?.sweepOffer, null)
+    assert.equal((await offerOf(h, 114)), null)
   } finally {
     await h.cleanup()
   }
@@ -420,7 +427,7 @@ test('the post button posts the sweep row\'s stored report once, as the form cli
     const rows = recorded?.result?.schema === 'pit-crew/sweep-result@1' ? recorded.result.rows as Record<string, unknown>[] : []
     assert.deepEqual(rows.find((row) => row.number === 114)?.posted, { form: 'approve', url: `https://github.com/${repo}/pull/114` })
     assert.equal(typeof recorded?.postAttempts[114], 'string')
-    assert.equal((await rowOf(h, 114))?.agent?.sweepOffer, null)
+    assert.equal((await offerOf(h, 114)), null)
     const shown = h.server.sweeps.get(sweep.id)?.result?.rows.find((row) => row.number === 114)
     assert.deepEqual(shown?.posted, { form: 'approve', url: `https://github.com/${repo}/pull/114` })
     // a second click posts nothing
@@ -456,7 +463,7 @@ test('the route takes a direct action\'s Origin and token, and a body that names
     assert.equal((await post(h, sweep.id, bodyOf('approve', { extra: true }))).status, 400)
     assert.equal((await post(h, 'x', bodyOf())).status, 400)
     assert.deepEqual(postsOf(h.runner), [])
-    assert.equal((await rowOf(h, 114))?.agent?.sweepOffer?.sweepId, sweep.id)
+    assert.equal((await offerOf(h, 114))?.sweepId, sweep.id)
   } finally {
     await h.cleanup()
   }
@@ -478,7 +485,7 @@ test('every refusal writes nothing: another repository or viewer, an unknown swe
     await refused(sweep.id, bodyOf('comment', { reviewedSha: earlier }), 409, /reviewed d6b9780, not 0123456/)
     await refused(sweep.id, bodyOf('comment', { headSha: earlier }), 409, /new commits since the confirmation was shown/)
     assert.deepEqual(postsOf(h.runner), [])
-    assert.equal((await rowOf(h, 114))?.agent?.sweepOffer?.sweepId, sweep.id)
+    assert.equal((await offerOf(h, 114))?.sweepId, sweep.id)
   } finally {
     await h.cleanup()
   }
@@ -513,7 +520,7 @@ test('an older sweep\'s row is never posted once a newer sweep has a row for the
   try {
     const older = await scheduledSweep(h, [row114()])
     const newer = await scheduledSweep(h, [row114()])
-    assert.equal((await rowOf(h, 114))?.agent?.sweepOffer?.sweepId, newer.id)
+    assert.equal((await offerOf(h, 114))?.sweepId, newer.id)
     const answer = await post(h, older.id, bodyOf())
     assert.equal(answer.status, 409)
     assert.match(String(answer.body.error), /no longer the latest for this PR; nothing was posted/)
@@ -527,7 +534,7 @@ test('the viewer\'s own PR in a sweep gets no button, and a post for it is refus
   const h = await setup()
   try {
     const sweep = await scheduledSweep(h, [row114({ number: 101, head: head101, report: '~/agents/output/PR-101.md' })], { 101: reportText(head101) })
-    assert.equal((await rowOf(h, 101))?.agent?.sweepOffer, null)
+    assert.equal((await offerOf(h, 101)), null)
     // the sweep's own start confirmed the account; the post must not
     const before = h.runner.calls.length
     const answer = await post(h, sweep.id, { repo, viewer: scenario.viewer, number: 101, headSha: head101, reviewedSha: head101, form: 'approve' })
@@ -546,7 +553,7 @@ test('a post GitHub refuses is a 502 with its reason, takes the mark off, and le
     const answer = await post(h, sweep.id, bodyOf())
     assert.equal(answer.status, 502)
     assert.deepEqual(h.server.cache.getSweep(sweep.id)?.postAttempts, {})
-    assert.equal((await rowOf(h, 114))?.agent?.sweepOffer?.sweepId, sweep.id)
+    assert.equal((await offerOf(h, 114))?.sweepId, sweep.id)
   } finally {
     await h.cleanup()
   }
@@ -705,51 +712,116 @@ test('the sweep\'s view shows a row whose post was begun and never recorded as a
     assert.equal(shown?.result?.rows.find((row) => row.number === 114)?.postUnknown, true)
     assert.equal('rowReports' in (shown ?? {}), false)
     assert.equal('postAttempts' in (shown ?? {}), false)
-    assert.equal((await rowOf(h, 114))?.agent?.sweepOffer, null)
+    assert.equal((await offerOf(h, 114)), null)
   } finally {
     await h.cleanup()
   }
 })
 
-test('a sweep row\'s offer reaches the page with the sweep\'s own patch, so a settle shows the button and a new sweep starting takes it away', async () => {
+type Feed = { patches: { rows: OpenRow[], sweeps?: SweepsView }[], close: () => void }
+
+// the live feed one tab receives, read as it arrives
+const feedOf = async (h: Harness): Promise<Feed> => {
+  const patches: Feed['patches'] = []
+  const controller = new AbortController()
+  const response = await fetch(`${h.base}/api/events?client=tab-1&visible=true&paused=true`, { signal: controller.signal })
+  const reader = response.body!.getReader()
+  let buffer = ''
+  void (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) return
+        buffer += new TextDecoder().decode(value)
+        for (let end = buffer.indexOf('\n\n'); end >= 0; end = buffer.indexOf('\n\n')) {
+          const frame = buffer.slice(0, end)
+          buffer = buffer.slice(end + 2)
+          if (frame.startsWith('event: patch\n')) patches.push(JSON.parse(frame.slice(frame.indexOf('data: ') + 6)) as Feed['patches'][number])
+        }
+      }
+    } catch {
+      // aborted at the end of the test
+    }
+  })()
+  return { patches, close: () => controller.abort() }
+}
+
+const arrives = async (feed: Feed, from: number, seen: (patch: Feed['patches'][number]) => boolean): Promise<boolean> => {
+  for (let tries = 0; tries < 200 && !feed.patches.slice(from).some(seen); tries += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+  return feed.patches.slice(from).some(seen)
+}
+
+const offered = (patch: Feed['patches'][number], number: number): SweepOffer | null | undefined =>
+  patch.sweeps === undefined ? undefined : patch.sweeps.offers?.find((offer) => offer.number === number) ?? null
+
+test('a sweep row\'s offer reaches the page with the sweeps, so a settle shows the button and a new sweep starting takes it away', async () => {
   const h = await setup()
   try {
-    const patches: { rows: OpenRow[], sweeps?: unknown }[] = []
-    const controller = new AbortController()
-    const response = await fetch(`${h.base}/api/events?client=tab-1&visible=true&paused=true`, { signal: controller.signal })
-    const reader = response.body!.getReader()
-    let buffer = ''
-    void (async () => {
-      try {
-        for (;;) {
-          const { value, done } = await reader.read()
-          if (done) return
-          buffer += new TextDecoder().decode(value)
-          for (let end = buffer.indexOf('\n\n'); end >= 0; end = buffer.indexOf('\n\n')) {
-            const frame = buffer.slice(0, end)
-            buffer = buffer.slice(end + 2)
-            if (frame.startsWith('event: patch\n')) patches.push(JSON.parse(frame.slice(frame.indexOf('data: ') + 6)) as { rows: OpenRow[] })
-          }
-        }
-      } catch {
-        // aborted at the end of the test
-      }
-    })()
+    const feed = await feedOf(h)
     try {
       const sweep = await scheduledSweep(h, [row114()])
       await h.server.sweepLauncher.flushed()
-      for (let tries = 0; tries < 200 && !patches.some((patch) => patch.sweeps !== undefined && patch.rows.some((row) => row.number === 114 && row.agent?.sweepOffer?.sweepId === sweep.id)); tries += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 5))
-      }
-      assert.ok(patches.some((patch) => patch.sweeps !== undefined && patch.rows.some((row) => row.number === 114 && row.agent?.sweepOffer?.sweepId === sweep.id)), 'the settle\'s patch carries the row with its offer')
-      const seen = patches.length
+      assert.ok(await arrives(feed, 0, (patch) => offered(patch, 114)?.sweepId === sweep.id), 'the settle\'s patch carries the offer')
+      const seen = feed.patches.length
       await h.server.sweepLauncher.start(sweepRequest(repo))
-      for (let tries = 0; tries < 200 && !patches.slice(seen).some((patch) => patch.rows.some((row) => row.number === 114 && row.agent?.sweepOffer === null)); tries += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 5))
-      }
-      assert.ok(patches.slice(seen).some((patch) => patch.rows.some((row) => row.number === 114 && row.agent?.sweepOffer === null)), 'a sweep in flight takes the offer away in its own patch')
+      assert.ok(await arrives(feed, seen, (patch) => offered(patch, 114) === null), 'a sweep in flight takes the offer away in its own patch')
     } finally {
-      controller.abort()
+      feed.close()
+    }
+  } finally {
+    await h.cleanup()
+  }
+})
+
+const row119 = (patch: Record<string, unknown> = {}): Record<string, unknown> =>
+  row114({ number: 119, url: `https://github.com/${repo}/pull/119`, title: 'Draft: rework the exporter', head: head119, bump: '', report: '~/agents/output/PR-119.md', ...patch })
+
+test('someone else\'s draft, which the open tables hide, gets its offer with the sweeps all the same, and its button posts the stored report', async () => {
+  const h = await setup()
+  try {
+    const sweep = await scheduledSweep(h, [row119()], { 119: reportText(head119) })
+    assert.equal(await rowOf(h, 119), undefined, 'the draft has no row on the page')
+    const offer = await offerOf(h, 119)
+    assert.equal(offer?.sweepId, sweep.id)
+    // a draft is never approved: its recommendation posts as a comment
+    assert.deepEqual(offer?.forms, ['comment'])
+    assert.equal(offer?.headSha, head119)
+    const answer = await post(h, sweep.id, { repo, viewer: scenario.viewer, number: 119, headSha: head119, reviewedSha: head119, form: 'comment' })
+    assert.equal(answer.status, 200, JSON.stringify(answer.body))
+    assert.deepEqual(postsOf(h.runner).map((call) => call.args.slice(0, 3)), [['pr', 'comment', '119']])
+    assert.equal(await offerOf(h, 119), null)
+    assert.equal((await post(h, sweep.id, { repo, viewer: scenario.viewer, number: 119, headSha: head119, reviewedSha: head119, form: 'comment' })).status, 422)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the viewer\'s own draft that a sweep reviewed gets no offer, and a post for it is refused with no gh call', async () => {
+  const h = await setup()
+  try {
+    const sweep = await scheduledSweep(h, [row114({ number: 103, head: head103, report: '~/agents/output/PR-103.md' })], { 103: reportText(head103) })
+    assert.equal(await offerOf(h, 103), null)
+    const answer = await post(h, sweep.id, { repo, viewer: scenario.viewer, number: 103, headSha: head103, reviewedSha: head103, form: 'comment' })
+    assert.equal(answer.status, 422)
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a change that touches no sweep still reaches the page with the sweeps when it changes an offer: a hidden draft\'s post that may have landed takes its button away in the next patch', async () => {
+  const h = await setup({ writeError: 'read tcp: connection reset by peer' })
+  try {
+    const sweep = await scheduledSweep(h, [row119()], { 119: reportText(head119) })
+    assert.equal((await offerOf(h, 119))?.sweepId, sweep.id)
+    const feed = await feedOf(h)
+    try {
+      const seen = feed.patches.length
+      assert.equal((await post(h, sweep.id, { repo, viewer: scenario.viewer, number: 119, headSha: head119, reviewedSha: head119, form: 'comment' })).status, 502)
+      assert.ok(await arrives(feed, seen, (patch) => offered(patch, 119) === null), 'a patch carries the sweeps without the draft\'s offer')
+    } finally {
+      feed.close()
     }
   } finally {
     await h.cleanup()

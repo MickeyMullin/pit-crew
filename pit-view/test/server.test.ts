@@ -2480,12 +2480,10 @@ test('the view carries the sweeps and how to start one, and the live feed sends 
     const done = await stream.until((patch) => patch.sweeps?.items[0]?.status === 'done')
     assert.deepEqual([done.sweeps?.items[0]?.status, done.sweeps?.items[0]?.text, done.sweeps?.start.unavailable], ['done', 'Done · 2 swept', null])
     assert.equal(done.sweeps?.items[0]?.result?.rows.length, 2)
-    // sweeps are not an Agent cell: no row of the view mentions them, beyond the post button's offer, which a sweep started by hand never makes
+    // sweeps are not an Agent cell: no row of the view mentions them
     const after = (await getJson<View>(`${h.base}/api/view`)).body
     assert.equal(after.sweeps.items[0]?.id, started.body.id)
-    const groups = [...after.mine.groups, ...after.others.groups]
-    assert.equal(JSON.stringify(groups).includes('"sweepOffer":{'), false)
-    assert.equal(JSON.stringify(groups, (key, value: unknown) => key === 'sweepOffer' ? undefined : value).includes('sweep'), false)
+    assert.equal(JSON.stringify([...after.mine.groups, ...after.others.groups]).includes('sweep'), false)
     stream.close()
   } finally {
     await h.cleanup()

@@ -932,8 +932,6 @@ export type AgentCell = {
   postOffer: PostOffer | null
   // the post button's offer for the stored report of an auto-review run that ran with --no-post; null for anything else (section 10, Posting)
   storedOffer: StoredOffer | null
-  // the post button's offer for the stored report a scheduled --no-post sweep wrote for this PR, which the sweep drawer shows on the PR's card (sweepOfferOf in sweeps.ts); null for anything else, whatever run the cell is about
-  sweepOffer: SweepOffer | null
   // set while the run on show is a stack review started from another PR: that PR's number, and the status of this PR's own latest run behind it, null with none. Null on the PR it started from, and on every other cell
   stackRun: { from: number, ownStatus: RunStatus | null } | null
 }
@@ -1156,7 +1154,7 @@ export type StoredOffer = {
   commands: Partial<Record<PostForm, string>>
 }
 
-// what the post button on a sweep row would do for the stored report a scheduled Dependabot sweep that ran with --no-post wrote for one PR (section 10, Posting); the drawer and the server at click time both judge it by sweepOfferOf in sweeps.ts, against the cache as it is then
+// what the post button on a sweep row would do for the stored report a scheduled Dependabot sweep that ran with --no-post wrote for one PR (section 10, Posting). It reaches the page with the sweeps, never on a row, so a PR the open tables hide still gets it; the drawer and the server at click time both judge it by sweepOfferOf in sweeps.ts, against the cache as it is then
 export type SweepOffer = {
   sweepId: number
   number: number
@@ -1278,7 +1276,7 @@ export const currentOffers = (pr: RawOpenPr, config: Config, ownRun: Run | undef
   }
 }
 
-export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null, cover: Run | undefined = undefined, history: readonly Run[] = [], sweepOffer: SweepOffer | null = null, marked = false): AgentCell => {
+export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null, cover: Run | undefined = undefined, history: readonly Run[] = [], marked = false): AgentCell => {
   const mine = isMine(pr, config)
   const plan = defaultRun(pr, config)
   // the button's text; the run's own label is unchanged
@@ -1290,7 +1288,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     state: 'idle', label: plan.label, action, models: modelLabels(config.agent), starts: startOptions(pr, config, stack, ownInFlight, queueing, ownRun === undefined || history.some((entry) => entry.id === ownRun.id) ? history : [ownRun, ...history]), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
-    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, sweepOffer, stackRun: null,
+    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,
   }
   const { run, covered } = cellRunOf(ownRun, cover)
   if (run === undefined) return idle

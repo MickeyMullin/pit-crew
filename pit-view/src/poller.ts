@@ -13,7 +13,7 @@ import { baselineOf, compareRows, runEvent } from './notify.ts'
 import type { NotifyEvent, RowBaseline } from './notify.ts'
 import { scanReports } from './reports.ts'
 import type { ReportInfo, ReportTarget } from './reports.ts'
-import { createSweepMemory, sweepOfferOf, sweepsView, sweepSummary } from './sweeps.ts'
+import { createSweepMemory, sweepOffersOf, sweepsView } from './sweeps.ts'
 import type { SweepMemory, SweepsView } from './sweeps.ts'
 import { closedSearchWindow, iso } from './time.ts'
 
@@ -273,12 +273,16 @@ export const createPoller = (options: PollerOptions): Poller => {
   const noQueueing: Queueing = { review: false, selfReview: false }
   const queueingNow = (): Queueing => options.queueing?.() ?? noQueueing
 
+  // the sweeps as the page holds them, with the post button's offer of every open PR in the cache, rendered or not
+  const sweepsNow = (settings: Config, queueing: Queueing): SweepsView => {
+    const offers = sweepOffersOf(settings, cache.readView(settings.repo).open.map((row) => row.pr), cache.sweepsFor(settings.repo), cache.runsByPr(settings.repo), cache.unresolvedPostMarks(settings.repo))
+    return sweepsView(settings, sweeps, queueing, offers)
+  }
+
   const snapshot = (settings: Config, reportMap: ReadonlyMap<number, ReportInfo>, queueing: Queueing = queueingNow()): Snapshot => {
     const cached = cache.readView(settings.repo)
     const runs = cache.latestRuns(settings.repo)
     const history = cache.runsByPr(settings.repo)
-    // newest first, for the post button a sweep row offers (sweepOfferOf)
-    const repoSweeps = cache.sweepsFor(settings.repo)
     // the PRs whose post from Pit View may have landed, which offer no report
     const marks = cache.unresolvedPostMarks(settings.repo)
     // derived on every read from the runs and the PRs as they are now, so nothing remembers which layers a stack run covered
@@ -295,7 +299,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       reports: reportMap,
       freshness: (number) => freshness.get(number) ?? { state: 'current', fetchedAt: iso(clock.now()) },
       refresh: (number) => rowRefreshes.get(prKey(settings.repo, number)) ?? null,
-      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack, queueing, cover.get(pr.number), history.get(pr.number), sweepOfferOf(pr, settings, repoSweeps, history.get(pr.number), marks.has(pr.number)).offer, marks.has(pr.number)),
+      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack, queueing, cover.get(pr.number), history.get(pr.number), marks.has(pr.number)),
     })
     const rows = new Map<number, OpenRow>()
     for (const group of [...view.mine.groups, ...view.others.groups]) {
@@ -367,8 +371,16 @@ export const createPoller = (options: PollerOptions): Poller => {
   }
 
   // the one place versions are assigned: exactly one more per patch
+  // the sweeps as every page last received them, as JSON; null until a patch carried them. A patch that carries none still carries them when they differ, since a PR's head, its reviews, or a post mark can change a post button's offer with no change to any sweep, and a PR the open tables hide has no row to carry it
+  let sentSweeps: string | null = null
+
   const patch = (body: PatchBody): void => {
     version += 1
+    if (body.sweeps === undefined) {
+      const now = sweepsNow(config(), queueingNow())
+      if (JSON.stringify(now) !== sentSweeps) body = { ...body, sweeps: now }
+    }
+    if (body.sweeps !== undefined) sentSweeps = JSON.stringify(body.sweeps)
     const full: Patch = { version, now: iso(clock.now()), rows: [], removed: [], closed: null, ...body }
     if (full.sync !== undefined) lastUi = JSON.stringify(full.sync.ui)
     for (const carried of records) {
@@ -669,8 +681,8 @@ export const createPoller = (options: PollerOptions): Poller => {
       sync: syncOf(next.cached, after),
     }
     // the repository, the viewer, and cloneDir all show in the sweep's start text, and the cap can change what Run sweep says, as it can a row's buttons
-    const sweepsBefore = sweepsView(before, sweeps, queueing)
-    const sweepsAfter = sweepsView(after, sweeps, queueing)
+    const sweepsBefore = sweepsNow(before, queueing)
+    const sweepsAfter = sweepsNow(after, queueing)
     if (everyRow || !same(sweepsBefore, sweepsAfter)) body.sweeps = sweepsAfter
     if (changed('repo')) body.repo = after.repo
     if (!same(previous.view.viewer, next.view.viewer)) body.viewer = next.view.viewer
@@ -694,7 +706,7 @@ export const createPoller = (options: PollerOptions): Poller => {
     if (stopped) return
     const settings = config()
     const queueing = queueingNow()
-    patch({ rows: [...snapshot(settings, reports, queueing).rows.values()], sweeps: sweepsView(settings, sweeps, queueing) })
+    patch({ rows: [...snapshot(settings, reports, queueing).rows.values()], sweeps: sweepsNow(settings, queueing) })
   }
 
   const runChanged = (repo: string, number: number): void => {
@@ -715,14 +727,11 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
-  // the sweeps go out whole, with the open rows of every PR one of the repo's sweeps has a row for, since a sweep that settles, starts, or records a post changes what those rows' post buttons offer
+  // the sweeps go out whole, the post buttons' offers with them, since a sweep that settles, starts, or records a post changes what they offer
   const sweepsChanged = (repo: string): void => {
     if (stopped) return
     const settings = config()
-    if (settings.repo !== repo) return
-    const numbers = new Set(cache.sweepsFor(repo).flatMap((sweep) => sweep.result?.schema === 'pit-crew/sweep-result@1' ? sweepSummary(sweep.result).rows.map((row) => row.number) : []))
-    const rows = [...snapshot(settings, reports).rows.values()].filter((row) => numbers.has(row.number))
-    patch({ rows, sweeps: sweepsView(settings, sweeps, queueingNow()) })
+    if (settings.repo === repo) patch({ sweeps: sweepsNow(settings, queueingNow()) })
   }
 
   // what the pages last received; a server with no scheduler state has nothing to send
@@ -757,7 +766,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       mine: snap.view.mine,
       others: snap.view.others,
       closed: snap.view.closed,
-      sweeps: sweepsView(settings, sweeps, queueingNow()),
+      sweeps: sweepsNow(settings, queueingNow()),
     }
   }
 

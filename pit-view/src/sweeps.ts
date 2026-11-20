@@ -283,11 +283,21 @@ export const createSweepMemory = (cache: Cache, keep = 20): SweepMemory => {
   }
 }
 
-// what the page holds about sweeps: how to start one now, and the repo's recent sweeps. Patches carry it whole whenever a sweep, the queue answer, or the config behind the start text changes
-export type SweepsView = { start: SweepStart, items: SweepView[] }
+// what the page holds about sweeps: how to start one now, the repo's recent sweeps, and the post button's offer of every PR that has one. The offers ride here rather than on the rows, so a PR the open tables hide, such as someone else's draft, still gets its button; a view built without them has none. Patches carry it whole whenever a sweep, the queue answer, the config behind the start text, or any offer changes
+export type SweepsView = { start: SweepStart, items: SweepView[], offers?: SweepOffer[] }
 
 // queueing is the launcher's answer now, which the button says; left out, nothing waits
-export const sweepsView = (config: Config, memory: SweepMemory, queueing: Queueing | null = null): SweepsView => {
+export const sweepsView = (config: Config, memory: SweepMemory, queueing: Queueing | null = null, offers: SweepOffer[] = []): SweepsView => {
   const items = memory.list(config.repo)
-  return { start: sweepStartOf(config, items.some((sweep) => sweep.status === 'running' || sweep.status === 'queued'), queueing?.review ?? false), items }
+  return { start: sweepStartOf(config, items.some((sweep) => sweep.status === 'running' || sweep.status === 'queued'), queueing?.review ?? false), items, offers }
+}
+
+// the offer of every open PR of the repository that one of its sweeps has a row for, by sweepOfferOf, in PR number order: prs holds every open PR the cache has, hidden ones included, runs each PR's runs newest first, and marked the PRs whose post from Pit View may have landed
+export const sweepOffersOf = (config: Config, prs: readonly RawOpenPr[], sweeps: readonly Sweep[], runs: ReadonlyMap<number, readonly Run[]>, marked: ReadonlySet<number>): SweepOffer[] => {
+  const named = new Set(sweeps.flatMap((sweep) => {
+    const parsed = sweep.repo === config.repo ? sweepResultOf(sweep) : null
+    return parsed === null ? [] : sweepSummary(parsed).rows.map((row) => row.number)
+  }))
+  return prs.filter((pr) => named.has(pr.number)).sort((a, b) => a.number - b.number)
+    .flatMap((pr) => sweepOfferOf(pr, config, sweeps, runs.get(pr.number), marked.has(pr.number)).offer ?? [])
 }

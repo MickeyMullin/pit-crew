@@ -66,7 +66,7 @@ export const goneRow = (number: number, title: string | null, url: string): Open
     models: { claude: '', codex: '' }, lastReviewAt: null,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: [], tandem: false, commit: null, finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null,
-    extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, sweepOffer: null, stackRun: null,
+    extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,
   },
 } as unknown as OpenRow)
 

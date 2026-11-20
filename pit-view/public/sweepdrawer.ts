@@ -1,10 +1,9 @@
 // public/sweepdrawer.ts
-// the Dependabot sweep drawer: a non-modal panel on the right for the repository's sweeps, not for one PR. It starts a sweep behind an inline confirmation, shows the queued, running, waiting, and finished card of the sweep it is on (the whole sweep-result@1: counts, one card per PR, the merge order, and the summary's path), offers the post button on a PR's card when the server offers that PR's stored report (section 10 of DESIGN.md, Posting), and lists the earlier sweeps. It reads the sweeps from the page's feed on every draw, so a patch updates it in place. sweepview.ts says what every part reads; this file makes the elements, keeps the confirmation's state, and moves focus
+// the Dependabot sweep drawer: a non-modal panel on the right for the repository's sweeps, not for one PR. It starts a sweep behind an inline confirmation, shows the queued, running, waiting, and finished card of the sweep it is on (the whole sweep-result@1: counts, one card per PR, the merge order, and the summary's path), offers the post button on a PR's card when the offers that come with the sweeps hold one for that PR's stored report, whether or not the PR has a row on the page (section 10 of DESIGN.md, Posting), and lists the earlier sweeps. It reads the sweeps from the page's feed on every draw, so a patch updates it in place. sweepview.ts says what every part reads; this file makes the elements, keeps the confirmation's state, and moves focus
 // Opened from a sweep line of the auto-review log it shows first in its body a link back to that line, the Agent drawer's link (DESIGN.md section 8, Drawer and Sweeps)
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
-import type { OpenRow } from '../src/derive.ts'
 import { focusKeySelector, mayMoveFocus, escapeTarget, outsidePressCloses } from './drawerview.ts'
 import { formatDuration, formatSince } from './format.ts'
 import type { ReportPanel } from './reportpanel.ts'
@@ -35,8 +34,6 @@ export type SweepDrawerOptions = {
   sweeps: () => SweepsView | null
   say: (text: string) => void
   reports: ReportPanel
-  // the PR's open row in the page's view, whose Agent cell carries the post button's offer; undefined for a PR that is not an open row. Left out, no card offers a post
-  rowOf?: (number: number) => OpenRow | undefined
 }
 
 export type SweepDrawer = {
@@ -99,7 +96,8 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
   // the hit set and report hash the last refusal over the scan showed, bound to the confirmation that was refused, as in the Agent drawer: only a click on that same confirmation sends it back
   let postAllow: { confirmation: Confirm, allow: PostAllow } | null = null
 
-  const offerOf = (number: number) => options.rowOf?.(number)?.agent?.sweepOffer ?? null
+  // the post button's offer for a PR comes with the sweeps, whether or not the PR has a row on the page; null when there is none
+  const offerOf = (number: number) => options.sweeps()?.offers?.find((offer) => offer.number === number) ?? null
 
   const heading = h('h2', { id: 'sweep-drawer-heading', class: 'drawer-heading', tabindex: '-1' }, 'Dependabot sweep')
   const subLine = h('p', { class: 'drawer-pr-sub' })
@@ -226,7 +224,9 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
 
   const postModelOf = (ask: SweepPostAsk) => {
     const offer = offerOf(ask.number)
-    return offer === null ? null : sweepPostModel(options.rowOf?.(ask.number)?.title ?? '', offer, ask)
+    // the title is the one the sweep's own row gives, since the PR may have no row on the page
+    const title = options.sweeps()?.items.find((sweep) => sweep.id === ask.sweepId)?.result?.rows.find((row) => row.number === ask.number)?.title ?? ''
+    return offer === null ? null : sweepPostModel(title, offer, ask)
   }
 
   // one click opens the confirmation on the PR's card, which names the form, the report, the login, the CI state read now, and, when the head has moved, both heads. Nothing is sent until its own button is clicked, and what it shows now is what the request is bound to

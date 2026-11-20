@@ -1,15 +1,13 @@
 // test/ui-sweeppost.test.ts
-// the post button on a scheduled Dependabot sweep's PR card (section 10 of DESIGN.md, Posting, and section 8, Sweeps, Sweep drawer), driven through the real public/sweepdrawer.ts against the fake document in test/fake-dom.ts: the buttons a row's offer names, none where there is nothing to post, the in-page confirmation with the form, the report, the login, the CI state, and the moved-head sentence, Cancel, Post, refusals, the scan's second click, and the request's token. Every expected value is a literal written out here, not taken from the code under test
+// the post button on a scheduled Dependabot sweep's PR card (section 10 of DESIGN.md, Posting, and section 8, Sweeps, Sweep drawer), driven through the real public/sweepdrawer.ts against the fake document in test/fake-dom.ts: the buttons the offers that come with the sweeps name, with no PR's row on the page, none where there is nothing to post, the in-page confirmation with the form, the report, the login, the CI state, and the moved-head sentence, Cancel, Post, refusals, the scan's second click, and the request's token. Every expected value is a literal written out here, not taken from the code under test
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Sweep } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
-import type { OpenRow } from '../src/derive.ts'
 import { parseResult } from '../src/launcher.ts'
 import type { SweepOffer } from '../src/launcher.ts'
 import { sweepStartOf, sweepView } from '../src/sweeps.ts'
 import type { SweepsView } from '../src/sweeps.ts'
-import type { AgentCell } from '../public/agent.ts'
 import { createSweepDrawer } from '../public/sweepdrawer.ts'
 import { installFakeBrowser, press } from './fake-dom.ts'
 import type { FakeElement } from './fake-dom.ts'
@@ -45,14 +43,6 @@ const offerOf = (patch: Partial<SweepOffer> = {}): SweepOffer => ({
   ...patch,
 })
 
-const rowOf = (number: number, offer: SweepOffer | null): OpenRow => ({
-  number,
-  url: `https://example.test/owner/name/pull/${number}`,
-  title: 'build(deps): bump left-pad from 1.3.0 to 1.3.1',
-  headOid: head.slice(0, 7), headSha: head,
-  agent: { sweepOffer: offer } as unknown as AgentCell,
-} as unknown as OpenRow)
-
 const sweepRecord = (id: number, rows: Record<string, unknown>[]): Sweep => {
   const parsed = parseResult(JSON.stringify(sweepResult({ notPostedReason: 'noPost', rows, counts: { swept: rows.length, fresh: rows.length, reused: 0, failed: 0 } })))
   if (!parsed.ok) throw new Error(parsed.error)
@@ -80,14 +70,13 @@ type Page = {
   writes: () => Sent[]
   drawer: ReturnType<typeof createSweepDrawer>
   document: ReturnType<typeof installFakeBrowser>['document']
-  // replaces the offers the rows carry, as a patch would, and redraws
+  // replaces the offers the sweeps carry, as a patch would, and redraws
   offers: (next: Record<number, SweepOffer | null>) => void
 }
 
 const withPage = async (offers: Record<number, SweepOffer | null>, check: (page: Page) => Promise<void>, replies: { post?: Response | (() => Response | Promise<Response>) } = {}, sweeps: Sweep[] = [sweepRecord(3, [row214, row215])]): Promise<void> => {
   const sent: Sent[] = []
   const said: string[] = []
-  let current = offers
   const fake = installFakeBrowser((async (input: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
     sent.push({ url: String(input), method, headers: (init?.headers ?? {}) as Record<string, string>, body: typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : null })
@@ -98,13 +87,14 @@ const withPage = async (offers: Record<number, SweepOffer | null>, check: (page:
     const root = fake.document.createElement('aside')
     root.hidden = true
     fake.document.body.appendChild(root)
-    const view: SweepsView = { start: sweepStartOf({ ...defaultConfig(), repo, viewer: 'viewer', cloneDir: '~/dev/orbit' }, false), items: sweeps.map(sweepView) }
+    // the offers come with the sweeps, not with any row: no PR here has a row on the page
+    const offersIn = (record: Record<number, SweepOffer | null>): SweepOffer[] => Object.values(record).filter((offer) => offer !== null)
+    const view: SweepsView = { start: sweepStartOf({ ...defaultConfig(), repo, viewer: 'viewer', cloneDir: '~/dev/orbit' }, false), items: sweeps.map(sweepView), offers: offersIn(offers) }
     const drawer = createSweepDrawer({
       root: root as unknown as HTMLElement,
       token: 'token-1',
       nowMs: () => Date.parse('2026-10-28T15:00:00Z'),
       sweeps: () => view,
-      rowOf: (number) => number in current ? rowOf(number, current[number] ?? null) : undefined,
       say: (text) => said.push(text),
       reports: { open: () => undefined, close: () => undefined, isOpen: () => false, refresh: () => undefined },
     })
@@ -130,7 +120,7 @@ const withPage = async (offers: Record<number, SweepOffer | null>, check: (page:
       drawer,
       document: fake.document,
       offers: (next) => {
-        current = next
+        view.offers = offersIn(next)
         drawer.update()
       },
     })
@@ -153,7 +143,7 @@ test('a PR card of the sweep shows a button for the report\'s recommendation and
   })
 })
 
-test('no button on a card whose PR has no offer, an offer from another sweep, or no open row', async () => {
+test('no button on a card whose PR has no offer, or whose offer is another sweep\'s', async () => {
   await withPage({ 214: null }, async (page) => assert.deepEqual(page.buttons(), []))
   await withPage({ 214: offerOf({ sweepId: 4 }) }, async (page) => assert.deepEqual(page.buttons(), []))
   await withPage({}, async (page) => assert.deepEqual(page.buttons(), []))
