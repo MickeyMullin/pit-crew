@@ -16,7 +16,7 @@ import { createGh } from '../src/github.ts'
 import type { RawOpenPr, Runner } from '../src/github.ts'
 import {
   agentCell, childEnv, currentOffers, claudeInvocation, codexInvocation, codexNote, createLauncher, createReviewLine, defaultRun, descendantGroups, doneText, emptyStream, gitConfigEnv,
-  emptySteps, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, procsFrom, remoteNamesRepo,
+  emptySteps, fixOfferOf, foldStream, foldSteps, isHttpUrl, isTandemRun, judge, LaunchError, notOffered, parsePs, parseResult, parseStepEvent, procsFrom, remoteNamesRepo,
   modelLabels, noteKind, requestText, reviewFits, runners, runView, shellPath, startOptions, stepsOf, systemFs, updateRequest,
   codexSandboxArgs,
 } from '../src/launcher.ts'
@@ -4093,6 +4093,15 @@ test('a fix start is offered on the viewer\'s own PR when GitHub has a request t
   assert.deepEqual(agentCell(await prOf(104), config, selfReviewRun(await prOf(104), {}, { findings: [] }), undefined).starts.map((option) => option.kind), ['default', 'tandem'])
   // while a run is in flight, the fix is as unavailable as the rest
   assert.ok(agentCell(await prOf(101), config, runRow({ number: 101 }), undefined).starts.every((option) => option.unavailable?.includes('in flight')))
+})
+
+test('GitHub\'s own review decision of changes requested offers the fix start even when no review in the cached list stands', async () => {
+  const config = baseConfig()
+  const pr = await prOf(104)
+  const decided = (reviewDecision: RawOpenPr['reviewDecision']): RawOpenPr => ({ ...pr, reviewDecision, latestReviews: { nodes: [] }, latestOpinionatedReviews: { nodes: [] } })
+  assert.deepEqual(fixOfferOf(decided('CHANGES_REQUESTED'), []), { remote: true, selfReview: null })
+  assert.equal(notOffered('fix', decided('CHANGES_REQUESTED'), config, null), null)
+  for (const decision of ['APPROVED', 'REVIEW_REQUIRED', null] as const) assert.deepEqual(fixOfferOf(decided(decision), []), { remote: false, selfReview: null }, String(decision))
 })
 
 const fixParsed = (patch: Record<string, unknown> = {}) => parseResult(JSON.stringify(fixResult(patch)))

@@ -176,3 +176,22 @@ test('a fix result keeps its head rule and its report rule with the new fields',
   assert.equal(outcome(localResult({ head: { sha: fixHead } })), 'ok')
   assert.match(outcome(localResult({ head: { sha: fixHead.slice(0, 7) } })), /head must be/)
 })
+
+test('the drawer paints the sources line under the facts, the styles carry its class, and DESIGN.md and the README state the flags and the offer rule', async () => {
+  const drawer = await read('pit-view/public/drawer.ts')
+  assert.match(drawer, /ask\.sources === null \? null : h\('p', \{ class: 'confirm-sources' \}, ask\.sources\)/)
+  assert.match(await read('pit-view/public/styles.css'), /\.confirm-sources \{/)
+  const design = await read('pit-view/DESIGN.md')
+  assert.match(design, /`fix-pr <n> \[--source=remote\|local\|both\] \[--severity=P0\|P1\|P2\|P3\]`/)
+  assert.match(design, /A stale report is never addressed/)
+  assert.match(design, /A request or finding with no P# is always addressed, whatever the floor/)
+  assert.match(design, /a tie goes to `remote`/)
+  assert.match(design, /fixOfferOf/)
+  assert.match(design, /\| `skipped` \|/)
+  // no sentence says the command reads GitHub requests only
+  assert.ok(!/acts on reviewers' requested changes/.test(design))
+  const readme = await read('README.md')
+  assert.match(readme, /`--source=remote\|local\|both` picks the requests and `--severity=P0\|P1\|P2\|P3` sets the floor/)
+  assert.match(readme, /A request or finding with no P# is always addressed, whatever the floor/)
+  assert.ok(!/fixes what other people asked for\./.test(readme))
+})
