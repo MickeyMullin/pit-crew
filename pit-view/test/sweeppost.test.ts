@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import type { Run, Sweep } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
@@ -182,6 +183,8 @@ type Behavior = {
   onWrite?: () => Promise<void>
   // holds each write until the test lets it go
   hold?: Promise<void>
+  // #114's head on GitHub once a commit lands on it: every GraphQL read and the live read answer with it in place of head114
+  moved?: string
 }
 
 const isWrite = (args: string[]): boolean => args[0] === 'pr' && (args[1] === 'review' || args[1] === 'comment')
@@ -197,7 +200,11 @@ const ghWorld = (behavior: Behavior = {}): FakeRunner => {
     if (isLiveRead(args)) {
       await behavior.onLive?.()
       const number = Number(args[1]!.split('/').pop())
-      return ok(JSON.stringify({ state: 'open', draft: false, merged: false, head: { sha: heads[number] }, ...behavior.live?.(number) }))
+      return ok(JSON.stringify({ state: 'open', draft: false, merged: false, head: { sha: number === 114 ? behavior.moved ?? head114 : heads[number] }, ...behavior.live?.(number) }))
+    }
+    if (args[0] === 'api' && args[1] === 'graphql' && behavior.moved !== undefined) {
+      const answer = await base.runner(args)
+      return { ...answer, stdout: answer.stdout.replaceAll(head114, behavior.moved) }
     }
     if (isReviewsRead(args)) return ok(behavior.reviews ?? '')
     if (isWrite(args)) {
@@ -561,6 +568,7 @@ test('a post GitHub refuses is a 502 with its reason, takes the mark off, and le
 
 // a single auto-review of #114 that ran with --no-post and finished with its report on disk, so its row offers the stored report's button
 const storedRun = async (h: Harness): Promise<number> => {
+  await mkdir(join(h.home, 'agents', 'output'), { recursive: true })
   await writeFile(join(h.home, 'agents', 'output', 'PR-114.md'), reportText(head114))
   const tick = h.server.cache.createTick(repo)
   const cwd = join(h.home, 'dev', 'orbit')
@@ -677,6 +685,286 @@ test('a sweep that starts while the click\'s live read of the PR waits on GitHub
     assert.equal(started, true)
     assert.equal(answer.status, 409, JSON.stringify(answer.body))
     assert.match(String(answer.body.error), /no longer the latest for this PR; nothing was posted/)
+    assert.deepEqual(postsOf(h.runner), [])
+    assert.equal(h.server.cache.unresolvedPostMarks(repo).has(114), false)
+    assert.deepEqual(h.server.cache.getSweep(sweep.id)?.postAttempts, {})
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// ---- one post per PR and head ----
+
+// a head #114 moves to once a commit lands on it
+const later = 'fedcba9876543210fedcba9876543210fedcba98'
+
+const moveHead = async (h: Harness, behavior: Behavior, to: string): Promise<void> => {
+  behavior.moved = to
+  await (await fetch(`${h.base}/api/refresh`, { method: 'POST' })).json()
+  await h.server.poller.idle()
+}
+
+const postRun = async (h: Harness, id: number, body: unknown): Promise<{ status: number, body: Record<string, unknown> }> => {
+  const response = await fetch(`${h.base}/api/runs/${id}/post`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: h.base, 'X-Pit-View-Token': h.server.token }, body: JSON.stringify(body),
+  })
+  return { status: response.status, body: await response.json() as Record<string, unknown> }
+}
+
+test('a recorded post is the one post for its PR and head: a newer sweep of the same head offers nothing and a click on it is refused, and a sweep of a new head offers its report again', async () => {
+  const behavior: Behavior = {}
+  const h = await setup(behavior)
+  try {
+    const first = await scheduledSweep(h, [row114()])
+    assert.equal((await post(h, first.id, bodyOf('comment'))).status, 200)
+    const same = await scheduledSweep(h, [row114()])
+    assert.notEqual(h.server.cache.getSweep(same.id)?.rowReports?.[114], undefined, 'the newer sweep recorded its row\'s report')
+    assert.equal(await offerOf(h, 114), null)
+    const again = await post(h, same.id, bodyOf('comment'))
+    assert.equal(again.status, 422, JSON.stringify(again.body))
+    assert.match(String(again.body.error), /a post on #114 at d6b9780 is already on record/)
+    assert.equal(postsOf(h.runner).length, 1)
+    await moveHead(h, behavior, later)
+    const newer = await scheduledSweep(h, [row114({ head: later })], { 114: reportText(later) })
+    assert.equal((await offerOf(h, 114))?.sweepId, newer.id)
+    const fresh = await post(h, newer.id, bodyOf('comment', { headSha: later, reviewedSha: later }))
+    assert.equal(fresh.status, 200, JSON.stringify(fresh.body))
+    assert.equal(postsOf(h.runner).length, 2)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a post onto a head its report did not review is on record at the head it went onto, so a sweep of that head offers nothing', async () => {
+  const behavior: Behavior = {}
+  const h = await setup(behavior)
+  try {
+    const first = await scheduledSweep(h, [row114()])
+    await moveHead(h, behavior, later)
+    assert.equal((await offerOf(h, 114))?.headSha, later, 'the old report stays on offer on the moved head')
+    assert.equal((await post(h, first.id, bodyOf('comment', { headSha: later }))).status, 200)
+    const newer = await scheduledSweep(h, [row114({ head: later })], { 114: reportText(later) })
+    assert.notEqual(h.server.cache.getSweep(newer.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    assert.equal((await post(h, newer.id, bodyOf('comment', { headSha: later, reviewedSha: later }))).status, 422)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a single run\'s recorded post withholds a later sweep\'s row of the same head, and a sweep\'s recorded post withholds a later run\'s stored report of it', async () => {
+  const h = await setup()
+  try {
+    const run = await storedRun(h)
+    assert.equal((await rowOf(h, 114))?.agent?.storedOffer?.runId, run)
+    assert.equal((await postRun(h, run, bodyOf('comment'))).status, 200)
+    const sweep = await scheduledSweep(h, [row114()])
+    assert.notEqual(h.server.cache.getSweep(sweep.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    const refused = await post(h, sweep.id, bodyOf('comment'))
+    assert.equal(refused.status, 422, JSON.stringify(refused.body))
+    assert.match(String(refused.body.error), /already on record/)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+  const other = await setup()
+  try {
+    const sweep = await scheduledSweep(other, [row114()])
+    assert.equal((await post(other, sweep.id, bodyOf('comment'))).status, 200)
+    const run = await storedRun(other)
+    assert.notEqual(other.server.cache.getRun(run)?.reportHash, null)
+    assert.equal((await rowOf(other, 114))?.agent?.storedOffer, null)
+    const refused = await postRun(other, run, bodyOf('comment'))
+    assert.equal(refused.status, 422, JSON.stringify(refused.body))
+    assert.match(String(refused.body.error), /already on record/)
+    assert.equal(postsOf(other.runner).length, 1)
+  } finally {
+    await other.cleanup()
+  }
+})
+
+test('a post a sweep or a review made itself is on record at the head it reviewed, so a later scheduled sweep of that head offers nothing', async () => {
+  const h = await setup()
+  try {
+    const manual = await h.server.sweepLauncher.start(sweepRequest(repo))
+    const child = h.launch.children.at(-1)!
+    await child.result(noPostResult([row114({ posted: { form: 'comment', url: `https://github.com/${repo}/pull/114#issuecomment-5` }, recommendation: 'hold' })], { notPostedReason: null }))
+    child.exit(0)
+    await h.server.sweepLauncher.settled(manual.id)
+    const sweep = await scheduledSweep(h, [row114()])
+    assert.notEqual(h.server.cache.getSweep(sweep.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    assert.equal((await post(h, sweep.id, bodyOf('comment'))).status, 422)
+  } finally {
+    await h.cleanup()
+  }
+  const other = await setup()
+  try {
+    const manual = await other.server.launcher.start({ repo, number: 114, command: 'review-dependabot', args: ['114'], label: 'Review' })
+    const child = other.launch.children.at(-1)!
+    await child.result({
+      schema: 'pit-crew/review-result@1', command: 'review-dependabot', status: 'done', target: { repo, pr: 114 }, reviewed: { kind: 'commit', sha: head114 }, verdict: 'clean', recommendation: 'hold',
+      findings: [], ci: 'green', fixAttempts: 0, posted: { form: 'comment', url: `https://github.com/${repo}/pull/114#issuecomment-6` }, notPostedReason: null, report: '~/agents/output/PR-114.md', question: null, error: null,
+    })
+    child.exit(0)
+    await other.server.launcher.settled(manual.id)
+    const sweep = await scheduledSweep(other, [row114()])
+    assert.notEqual(other.server.cache.getSweep(sweep.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(other, 114), null)
+    assert.equal((await post(other, sweep.id, bodyOf('comment'))).status, 422)
+  } finally {
+    await other.cleanup()
+  }
+})
+
+// ---- a cache from before the marks and the posted heads ----
+
+// the cache as version 18 left it, with neither the marks nor the posted heads: what the runs and the sweeps recorded is all there is, and the server starts over it
+const toVersion18 = async (h: Harness): Promise<void> => {
+  await h.server.close()
+  const old = new DatabaseSync(h.options.cachePath)
+  old.exec('DROP TABLE IF EXISTS post_marks')
+  old.exec('DROP TABLE IF EXISTS posted_heads')
+  old.exec('UPDATE meta SET value = \'18\' WHERE key = \'schemaVersion\'')
+  old.close()
+  h.server = await startServer(h.options)
+  h.base = h.server.url
+  await (await fetch(`${h.base}/api/refresh`, { method: 'POST' })).json()
+  await h.server.poller.idle()
+}
+
+test('a version 18 sweep row whose post was begun and never recorded marks its PR in the migration, so a newer sweep offers nothing and a click on it is refused', async () => {
+  const h = await setup()
+  try {
+    const first = await scheduledSweep(h, [row114()])
+    // what version 18 wrote before a write that timed out: the row's own mark, and nothing else
+    h.server.sweepLauncher.markRowPost(first.id, 114, true)
+    await toVersion18(h)
+    const newer = await scheduledSweep(h, [row114()])
+    assert.notEqual(h.server.cache.getSweep(newer.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    const refused = await post(h, newer.id, bodyOf('comment'))
+    assert.equal(refused.status, 422, JSON.stringify(refused.body))
+    assert.match(String(refused.body.error), /may have landed/)
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a version 18 run whose post was begun and never recorded marks its PR in the migration, so a newer sweep offers nothing', async () => {
+  const h = await setup()
+  try {
+    const run = await storedRun(h)
+    h.server.launcher.markPost(run, true)
+    await toVersion18(h)
+    const newer = await scheduledSweep(h, [row114()])
+    assert.notEqual(h.server.cache.getSweep(newer.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    assert.equal((await post(h, newer.id, bodyOf('comment'))).status, 422)
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a version 18 post on record, from a sweep row or a run, is on record at its head after the migration: a newer sweep of that head offers nothing, and one of a new head does', async () => {
+  const behavior: Behavior = {}
+  const h = await setup(behavior)
+  try {
+    const first = await scheduledSweep(h, [row114()])
+    assert.equal((await post(h, first.id, bodyOf('comment'))).status, 200)
+    await toVersion18(h)
+    const same = await scheduledSweep(h, [row114()])
+    assert.notEqual(h.server.cache.getSweep(same.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    assert.equal((await post(h, same.id, bodyOf('comment'))).status, 422)
+    await moveHead(h, behavior, later)
+    const newer = await scheduledSweep(h, [row114({ head: later })], { 114: reportText(later) })
+    assert.equal((await offerOf(h, 114))?.sweepId, newer.id)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+  const other = await setup()
+  try {
+    const run = await storedRun(other)
+    assert.equal((await postRun(other, run, bodyOf('comment'))).status, 200)
+    await toVersion18(other)
+    const same = await scheduledSweep(other, [row114()])
+    assert.equal(await offerOf(other, 114), null)
+    assert.equal((await post(other, same.id, bodyOf('comment'))).status, 422)
+    assert.equal(postsOf(other.runner).length, 1)
+  } finally {
+    await other.cleanup()
+  }
+})
+
+// ---- the two marks, and the settings the last check reads ----
+
+test('a row mark that cannot be written stops the post and takes the PR\'s mark off again, so nothing is written and the button stays', async () => {
+  const h = await setup()
+  try {
+    const sweep = await scheduledSweep(h, [row114()])
+    h.server.cache.db.exec('CREATE TEMP TRIGGER no_row_mark BEFORE UPDATE OF post_attempts ON sweeps BEGIN SELECT RAISE(ABORT, \'disk I/O error\'); END')
+    const refused = await post(h, sweep.id, bodyOf('comment'))
+    assert.equal(refused.status, 422, JSON.stringify(refused.body))
+    assert.match(String(refused.body.error), /cannot record that #114 is being posted \(.*disk I\/O error\)/)
+    assert.deepEqual(postsOf(h.runner), [])
+    assert.equal(h.server.cache.unresolvedPostMarks(repo).has(114), false)
+    assert.deepEqual(h.server.cache.getSweep(sweep.id)?.postAttempts, {})
+    assert.equal((await offerOf(h, 114))?.sweepId, sweep.id)
+    h.server.cache.db.exec('DROP TRIGGER no_row_mark')
+    assert.equal((await post(h, sweep.id, bodyOf('comment'))).status, 200)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a crash between the PR\'s mark and the row\'s mark leaves the PR marked: after the restart no sweep offers it and a click is refused', async () => {
+  const h = await setup()
+  try {
+    const sweep = await scheduledSweep(h, [row114()])
+    // the PR's mark is written and the process ends before the row's mark
+    h.server.cache.beginPostMark(repo, 114, `sweep ${sweep.id}`)
+    await restart(h)
+    await (await fetch(`${h.base}/api/refresh`, { method: 'POST' })).json()
+    await h.server.poller.idle()
+    assert.deepEqual(h.server.cache.getSweep(sweep.id)?.postAttempts, {})
+    assert.equal(await offerOf(h, 114), null)
+    const refused = await post(h, sweep.id, bodyOf('comment'))
+    assert.equal(refused.status, 422, JSON.stringify(refused.body))
+    assert.match(String(refused.body.error), /may have landed/)
+    const newer = await scheduledSweep(h, [row114()])
+    assert.equal(await offerOf(h, 114), null)
+    assert.equal((await post(h, newer.id, bodyOf('comment'))).status, 422)
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('settings saved while the click\'s live read waits on GitHub are the ones its last check derives with: a reports folder that moved withdraws the offer, and nothing is written or marked', async () => {
+  const behavior: Behavior = {}
+  const h = await setup(behavior)
+  try {
+    const sweep = await scheduledSweep(h, [row114()])
+    let saved = false
+    behavior.onLive = async () => {
+      if (saved) return
+      saved = true
+      const headers = { 'Content-Type': 'application/json', Origin: h.base, 'X-Pit-View-Token': h.server.token }
+      const stored = await (await fetch(`${h.base}/api/config`, { headers })).json() as Record<string, unknown>
+      const put = await fetch(`${h.base}/api/config`, { method: 'PUT', headers, body: JSON.stringify({ ...stored, reportsDir: '~/agents/elsewhere' }) })
+      assert.equal(put.status, 200, await put.text())
+    }
+    const answer = await post(h, sweep.id, bodyOf('comment'))
+    assert.equal(saved, true)
+    assert.equal(answer.status, 422, JSON.stringify(answer.body))
+    assert.match(String(answer.body.error), /no stored report waiting to be posted on #114; nothing was posted/)
     assert.deepEqual(postsOf(h.runner), [])
     assert.equal(h.server.cache.unresolvedPostMarks(repo).has(114), false)
     assert.deepEqual(h.server.cache.getSweep(sweep.id)?.postAttempts, {})

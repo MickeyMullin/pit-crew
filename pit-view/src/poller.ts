@@ -275,7 +275,7 @@ export const createPoller = (options: PollerOptions): Poller => {
 
   // the sweeps as the page holds them, with the post button's offer of every open PR in the cache, rendered or not
   const sweepsNow = (settings: Config, queueing: Queueing): SweepsView => {
-    const offers = sweepOffersOf(settings, cache.readView(settings.repo).open.map((row) => row.pr), cache.sweepsFor(settings.repo), cache.runsByPr(settings.repo), cache.unresolvedPostMarks(settings.repo))
+    const offers = sweepOffersOf(settings, cache.readView(settings.repo).open.map((row) => row.pr), cache.sweepsFor(settings.repo), cache.runsByPr(settings.repo), cache.postRecords(settings.repo))
     return sweepsView(settings, sweeps, queueing, offers)
   }
 
@@ -283,8 +283,8 @@ export const createPoller = (options: PollerOptions): Poller => {
     const cached = cache.readView(settings.repo)
     const runs = cache.latestRuns(settings.repo)
     const history = cache.runsByPr(settings.repo)
-    // the PRs whose post from Pit View may have landed, which offer no report
-    const marks = cache.unresolvedPostMarks(settings.repo)
+    // what Pit View knows of each PR's posts: a post that may have landed offers no report of the PR, and a post on record offers none at its head
+    const posts = cache.postRecords(settings.repo)
     // derived on every read from the runs and the PRs as they are now, so nothing remembers which layers a stack run covered
     const cover = stackRunCover(runs.values(), cached.open.map((row) => row.pr))
     const freshness = new Map<number, Freshness>(cached.open.map((row) => [row.number, { state: row.freshness.state, fetchedAt: row.freshness.fetchedAt }]))
@@ -299,7 +299,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       reports: reportMap,
       freshness: (number) => freshness.get(number) ?? { state: 'current', fetchedAt: iso(clock.now()) },
       refresh: (number) => rowRefreshes.get(prKey(settings.repo, number)) ?? null,
-      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack, queueing, cover.get(pr.number), history.get(pr.number), marks.has(pr.number)),
+      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack, queueing, cover.get(pr.number), history.get(pr.number), posts.get(pr.number)),
     })
     const rows = new Map<number, OpenRow>()
     for (const group of [...view.mine.groups, ...view.others.groups]) {

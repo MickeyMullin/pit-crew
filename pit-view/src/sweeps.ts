@@ -1,9 +1,9 @@
 // src/sweeps.ts
-import type { Cache, Run, Sweep } from './cache.ts'
+import type { Cache, PostRecord, Run, Sweep } from './cache.ts'
 import type { Config, RunnerName, RunRunner } from './config.ts'
 import { ciStateOf, isMine, viewerReview } from './derive.ts'
 import type { RawOpenPr } from './github.ts'
-import { doneText, isFullSha, modelLabels, postArgs, recommendedFormOf, stepsOf } from './launcher.ts'
+import { doneText, isFullSha, modelLabels, noPosts, postArgs, postWithheld, recommendedFormOf, stepsOf } from './launcher.ts'
 import type { CiState, PostForm, Priority, Queueing, Recommendation, RunnerModels, StartRequest, StepSlot, SweepOffer, SweepResult } from './launcher.ts'
 import { prReportName } from './reports.ts'
 
@@ -200,16 +200,17 @@ const rewroteReport = (run: Run, sweep: Sweep, pr: RawOpenPr, config: Config): b
   return run.finishedAt === null || !(Date.parse(run.finishedAt) <= started)
 }
 
-// the stored report a sweep row offers to post, and the sweep that has the say over the PR (section 10 of DESIGN.md, Posting). sweeps holds the repo's sweeps newest first; runs holds the PR's own runs. A sweep queued, running, or waiting for an answer has the say and offers nothing, since its reviewer may write the PR's report again; otherwise the newest settled sweep with a row for the PR has it, and every older sweep is passed over. That sweep offers the row only when the scheduler started it with --no-post and it finished done saying so, on someone else's open PR, for a row that posted nothing, whose report is the PR's own file and was recorded with its hash and verdict when the sweep settled, with no post begun from it, no post begun on the PR whose outcome is not known (marked), no decided review of the head by the viewer, and no review of the PR that may have written the report since. Like a single run's stored report it stays on offer after the head has moved, and the confirmation says so. A hermes sweep offers nothing, since its reports are never cleared of keys. The drawer's buttons and the server's check at click time both come from this one function
-export const sweepOfferOf = (pr: RawOpenPr, config: Config, sweeps: readonly Sweep[], runs: readonly Run[] = [], marked = false): { sweepId: number | null, offer: SweepOffer | null } => {
+// the stored report a sweep row offers to post, and the sweep that has the say over the PR (section 10 of DESIGN.md, Posting). sweeps holds the repo's sweeps newest first; runs holds the PR's own runs. A sweep queued, running, or waiting for an answer has the say and offers nothing, since its reviewer may write the PR's report again; otherwise the newest settled sweep with a row for the PR has it, and every older sweep is passed over. That sweep offers the row only when the scheduler started it with --no-post and it finished done saying so, on someone else's open PR, for a row that posted nothing, whose report is the PR's own file and was recorded with its hash and verdict when the sweep settled, with no post begun from it, no post begun on the PR whose outcome is not known and none on record at the head the row reviewed or at the PR's head now (posts, section 10, One post per PR and head), no decided review of the head by the viewer, and no review of the PR that may have written the report since. Like a single run's stored report it stays on offer after the head has moved, and the confirmation says so. A hermes sweep offers nothing, since its reports are never cleared of keys. The drawer's buttons and the server's check at click time both come from this one function
+export const sweepOfferOf = (pr: RawOpenPr, config: Config, sweeps: readonly Sweep[], runs: readonly Run[] = [], posts: PostRecord = noPosts): { sweepId: number | null, offer: SweepOffer | null } => {
   for (const sweep of sweeps) {
     if (sweep.repo !== config.repo) continue
     if (inFlight(sweep.status)) return { sweepId: null, offer: null }
     const parsed = sweepResultOf(sweep)
     const row = parsed === null ? undefined : sweepSummary(parsed).rows.find((entry) => entry.number === pr.number)
     if (parsed === null || row === undefined) continue
-    // a post begun on the PR from any sweep, run, or Post it whose outcome is not known may have landed, so no row of it is offered
-    return { sweepId: sweep.id, offer: marked ? null : rowOffer(pr, config, sweep, parsed, row, runs) }
+    // a post begun on the PR from any sweep, run, or Post it whose outcome is not known may have landed, so no row of it is offered, and a post on record at either head is the one post that head gets
+    const offer = posts.unknown ? null : rowOffer(pr, config, sweep, parsed, row, runs)
+    return { sweepId: sweep.id, offer: offer === null || postWithheld(posts, offer.reviewedSha, offer.headSha) ? null : offer }
   }
   return { sweepId: null, offer: null }
 }
@@ -292,12 +293,12 @@ export const sweepsView = (config: Config, memory: SweepMemory, queueing: Queuei
   return { start: sweepStartOf(config, items.some((sweep) => sweep.status === 'running' || sweep.status === 'queued'), queueing?.review ?? false), items, offers }
 }
 
-// the offer of every open PR of the repository that one of its sweeps has a row for, by sweepOfferOf, in PR number order: prs holds every open PR the cache has, hidden ones included, runs each PR's runs newest first, and marked the PRs whose post from Pit View may have landed
-export const sweepOffersOf = (config: Config, prs: readonly RawOpenPr[], sweeps: readonly Sweep[], runs: ReadonlyMap<number, readonly Run[]>, marked: ReadonlySet<number>): SweepOffer[] => {
+// the offer of every open PR of the repository that one of its sweeps has a row for, by sweepOfferOf, in PR number order: prs holds every open PR the cache has, hidden ones included, runs each PR's runs newest first, and posts what Pit View knows of each PR's posts
+export const sweepOffersOf = (config: Config, prs: readonly RawOpenPr[], sweeps: readonly Sweep[], runs: ReadonlyMap<number, readonly Run[]>, posts: ReadonlyMap<number, PostRecord>): SweepOffer[] => {
   const named = new Set(sweeps.flatMap((sweep) => {
     const parsed = sweep.repo === config.repo ? sweepResultOf(sweep) : null
     return parsed === null ? [] : sweepSummary(parsed).rows.map((row) => row.number)
   }))
   return prs.filter((pr) => named.has(pr.number)).sort((a, b) => a.number - b.number)
-    .flatMap((pr) => sweepOfferOf(pr, config, sweeps, runs.get(pr.number), marked.has(pr.number)).offer ?? [])
+    .flatMap((pr) => sweepOfferOf(pr, config, sweeps, runs.get(pr.number), posts.get(pr.number)).offer ?? [])
 }

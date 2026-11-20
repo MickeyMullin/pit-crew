@@ -12,8 +12,11 @@ import type { ReportVerdict } from './reports.ts'
 // why a run was queued (section 10 of DESIGN.md, What qualifies)
 export type QueueReason = 'requested' | 'new' | 'pushed' | 'selfReview' | 'dependabot'
 
-// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table. Version 12 added the database id of the latest reviews to the open-PR query, which the Changes requested links read, so the GitHub tables are rebuilt again. Version 13 added GitHub's stack marker (stack and stackEntry) to the open-PR query, which the stack chip, the Review stack start, and the stack report lookup read in place of the base-branch guess, so the GitHub tables are rebuilt again. Version 14 added the ticks table and auto-review's columns on runs and sweeps (origin, tick, reason, queued_at, posting, and worktree on both, and head_oid on runs), changing no GitHub table; a row from before it reads as a manual run. Version 15 added runs.extra_instructions, the extra review instructions a run used and where they came from, and changed no GitHub table; a row from before it reads as having none. Version 16 added the workflow run's identity (databaseId, createdAt, and runAttempt, and the workflow's databaseId) to the check runs of the open-PR query, which the CI readings use to drop a superseded run, so the GitHub tables are rebuilt again. Version 17 added runs.models, the roles and models a run used, and changed no GitHub table; a row from before it reads as not recorded. Version 18 added sweeps.row_reports and sweeps.post_attempts, for the post button on a sweep's rows, and changed no GitHub table; a sweep from before it reads as having no row's report recorded and no post begun, so none of its rows is offered. Version 19 added the post_marks table, one mark per PR for a post from Pit View that was begun and whose outcome is not known, and changed no GitHub table; a cache from before it has no marks
-export const schemaVersion = 19
+// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table. Version 12 added the database id of the latest reviews to the open-PR query, which the Changes requested links read, so the GitHub tables are rebuilt again. Version 13 added GitHub's stack marker (stack and stackEntry) to the open-PR query, which the stack chip, the Review stack start, and the stack report lookup read in place of the base-branch guess, so the GitHub tables are rebuilt again. Version 14 added the ticks table and auto-review's columns on runs and sweeps (origin, tick, reason, queued_at, posting, and worktree on both, and head_oid on runs), changing no GitHub table; a row from before it reads as a manual run. Version 15 added runs.extra_instructions, the extra review instructions a run used and where they came from, and changed no GitHub table; a row from before it reads as having none. Version 16 added the workflow run's identity (databaseId, createdAt, and runAttempt, and the workflow's databaseId) to the check runs of the open-PR query, which the CI readings use to drop a superseded run, so the GitHub tables are rebuilt again. Version 17 added runs.models, the roles and models a run used, and changed no GitHub table; a row from before it reads as not recorded. Version 18 added sweeps.row_reports and sweeps.post_attempts, for the post button on a sweep's rows, and changed no GitHub table; a sweep from before it reads as having no row's report recorded and no post begun, so none of its rows is offered. Version 19 added the post_marks table, one mark per PR for a post from Pit View that was begun and whose outcome is not known, and changed no GitHub table. Version 20 added the posted_heads table, every head of a PR that a post is on record at, and changed no GitHub table; a cache from before it has its runs' and sweeps' posts carried forward: a post begun and never recorded marks its PR, and a post on record is on record at its head
+export const schemaVersion = 20
+
+// the version that added posted_heads, from before which the migration carries the runs' and sweeps' posts forward
+const postedHeadsVersion = 20
 
 // the last version that changed what the GitHub tables hold; a cache at this version or later keeps them through a bump, since a bump after it only adds tables
 export const githubTablesVersion = 16
@@ -158,7 +161,10 @@ export type NewRun = Omit<Run, 'id' | 'dir' | 'steps' | 'resolvedByHand' | 'firs
 export type NewSweep = Omit<Sweep, 'id' | 'dir' | 'steps' | 'rowReports' | 'postAttempts' | AutoFields> & Partial<Pick<Sweep, AutoFields>>
 export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>> & { resolvedByHand?: boolean, firstNote?: string | null, reportHash?: string | null, postAttemptedAt?: string | null, headOid?: string | null, extraInstructions?: ExtraInstructions | null, models?: RunModels | null }
 // a sweep's changes: a run's, without the columns only runs have, plus the sweep's own
-export type SweepChanges = RunChanges & { rowReports?: Record<string, SweepRowReport> | null, postAttempts?: Record<string, string> }
+// what Pit View knows of the posts on one PR (section 10 of DESIGN.md, Posting, One post per PR and head): unknown is a post begun whose outcome is not known, which withholds the PR at every head, and heads holds every head, in lowercase, that a post is on record at, each withheld from every later offer
+export type PostRecord = { unknown: boolean, heads: ReadonlySet<string> }
+
+export type SweepChanges = RunChanges &{ rowReports?: Record<string, SweepRowReport> | null, postAttempts?: Record<string, string> }
 
 // one scheduler tick (section 10 of DESIGN.md, Recording). state and finishedAt are null while it runs; interrupted is a tick the server stopped under or that failed on its own, and the rest are the spec's reasons to skip
 export type TickState = 'ran' | 'skipped'
@@ -242,8 +248,10 @@ export type Cache = {
   unresolvedPostMarks: (repo: string) => Set<number>
   // marks a post begun, before gh writes; throws while the PR already has an unresolved mark. source names what posts it ("run 5", "sweep 3")
   beginPostMark: (repo: string, number: number, source: string) => void
-  // the post is on record, so the mark no longer withholds anything
-  resolvePostMark: (repo: string, number: number) => void
+  // the post is on record, so the mark no longer withholds the PR at every head, and the post is on record at each of heads: the head it went onto and the commit its report reviewed
+  resolvePostMark: (repo: string, number: number, heads?: readonly string[]) => void
+  // what Pit View knows of the posts on each PR of a repo that has any (section 10 of DESIGN.md, Posting, One post per PR and head)
+  postRecords: (repo: string) => Map<number, PostRecord>
   // GitHub refused the post, so nothing landed
   clearPostMark: (repo: string, number: number) => void
   close: () => void
@@ -292,6 +300,42 @@ const sweepsSchema = [
 const postMarksSchema = [
   'CREATE TABLE IF NOT EXISTS post_marks (repo TEXT NOT NULL, number INTEGER NOT NULL, attempted_at TEXT NOT NULL, source TEXT NOT NULL, resolved_at TEXT, PRIMARY KEY (repo, number))',
 ]
+
+// kept across rebuilds like runs (version 20), and never pruned: one row per head of a PR that a post is on record at, whoever made it (a review or a sweep that posted, Post it, or either post button), so no later run or sweep offers that head again once the run or sweep that posted is pruned. The first record of a head is kept
+const postedHeadsSchema = [
+  'CREATE TABLE IF NOT EXISTS posted_heads (repo TEXT NOT NULL, number INTEGER NOT NULL, head TEXT NOT NULL, source TEXT NOT NULL, posted_at TEXT NOT NULL, PRIMARY KEY (repo, number, head))',
+]
+
+const fullSha = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
+
+// a run's result as the posted heads read it: defensively, since a record from an older version may lack a field
+type LooseReview = { schema?: unknown, posted?: unknown, target?: { pr?: unknown } | null, reviewed?: { sha?: unknown } | null } | null
+
+// whether a run's result is a review that names its post; any other result, or none, names no post
+const reviewPosted = (result: Run['result']): boolean => {
+  const review = result as LooseReview
+  return review?.schema === 'pit-crew/review-result@1' && typeof review.posted === 'object' && review.posted !== null
+}
+
+// the heads a run's record says its review posted at: a review whose result names the run's own PR, the full commit it read, and a post. A run with no such result, a stack review among them, names none
+const runPostedHeads = (run: Pick<Run, 'number' | 'result'>): string[] => {
+  const review = run.result as LooseReview
+  if (!reviewPosted(run.result) || review?.target?.pr !== run.number) return []
+  const sha = review.reviewed?.sha
+  return fullSha(sha) ? [sha] : []
+}
+
+// the PRs a sweep's result has a row for, each with its head when it is a full SHA and whether the row says it posted. Each row is read defensively, as the page reads it
+const sweepRowPosts = (sweep: Pick<Sweep, 'result'>): { number: number, head: string | null, posted: boolean }[] => {
+  const result = sweep.result as { schema?: unknown, rows?: unknown } | null
+  if (result?.schema !== 'pit-crew/sweep-result@1' || !Array.isArray(result.rows)) return []
+  return result.rows.flatMap((row: unknown) => {
+    if (typeof row !== 'object' || row === null) return []
+    const { number, head, posted } = row as Record<string, unknown>
+    if (typeof number !== 'number' || !Number.isInteger(number)) return []
+    return [{ number, head: fullSha(head) ? head : null, posted: typeof posted === 'object' && posted !== null }]
+  })
+}
 
 // kept across rebuilds like runs (version 14); AUTOINCREMENT so a pruned id is never reused by the rows that name it
 const ticksSchema = [
@@ -532,6 +576,41 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     })
   }
 
+  // a post on record at a head of a PR, by what made it; the first record of a head is kept
+  const notePosted = (repo: string, number: number, head: string, source: string, at: string): void => {
+    run('INSERT INTO posted_heads (repo, number, head, source, posted_at) VALUES ($repo, $number, $head, $source, $at) ON CONFLICT (repo, number, head) DO NOTHING', { repo, number, head: head.toLowerCase(), source, at })
+  }
+
+  // what a run's or a sweep's record says it posted goes on record at its head whenever its result is written, so it outlives the run or the sweep: a review or a sweep that posted itself, and a post from Pit View once it is recorded on the run or the row
+  const notePostsOfRun = (found: Run): void => {
+    for (const head of runPostedHeads(found)) notePosted(found.repo, found.number, head, `run ${found.id}`, found.finishedAt ?? now())
+  }
+  const notePostsOfSweep = (found: Sweep): void => {
+    for (const row of sweepRowPosts(found)) {
+      if (row.posted && row.head !== null) notePosted(found.repo, row.number, row.head, `sweep ${found.id}`, found.finishedAt ?? now())
+    }
+  }
+
+  // the migration to version 20: before it, the only record of a post begun from Pit View was on its run (post_attempted_at) or its sweep row (post_attempts), and the only record of a post was the run's or the row's own. A post begun and never recorded may have landed, so it marks its PR as of unknown outcome, which withholds the PR at every head: an unresolved mark the PR already has is kept, and a resolved one is made unresolved again. A post on record is on record at the head its run reviewed or its row names, where that is a full SHA. The head a post from Pit View went onto, when it was not the reviewed one, was never recorded, so only the reviewed head is known
+  const carryPostsForward = (): void => {
+    const markUnknown = (repo: string, number: number, source: string, at: string): void => {
+      run('INSERT INTO post_marks (repo, number, attempted_at, source, resolved_at) VALUES ($repo, $number, $at, $source, NULL) ON CONFLICT (repo, number) DO UPDATE SET attempted_at = excluded.attempted_at, source = excluded.source, resolved_at = NULL WHERE post_marks.resolved_at IS NOT NULL', { repo, number, at, source })
+    }
+    for (const found of all('SELECT * FROM runs ORDER BY id').map(toRun)) {
+      notePostsOfRun(found)
+      // only a post the result names counts as recorded; anything else leaves the begun post's outcome unknown
+      if (found.postAttemptedAt !== null && !reviewPosted(found.result)) markUnknown(found.repo, found.number, `run ${found.id}`, found.postAttemptedAt)
+    }
+    for (const found of all('SELECT * FROM sweeps ORDER BY id').map(toSweep)) {
+      notePostsOfSweep(found)
+      const rows = sweepRowPosts(found)
+      for (const [key, at] of Object.entries(found.postAttempts)) {
+        const number = Number(key)
+        if (Number.isInteger(number) && !rows.some((row) => row.number === number && row.posted)) markUnknown(found.repo, number, `sweep ${found.id}`, at)
+      }
+    }
+  }
+
   const migrate = (): void => {
     const hasMeta = get('SELECT 1 AS found FROM sqlite_master WHERE type = \'table\' AND name = \'meta\'') !== undefined
     const stored = hasMeta ? getMeta<number>('schemaVersion') : null
@@ -572,6 +651,9 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       for (const statement of ticksSchema) db.exec(statement)
       // version 19 added post_marks
       for (const statement of postMarksSchema) db.exec(statement)
+      // version 20 added posted_heads; a cache from before it carries forward what its runs and sweeps recorded of their posts
+      for (const statement of postedHeadsSchema) db.exec(statement)
+      if (stored === null || stored < postedHeadsVersion) carryPostsForward()
       setMeta('schemaVersion', schemaVersion)
     })
   }
@@ -876,7 +958,9 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       })
       if (run(`UPDATE runs SET ${sets.join(', ')} WHERE id = $id`, params) === 0) throw new CacheError(`run ${id} does not exist`)
     }
-    return mustRun(id)
+    const updated = mustRun(id)
+    if (changes.result !== undefined) notePostsOfRun(updated)
+    return updated
   }
 
   const runsFor = (repo: string, number: number, limit = keepRuns): Run[] =>
@@ -939,7 +1023,9 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       })
       if (run(`UPDATE sweeps SET ${sets.join(', ')} WHERE id = $id`, params) === 0) throw new CacheError(`sweep ${id} does not exist`)
     }
-    return mustSweep(id)
+    const updated = mustSweep(id)
+    if (changes.result !== undefined) notePostsOfSweep(updated)
+    return updated
   }
 
   const sweepsFor = (repo: string, limit = keepSweeps): Sweep[] =>
@@ -999,8 +1085,25 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     run('INSERT INTO post_marks (repo, number, attempted_at, source, resolved_at) VALUES ($repo, $number, $at, $source, NULL) ON CONFLICT (repo, number) DO UPDATE SET attempted_at = excluded.attempted_at, source = excluded.source, resolved_at = NULL', { repo, number, at: now(), source })
   })
 
-  const resolvePostMark = (repo: string, number: number): void => {
-    run('UPDATE post_marks SET resolved_at = $at WHERE repo = $repo AND number = $number', { repo, number, at: now() })
+  const resolvePostMark = (repo: string, number: number, heads: readonly string[] = []): void => transaction(() => {
+    const at = now()
+    const source = get('SELECT source FROM post_marks WHERE repo = $repo AND number = $number', { repo, number })
+    for (const head of heads) {
+      if (fullSha(head)) notePosted(repo, number, head, source === undefined ? 'Pit View' : str(source, 'source'), at)
+    }
+    run('UPDATE post_marks SET resolved_at = $at WHERE repo = $repo AND number = $number', { repo, number, at })
+  })
+
+  const postRecords = (repo: string): Map<number, PostRecord> => {
+    const records = new Map<number, { unknown: boolean, heads: Set<string> }>()
+    const recordOf = (number: number): { unknown: boolean, heads: Set<string> } => {
+      const found = records.get(number) ?? { unknown: false, heads: new Set<string>() }
+      records.set(number, found)
+      return found
+    }
+    for (const row of all('SELECT number FROM post_marks WHERE repo = $repo AND resolved_at IS NULL', { repo })) recordOf(int(row, 'number')).unknown = true
+    for (const row of all('SELECT number, head FROM posted_heads WHERE repo = $repo', { repo })) recordOf(int(row, 'number')).heads.add(str(row, 'head'))
+    return records
   }
 
   const clearPostMark = (repo: string, number: number): void => {
@@ -1049,6 +1152,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     unresolvedPostMarks,
     beginPostMark,
     resolvePostMark,
+    postRecords,
     clearPostMark,
     close: () => db.close(),
     db,

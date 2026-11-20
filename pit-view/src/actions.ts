@@ -230,6 +230,8 @@ const readTimedOutMessage = 'GitHub did not answer in time; nothing was posted'
 
 // the refusal for a PR whose earlier post from Pit View may have landed, whichever run or sweep began it
 const markedText = (number: number): string => `a post on #${number} was begun earlier and may have landed; nothing was posted. Check #${number} on GitHub`
+// the refusal for a head of a PR that a post is already on record at, whichever review, sweep, or button made it
+const postedText = (number: number, head: string): string => `a post on #${number} at ${head.slice(0, 7)} is already on record, and each head of a PR is posted on once; nothing was posted. A review of a newer commit can be posted`
 const writeTimedOutMessage = 'The post to GitHub timed out and may or may not have gone through. Check the pull request before posting again.'
 
 export type ActionsOptions = {
@@ -415,8 +417,8 @@ export const createActions = (options: ActionsOptions): Actions => {
     reviewedAt: string
     // the hash recorded when the run or sweep finished
     hash: string | null
-    // the offer derived again from the cache, which throws when it is gone
-    again: () => { offer: { report: string }, reviewedAt: string }
+    // the offer derived again from the cache and the settings as they are then, which throws when it is gone
+    again: () => { offer: { report: string, reportPath: string }, reviewedAt: string }
     mark: (posting: boolean) => void
     record: (posted: Posted) => R
   }
@@ -463,8 +465,8 @@ export const createActions = (options: ActionsOptions): Actions => {
         if (reviewedHead(reviews, viewer, headSha)) throw new ActionError('notAllowed', `you have already reviewed this commit of #${number}; nothing was posted`)
         // the offer derived once more from the cache as it is now, with nothing awaited between this reading and the mark below: a run that got in by a path the hold does not cover is seen here, and the hold refuses every run after it
         const again = posting.again()
-        if (again.offer.report !== offer.report || again.reviewedAt !== reviewedAt) throw new ActionError('stale', 'This report is no longer the one offered for this PR; nothing was posted. Reload the PR to see its current state')
-        // the last step before the write, so a restart can never offer a post that may have landed: the PR's own mark, which every later run, sweep, and Post it honors, then the mark of the run or sweep row that posts
+        if (again.offer.report !== offer.report || again.offer.reportPath !== offer.reportPath || again.reviewedAt !== reviewedAt) throw new ActionError('stale', 'This report is no longer the one offered for this PR; nothing was posted. Reload the PR to see its current state')
+        // the last step before the write, so a restart can never offer a post that may have landed: the PR's own mark, which every later run, sweep, and Post it honors, then the mark of the run or sweep row that posts. When the second cannot be written the first is deleted again, so nothing is marked and nothing is posted; a server stopped between the two leaves the PR's mark alone, which withholds the PR at every head as any unresolved mark does
         try {
           cache.beginPostMark(repo, number, source)
         } catch (error) {
@@ -529,8 +531,8 @@ export const createActions = (options: ActionsOptions): Actions => {
       let recorded: R | null = null
       try {
         recorded = posting.record(posted)
-        // the outcome is known now; a mark whose post could not be recorded stays unresolved, so nothing offers the PR again
-        cache.resolvePostMark(repo, number)
+        // the outcome is known now, and the post is on record at the head it went onto and at the commit its report reviewed, so neither is offered again; a mark whose post could not be recorded stays unresolved, so nothing offers the PR again at any head
+        cache.resolvePostMark(repo, number, [headSha, reviewedAt])
       } catch (error) {
         log(`PR #${number}: the post of ${source} landed but could not be recorded: ${messageOf(error)}`)
       }
@@ -540,6 +542,20 @@ export const createActions = (options: ActionsOptions): Actions => {
       inFlight.delete(key)
       release()
     }
+  }
+
+  // the settings as they are at this moment, for each derivation of a post's offer: a save while the click waits on GitHub is what the last check before the mark judges by, and a save that changed the repository or the viewer refuses the post
+  const settingsFor = (repo: string, viewer: string): Config => {
+    const settings = options.config()
+    if (settings.repo !== repo) throw new ActionError('stale', `the repository is now ${settings.repo}, not ${repo}; nothing was posted`)
+    if (!sameLogin(settings.viewer, viewer)) throw new ActionError('stale', `the viewer is now ${settings.viewer || 'nobody'}, not ${viewer}; nothing was posted`)
+    return settings
+  }
+
+  // the first of these heads that a post on the PR is on record at, or null (section 10 of DESIGN.md, Posting, One post per PR and head)
+  const postedHead = (repo: string, number: number, heads: readonly (string | undefined)[]): string | null => {
+    const record = cache.postRecords(repo).get(number)
+    return heads.find((head): head is string => head !== undefined && record?.heads.has(head.toLowerCase()) === true) ?? null
   }
 
   const post = async (id: number, body: unknown): Promise<PostResult> => {
@@ -554,11 +570,12 @@ export const createActions = (options: ActionsOptions): Actions => {
     if (run.repo !== repo || run.number !== number) throw new ActionError('stale', `run ${id} is not a run of #${number} in ${repo}; the confirmation was for #${number}, so nothing was posted`)
     // the offer as the cache has it at this moment, derived the way the drawer derives it: from the PR's latest run and the stack run that covers it. The requested run must be the run that offer is about (the PR's latest run, or for a stored report the earlier run it falls back to), so a run another has superseded, or a stack run now covers, posts nothing, whatever report is still on disk. Everything here is synchronous, so what it answers is true until the caller next awaits
     const current = (): ReturnType<typeof currentOffers> => {
+      const settings = settingsFor(repo, viewer)
       const cached = cache.readView(repo)
       const row = cached.open.find((entry) => entry.number === number)
       if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched; nothing was posted`)
       const latest = cache.latestRuns(repo)
-      const offers = currentOffers(row.pr, config, latest.get(number), stackRunCover(latest.values(), cached.open.map((entry) => entry.pr)).get(number), cache.runsByPr(repo).get(number), cache.unresolvedPostMarks(repo).has(number))
+      const offers = currentOffers(row.pr, settings, latest.get(number), stackRunCover(latest.values(), cached.open.map((entry) => entry.pr)).get(number), cache.runsByPr(repo).get(number), cache.postRecords(repo).get(number))
       // a stored report's click names the run that report is from, which is an earlier run when the latest has no result of its own; a Post it click names the run the cell is about
       const offered = request.reviewedSha === undefined ? offers.runId : offers.storedOffer?.runId ?? offers.runId
       if (offered !== id) throw new ActionError('stale', 'This report is no longer the latest for this PR; nothing was posted. Reload the PR to see its current state')
@@ -590,6 +607,8 @@ export const createActions = (options: ActionsOptions): Actions => {
     if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
     if (run.postAttemptedAt !== null) throw new ActionError('notAllowed', `run ${id} has already begun its post, which may have landed; nothing was posted. Check #${number} on GitHub`)
     if (cache.unresolvedPostMarks(repo).has(number)) throw new ActionError('notAllowed', markedText(number))
+    const onRecord = postedHead(repo, number, [headSha, request.reviewedSha])
+    if (onRecord !== null) throw new ActionError('notAllowed', postedText(number, onRecord))
     const { offer, reviewedAt } = offeredBy(offers)
     return deliver({
       config, request, source: `run ${id}`, noun: 'run', button: 'Post it', offer, reviewedAt, hash: run.reportHash,
@@ -611,9 +630,10 @@ export const createActions = (options: ActionsOptions): Actions => {
     if (sweep.repo !== repo) throw new ActionError('stale', `sweep ${id} is not a sweep of ${repo}; the confirmation was for ${repo}, so nothing was posted`)
     // the row's offer as the cache has it at this moment, derived by the function the drawer's buttons come from: the requested sweep must be the one that has the say over the PR, so an older sweep's row, or any row while a sweep is in flight, posts nothing, whatever report is still on disk. Everything here is synchronous, so what it answers is true until the caller next awaits
     const current = (): SweepOffer | null => {
+      const settings = settingsFor(repo, viewer)
       const row = cache.readView(repo).open.find((entry) => entry.number === number)
       if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched; nothing was posted`)
-      const derived = sweepOfferOf(row.pr, config, cache.sweepsFor(repo), cache.runsByPr(repo).get(number), cache.unresolvedPostMarks(repo).has(number))
+      const derived = sweepOfferOf(row.pr, settings, cache.sweepsFor(repo), cache.runsByPr(repo).get(number), cache.postRecords(repo).get(number))
       if (derived.sweepId !== id) throw new ActionError('stale', 'This report is no longer the latest for this PR; nothing was posted. Reload the PR to see its current state')
       if (headSha !== row.pr.headRefOid.toLowerCase()) {
         refresh(repo, number)
@@ -632,6 +652,8 @@ export const createActions = (options: ActionsOptions): Actions => {
     if (inFlight.has(`${repo}#${number}`)) throw new ActionError('busy', `an action on #${number} is already in progress`)
     if (sweep.postAttempts[number] !== undefined) throw new ActionError('notAllowed', `sweep ${id} has already begun its post on #${number}, which may have landed; nothing was posted. Check #${number} on GitHub`)
     if (cache.unresolvedPostMarks(repo).has(number)) throw new ActionError('notAllowed', markedText(number))
+    const onRecord = postedHead(repo, number, [headSha, request.reviewedSha])
+    if (onRecord !== null) throw new ActionError('notAllowed', postedText(number, onRecord))
     const { offer, reviewedAt } = offeredBy(derived)
     return deliver({
       config, request, source: `sweep ${id}`, noun: 'sweep', button: 'the post button', offer, reviewedAt, hash: sweep.rowReports?.[number]?.hash ?? null,

@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { closeSync, constants, openSync, watch as watchDir } from 'node:fs'
 import { chmod, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, join, resolve, sep } from 'node:path'
-import type { Cache, NewRun, NewSweep, Origin, QueueReason, Run, RunChanges, RunStatus, Session, Sweep, SweepChanges, SweepRowReport } from './cache.ts'
+import type { Cache, NewRun, NewSweep, Origin, PostRecord, QueueReason, Run, RunChanges, RunStatus, Session, Sweep, SweepChanges, SweepRowReport } from './cache.ts'
 import { defaultHermesProfile, expandHome, normalizeExtraInstructions, tildePath } from './config.ts'
 import type { AgentSettings, Clock, Config, ExtraInstructions, RunnerName, RunRunner } from './config.ts'
 import { ciStateOf, hasStandingChangeRequest, isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
@@ -1265,18 +1265,26 @@ const fallbackStoredOffer = (pr: RawOpenPr, config: Config, run: Run, history: r
 }
 
 // the post offers a PR has now, from the run its cell is about and, for the stored report, from the newest earlier run that finished with a result when that run has none of its own. history holds the PR's runs, newest first. The drawer's offers and the server's check at post time both come from this one function, so a click is judged by the same derivation that showed the button: a run that is no longer the PR's latest, or that a stack run now covers, offers nothing unless its stored report is the one the latest run has fallen back to. runId is the run the cell is about; a stored offer carries the id of its own run
-// marked is whether the PR has a post begun from Pit View whose outcome is not known (section 10, Posting, How it posts): it may have landed, so no report of the PR is offered, whatever run or sweep would have offered it
-export const currentOffers = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, cover: Run | undefined, history: readonly Run[] = [], marked = false): { runId: number | null, postOffer: PostOffer | null, storedOffer: StoredOffer | null } => {
+// a PR with no post begun and none on record
+export const noPosts: PostRecord = { unknown: false, heads: new Set() }
+
+// whether what Pit View knows of a PR's posts withholds an offer about these heads, the commit its report reviewed and the PR's head now (section 10, Posting, One post per PR and head): a post begun whose outcome is not known withholds the PR at every head, and a post on record withholds the head it is on record at
+export const postWithheld = (posts: PostRecord, ...heads: string[]): boolean => posts.unknown || heads.some((head) => posts.heads.has(head.toLowerCase()))
+
+// posts is what Pit View knows of the PR's posts (section 10, Posting, One post per PR and head): a post begun whose outcome is not known may have landed, so no report of the PR is offered, whatever run or sweep would have offered it, and a post on record at the head a report reviewed or at the PR's head now withholds that report's offer
+export const currentOffers = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, cover: Run | undefined, history: readonly Run[] = [], posts: PostRecord = noPosts): { runId: number | null, postOffer: PostOffer | null, storedOffer: StoredOffer | null } => {
   const { run, covered } = cellRunOf(ownRun, cover)
-  if (marked) return { runId: run?.id ?? null, postOffer: null, storedOffer: null }
+  if (posts.unknown) return { runId: run?.id ?? null, postOffer: null, storedOffer: null }
+  const blocked = postOffer(pr, config, run)
+  const stored = storedOffer(pr, config, run) ?? (run === undefined || covered ? null : fallbackStoredOffer(pr, config, run, history))
   return {
     runId: run?.id ?? null,
-    postOffer: postOffer(pr, config, run),
-    storedOffer: storedOffer(pr, config, run) ?? (run === undefined || covered ? null : fallbackStoredOffer(pr, config, run, history)),
+    postOffer: blocked === null || postWithheld(posts, blocked.headSha) ? null : blocked,
+    storedOffer: stored === null || postWithheld(posts, stored.reviewedSha, stored.headSha) ? null : stored,
   }
 }
 
-export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null, cover: Run | undefined = undefined, history: readonly Run[] = [], marked = false): AgentCell => {
+export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null, cover: Run | undefined = undefined, history: readonly Run[] = [], posts: PostRecord = noPosts): AgentCell => {
   const mine = isMine(pr, config)
   const plan = defaultRun(pr, config)
   // the button's text; the run's own label is unchanged
@@ -1292,7 +1300,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
   }
   const { run, covered } = cellRunOf(ownRun, cover)
   if (run === undefined) return idle
-  const offers = currentOffers(pr, config, ownRun, cover, history, marked)
+  const offers = currentOffers(pr, config, ownRun, cover, history, posts)
   const shas = standingShas(run)
   const head = pr.headRefOid.toLowerCase()
   let state: AgentCell['state'] = 'done'
@@ -2805,7 +2813,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         entry.steps = foldSteps(entry.steps, events)
         // a note or time that moved on an unchanged step still changes the row
         if (JSON.stringify(entry.steps) !== JSON.stringify(run.steps)) changes.steps = entry.steps
-        // the review step covers every reviewer's return, so its end is when each row's report is its reviewer's. Seen first while settling, it is seen too late to tell
+        // the review step covers every reviewer's return, so its end is the earliest point at which each row's report can be held as its reviewer left it; that is all the snapshot shows, since nothing names the hash a reviewer returned. Seen first while settling, it is seen too late to tell
         if (store.schema !== null && entry.reviewed === null && !entry.settling && entry.child !== null && recordsRowReports(entry.row) && entry.steps.some((slot) => slot.step === 'review' && slot.state === 'done')) {
           entry.reviewed = await reportsSnapshot()
         }
@@ -2990,7 +2998,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return undefined
   }
 
-  // the report each row of a scheduled --no-post sweep left unposted, recorded by its hash and verdict, so the row's post button can tell it from what anyone else wrote to the same name (section 8, Sweeps, Settling). A report counts as its reviewer's only when this server saw the sweep's review step end, held the report as it stood then, and finds it unchanged, by modification time, size, and hash, when the sweep settles; a reused row's report counts only when it is also the one an earlier sweep recorded for the same head. A sweep settled in recovery, or watched again after a restart, was not watched all along, so it records none. Only a row whose report is the PR's own file in the reports folder is read, and every other sweep records none: one started by hand or allowed to post has no post button, and a hermes sweep's reports are never cleared of keys
+  // the report each row of a scheduled --no-post sweep left unposted, recorded by its hash and verdict, so the row's post button can tell it from what anyone writes to the same name later (section 8, Sweeps, Settling, which says what this cannot prove). A report is recorded only when this server saw the sweep's review step end, held the report as it stood then, and finds it unchanged, by modification time, size, and hash, when the sweep settles; a reused row's report counts only when it is also the one an earlier sweep recorded for the same head. A sweep settled in recovery, or watched again after a restart, was not watched all along, so it records none. Only a row whose report is the PR's own file in the reports folder is read, and every other sweep records none: one started by hand or allowed to post has no post button, and a hermes sweep's reports are never cleared of keys
   const sweepRowReports = async (value: SweepResult, id: number, row: Partial<Session> | null, reviewed: Map<number, ReportSnapshot> | null): Promise<Record<string, SweepRowReport> | null> => {
     if (row === null || !recordsRowReports(row) || value.notPostedReason !== 'noPost') return null
     const folder = options.config().reportsDir.replace(/\/$/, '')

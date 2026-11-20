@@ -62,7 +62,7 @@ const count = (cache: Cache, table: string): number => Number(cache.db.prepare(`
 test('a new cache has the schema, its version, and nothing fetched', () => {
   const { cache } = memoryCache()
   const tables = cache.db.prepare('SELECT name FROM sqlite_master WHERE type = \'table\' AND name NOT LIKE \'sqlite_%\' ORDER BY name').all()
-  assert.deepEqual(tables.map((row) => row.name), ['cycles', 'meta', 'post_marks', 'prs', 'runs', 'snapshots', 'sweeps', 'ticks'])
+  assert.deepEqual(tables.map((row) => row.name), ['cycles', 'meta', 'post_marks', 'posted_heads', 'prs', 'runs', 'snapshots', 'sweeps', 'ticks'])
   assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
 
   const view = cache.readView(scenario.repo)
@@ -1221,7 +1221,7 @@ test('a cache from version 13 gains the ticks table and the auto-review columns 
     for (const column of ['origin', 'tick', 'reason', 'queued_at', 'posting', 'worktree']) old.exec(`ALTER TABLE sweeps DROP COLUMN ${column}`)
     old.exec('UPDATE meta SET value = \'13\' WHERE key = \'schemaVersion\'')
     old.close()
-    assert.equal(schemaVersion, 19)
+    assert.equal(schemaVersion, 20)
     assert.equal(githubTablesVersion, 16)
     const cache = openCache({ path, clock: handClock().clock })
     // version 16 changed what the GitHub tables hold, so a cache from version 13 refetches its PRs
@@ -1286,7 +1286,7 @@ test('a version 17 cache gains sweeps.row_reports and sweeps.post_attempts in pl
     old.exec('UPDATE meta SET value = \'17\' WHERE key = \'schemaVersion\'')
     old.close()
     const cache = openCache({ path, clock: handClock().clock })
-    assert.equal(schemaVersion, 19)
+    assert.equal(schemaVersion, 20)
     assert.equal(cache.getSweep(created.id)?.status, 'done')
     assert.equal(cache.getSweep(created.id)?.rowReports, null)
     assert.deepEqual(cache.getSweep(created.id)?.postAttempts, {})
@@ -1319,7 +1319,7 @@ test('a version 18 cache gains the post_marks table in place, keeping its sweeps
     old.exec('UPDATE meta SET value = \'18\' WHERE key = \'schemaVersion\'')
     old.close()
     const cache = openCache({ path, clock: handClock().clock })
-    assert.equal(schemaVersion, 19)
+    assert.equal(schemaVersion, 20)
     assert.equal(cache.getSweep(created.id)?.status, 'done')
     assert.ok(cache.readView(scenario.repo).open.length > 0, 'the cached PRs are kept')
     assert.deepEqual([...cache.unresolvedPostMarks(scenario.repo)], [])
@@ -1341,6 +1341,92 @@ test('a version 18 cache gains the post_marks table in place, keeping its sweeps
     await cleanup()
   }
 })
+
+// the heads of the posted-head tests: what a run reviewed, a sweep row's head, and the head a moved-head post went onto
+const shaX = 'abcdef0123456789abcdef0123456789abcdef01'
+const shaY = '1234567890abcdef1234567890abcdef12345678'
+const shaZ = '0fedcba9876543210fedcba9876543210fedcba9'
+
+const reviewOf = (number: number, sha: string, posted: { form: string, url: string } | null): NonNullable<Run['result']> => ({
+  schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: scenario.repo, pr: number }, reviewed: { kind: 'commit', sha }, verdict: 'clean', recommendation: null,
+  findings: [], ci: 'green', fixAttempts: 0, posted, notPostedReason: posted === null ? 'noPost' : null, report: `~/agents/output/PR-${number}.md`, question: null, error: null,
+}) as unknown as NonNullable<Run['result']>
+
+const sweepOfRows = (rows: { number: number, head: string, posted: { form: string, url: string } | null }[]): NonNullable<Run['result']> =>
+  ({ schema: 'pit-crew/sweep-result@1', status: 'done', repo: scenario.repo, rows }) as unknown as NonNullable<Run['result']>
+
+const comment = { form: 'comment', url: 'https://github.com/octo-example/orbit/pull/1#issuecomment-1' }
+
+test('a post is on record at its head once a run or a sweep row records it or a mark is resolved with that head, in lowercase and per repository, and the record outlives the run and the sweep', () => {
+  const { cache } = memoryCache()
+  assert.deepEqual(cache.postRecords(scenario.repo), new Map())
+  const run = cache.createRun(newRun(107, { status: 'done' }), (id) => `~/runs/${id}`)
+  cache.updateRun(run.id, { result: reviewOf(107, shaX, null) })
+  assert.equal(cache.postRecords(scenario.repo).get(107), undefined, 'a review that did not post records nothing')
+  cache.updateRun(run.id, { result: reviewOf(107, shaX, comment) })
+  cache.createSweep(newSweep({ status: 'done', result: sweepOfRows([{ number: 113, head: shaY, posted: comment }, { number: 201, head: shaZ, posted: null }]) }), (id) => `~/sweeps/${id}`)
+  cache.beginPostMark(scenario.repo, 108, 'run 3')
+  assert.deepEqual(cache.postRecords(scenario.repo).get(108), { unknown: true, heads: new Set() })
+  cache.resolvePostMark(scenario.repo, 108, [shaZ.toUpperCase(), shaX])
+  cache.db.exec('DELETE FROM runs')
+  cache.db.exec('DELETE FROM sweeps')
+  assert.deepEqual(cache.postRecords(scenario.repo), new Map([
+    [107, { unknown: false, heads: new Set([shaX]) }],
+    [108, { unknown: false, heads: new Set([shaZ, shaX]) }],
+    [113, { unknown: false, heads: new Set([shaY]) }],
+  ]))
+  assert.deepEqual(cache.postRecords('octo-example/other'), new Map())
+  cache.close()
+})
+
+for (const from of [18, 19]) {
+  test(`a version ${from} cache carries forward the posts its runs and sweeps recorded: a post begun and never recorded marks its PR as of unknown outcome, and a post on record is on record at its head`, async () => {
+    const { dir, cleanup } = await tempDir()
+    try {
+      const path = join(dir, 'cache.sqlite')
+      const first = openCache({ path, clock: handClock().clock })
+      // #106: a run's post begun and never recorded; #107: a run's post on record at X
+      const begun = first.createRun(newRun(106, { status: 'done' }), (id) => `~/runs/${id}`)
+      first.updateRun(begun.id, { result: reviewOf(106, shaX, null), postAttemptedAt: '2026-10-26T14:05:00Z' })
+      const landed = first.createRun(newRun(107, { status: 'done' }), (id) => `~/runs/${id}`)
+      first.updateRun(landed.id, { result: reviewOf(107, shaX, comment), postAttemptedAt: '2026-10-26T14:06:00Z' })
+      // #114: a sweep row's post begun and never recorded; #113: a sweep row's post on record at Y; #201: neither
+      const sweep = first.createSweep(newSweep({ status: 'done', result: sweepOfRows([{ number: 114, head: shaZ, posted: null }, { number: 113, head: shaY, posted: comment }, { number: 201, head: shaZ, posted: null }]) }), (id) => `~/sweeps/${id}`)
+      first.updateSweep(sweep.id, { postAttempts: { 114: '2026-10-26T14:07:00Z', 113: '2026-10-26T14:08:00Z' } })
+      first.close()
+      const old = new DatabaseSync(path)
+      old.exec('DROP TABLE posted_heads')
+      if (from === 18) old.exec('DROP TABLE post_marks')
+      old.exec(`UPDATE meta SET value = '${from}' WHERE key = 'schemaVersion'`)
+      old.close()
+      const cache = openCache({ path, clock: handClock().clock })
+      assert.equal(schemaVersion, 20)
+      assert.deepEqual([...cache.unresolvedPostMarks(scenario.repo)].sort(), [106, 114])
+      assert.deepEqual(cache.postRecords(scenario.repo), new Map([
+        [106, { unknown: true, heads: new Set() }],
+        [107, { unknown: false, heads: new Set([shaX]) }],
+        [113, { unknown: false, heads: new Set([shaY]) }],
+        [114, { unknown: true, heads: new Set() }],
+      ]))
+      assert.deepEqual(cache.db.prepare('SELECT number, source, attempted_at FROM post_marks ORDER BY number').all().map((row) => ({ ...row })), [
+        { number: 106, source: `run ${begun.id}`, attempted_at: '2026-10-26T14:05:00Z' },
+        { number: 114, source: `sweep ${sweep.id}`, attempted_at: '2026-10-26T14:07:00Z' },
+      ])
+      assert.equal(cache.getRun(begun.id)?.postAttemptedAt, '2026-10-26T14:05:00Z', 'the runs and the sweeps are kept as they were')
+      assert.deepEqual(cache.getSweep(sweep.id)?.postAttempts, { 114: '2026-10-26T14:07:00Z', 113: '2026-10-26T14:08:00Z' })
+      cache.close()
+      // a reopen at the current version carries nothing forward again
+      const again = openCache({ path, clock: handClock().clock })
+      again.clearPostMark(scenario.repo, 106)
+      again.close()
+      const third = openCache({ path, clock: handClock().clock })
+      assert.deepEqual([...third.unresolvedPostMarks(scenario.repo)], [114])
+      third.close()
+    } finally {
+      await cleanup()
+    }
+  })
+}
 
 test('a new run carries the models it was created with, and one created without them reads as not recorded', () => {
   const cache = openCache({ path: ':memory:', clock: handClock().clock })
