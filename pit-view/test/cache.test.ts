@@ -1379,6 +1379,127 @@ test('a post is on record at its head once a run or a sweep row records it or a 
   cache.close()
 })
 
+// the marks a cache holds, by PR, with their sources and whether they are resolved
+const marksOf = (cache: Cache): { number: number, source: string, resolved: boolean }[] =>
+  cache.db.prepare('SELECT number, source, resolved_at FROM post_marks ORDER BY number').all().map((row) => ({ number: Number(row.number), source: String(row.source), resolved: row.resolved_at !== null }))
+
+const headsOf = (cache: Cache): Record<number, string[]> => {
+  const heads: Record<number, string[]> = {}
+  for (const row of cache.db.prepare('SELECT number, head FROM posted_heads ORDER BY number, head').all()) heads[Number(row.number)] = [...heads[Number(row.number)] ?? [], String(row.head)]
+  return heads
+}
+
+test('a post whose head cannot be established marks its PR as of unknown outcome, and a post from Pit View is on record at the head it went onto as well as the one its report reviewed', () => {
+  const { cache } = memoryCache()
+  const stored = (number: number, result: NonNullable<Run['result']>, patch: Partial<Run> = {}): Run => {
+    const created = cache.createRun(newRun(number, { status: 'done' }), (id) => `~/runs/${id}`)
+    return cache.updateRun(created.id, { ...patch, result })
+  }
+  // #120: a review that posted itself and names no reviewed commit; #121: one whose reviewed commit is not a full SHA
+  const noCommit = stored(120, { ...reviewOf(120, shaX, comment), reviewed: null } as NonNullable<Run['result']>)
+  const shortCommit = stored(121, reviewOf(121, 'abcdef0', comment))
+  // #122: a post from Pit View, begun from the run, whose result does not say which head it went onto
+  const noLanding = stored(122, reviewOf(122, shaX, comment), { postAttemptedAt: '2026-10-26T14:05:00Z' })
+  // #123: a post from Pit View that names the head it went onto, a moved one
+  stored(123, reviewOf(123, shaX, { ...comment, head: shaY.toUpperCase() } as typeof comment), { postAttemptedAt: '2026-10-26T14:06:00Z' })
+  // #124: a landing head that is not a full SHA
+  const badLanding = stored(124, reviewOf(124, shaX, { ...comment, head: '1234567' } as typeof comment))
+  // #131: a stack review started from #130 that posted on its top layer
+  const stack = cache.createRun(newRun(130, { status: 'done', command: 'review-stack' }), (id) => `~/runs/${id}`)
+  cache.updateRun(stack.id, { result: { ...reviewOf(130, shaZ, comment), command: 'review-stack', target: { repo: scenario.repo, stack: [130, 131], top: 131 } } as NonNullable<Run['result']> })
+  // the rows of a sweep: #140 a short head, #141 no head, #142 a post begun from the row with no landing head, #143 one with a moved landing head, and #144 a post the sweep made itself
+  const sweep = cache.createSweep(newSweep({ status: 'done' }), (id) => `~/sweeps/${id}`)
+  cache.updateSweep(sweep.id, {
+    postAttempts: { 142: '2026-10-26T14:07:00Z', 143: '2026-10-26T14:08:00Z' },
+    result: sweepOfRows([
+      { number: 140, head: 'abcdef0', posted: comment },
+      { number: 141, head: undefined as unknown as string, posted: comment },
+      { number: 142, head: shaX, posted: comment },
+      { number: 143, head: shaX, posted: { ...comment, head: shaY } as typeof comment },
+      { number: 144, head: shaX, posted: comment },
+    ]),
+  })
+  const unknown = (source: string): string => `${source}, head not on record`
+  assert.deepEqual(marksOf(cache), [
+    { number: 120, source: unknown(`run ${noCommit.id}`), resolved: false },
+    { number: 121, source: unknown(`run ${shortCommit.id}`), resolved: false },
+    { number: 122, source: unknown(`run ${noLanding.id}`), resolved: false },
+    { number: 124, source: unknown(`run ${badLanding.id}`), resolved: false },
+    { number: 140, source: unknown(`sweep ${sweep.id}`), resolved: false },
+    { number: 141, source: unknown(`sweep ${sweep.id}`), resolved: false },
+    { number: 142, source: unknown(`sweep ${sweep.id}`), resolved: false },
+  ])
+  assert.deepEqual(headsOf(cache), { 122: [shaX], 123: [shaY, shaX].sort(), 124: [shaX], 131: [shaZ], 142: [shaX], 143: [shaY, shaX].sort(), 144: [shaX] })
+  for (const number of [120, 121, 122, 124, 140, 141, 142]) assert.equal(cache.postRecords(scenario.repo).get(number)?.unknown, true, `#${number}`)
+  // a post from Pit View resolves only the mark it began, so a post with no head on record recorded while it was in flight keeps the PR marked
+  cache.beginPostMark(scenario.repo, 150, 'sweep 9')
+  const during = stored(150, { ...reviewOf(150, shaX, comment), reviewed: null } as NonNullable<Run['result']>)
+  cache.resolvePostMark(scenario.repo, 150, [shaZ], 'sweep 9')
+  assert.deepEqual(marksOf(cache).find((mark) => mark.number === 150), { number: 150, source: unknown(`run ${during.id}`), resolved: false })
+  cache.beginPostMark(scenario.repo, 151, 'sweep 9')
+  cache.resolvePostMark(scenario.repo, 151, [shaZ], 'sweep 9')
+  assert.equal(cache.postRecords(scenario.repo).get(151)?.unknown, false)
+  // a resolved mark is made unresolved again by a post with no head on record
+  stored(151, { ...reviewOf(151, shaX, comment), reviewed: null } as NonNullable<Run['result']>)
+  assert.equal(cache.postRecords(scenario.repo).get(151)?.unknown, true)
+  cache.close()
+})
+
+test('a stored result and the post it names are one write: when the post cannot be put on record, the result is not stored either', () => {
+  const { cache } = memoryCache()
+  const run = cache.createRun(newRun(107, { status: 'done' }), (id) => `~/runs/${id}`)
+  cache.updateRun(run.id, { result: reviewOf(107, shaX, null) })
+  const sweep = cache.createSweep(newSweep({ status: 'done', result: sweepOfRows([{ number: 113, head: shaY, posted: null }]) }), (id) => `~/sweeps/${id}`)
+  cache.db.exec('CREATE TEMP TRIGGER no_head BEFORE INSERT ON posted_heads BEGIN SELECT RAISE(ABORT, \'disk I/O error\'); END')
+  cache.db.exec('CREATE TEMP TRIGGER no_mark BEFORE INSERT ON post_marks BEGIN SELECT RAISE(ABORT, \'disk I/O error\'); END')
+  assert.throws(() => cache.updateRun(run.id, { result: reviewOf(107, shaX, comment), note: 'posted' }), /disk I\/O error/)
+  assert.equal((cache.getRun(run.id)?.result as { posted: unknown } | null)?.posted, null, 'the run still reads as not posted')
+  assert.equal(cache.getRun(run.id)?.note, null)
+  assert.throws(() => cache.updateRun(run.id, { result: { ...reviewOf(107, shaX, comment), reviewed: null } as NonNullable<Run['result']> }), /disk I\/O error/)
+  assert.equal((cache.getRun(run.id)?.result as { posted: unknown } | null)?.posted, null)
+  assert.throws(() => cache.updateSweep(sweep.id, { result: sweepOfRows([{ number: 113, head: shaY, posted: comment }]) }), /disk I\/O error/)
+  assert.equal((cache.getSweep(sweep.id)?.result as { rows: { posted: unknown }[] } | null)?.rows[0]?.posted, null)
+  assert.throws(() => cache.createRun({ ...newRun(108, { status: 'done' }), result: reviewOf(108, shaX, comment) }, (id) => `~/runs/${id}`), /disk I\/O error/)
+  assert.equal(cache.runsFor(scenario.repo, 108).length, 0, 'a run created with a post it cannot record is not created')
+  cache.db.exec('DROP TRIGGER no_head')
+  cache.db.exec('DROP TRIGGER no_mark')
+  cache.updateRun(run.id, { result: reviewOf(107, shaX, comment) })
+  assert.deepEqual(headsOf(cache), { 107: [shaX] })
+  cache.close()
+})
+
+test('a cache whose stored results name posts that are not on record, as a stop between the two writes left it before they were one, is repaired when it opens, and the repair changes nothing on a second open', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const run = first.createRun(newRun(107, { status: 'done' }), (id) => `~/runs/${id}`)
+    first.updateRun(run.id, { result: reviewOf(107, shaX, comment) })
+    const unknown = first.createRun(newRun(120, { status: 'done' }), (id) => `~/runs/${id}`)
+    first.updateRun(unknown.id, { result: { ...reviewOf(120, shaX, comment), reviewed: null } as NonNullable<Run['result']> })
+    const sweep = first.createSweep(newSweep({ status: 'done', result: sweepOfRows([{ number: 113, head: shaY, posted: comment }, { number: 140, head: 'abcdef0', posted: comment }]) }), (id) => `~/sweeps/${id}`)
+    // the state a stop after the result's write left: the result is stored, and nothing is on record
+    first.db.exec('DELETE FROM posted_heads')
+    first.db.exec('DELETE FROM post_marks')
+    first.close()
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.deepEqual(headsOf(cache), { 107: [shaX], 113: [shaY] })
+    assert.deepEqual(marksOf(cache), [
+      { number: 120, source: `run ${unknown.id}, head not on record`, resolved: false },
+      { number: 140, source: `sweep ${sweep.id}, head not on record`, resolved: false },
+    ])
+    const rows = cache.db.prepare('SELECT * FROM post_marks ORDER BY number').all()
+    cache.close()
+    const again = openCache({ path, clock: handClock().clock })
+    assert.deepEqual(again.db.prepare('SELECT * FROM post_marks ORDER BY number').all(), rows)
+    assert.deepEqual(headsOf(again), { 107: [shaX], 113: [shaY] })
+    assert.equal(again.getRun(run.id)?.id, run.id, 'the runs and the sweeps are kept as they were')
+    again.close()
+  } finally {
+    await cleanup()
+  }
+})
+
 for (const from of [18, 19]) {
   test(`a version ${from} cache carries forward the posts its runs and sweeps recorded: a post begun and never recorded marks its PR as of unknown outcome, and a post on record is on record at its head`, async () => {
     const { dir, cleanup } = await tempDir()
@@ -1401,15 +1522,18 @@ for (const from of [18, 19]) {
       old.close()
       const cache = openCache({ path, clock: handClock().clock })
       assert.equal(schemaVersion, 20)
-      assert.deepEqual([...cache.unresolvedPostMarks(scenario.repo)].sort(), [106, 114])
+      // #107's and #113's posts were made from Pit View, and nothing before version 20 recorded the head they went onto, so each marks its PR too, beside the reviewed head on record
+      assert.deepEqual([...cache.unresolvedPostMarks(scenario.repo)].sort(), [106, 107, 113, 114])
       assert.deepEqual(cache.postRecords(scenario.repo), new Map([
         [106, { unknown: true, heads: new Set() }],
-        [107, { unknown: false, heads: new Set([shaX]) }],
-        [113, { unknown: false, heads: new Set([shaY]) }],
+        [107, { unknown: true, heads: new Set([shaX]) }],
+        [113, { unknown: true, heads: new Set([shaY]) }],
         [114, { unknown: true, heads: new Set() }],
       ]))
       assert.deepEqual(cache.db.prepare('SELECT number, source, attempted_at FROM post_marks ORDER BY number').all().map((row) => ({ ...row })), [
         { number: 106, source: `run ${begun.id}`, attempted_at: '2026-10-26T14:05:00Z' },
+        { number: 107, source: `run ${landed.id}, head not on record`, attempted_at: '2026-10-26T14:06:00Z' },
+        { number: 113, source: `sweep ${sweep.id}, head not on record`, attempted_at: '2026-10-26T14:08:00Z' },
         { number: 114, source: `sweep ${sweep.id}`, attempted_at: '2026-10-26T14:07:00Z' },
       ])
       assert.equal(cache.getRun(begun.id)?.postAttemptedAt, '2026-10-26T14:05:00Z', 'the runs and the sweeps are kept as they were')
@@ -1420,7 +1544,7 @@ for (const from of [18, 19]) {
       again.clearPostMark(scenario.repo, 106)
       again.close()
       const third = openCache({ path, clock: handClock().clock })
-      assert.deepEqual([...third.unresolvedPostMarks(scenario.repo)], [114])
+      assert.deepEqual([...third.unresolvedPostMarks(scenario.repo)].sort(), [107, 113, 114])
       third.close()
     } finally {
       await cleanup()

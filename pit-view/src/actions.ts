@@ -2,6 +2,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Cache, Run } from './cache.ts'
+import { isHeadNotOnRecord } from './cache.ts'
 import type { Config } from './config.ts'
 import { deriveIssues, deriveMerge, isPrimaryBase, offersMerge } from './derive.ts'
 import { GhError, GhTimeoutError, WriteIdentityError } from './github.ts'
@@ -229,7 +230,10 @@ export const postWriteDeadlineMs = 60_000
 const readTimedOutMessage = 'GitHub did not answer in time; nothing was posted'
 
 // the refusal for a PR whose earlier post from Pit View may have landed, whichever run or sweep began it
-const markedText = (number: number): string => `a post on #${number} was begun earlier and may have landed; nothing was posted. Check #${number} on GitHub`
+// the refusal for a PR with an unresolved mark: a post begun whose outcome is not known, or a post on record without the head it went onto (source names which)
+const markedText = (number: number, source: string): string => isHeadNotOnRecord(source)
+  ? `a post on #${number} by ${source.slice(0, source.lastIndexOf(','))} is on record, but not the head it went onto, so no head of #${number} is offered; nothing was posted. Check #${number} on GitHub`
+  : `a post on #${number} was begun earlier and may have landed; nothing was posted. Check #${number} on GitHub`
 // the refusal for a head of a PR that a post is already on record at, whichever review, sweep, or button made it
 const postedText = (number: number, head: string): string => `a post on #${number} at ${head.slice(0, 7)} is already on record, and each head of a PR is posted on once; nothing was posted. A review of a newer commit can be posted`
 const writeTimedOutMessage = 'The post to GitHub timed out and may or may not have gone through. Check the pull request before posting again.'
@@ -526,13 +530,14 @@ export const createActions = (options: ActionsOptions): Actions => {
       }
       // gh pr comment prints the comment's URL; gh pr review prints none, so the post links to the PR, as the prompts' own fallback does
       const url = printed.trim().split('\n').at(-1) ?? ''
-      const posted: Posted = { form, url: isHttpUrl(url) ? url : `https://github.com/${repo}/pull/${number}` }
+      // the head it went onto is recorded with it, so the post is on record at that head as well as at the commit its report reviewed, from the result alone
+      const posted: Posted = { form, url: isHttpUrl(url) ? url : `https://github.com/${repo}/pull/${number}`, head: headSha }
       log(`PR #${number}: ${source} posted its report (${form})`)
       let recorded: R | null = null
       try {
         recorded = posting.record(posted)
-        // the outcome is known now, and the post is on record at the head it went onto and at the commit its report reviewed, so neither is offered again; a mark whose post could not be recorded stays unresolved, so nothing offers the PR again at any head
-        cache.resolvePostMark(repo, number, [headSha, reviewedAt])
+        // the outcome is known now, and the post is on record at the head it went onto and at the commit its report reviewed, so neither is offered again; a mark whose post could not be recorded stays unresolved, so nothing offers the PR again at any head, and only the mark this post began is resolved
+        cache.resolvePostMark(repo, number, [headSha, reviewedAt], source)
       } catch (error) {
         log(`PR #${number}: the post of ${source} landed but could not be recorded: ${messageOf(error)}`)
       }
@@ -606,7 +611,8 @@ export const createActions = (options: ActionsOptions): Actions => {
     const key = `${repo}#${number}`
     if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
     if (run.postAttemptedAt !== null) throw new ActionError('notAllowed', `run ${id} has already begun its post, which may have landed; nothing was posted. Check #${number} on GitHub`)
-    if (cache.unresolvedPostMarks(repo).has(number)) throw new ActionError('notAllowed', markedText(number))
+    const marked = cache.unresolvedPostMark(repo, number)
+    if (marked !== null) throw new ActionError('notAllowed', markedText(number, marked))
     const onRecord = postedHead(repo, number, [headSha, request.reviewedSha])
     if (onRecord !== null) throw new ActionError('notAllowed', postedText(number, onRecord))
     const { offer, reviewedAt } = offeredBy(offers)
@@ -651,7 +657,8 @@ export const createActions = (options: ActionsOptions): Actions => {
     // before the mark and the offer, which a post in flight has already changed
     if (inFlight.has(`${repo}#${number}`)) throw new ActionError('busy', `an action on #${number} is already in progress`)
     if (sweep.postAttempts[number] !== undefined) throw new ActionError('notAllowed', `sweep ${id} has already begun its post on #${number}, which may have landed; nothing was posted. Check #${number} on GitHub`)
-    if (cache.unresolvedPostMarks(repo).has(number)) throw new ActionError('notAllowed', markedText(number))
+    const marked = cache.unresolvedPostMark(repo, number)
+    if (marked !== null) throw new ActionError('notAllowed', markedText(number, marked))
     const onRecord = postedHead(repo, number, [headSha, request.reviewedSha])
     if (onRecord !== null) throw new ActionError('notAllowed', postedText(number, onRecord))
     const { offer, reviewedAt } = offeredBy(derived)

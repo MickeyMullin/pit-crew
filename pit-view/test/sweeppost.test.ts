@@ -417,7 +417,7 @@ test('the post button posts the sweep row\'s stored report once, as the form cli
     assert.equal(answer.status, 200, JSON.stringify(answer.body))
     assert.equal(answer.body.number, 114)
     assert.equal(answer.body.sweepId, sweep.id)
-    assert.deepEqual(answer.body.posted, { form: 'approve', url: `https://github.com/${repo}/pull/114` })
+    assert.deepEqual(answer.body.posted, { form: 'approve', url: `https://github.com/${repo}/pull/114`, head: head114 })
     const posts = postsOf(h.runner)
     assert.equal(posts.length, 1)
     assert.deepEqual(posts[0]?.args.slice(0, -1), ['pr', 'review', '114', '--repo', repo, '--approve', '--body-file'])
@@ -432,7 +432,7 @@ test('the post button posts the sweep row\'s stored report once, as the form cli
     assert.equal(h.launch.children.length, children)
     const recorded = h.server.cache.getSweep(sweep.id)
     const rows = recorded?.result?.schema === 'pit-crew/sweep-result@1' ? recorded.result.rows as Record<string, unknown>[] : []
-    assert.deepEqual(rows.find((row) => row.number === 114)?.posted, { form: 'approve', url: `https://github.com/${repo}/pull/114` })
+    assert.deepEqual(rows.find((row) => row.number === 114)?.posted, { form: 'approve', url: `https://github.com/${repo}/pull/114`, head: head114 })
     assert.equal(typeof recorded?.postAttempts[114], 'string')
     assert.equal((await offerOf(h, 114)), null)
     const shown = h.server.sweeps.get(sweep.id)?.result?.rows.find((row) => row.number === 114)
@@ -452,7 +452,7 @@ test('Comment posts through gh pr comment and keeps the comment\'s address', asy
     const answer = await post(h, sweep.id, bodyOf('comment'))
     assert.equal(answer.status, 200)
     assert.deepEqual(postsOf(h.runner)[0]?.args.slice(0, -1), ['pr', 'comment', '114', '--repo', repo, '--body-file'])
-    assert.deepEqual(answer.body.posted, { form: 'comment', url: `https://github.com/${repo}/pull/114#issuecomment-77` })
+    assert.deepEqual(answer.body.posted, { form: 'comment', url: `https://github.com/${repo}/pull/114#issuecomment-77`, head: head114 })
   } finally {
     await h.cleanup()
   }
@@ -822,9 +822,10 @@ test('a post a sweep or a review made itself is on record at the head it reviewe
 // ---- a cache from before the marks and the posted heads ----
 
 // the cache as version 18 left it, with neither the marks nor the posted heads: what the runs and the sweeps recorded is all there is, and the server starts over it
-const toVersion18 = async (h: Harness): Promise<void> => {
+const toVersion18 = async (h: Harness, edit: (old: DatabaseSync) => void = () => {}): Promise<void> => {
   await h.server.close()
   const old = new DatabaseSync(h.options.cachePath)
+  edit(old)
   old.exec('DROP TABLE IF EXISTS post_marks')
   old.exec('DROP TABLE IF EXISTS posted_heads')
   old.exec('UPDATE meta SET value = \'18\' WHERE key = \'schemaVersion\'')
@@ -896,6 +897,167 @@ test('a version 18 post on record, from a sweep row or a run, is on record at it
     const same = await scheduledSweep(other, [row114()])
     assert.equal(await offerOf(other, 114), null)
     assert.equal((await post(other, same.id, bodyOf('comment'))).status, 422)
+    assert.equal(postsOf(other.runner).length, 1)
+  } finally {
+    await other.cleanup()
+  }
+})
+
+// ---- a post whose head is not on record ----
+
+// a restart over the same cache once the edit has changed it, as a server stopped mid-write or an older version left it
+const reopenEdited = async (h: Harness, edit: (db: DatabaseSync) => void): Promise<void> => {
+  await h.server.close()
+  const db = new DatabaseSync(h.options.cachePath)
+  edit(db)
+  db.close()
+  h.server = await startServer(h.options)
+  h.base = h.server.url
+  await (await fetch(`${h.base}/api/refresh`, { method: 'POST' })).json()
+  await h.server.poller.idle()
+}
+
+const third = '00112233445566778899aabbccddeeff00112233'
+
+const postedOf = (sweep: Sweep | null, number: number): unknown => (sweep?.result as { rows: Record<string, unknown>[] } | null)?.rows.find((row) => row.number === number)?.posted
+
+test('a post from Pit View records on the row or the run the head it went onto, so a cache that lost its posted heads gets both heads back when it opens, and a newer head is offered again', async () => {
+  const behavior: Behavior = {}
+  const h = await setup(behavior)
+  try {
+    const first = await scheduledSweep(h, [row114()])
+    await moveHead(h, behavior, later)
+    assert.equal((await post(h, first.id, bodyOf('comment', { headSha: later }))).status, 200)
+    assert.deepEqual(postedOf(h.server.cache.getSweep(first.id), 114), { form: 'comment', url: `https://github.com/${repo}/pull/114#issuecomment-77`, head: later })
+    await reopenEdited(h, (db) => {
+      db.exec('DELETE FROM posted_heads')
+      db.exec('DELETE FROM post_marks')
+    })
+    assert.deepEqual(h.server.cache.postRecords(repo).get(114), { unknown: false, heads: new Set([head114, later]) })
+    const newer = await scheduledSweep(h, [row114({ head: later })], { 114: reportText(later) })
+    assert.notEqual(h.server.cache.getSweep(newer.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    assert.equal((await post(h, newer.id, bodyOf('comment', { headSha: later, reviewedSha: later }))).status, 422)
+    await moveHead(h, behavior, third)
+    const fresh = await scheduledSweep(h, [row114({ head: third })], { 114: reportText(third) })
+    assert.equal((await offerOf(h, 114))?.sweepId, fresh.id)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+  const runBehavior: Behavior = {}
+  const other = await setup(runBehavior)
+  try {
+    const run = await storedRun(other)
+    await moveHead(other, runBehavior, later)
+    const answer = await postRun(other, run, bodyOf('comment', { headSha: later }))
+    assert.equal(answer.status, 200, JSON.stringify(answer.body))
+    assert.equal((other.server.cache.getRun(run)?.result as { posted: { head?: string } } | null)?.posted.head, later)
+    assert.deepEqual(other.server.cache.postRecords(repo).get(114), { unknown: false, heads: new Set([head114, later]) })
+  } finally {
+    await other.cleanup()
+  }
+})
+
+test('a stop between storing a result that names a post and putting the post on record is repaired when the server opens the cache: a newer sweep of that head offers nothing and a click on it is refused', async () => {
+  const h = await setup()
+  try {
+    const manual = await h.server.sweepLauncher.start(sweepRequest(repo))
+    const child = h.launch.children.at(-1)!
+    await child.result(noPostResult([row114({ posted: { form: 'comment', url: `https://github.com/${repo}/pull/114#issuecomment-5` }, recommendation: 'hold' })], { notPostedReason: null }))
+    child.exit(0)
+    await h.server.sweepLauncher.settled(manual.id)
+    // what a stop after the result's write and before the posted head's left, when the two were separate writes
+    await reopenEdited(h, (db) => db.exec('DELETE FROM posted_heads'))
+    const sweep = await scheduledSweep(h, [row114()])
+    assert.notEqual(h.server.cache.getSweep(sweep.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    const refused = await post(h, sweep.id, bodyOf('comment'))
+    assert.equal(refused.status, 422, JSON.stringify(refused.body))
+    assert.match(String(refused.body.error), /a post on #114 at d6b9780 is already on record/)
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a post a review or a sweep made itself whose head is not known marks its PR, so no later sweep offers it at any head and a click is refused', async () => {
+  const behavior: Behavior = {}
+  const h = await setup(behavior)
+  try {
+    const manual = await h.server.launcher.start({ repo, number: 114, command: 'review-dependabot', args: ['114'], label: 'Review' })
+    const child = h.launch.children.at(-1)!
+    await child.result({
+      schema: 'pit-crew/review-result@1', command: 'review-dependabot', status: 'done', target: { repo, pr: 114 }, reviewed: null, verdict: 'clean', recommendation: 'hold',
+      findings: [], ci: 'green', fixAttempts: 0, posted: { form: 'comment', url: `https://github.com/${repo}/pull/114#issuecomment-6` }, notPostedReason: null, report: '~/agents/output/PR-114.md', question: null, error: null,
+    })
+    child.exit(0)
+    await h.server.launcher.settled(manual.id)
+    assert.equal(h.server.cache.postRecords(repo).get(114)?.unknown, true)
+    const sweep = await scheduledSweep(h, [row114()])
+    assert.notEqual(h.server.cache.getSweep(sweep.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    const refused = await post(h, sweep.id, bodyOf('comment'))
+    assert.equal(refused.status, 422, JSON.stringify(refused.body))
+    assert.match(String(refused.body.error), new RegExp(`a post on #114 by run ${manual.id} is on record, but not the head it went onto`))
+    await moveHead(h, behavior, later)
+    const newer = await scheduledSweep(h, [row114({ head: later })], { 114: reportText(later) })
+    assert.notEqual(h.server.cache.getSweep(newer.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+  const other = await setup()
+  try {
+    const manual = await other.server.sweepLauncher.start(sweepRequest(repo))
+    const child = other.launch.children.at(-1)!
+    await child.result(noPostResult([row114({ head: 'd6b9780', posted: { form: 'comment', url: `https://github.com/${repo}/pull/114#issuecomment-5` }, recommendation: 'hold' })], { notPostedReason: null }))
+    child.exit(0)
+    await other.server.sweepLauncher.settled(manual.id)
+    const sweep = await scheduledSweep(other, [row114()])
+    assert.equal(await offerOf(other, 114), null)
+    assert.equal((await post(other, sweep.id, bodyOf('comment'))).status, 422)
+    assert.deepEqual(postsOf(other.runner), [])
+  } finally {
+    await other.cleanup()
+  }
+})
+
+test('a version 18 post from Pit View onto a moved head, whose head nothing then recorded, marks its PR in the migration, so no sweep of that head or a newer one offers it', async () => {
+  const behavior: Behavior = {}
+  const h = await setup(behavior)
+  try {
+    const first = await scheduledSweep(h, [row114()])
+    await moveHead(h, behavior, later)
+    assert.equal((await post(h, first.id, bodyOf('comment', { headSha: later }))).status, 200)
+    // version 18 recorded the post on the row without the head it went onto
+    await toVersion18(h, (old) => old.exec('UPDATE sweeps SET result = json_remove(result, \'$.rows[0].posted.head\')'))
+    assert.equal((postedOf(h.server.cache.getSweep(first.id), 114) as { head?: string }).head, undefined)
+    const same = await scheduledSweep(h, [row114({ head: later })], { 114: reportText(later) })
+    assert.notEqual(h.server.cache.getSweep(same.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    const refused = await post(h, same.id, bodyOf('comment', { headSha: later, reviewedSha: later }))
+    assert.equal(refused.status, 422, JSON.stringify(refused.body))
+    assert.match(String(refused.body.error), /is on record, but not the head it went onto/)
+    await moveHead(h, behavior, third)
+    await scheduledSweep(h, [row114({ head: third })], { 114: reportText(third) })
+    assert.equal(await offerOf(h, 114), null)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+  const runBehavior: Behavior = {}
+  const other = await setup(runBehavior)
+  try {
+    const run = await storedRun(other)
+    await moveHead(other, runBehavior, later)
+    assert.equal((await postRun(other, run, bodyOf('comment', { headSha: later }))).status, 200)
+    await toVersion18(other, (old) => old.exec('UPDATE runs SET result = json_remove(result, \'$.posted.head\')'))
+    const same = await scheduledSweep(other, [row114({ head: later })], { 114: reportText(later) })
+    assert.notEqual(other.server.cache.getSweep(same.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(other, 114), null)
+    assert.equal((await post(other, same.id, bodyOf('comment', { headSha: later, reviewedSha: later }))).status, 422)
     assert.equal(postsOf(other.runner).length, 1)
   } finally {
     await other.cleanup()

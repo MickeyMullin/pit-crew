@@ -36,7 +36,8 @@ export type ResultStatus = 'done' | 'failed' | 'needsInput'
 export type Priority = 'P0' | 'P1' | 'P2' | 'P3'
 export type Finding = { priority: Priority, summary: string, files: string[] }
 export type PostForm = 'approve' | 'requestChanges' | 'comment'
-export type Posted = { form: PostForm, url: string }
+// head is the full SHA of the head a post from Pit View went onto, which it records beside the form and the URL; a post a reviewer made itself names none, having gone onto the commit it reviewed (section 10 of DESIGN.md, Posting, One post per PR and head)
+export type Posted = { form: PostForm, url: string, head?: string }
 export type NotPostedReason = 'noPost' | 'ownPr' | 'awaitingAnswer' | 'ghFailed' | 'postBlocked'
 export type Verdict = 'changesRequested' | 'clean'
 export type Recommendation = 'approve' | 'fixBeforeMerge' | 'hold' | 'doNotMerge'
