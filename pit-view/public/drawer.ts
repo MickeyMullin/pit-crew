@@ -256,6 +256,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
         ask.heading),
       h('p', { class: 'confirm-title' }, ask.title),
       list,
+      ask.sources === null ? null : h('p', { class: 'confirm-sources' }, ask.sources),
       caution ? h('p', { id: 'drawer-confirm-caution', class: 'confirm-caution-line' }, ask.caution) : null,
       errorLine(),
       confirmActions(ask.confirm, caution ? 'caution' : 'primary', () => void doStart()))

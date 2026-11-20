@@ -261,6 +261,10 @@ const countedReviews = (pr: RawOpenPr): RawReview[] =>
   latestReviewsOf(pr).filter((review) =>
     review.author !== null && !same(review.author.login, pr.author?.login) && reviewStates[review.state] !== undefined)
 
+// whether a change request stands on the PR: GitHub's review decision says so, or someone other than the author has a latest approving or change-requesting review that is CHANGES_REQUESTED. It is the only evidence of requests to act on that the cached PR holds; its unresolved threads are not fetched
+export const hasStandingChangeRequest = (pr: RawOpenPr): boolean =>
+  pr.reviewDecision === 'CHANGES_REQUESTED' || countedReviews(pr).some((review) => review.state === 'CHANGES_REQUESTED')
+
 // latest review per reviewer, then pending requests; a re-requested reviewer shows as requested
 export const reviewerPips = (pr: RawOpenPr, config: Config): Reviewer[] => {
   const pips: Reviewer[] = []

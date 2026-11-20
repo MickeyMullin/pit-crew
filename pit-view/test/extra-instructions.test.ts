@@ -213,7 +213,7 @@ test('a Fix session and a Dependabot review offer no box, and a start that sends
   const h = await setup({ extraReviewInstructions: 'skip fixtures' })
   try {
     const before = h.launch.children.length
-    for (const [number, ask] of [[104, { kind: 'fix' }], [114, { kind: 'default' }]] as const) {
+    for (const [number, ask] of [[101, { kind: 'fix' }], [114, { kind: 'default' }]] as const) {
       for (const value of ['skip fixtures', '']) {
         const refused = await start(h, number, { ...ask, extraInstructions: value })
         assert.equal(refused.status, 422, `#${number}`)
@@ -222,10 +222,10 @@ test('a Fix session and a Dependabot review offer no box, and a start that sends
     }
     assert.equal(h.launch.children.length, before)
     // and with none sent, each runs as it always did, with the standing default left out
-    const fix = await start(h, 104, { kind: 'fix' })
-    assert.deepEqual(fix.body.args, ['104'])
+    const fix = await start(h, 101, { kind: 'fix' })
+    assert.deepEqual(fix.body.args, ['101'])
     assert.equal(await exists(fileOf(h, fix.body.id)), false)
-    assert.equal(claudeRequest(h.launch.children.at(-1) as FakeChild), `/fix-pr 104 --emit-json=${runDir(h, fix.body.id)}`)
+    assert.equal(claudeRequest(h.launch.children.at(-1) as FakeChild), `/fix-pr 101 --emit-json=${runDir(h, fix.body.id)}`)
     assert.equal(Object.hasOwn(await requestOf(h, fix.body.id), 'extraInstructions'), false)
     const dependabot = await start(h, 114, { kind: 'default' })
     assert.deepEqual(dependabot.body.args, ['114'])
@@ -239,7 +239,8 @@ test('the starts a row offers name the standing default and the flag on review s
   const h = await setup({ extraReviewInstructions: 'skip fixtures' })
   try {
     const offered = { standing: 'skip fixtures', flag }
-    const own = await cellOf(h, 104)
+    // #101 has changes requested, which offers its Fix session
+    const own = await cellOf(h, 101)
     assert.deepEqual(own.starts.map((option) => [option.kind, option.extraInstructions]), [['default', offered], ['tandem', offered], ['fix', undefined]])
     const others = await cellOf(h, 113)
     assert.deepEqual(others.starts.map((option) => [option.kind, option.extraInstructions]), [['default', offered], ['tandem', offered]])

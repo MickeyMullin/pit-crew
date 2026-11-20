@@ -129,6 +129,8 @@ export type StartConfirmModel = {
   extraBox: { label: string, toggle: string, detail: string, checked: boolean, text: string } | null
   effect: string
   effectKind: StartOption['posts']['kind']
+  // a Fix session's line about what it acts on; null for every other start, and for an entry from before the field
+  sources: string | null
   // a start that pushes to the PR's branch is confirmed with a caution treatment and this plain
   // line about the push; null for a review
   caution: string | null
@@ -138,6 +140,15 @@ export type StartConfirmModel = {
 
 // null when the PR no longer offers that start. A Fix session pushes commits, so its confirmation
 // names the branch in its heading, says plainly what the push does, and has a Start of its own
+// what a Fix session says it addresses: the command's default, the more recent of GitHub's requested changes and the latest self-review report, which it names at its short SHA when the PR has one for its current head
+export const fixSourcesLine = (fix: StartOption['fix']): string | null => {
+  if (fix === undefined) return null
+  const base = 'It addresses the more recent of GitHub\'s requested changes and your self-review report'
+  if (fix.selfReview === null) return `${base}; this PR has no self-review report for its current head, so it addresses GitHub's requests.`
+  const named = `${base} at ${fix.selfReview.sha}`
+  return fix.remote ? `${named}.` : `${named}; GitHub shows no request, so it addresses that report.`
+}
+
 export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headRef'>, cell: AgentCell, kind: StartKind, runner: RunnerName, checkComments = false, extraText?: string, extraOn = false): StartConfirmModel | null => {
   const option = optionOf(cell, kind)
   if (option === undefined) return null
@@ -172,6 +183,7 @@ export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headR
     },
     effect: option.posts.text,
     effectKind: option.posts.kind,
+    sources: option.kind === 'fix' ? fixSourcesLine(option.fix) : null,
     caution: push ? `It pushes new commits to ${row.headRef} on GitHub under your account, and never force-pushes.` : null,
     confirm: push ? 'Start fix session' : 'Start',
     busy: push ? 'Starting fix session…' : 'Starting…',

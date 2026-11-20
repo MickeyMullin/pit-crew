@@ -711,9 +711,11 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (row === undefined) throw new HttpError(422, `#${number} is not an open PR in ${config.repo} that Pit View has fetched`)
     // the stack is GitHub's marker on the cached PR; a base branch that is another PR's never makes one
     const stack = markedStack(row.pr)
-    const refusal = notOffered(kind, row.pr, config, stack)
+    // a Fix session's offer reads the PR's runs, the latest finished self-review among them
+    const runs = cache.runsFor(config.repo, number)
+    const refusal = notOffered(kind, row.pr, config, stack, runs)
     if (refusal !== null) throw new HttpError(422, refusal)
-    const option = startOptions(row.pr, config, stack, false).find((candidate) => candidate.kind === kind)
+    const option = startOptions(row.pr, config, stack, false, null, runs).find((candidate) => candidate.kind === kind)
     if (option === undefined) throw new HttpError(422, `${kind} is not offered for #${number}`)
     // the comments check rides on a Self-review alone: the option carries the args it runs with, and no other start has them
     const args = checkComments === true ? option.checkCommentsArgs : option.args

@@ -347,7 +347,9 @@ test('an auto-review run\'s cell carries its origin, when it was queued, and whe
 test('a PR offers its default run, the same review in tandem, and a stack review only when stacked', async () => {
   const config = baseConfig()
   const stacked = { position: 2, size: 3 }
-  const options = async (number: number, stack: typeof stacked | null = null) => startOptions(await prOf(number), config, stack, false)
+  // #104 has a finished self-review of its head with findings, which is what offers it a fix session
+  const reviewed = async (number: number): Promise<Run[]> => number === 104 ? [selfReviewRun(await prOf(104))] : []
+  const options = async (number: number, stack: typeof stacked | null = null) => startOptions(await prOf(number), config, stack, false, null, await reviewed(number))
   const summary = (list: Awaited<ReturnType<typeof options>>) => list.map((option) => [option.kind, option.label, option.button, option.command, option.args])
 
   assert.deepEqual(summary(await options(113)), [
@@ -380,7 +382,7 @@ test('a PR offers its default run, the same review in tandem, and a stack review
 test('only a Self-review offers the comments check, which adds --check-comments after --no-post, and every run kind without it is the invocation it always was', async () => {
   const config = baseConfig()
   const stacked = { position: 2, size: 3 }
-  const offered = async (number: number) => startOptions(await prOf(number), config, stacked, false).map((option) => [option.kind, requestText('/', option.command, option.args, '/r/1'), option.checkCommentsArgs])
+  const offered = async (number: number) => startOptions(await prOf(number), config, stacked, false, null, number === 104 ? [selfReviewRun(await prOf(104))] : []).map((option) => [option.kind, requestText('/', option.command, option.args, '/r/1'), option.checkCommentsArgs])
   // a Self-review, then the viewer's own PR's other starts
   assert.deepEqual(await offered(104), [
     ['default', '/review-pr 104 --no-post --emit-json=/r/1', ['104', '--no-post', '--check-comments']],
@@ -419,7 +421,7 @@ test('only a Self-review offers the comments check, which adds --check-comments 
 test('each start says which runners it works with and what it does on GitHub', async () => {
   const config = baseConfig()
   const stacked = { position: 1, size: 2 }
-  const posts = async (number: number) => Object.fromEntries(startOptions(await prOf(number), config, stacked, false).map((option) => [option.kind, [option.runners, option.posts]]))
+  const posts = async (number: number) => Object.fromEntries(startOptions(await prOf(number), config, stacked, false, null, number === 104 ? [selfReviewRun(await prOf(104))] : []).map((option) => [option.kind, [option.runners, option.posts]]))
   const review = { kind: 'review', text: 'Posts its report to the PR as @vera-quill: an approval, a request for changes, or a comment, per the findings.' }
   const stack = { kind: 'offer', text: 'Posts nothing; writes the report only. It stops to offer posting it on the top PR, and you answer in the session.' }
   assert.deepEqual(await posts(113), { default: [['claude', 'codex'], review], tandem: [['claude'], review], stack: [['claude', 'codex'], stack] })
@@ -779,7 +781,7 @@ test('every start a row offers gets the same answer through the launcher: hooks 
   try {
     const seen = new Set<string>()
     for (const number of [106, 104, 114, 113]) {
-      for (const option of startOptions(await prOf(number), baseConfig(), null, false)) {
+      for (const option of startOptions(await prOf(number), baseConfig(), null, false, null, number === 104 ? [selfReviewRun(await prOf(104))] : [])) {
         const before = h.launch.children.length
         const run = await h.launcher.start(request(number, { command: option.command, args: option.args, label: option.label, runner: 'claude' }))
         const child = h.launch.children[before]!
@@ -4023,31 +4025,72 @@ const fixRun = (result: Record<string, unknown> | null, patch: Partial<Run> = {}
   finishedAt: '2026-10-28T15:00:00Z', result: result as unknown as RunResultJson | null, ...patch,
 })
 
-test('a fix session is offered on every own open PR, drafts included, Claude only and without --no-post; never on others\' or bots\' PRs, and never the default', async () => {
+// a finished self-review of an own PR: review-pr with --no-post, whose result names the commit it read
+const selfReviewRun = (pr: RawOpenPr, patch: Partial<Run> = {}, result: Record<string, unknown> = {}): Run => runRow({
+  id: 30, number: pr.number, command: 'review-pr', args: [String(pr.number), '--no-post'], label: 'Self-review', status: 'done', finishedAt: '2026-10-28T14:00:00Z',
+  result: reviewResult({ target: { repo: scenario.repo, pr: pr.number }, reviewed: { kind: 'commit', sha: pr.headRefOid }, posted: null, notPostedReason: 'noPost', ...result }) as unknown as RunResultJson, ...patch,
+})
+
+test('a fix start is offered on the viewer\'s own PR when GitHub has a request to act on or a finished self-review for its head has findings, Claude only and without --no-post; never on others\' or bots\' PRs, and never the default', async () => {
   const config = baseConfig()
-  const fixOf = async (number: number, viewer = config) => startOptions(await prOf(number), viewer, null, false).find((option) => option.kind === 'fix')
-  // 101 has changes requested, 103 is a draft, 104 awaits review, 120 is approved
-  for (const number of [101, 103, 104, 120]) {
-    const fix = await fixOf(number)
-    assert.ok(fix !== undefined, `#${number}`)
-    assert.deepEqual([fix.label, fix.button, fix.command, fix.args, fix.runners, fix.posts.kind, fix.unavailable], ['Fix session', 'Fix requested changes', 'fix-pr', [String(number)], ['claude'], 'push', null])
-    assert.ok(!fix.args.includes('--no-post'))
-    assert.equal(notOffered('fix', await prOf(number), config, null), null)
-  }
-  assert.equal((await fixOf(101))?.posts.text, 'Pushes new commits to fix/webhook-retry on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.')
-  // others' PRs, Dependabot's and Renovate's
-  for (const number of [113, 106, 111, 114, 115]) {
+  const fixOf = async (number: number, runs: readonly Run[] = [], viewer = config) => startOptions(await prOf(number), viewer, null, false, null, runs).find((option) => option.kind === 'fix')
+  // 101 has changes requested: offered with no run at all, and its sources say GitHub is the one
+  const remote = await fixOf(101)
+  assert.ok(remote !== undefined)
+  assert.deepEqual([remote.label, remote.button, remote.command, remote.args, remote.runners, remote.posts.kind, remote.unavailable], ['Fix session', 'Fix requested changes', 'fix-pr', ['101'], ['claude'], 'push', null])
+  assert.deepEqual(remote.fix, { remote: true, selfReview: null })
+  assert.ok(!remote.args.includes('--no-post'))
+  assert.equal(notOffered('fix', await prOf(101), config, null), null)
+  assert.equal(remote.posts.text, 'Pushes new commits to fix/webhook-retry on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.')
+  // 103 is a draft, 104 awaits review, 120 is approved: no request on GitHub and no self-review, so no start
+  for (const number of [103, 104, 120]) {
     assert.equal(await fixOf(number), undefined, `#${number}`)
+    assert.match(notOffered('fix', await prOf(number), config, null) ?? '', new RegExp(`GitHub shows no request to act on and no finished self-review of its current head has findings`), `#${number}`)
+  }
+  // a finished self-review of the current head with findings offers it, drafts and approved PRs included, and names the short SHA
+  for (const number of [103, 104, 120]) {
+    const pr = await prOf(number)
+    const fix = await fixOf(number, [selfReviewRun(pr)])
+    assert.deepEqual(fix?.fix, { remote: false, selfReview: { sha: pr.headRefOid.slice(0, 7), findings: 1 } }, `#${number}`)
+    assert.equal(notOffered('fix', pr, config, null, [selfReviewRun(pr)]), null)
+  }
+  // both sources: the standing change request and the self-review
+  const both = await prOf(101)
+  assert.deepEqual((await fixOf(101, [selfReviewRun(both)]))?.fix, { remote: true, selfReview: { sha: both.headRefOid.slice(0, 7), findings: 1 } })
+  // a self-review that is not for the head, one with no findings, one that did not finish, one that posted (a review, not a self-review), and a fix run offer nothing; the newest finished self-review alone counts
+  const pr = await prOf(104)
+  const stale = selfReviewRun(pr, {}, { reviewed: { kind: 'commit', sha: '0123456789abcdef0123456789abcdef01234567' } })
+  const clean = selfReviewRun(pr, {}, { findings: [], verdict: 'clean' })
+  for (const [name, run] of [
+    ['stale', stale], ['clean', clean], ['stopped', selfReviewRun(pr, { status: 'stopped', result: null })], ['failed', selfReviewRun(pr, { status: 'failed' })],
+    ['a posted review', selfReviewRun(pr, { args: ['104'] })], ['a fix run', fixRun(fixResult())],
+  ] as const) assert.equal(await fixOf(104, [run]), undefined, name)
+  // an older self-review with findings does not stand in for a newer one that has none, or one that went stale
+  assert.equal(await fixOf(104, [selfReviewRun(pr, { id: 32 }, { reviewed: { kind: 'commit', sha: 'f'.repeat(40) } }), selfReviewRun(pr, { id: 31 })]), undefined)
+  assert.equal(await fixOf(104, [{ ...clean, id: 32 }, selfReviewRun(pr, { id: 31 })]), undefined)
+  assert.ok(await fixOf(104, [{ ...stale, id: 29 }, selfReviewRun(pr, { id: 31 })]))
+  // a short SHA that is a prefix of the head, in any letter case, is the same commit
+  assert.ok(await fixOf(104, [selfReviewRun(pr, {}, { reviewed: { kind: 'commit', sha: pr.headRefOid.slice(0, 9).toUpperCase() } })]))
+  // a tandem self-review is a self-review
+  assert.ok(await fixOf(104, [selfReviewRun(pr, { args: ['104', '--tandem', '--no-post'] })]))
+  // others' PRs, Dependabot's and Renovate's, whatever their runs
+  for (const number of [113, 106, 111, 114, 115]) {
+    assert.equal(await fixOf(number, [selfReviewRun(await prOf(number))]), undefined, `#${number}`)
     assert.match(notOffered('fix', await prOf(number), config, null) ?? '', new RegExp(`only on your own PRs, and #${number} is not yours`))
   }
   // a bot is never the owner, even when the configured viewer names one
   const botViewer = { ...config, viewer: (await prOf(114)).author!.login }
-  assert.equal(await fixOf(114, botViewer), undefined)
+  assert.equal(await fixOf(114, [], botViewer), undefined)
   assert.notEqual(notOffered('fix', await prOf(114), botViewer, null), null)
-  // the default stays Self-review, changes requested or not, and the fix comes last
+  // the default stays Self-review, changes requested or not, and the fix comes last; the cell passes the PR's runs through
   const cell = agentCell(await prOf(101), config, undefined, undefined)
   assert.deepEqual([cell.action.kind, cell.action.command, cell.action.args, cell.label], ['selfReview', 'review-pr', ['101', '--no-post'], 'Self-review'])
   assert.deepEqual(cell.starts.map((option) => option.kind), ['default', 'tandem', 'fix'])
+  const ownRun = selfReviewRun(await prOf(104))
+  assert.deepEqual(agentCell(await prOf(104), config, ownRun, undefined, null, null, undefined, [ownRun]).starts.map((option) => option.kind), ['default', 'tandem', 'fix'])
+  // the PR's own latest run counts even when the history handed in lacks it
+  assert.deepEqual(agentCell(await prOf(104), config, ownRun, undefined).starts.map((option) => option.kind), ['default', 'tandem', 'fix'])
+  assert.deepEqual(agentCell(await prOf(104), config, selfReviewRun(await prOf(104), {}, { findings: [] }), undefined).starts.map((option) => option.kind), ['default', 'tandem'])
   // while a run is in flight, the fix is as unavailable as the rest
   assert.ok(agentCell(await prOf(101), config, runRow({ number: 101 }), undefined).starts.every((option) => option.unavailable?.includes('in flight')))
 })
