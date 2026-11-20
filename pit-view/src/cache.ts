@@ -254,8 +254,8 @@ export type Cache = {
   resolvePostMark: (repo: string, number: number, heads?: readonly string[], source?: string) => void
   // what Pit View knows of the posts on each PR of a repo that has any (section 10 of DESIGN.md, Posting, One post per PR and head)
   postRecords: (repo: string) => Map<number, PostRecord>
-  // GitHub refused the post, so nothing landed
-  clearPostMark: (repo: string, number: number) => void
+  // GitHub refused the post that source began, so nothing it wrote landed: only a mark that source began is taken off, and a mark another record made since, such as a post on record without its head, stays as it is
+  clearPostMark: (repo: string, number: number, source: string) => void
   close: () => void
   // the open handle, for tests and diagnostics
   db: DatabaseSync
@@ -1159,8 +1159,8 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     return records
   }
 
-  const clearPostMark = (repo: string, number: number): void => {
-    run('DELETE FROM post_marks WHERE repo = $repo AND number = $number', { repo, number })
+  const clearPostMark = (repo: string, number: number, source: string): void => {
+    run('DELETE FROM post_marks WHERE repo = $repo AND number = $number AND source = $source', { repo, number, source })
   }
 
   migrate()

@@ -479,7 +479,7 @@ export const createActions = (options: ActionsOptions): Actions => {
         try {
           posting.mark(true)
         } catch (error) {
-          cache.clearPostMark(repo, number)
+          cache.clearPostMark(repo, number, source)
           throw new ActionError('notAllowed', `cannot record that #${number} is being posted (${messageOf(error)}), and without that record it could be posted twice; nothing was posted`)
         }
         marked = true
@@ -515,10 +515,11 @@ export const createActions = (options: ActionsOptions): Actions => {
           refresh(repo, number)
           throw new ActionError('ghFailed', `${messageOf(error)}; the post may have landed, so ${posting.button} will not be offered again. Check #${number} on GitHub`, kind)
         }
+        // only the mark this post began is taken off: a record that marked the PR while the post was in flight, such as a sweep that settled saying it posted at a head it could not establish, keeps the PR marked
         if (marked) {
           try {
             posting.mark(false)
-            cache.clearPostMark(repo, number)
+            cache.clearPostMark(repo, number, source)
           } catch (failure) {
             log(`PR #${number}: GitHub refused the post of ${source}, but its mark could not be taken off: ${messageOf(failure)}`)
           }
@@ -530,13 +531,13 @@ export const createActions = (options: ActionsOptions): Actions => {
       }
       // gh pr comment prints the comment's URL; gh pr review prints none, so the post links to the PR, as the prompts' own fallback does
       const url = printed.trim().split('\n').at(-1) ?? ''
-      // the head it went onto is recorded with it, so the post is on record at that head as well as at the commit its report reviewed, from the result alone
+      // the head the live read returned just before the write is recorded with it as the head it went onto, so the post is on record at that head as well as at the commit its report reviewed, from the result alone. gh cannot pin the post to a commit, so a push that lands after that read can put it on a newer head that is not recorded (section 10 of DESIGN.md, Posting, One post per PR and head)
       const posted: Posted = { form, url: isHttpUrl(url) ? url : `https://github.com/${repo}/pull/${number}`, head: headSha }
       log(`PR #${number}: ${source} posted its report (${form})`)
       let recorded: R | null = null
       try {
         recorded = posting.record(posted)
-        // the outcome is known now, and the post is on record at the head it went onto and at the commit its report reviewed, so neither is offered again; a mark whose post could not be recorded stays unresolved, so nothing offers the PR again at any head, and only the mark this post began is resolved
+        // the outcome is known now, and the post is on record at the head read before the write and at the commit its report reviewed, so neither is offered again; a mark whose post could not be recorded stays unresolved, so nothing offers the PR again at any head, and only the mark this post began is resolved
         cache.resolvePostMark(repo, number, [headSha, reviewedAt], source)
       } catch (error) {
         log(`PR #${number}: the post of ${source} landed but could not be recorded: ${messageOf(error)}`)

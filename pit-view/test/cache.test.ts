@@ -1333,9 +1333,14 @@ test('a version 18 cache gains the post_marks table in place, keeping its sweeps
     again.resolvePostMark(scenario.repo, 114)
     assert.deepEqual([...again.unresolvedPostMarks(scenario.repo)], [])
     again.beginPostMark(scenario.repo, 114, 'run 9')
-    again.clearPostMark(scenario.repo, 114)
+    again.clearPostMark(scenario.repo, 114, 'run 9')
     assert.deepEqual([...again.unresolvedPostMarks(scenario.repo)], [])
     assert.equal(again.db.prepare('SELECT COUNT(*) AS n FROM post_marks').get()?.n, 0)
+    // a mark another source took over since the post began is not that post's to take off
+    again.beginPostMark(scenario.repo, 114, 'run 9')
+    again.db.prepare('UPDATE post_marks SET source = \'sweep 4, head not on record\' WHERE number = 114').run()
+    again.clearPostMark(scenario.repo, 114, 'run 9')
+    assert.equal(again.unresolvedPostMark(scenario.repo, 114), 'sweep 4, head not on record')
     again.close()
   } finally {
     await cleanup()
@@ -1541,7 +1546,7 @@ for (const from of [18, 19]) {
       cache.close()
       // a reopen at the current version carries nothing forward again
       const again = openCache({ path, clock: handClock().clock })
-      again.clearPostMark(scenario.repo, 106)
+      again.clearPostMark(scenario.repo, 106, `run ${begun.id}`)
       again.close()
       const third = openCache({ path, clock: handClock().clock })
       assert.deepEqual([...third.unresolvedPostMarks(scenario.repo)].sort(), [107, 113, 114])

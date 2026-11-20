@@ -625,6 +625,41 @@ test('a post GitHub refused takes the PR\'s mark off, so a newer sweep\'s row of
   }
 })
 
+test('a post GitHub refuses takes off only its own mark: a sweep that settled while it was in flight, recording a post of the PR whose head cannot be established, keeps the PR marked, so a later sweep of another head offers nothing', async () => {
+  const behavior: Behavior = { writeError: 'HTTP 422: Unprocessable Entity (https://api.github.com/graphql)' }
+  const h = await setup(behavior)
+  try {
+    const first = await scheduledSweep(h, [row114()])
+    let manualId: number | null = null
+    behavior.onWrite = async () => {
+      behavior.onWrite = undefined
+      // a sweep started by hand settles while the post waits on GitHub, saying it posted on #114 at a head it gives only in short
+      const manual = await h.server.sweepLauncher.start(sweepRequest(repo))
+      manualId = manual.id
+      const child = h.launch.children.at(-1)!
+      await child.result(noPostResult([row114({ head: 'd6b9780', posted: { form: 'comment', url: `https://github.com/${repo}/pull/114#issuecomment-5` }, recommendation: 'hold' })], { notPostedReason: null }))
+      child.exit(0)
+      await h.server.sweepLauncher.settled(manual.id)
+    }
+    const refused = await post(h, first.id, bodyOf('comment'))
+    assert.equal(refused.status, 502, JSON.stringify(refused.body))
+    assert.notEqual(manualId, null)
+    assert.equal(h.server.cache.unresolvedPostMark(repo, 114), `sweep ${manualId}, head not on record`)
+    assert.deepEqual(h.server.cache.getSweep(first.id)?.postAttempts, {})
+    behavior.writeError = undefined
+    await moveHead(h, behavior, later)
+    const newer = await scheduledSweep(h, [row114({ head: later })], { 114: reportText(later) })
+    assert.notEqual(h.server.cache.getSweep(newer.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    const again = await post(h, newer.id, bodyOf('comment', { headSha: later, reviewedSha: later }))
+    assert.equal(again.status, 422, JSON.stringify(again.body))
+    assert.match(String(again.body.error), /is on record, but not the head it went onto/)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('the PR\'s mark is on disk before gh is asked to write, so a restart before any record of the post offers the PR to no sweep, old or new', async () => {
   const behavior: Behavior = { writeError: 'read tcp: connection reset by peer' }
   const h = await setup(behavior)
