@@ -1875,6 +1875,31 @@ test('a checked Self-review meets the review cap as an unchecked one does: it qu
   }
 })
 
+test('a fix start reads the self-review that finished last, not the one created last: an earlier-created run that finished later and is clean refuses it with a 422', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const url = `${h.base}/api/prs/104/runs`
+    const fixOf = async () => rowIn((await getJson<View>(`${h.base}/api/view`)).body, 104)?.agent?.starts.find((start) => start.kind === 'fix')
+    const sha = h.server.cache.readView(scenario.repo).open.find((entry) => entry.number === 104)!.pr.headRefOid
+    const record = (finishedAt: string, clean: boolean) => h.server.cache.createRun({
+      repo: scenario.repo, number: 104, command: 'review-pr', args: ['104', '--no-post'], label: 'Self-review', runner: 'claude', cwd: '~/dev/orbit', sessionId: 's', pid: null, pidStartedAt: null,
+      startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, finishedAt, status: 'done', note: null, costUsd: null, resume: 'cd ~/dev/orbit && claude --resume s',
+      result: reviewResult({ target: { repo: scenario.repo, pr: 104 }, reviewed: { kind: 'commit', sha }, posted: null, notPostedReason: 'noPost', ...(clean ? { findings: [], verdict: 'clean' } : {}) }) as never,
+    }, (runId) => `~/runs/${runId}`)
+    // the first-created run finishes last and is clean; the second-created run finished earlier and has findings
+    record('2026-10-26T15:00:00Z', true)
+    record('2026-10-26T14:05:00Z', false)
+    assert.equal(await fixOf(), undefined)
+    assert.equal((await send(url, 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))).status, 422)
+    // a run that finishes after both, with findings, is the one the offer reads
+    record('2026-10-26T16:00:00Z', false)
+    assert.deepEqual((await fixOf())?.fix, { remote: false, selfReview: { sha: sha.slice(0, 7), findings: 1 } })
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a fix start is offered and runs as fix-pr with no --source on a PR with only a finished self-review of its head, and not once that review is for another head', async () => {
   const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
   try {

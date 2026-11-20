@@ -4095,6 +4095,36 @@ test('a fix start is offered on the viewer\'s own PR when GitHub has a request t
   assert.ok(agentCell(await prOf(101), config, runRow({ number: 101 }), undefined).starts.every((option) => option.unavailable?.includes('in flight')))
 })
 
+test('the fix offer reads the latest finished self-review by finish time, not by run id: ties and a missing or unparsable time fall back to the higher id', async () => {
+  const pr = await prOf(104)
+  const sha = pr.headRefOid.slice(0, 7).toLowerCase()
+  const withFindings = (id: number, finishedAt: string | null) => selfReviewRun(pr, { id, finishedAt })
+  const clean = (id: number, finishedAt: string | null) => selfReviewRun(pr, { id, finishedAt }, { findings: [], verdict: 'clean' })
+  const stale = (id: number, finishedAt: string | null) => selfReviewRun(pr, { id, finishedAt }, { reviewed: { kind: 'commit', sha: 'f'.repeat(40) } })
+  const offerOf = (runs: Run[]) => fixOfferOf(pr, runs).selfReview
+  const found = { sha, findings: 1 }
+  // the lower id finished later and has findings; the higher id finished earlier and is clean or stale
+  assert.deepEqual(offerOf([clean(32, '2026-10-28T14:00:00Z'), withFindings(31, '2026-10-28T14:30:00Z')]), found)
+  assert.deepEqual(offerOf([withFindings(31, '2026-10-28T14:30:00Z'), stale(32, '2026-10-28T14:00:00Z')]), found)
+  // the mirror: the lower id finished later and is clean or stale; the higher id finished earlier with findings
+  assert.equal(offerOf([withFindings(32, '2026-10-28T14:00:00Z'), clean(31, '2026-10-28T14:30:00Z')]), null)
+  assert.equal(offerOf([stale(31, '2026-10-28T14:30:00Z'), withFindings(32, '2026-10-28T14:00:00Z')]), null)
+  // the times compare as instants, not strings: the same moment in another offset, and a later one written with a different offset
+  assert.deepEqual(offerOf([clean(32, '2026-10-28T14:00:00Z'), withFindings(31, '2026-10-28T15:30:00+01:00')]), found)
+  assert.equal(offerOf([withFindings(32, '2026-10-28T09:00:00-05:00'), clean(31, '2026-10-28T14:30:00Z')]), null)
+  // equal finish times fall back to the higher id
+  assert.deepEqual(offerOf([clean(31, '2026-10-28T14:00:00Z'), withFindings(32, '2026-10-28T14:00:00Z')]), found)
+  assert.equal(offerOf([withFindings(31, '2026-10-28T14:00:00Z'), clean(32, '2026-10-28T14:00:00Z')]), null)
+  // a missing or unparsable time loses to a valid one, whatever the ids, and never throws
+  for (const bad of [null, 'not a time', '']) {
+    assert.deepEqual(offerOf([clean(32, bad), withFindings(31, '2026-10-28T14:00:00Z')]), found, String(bad))
+    assert.equal(offerOf([withFindings(32, bad), clean(31, '2026-10-28T14:00:00Z')]), null, String(bad))
+  }
+  // two runs with no usable time fall back to the higher id
+  assert.deepEqual(offerOf([clean(31, null), withFindings(32, 'nope')]), found)
+  assert.equal(offerOf([withFindings(31, null), clean(32, 'nope')]), null)
+})
+
 test('GitHub\'s own review decision of changes requested offers the fix start even when no review in the cached list stands', async () => {
   const config = baseConfig()
   const pr = await prOf(104)

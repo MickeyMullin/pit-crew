@@ -719,7 +719,7 @@ export const isTandemRun = (args: readonly string[]): boolean => args.includes('
 export const offersFix = (pr: RawOpenPr, config: Config): boolean =>
   isMine(pr, config) && pr.author?.__typename !== 'Bot' && !isBotLogin(pr.author?.login, config)
 
-// what a Fix session has to act on, as far as the cached PR and its runs show (section 8 of DESIGN.md, Fix session): remote is whether GitHub has a change request standing, and selfReview is the PR's latest finished self-review when it read the PR's current head and has findings. The start passes no --source, so the command picks the more recent of the two itself
+// what a Fix session has to act on, as far as the cached PR and its runs show (section 8 of DESIGN.md, Fix session): remote is whether GitHub has a change request standing, and selfReview is the PR's self-review that finished last when it read the PR's current head and has findings. The start passes no --source, so the command picks the more recent of the two itself
 export type FixOffer = { remote: boolean, selfReview: { sha: string, findings: number } | null }
 
 // two commits are the same when one SHA is a prefix of the other, in any letter case
@@ -733,8 +733,9 @@ const isSelfReviewRun = (run: Run): boolean =>
   run.command === 'review-pr' && run.args.includes('--no-post') && run.status === 'done' && run.result?.schema === 'pit-crew/review-result@1' && run.result.reviewed !== null
 
 export const fixOfferOf = (pr: RawOpenPr, runs: readonly Run[]): FixOffer => {
-  // only the newest finished self-review counts: an older one with findings never stands in for a newer one that has none or has gone stale
-  const latest = [...runs].filter(isSelfReviewRun).sort((a, b) => b.id - a.id)[0]
+  // only the self-review that finished last counts, the one whose report PR-<n>.md holds: an earlier one with findings never stands in for a later one that has none or has gone stale; a null or unparsable finishedAt ranks below every valid time, and ties and such times fall back to the higher run id
+  const finished = (run: Run): number => { const at = run.finishedAt === null ? NaN : Date.parse(run.finishedAt); return Number.isNaN(at) ? -Infinity : at }
+  const latest = [...runs].filter(isSelfReviewRun).sort((a, b) => (finished(b) === finished(a) ? 0 : finished(b) > finished(a) ? 1 : -1) || b.id - a.id)[0]
   const result = latest?.result?.schema === 'pit-crew/review-result@1' ? latest.result : undefined
   const reviewed = result?.reviewed?.sha
   const current = reviewed !== undefined && sameCommit(reviewed, pr.headRefOid) && result !== undefined && result.findings.length > 0
