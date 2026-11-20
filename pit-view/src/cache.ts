@@ -12,8 +12,8 @@ import type { ReportVerdict } from './reports.ts'
 // why a run was queued (section 10 of DESIGN.md, What qualifies)
 export type QueueReason = 'requested' | 'new' | 'pushed' | 'selfReview' | 'dependabot'
 
-// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table. Version 12 added the database id of the latest reviews to the open-PR query, which the Changes requested links read, so the GitHub tables are rebuilt again. Version 13 added GitHub's stack marker (stack and stackEntry) to the open-PR query, which the stack chip, the Review stack start, and the stack report lookup read in place of the base-branch guess, so the GitHub tables are rebuilt again. Version 14 added the ticks table and auto-review's columns on runs and sweeps (origin, tick, reason, queued_at, posting, and worktree on both, and head_oid on runs), changing no GitHub table; a row from before it reads as a manual run. Version 15 added runs.extra_instructions, the extra review instructions a run used and where they came from, and changed no GitHub table; a row from before it reads as having none. Version 16 added the workflow run's identity (databaseId, createdAt, and runAttempt, and the workflow's databaseId) to the check runs of the open-PR query, which the CI readings use to drop a superseded run, so the GitHub tables are rebuilt again. Version 17 added runs.models, the roles and models a run used, and changed no GitHub table; a row from before it reads as not recorded. Version 18 added sweeps.row_reports and sweeps.post_attempts, for the post button on a sweep's rows, and changed no GitHub table; a sweep from before it reads as having no row's report recorded and no post begun, so none of its rows is offered
-export const schemaVersion = 18
+// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table. Version 12 added the database id of the latest reviews to the open-PR query, which the Changes requested links read, so the GitHub tables are rebuilt again. Version 13 added GitHub's stack marker (stack and stackEntry) to the open-PR query, which the stack chip, the Review stack start, and the stack report lookup read in place of the base-branch guess, so the GitHub tables are rebuilt again. Version 14 added the ticks table and auto-review's columns on runs and sweeps (origin, tick, reason, queued_at, posting, and worktree on both, and head_oid on runs), changing no GitHub table; a row from before it reads as a manual run. Version 15 added runs.extra_instructions, the extra review instructions a run used and where they came from, and changed no GitHub table; a row from before it reads as having none. Version 16 added the workflow run's identity (databaseId, createdAt, and runAttempt, and the workflow's databaseId) to the check runs of the open-PR query, which the CI readings use to drop a superseded run, so the GitHub tables are rebuilt again. Version 17 added runs.models, the roles and models a run used, and changed no GitHub table; a row from before it reads as not recorded. Version 18 added sweeps.row_reports and sweeps.post_attempts, for the post button on a sweep's rows, and changed no GitHub table; a sweep from before it reads as having no row's report recorded and no post begun, so none of its rows is offered. Version 19 added the post_marks table, one mark per PR for a post from Pit View that was begun and whose outcome is not known, and changed no GitHub table; a cache from before it has no marks
+export const schemaVersion = 19
 
 // the last version that changed what the GitHub tables hold; a cache at this version or later keeps them through a bump, since a bump after it only adds tables
 export const githubTablesVersion = 16
@@ -238,6 +238,14 @@ export type Cache = {
   // a repo's ticks, newest first
   ticksFor: (repo: string, limit?: number) => Tick[]
   latestTick: (repo: string) => Tick | null
+  // the PRs of a repo with a post begun from Pit View whose outcome is not known, so no button offers them again (section 10 of DESIGN.md, Posting)
+  unresolvedPostMarks: (repo: string) => Set<number>
+  // marks a post begun, before gh writes; throws while the PR already has an unresolved mark. source names what posts it ("run 5", "sweep 3")
+  beginPostMark: (repo: string, number: number, source: string) => void
+  // the post is on record, so the mark no longer withholds anything
+  resolvePostMark: (repo: string, number: number) => void
+  // GitHub refused the post, so nothing landed
+  clearPostMark: (repo: string, number: number) => void
   close: () => void
   // the open handle, for tests and diagnostics
   db: DatabaseSync
@@ -278,6 +286,11 @@ const sweepsSchema = [
   'CREATE TABLE IF NOT EXISTS sweeps (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, origin TEXT NOT NULL DEFAULT \'manual\', tick INTEGER, reason TEXT, queued_at TEXT, posting INTEGER NOT NULL DEFAULT 0, worktree TEXT, row_reports TEXT, post_attempts TEXT)',
   'CREATE INDEX IF NOT EXISTS sweeps_by_repo ON sweeps (repo, id)',
   'CREATE INDEX IF NOT EXISTS sweeps_by_status ON sweeps (status)',
+]
+
+// kept across rebuilds like runs (version 19): one row per PR that a post from Pit View, Post it or either post button, has been begun on. resolved_at is set once the post is on record; a mark without it is a post that may have landed, and it is deleted only when GitHub refused the post
+const postMarksSchema = [
+  'CREATE TABLE IF NOT EXISTS post_marks (repo TEXT NOT NULL, number INTEGER NOT NULL, attempted_at TEXT NOT NULL, source TEXT NOT NULL, resolved_at TEXT, PRIMARY KEY (repo, number))',
 ]
 
 // kept across rebuilds like runs (version 14); AUTOINCREMENT so a pruned id is never reused by the rows that name it
@@ -557,6 +570,8 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       if (!sweepColumns.includes('row_reports')) db.exec('ALTER TABLE sweeps ADD COLUMN row_reports TEXT')
       if (!sweepColumns.includes('post_attempts')) db.exec('ALTER TABLE sweeps ADD COLUMN post_attempts TEXT')
       for (const statement of ticksSchema) db.exec(statement)
+      // version 19 added post_marks
+      for (const statement of postMarksSchema) db.exec(statement)
       setMeta('schemaVersion', schemaVersion)
     })
   }
@@ -975,6 +990,23 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
 
   const latestTick = (repo: string): Tick | null => ticksFor(repo, 1)[0] ?? null
 
+  const unresolvedPostMarks = (repo: string): Set<number> =>
+    new Set(all('SELECT number FROM post_marks WHERE repo = $repo AND resolved_at IS NULL', { repo }).map((row) => int(row, 'number')))
+
+  const beginPostMark = (repo: string, number: number, source: string): void => transaction(() => {
+    const standing = get('SELECT source FROM post_marks WHERE repo = $repo AND number = $number AND resolved_at IS NULL', { repo, number })
+    if (standing !== undefined) throw new CacheError(`a post on #${number} by ${str(standing, 'source')} was begun earlier and may have landed`)
+    run('INSERT INTO post_marks (repo, number, attempted_at, source, resolved_at) VALUES ($repo, $number, $at, $source, NULL) ON CONFLICT (repo, number) DO UPDATE SET attempted_at = excluded.attempted_at, source = excluded.source, resolved_at = NULL', { repo, number, at: now(), source })
+  })
+
+  const resolvePostMark = (repo: string, number: number): void => {
+    run('UPDATE post_marks SET resolved_at = $at WHERE repo = $repo AND number = $number', { repo, number, at: now() })
+  }
+
+  const clearPostMark = (repo: string, number: number): void => {
+    run('DELETE FROM post_marks WHERE repo = $repo AND number = $number', { repo, number })
+  }
+
   migrate()
   closeInterrupted()
 
@@ -1014,6 +1046,10 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     updateTick,
     ticksFor,
     latestTick,
+    unresolvedPostMarks,
+    beginPostMark,
+    resolvePostMark,
+    clearPostMark,
     close: () => db.close(),
     db,
   }

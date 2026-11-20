@@ -15,6 +15,7 @@ import { startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
 import { sweepOfferOf, sweepRequest } from '../src/sweeps.ts'
 import type { View } from '../src/poller.ts'
+import type { SweepOffer } from '../src/launcher.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { fakeLaunch, fakeRunner, fakeTime, fixtureRunner, ok, failed, openPage1, openPage2, sweepResult, sweepRow, tempDir } from './helpers.ts'
 import type { Call, FakeLaunch, FakeRunner } from './helpers.ts'
@@ -165,9 +166,19 @@ test('a review of the PR in flight, or one that ran after the sweep started, wit
 
 // ---- the server: the record at settle, the row's offer, and the route ----
 
-type Harness = { server: PitServer, runner: FakeRunner, launch: FakeLaunch, base: string, home: string, cleanup: () => Promise<void> }
+type Harness = { server: PitServer, runner: FakeRunner, launch: FakeLaunch, base: string, home: string, options: Parameters<typeof startServer>[0], cleanup: () => Promise<void> }
 
-type Behavior = { bodies?: { text: string, mode: number }[], writeError?: string, reviews?: string, live?: (number: number) => Record<string, unknown> }
+type Behavior = {
+  bodies?: { text: string, mode: number }[]
+  writeError?: string
+  reviews?: string
+  live?: (number: number) => Record<string, unknown>
+  // runs while the post's live read of the PR waits for GitHub, and as the write reaches gh
+  onLive?: () => Promise<void>
+  onWrite?: () => Promise<void>
+  // holds each write until the test lets it go
+  hold?: Promise<void>
+}
 
 const isWrite = (args: string[]): boolean => args[0] === 'pr' && (args[1] === 'review' || args[1] === 'comment')
 const isLiveRead = (args: string[]): boolean => args[0] === 'api' && /^repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(args[1] ?? '') && !args.includes('--method')
@@ -180,11 +191,14 @@ const ghWorld = (behavior: Behavior = {}): FakeRunner => {
   const base = fixtureRunner()
   return fakeRunner(async (args) => {
     if (isLiveRead(args)) {
+      await behavior.onLive?.()
       const number = Number(args[1]!.split('/').pop())
       return ok(JSON.stringify({ state: 'open', draft: false, merged: false, head: { sha: heads[number] }, ...behavior.live?.(number) }))
     }
     if (isReviewsRead(args)) return ok(behavior.reviews ?? '')
     if (isWrite(args)) {
+      await behavior.onWrite?.()
+      await behavior.hold
       const bodyFile = args[args.indexOf('--body-file') + 1]
       if (bodyFile !== undefined && behavior.bodies !== undefined) behavior.bodies.push({ text: await readFile(bodyFile, 'utf8'), mode: (await stat(bodyFile)).mode & 0o777 })
       if (behavior.writeError !== undefined) return failed(behavior.writeError)
@@ -203,21 +217,32 @@ const setup = async (behavior: Behavior = {}): Promise<Harness> => {
   const time = fakeTime()
   const launch = fakeLaunch()
   const runner = ghWorld(behavior)
-  const server = await startServer({
+  const options = {
     home, port: 0, runner: runner.runner, clock: time.clock, timers: time.timers, timeZone: scenario.timeZone, configPath,
     cachePath: join(home, '.local', 'state', 'pit-view', 'cache.sqlite'), stateDir: join(home, '.local', 'state', 'pit-view'), publicDir: join(home, 'public'),
     launch: launch.deps, log: () => {}, pageSize: scenario.pageSize,
-  })
+  }
+  const server = await startServer(options)
   await (await fetch(`${server.url}/api/refresh`, { method: 'POST' })).json()
   await server.poller.idle()
-  return { server, runner, launch, base: server.url, home, cleanup: async () => { await server.close(); await removeHome() } }
+  const h: Harness = { server, runner, launch, base: server.url, home, options, cleanup: async () => { await h.server.close(); await removeHome() } }
+  return h
 }
 
-// a sweep the scheduler started, with --no-post, that settles with these rows; each row's report is written first, as its reviewer writes it
-const scheduledSweep = async (h: Harness, rows: Record<string, unknown>[], reports: Record<number, string> = { 114: reportText(head114) }, result: Record<string, unknown> = {}): Promise<Sweep> => {
+// a second start over the same home, cache, and state folder, which is what a restart of the server is
+const restart = async (h: Harness): Promise<void> => {
+  await h.server.close()
+  h.server = await startServer(h.options)
+  h.base = h.server.url
+}
+
+// the post button's offer the page holds for a PR
+const offerOf = async (h: Harness, number: number): Promise<SweepOffer | null | undefined> => (await rowOf(h, number))?.agent?.sweepOffer
+
+// a sweep the scheduler started, with --no-post, still running: its reviewers have written each row's report and its review step has ended, which Pit View has seen. reviewEnd false leaves the step's end unwritten
+const reviewedSweep = async (h: Harness, reports: Record<number, string> = { 114: reportText(head114) }, reviewEnd = true): Promise<{ id: number, child: FakeLaunch['children'][number] }> => {
   const folder = join(h.home, 'agents', 'output')
   await mkdir(folder, { recursive: true })
-  for (const [number, text] of Object.entries(reports)) await writeFile(join(folder, `PR-${number}.md`), text)
   await writeFile(join(folder, 'dependabot-sweep-orbit-2026-10-26.md'), '# Sweep\n')
   const tick = h.server.cache.createTick(repo)
   const cwd = join(h.home, 'dev', 'orbit')
@@ -226,9 +251,20 @@ const scheduledSweep = async (h: Harness, rows: Record<string, unknown>[], repor
   const queued = h.server.sweepLauncher.queueScheduled({ ...request, args }, cwd, { tick: tick.id, reason: 'dependabot', headOid: null, posting: false })
   await h.server.sweepLauncher.startScheduled(queued.id, { ...request, args }, { args, posting: false }, async () => cwd)
   const child = h.launch.children.at(-1)!
+  await child.events({ at: '2026-10-26T12:01:00Z', step: 'review', state: 'started', note: null })
+  for (const [number, text] of Object.entries(reports)) await writeFile(join(folder, `PR-${number}.md`), text)
+  if (reviewEnd) await child.events({ at: '2026-10-26T12:10:00Z', step: 'review', state: 'done', note: null })
+  await h.server.sweepLauncher.check()
+  return { id: queued.id, child }
+}
+
+// a sweep the scheduler started, with --no-post, that settles with these rows. Each row's report is written during the sweep's review step, as its reviewer writes it; replaced is written over a report after Pit View saw that step end and before the sweep settles
+const scheduledSweep = async (h: Harness, rows: Record<string, unknown>[], reports: Record<number, string> = { 114: reportText(head114) }, result: Record<string, unknown> = {}, replaced: Record<number, string> = {}): Promise<Sweep> => {
+  const { id, child } = await reviewedSweep(h, reports)
+  for (const [number, text] of Object.entries(replaced)) await writeFile(join(h.home, 'agents', 'output', `PR-${number}.md`), text)
   await child.result(noPostResult(rows, result))
   child.exit(0)
-  return h.server.sweepLauncher.settled(queued.id)
+  return h.server.sweepLauncher.settled(id)
 }
 
 const rowOf = async (h: Harness, number: number): Promise<OpenRow | undefined> => {
@@ -279,6 +315,79 @@ test('a sweep allowed to post records no row reports, and its rows offer nothing
     assert.equal(sweep.status, 'done')
     assert.equal(h.server.cache.getSweep(sweep.id)?.rowReports, null)
     assert.equal((await rowOf(h, 114))?.agent?.sweepOffer, null)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a report replaced after the sweep\'s review step ended and before the sweep settled is not the reviewer\'s, so it is not recorded and its row offers nothing', async () => {
+  const h = await setup()
+  try {
+    const sweep = await scheduledSweep(h, [row114()], { 114: reportText(head114) }, {}, { 114: reportText(head114, 'No actionable findings. Written by another review.') })
+    assert.equal(sweep.status, 'done')
+    assert.equal(h.server.cache.getSweep(sweep.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    const answer = await post(h, sweep.id, bodyOf())
+    assert.equal(answer.status, 422, JSON.stringify(answer.body))
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a sweep whose review step Pit View never saw end before it settled records no row report, since nothing ties the report to its reviewer', async () => {
+  const h = await setup()
+  try {
+    const { id, child } = await reviewedSweep(h, { 114: reportText(head114) }, false)
+    await child.events({ at: '2026-10-26T12:10:00Z', step: 'review', state: 'done', note: null })
+    await child.result(noPostResult([row114()]))
+    child.exit(0)
+    const sweep = await h.server.sweepLauncher.settled(id)
+    assert.equal(sweep.status, 'done')
+    assert.equal(h.server.cache.getSweep(id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a sweep that settles in the recovery after a restart records no row report, so a report replaced while the server was down is never offered', async () => {
+  const h = await setup()
+  try {
+    const { id, child } = await reviewedSweep(h)
+    await child.result(noPostResult([row114()]))
+    // the server stops before the sweep settles; meanwhile another writer replaces the report and the sweep's process ends
+    await h.server.close()
+    await writeFile(join(h.home, 'agents', 'output', 'PR-114.md'), reportText(head114, 'No actionable findings. Written while the server was down.'))
+    h.launch.alive.delete(child.pid)
+    h.server = await startServer(h.options)
+    h.base = h.server.url
+    await (await fetch(`${h.base}/api/refresh`, { method: 'POST' })).json()
+    await h.server.poller.idle()
+    const sweep = h.server.cache.getSweep(id)
+    assert.equal(sweep?.status, 'done')
+    assert.equal(sweep?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    const answer = await post(h, id, bodyOf())
+    assert.equal(answer.status, 422, JSON.stringify(answer.body))
+    assert.deepEqual(postsOf(h.runner), [])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a reused row keeps the report an earlier sweep recorded for the same head while the file is unchanged, and records nothing for a report no sweep recorded', async () => {
+  const h = await setup()
+  try {
+    const older = await scheduledSweep(h, [row114()])
+    // the newer sweep reuses #114's unchanged report, writing nothing to it
+    const newer = await scheduledSweep(h, [row114({ reused: true })], {})
+    assert.deepEqual(h.server.cache.getSweep(newer.id)?.rowReports?.[114], h.server.cache.getSweep(older.id)?.rowReports?.[114])
+    assert.equal((await offerOf(h, 114))?.sweepId, newer.id)
+    // a reused row whose report differs from what the earlier sweep recorded is not that sweep's report
+    const changed = await scheduledSweep(h, [row114({ reused: true })], {}, {}, { 114: reportText(head114, 'No actionable findings. Edited by hand.') })
+    assert.equal(h.server.cache.getSweep(changed.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
   } finally {
     await h.cleanup()
   }
@@ -438,6 +547,132 @@ test('a post GitHub refuses is a 502 with its reason, takes the mark off, and le
     assert.equal(answer.status, 502)
     assert.deepEqual(h.server.cache.getSweep(sweep.id)?.postAttempts, {})
     assert.equal((await rowOf(h, 114))?.agent?.sweepOffer?.sweepId, sweep.id)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+// a single auto-review of #114 that ran with --no-post and finished with its report on disk, so its row offers the stored report's button
+const storedRun = async (h: Harness): Promise<number> => {
+  await writeFile(join(h.home, 'agents', 'output', 'PR-114.md'), reportText(head114))
+  const tick = h.server.cache.createTick(repo)
+  const cwd = join(h.home, 'dev', 'orbit')
+  const request = { repo, number: 114, command: 'review-dependabot', args: ['114', '--no-post'], label: 'Review' }
+  const queued = h.server.launcher.queueScheduled(request, cwd, { tick: tick.id, reason: 'dependabot', headOid: head114.slice(0, 7), posting: false })
+  await h.server.launcher.startScheduled(queued.id, request, { args: request.args, posting: false }, async () => cwd)
+  const child = h.launch.children.at(-1)!
+  await child.result({
+    schema: 'pit-crew/review-result@1', command: 'review-dependabot', status: 'done', target: { repo, pr: 114 }, reviewed: { kind: 'commit', sha: head114 }, verdict: 'clean', recommendation: 'approve',
+    findings: [], ci: 'green', fixAttempts: 0, posted: null, notPostedReason: 'noPost', report: '~/agents/output/PR-114.md', question: null, error: null,
+  })
+  child.exit(0)
+  await h.server.launcher.settled(queued.id)
+  return queued.id
+}
+
+test('a Comment whose outcome is unknown leaves the PR marked: a newer sweep\'s fresh row of it offers nothing and a click on it is refused, and a later single auto-review offers nothing either', async () => {
+  const h = await setup({ writeError: 'read tcp: connection reset by peer' })
+  try {
+    const first = await scheduledSweep(h, [row114()])
+    const unknown = await post(h, first.id, bodyOf('comment'))
+    assert.equal(unknown.status, 502)
+    assert.match(String(unknown.body.error), /may have landed/)
+    // the next sweep reviews the unchanged PR again, with a fresh row and a fresh report
+    const newer = await scheduledSweep(h, [row114()])
+    assert.notEqual(h.server.cache.getSweep(newer.id)?.rowReports?.[114], undefined)
+    assert.equal(await offerOf(h, 114), null)
+    const again = await post(h, newer.id, bodyOf('comment'))
+    assert.equal(again.status, 422, JSON.stringify(again.body))
+    assert.match(String(again.body.error), /may have landed/)
+    // a single auto-review's stored report of the PR is not offered either
+    const run = await storedRun(h)
+    assert.equal(h.server.cache.getRun(run)?.reportHash !== null, true)
+    assert.equal((await rowOf(h, 114))?.agent?.storedOffer, null)
+    const fromRun = await fetch(`${h.base}/api/runs/${run}/post`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Origin: h.base, 'X-Pit-View-Token': h.server.token }, body: JSON.stringify(bodyOf('comment')),
+    })
+    assert.equal(fromRun.status, 422)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a post GitHub refused takes the PR\'s mark off, so a newer sweep\'s row of it offers the button again', async () => {
+  const h = await setup({ writeError: 'HTTP 422: Unprocessable Entity (https://api.github.com/graphql)' })
+  try {
+    const first = await scheduledSweep(h, [row114()])
+    assert.equal((await post(h, first.id, bodyOf('comment'))).status, 502)
+    const newer = await scheduledSweep(h, [row114()])
+    assert.equal((await offerOf(h, 114))?.sweepId, newer.id)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the PR\'s mark is on disk before gh is asked to write, so a restart before any record of the post offers the PR to no sweep, old or new', async () => {
+  const behavior: Behavior = { writeError: 'read tcp: connection reset by peer' }
+  const h = await setup(behavior)
+  try {
+    const first = await scheduledSweep(h, [row114()])
+    let markedBeforeWrite = false
+    behavior.onWrite = async () => {
+      markedBeforeWrite = h.server.cache.unresolvedPostMarks(repo).has(114)
+    }
+    assert.equal((await post(h, first.id, bodyOf('comment'))).status, 502)
+    assert.equal(markedBeforeWrite, true)
+    await restart(h)
+    await (await fetch(`${h.base}/api/refresh`, { method: 'POST' })).json()
+    await h.server.poller.idle()
+    assert.equal(await offerOf(h, 114), null)
+    const newer = await scheduledSweep(h, [row114()])
+    assert.equal(await offerOf(h, 114), null)
+    assert.equal((await post(h, newer.id, bodyOf('comment'))).status, 422)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('two clicks on one PR\'s button at once post once: the first holds the PR, and the second is refused with nothing written', async () => {
+  let release: () => void = () => {}
+  const behavior: Behavior = { hold: new Promise<void>((resolve) => { release = resolve }) }
+  const h = await setup(behavior)
+  try {
+    const sweep = await scheduledSweep(h, [row114()])
+    const first = post(h, sweep.id, bodyOf('approve'))
+    for (let tries = 0; tries < 200 && postsOf(h.runner).length === 0; tries += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+    assert.equal(postsOf(h.runner).length, 1, 'the first click reached the write')
+    const second = await post(h, sweep.id, bodyOf('approve'))
+    assert.equal(second.status, 409, JSON.stringify(second.body))
+    assert.match(String(second.body.error), /already in progress/)
+    release()
+    assert.equal((await first).status, 200)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    release()
+    await h.cleanup()
+  }
+})
+
+test('a sweep that starts while the click\'s live read of the PR waits on GitHub withdraws the offer before the mark: nothing is written and the PR is not marked', async () => {
+  const behavior: Behavior = {}
+  const h = await setup(behavior)
+  try {
+    const sweep = await scheduledSweep(h, [row114()])
+    let started = false
+    behavior.onLive = async () => {
+      if (started) return
+      started = true
+      await h.server.sweepLauncher.start(sweepRequest(repo))
+    }
+    const answer = await post(h, sweep.id, bodyOf('approve'))
+    assert.equal(started, true)
+    assert.equal(answer.status, 409, JSON.stringify(answer.body))
+    assert.match(String(answer.body.error), /no longer the latest for this PR; nothing was posted/)
+    assert.deepEqual(postsOf(h.runner), [])
+    assert.equal(h.server.cache.unresolvedPostMarks(repo).has(114), false)
+    assert.deepEqual(h.server.cache.getSweep(sweep.id)?.postAttempts, {})
   } finally {
     await h.cleanup()
   }

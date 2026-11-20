@@ -227,6 +227,9 @@ export const postReadDeadlineMs = 30_000
 export const postWriteDeadlineMs = 60_000
 
 const readTimedOutMessage = 'GitHub did not answer in time; nothing was posted'
+
+// the refusal for a PR whose earlier post from Pit View may have landed, whichever run or sweep began it
+const markedText = (number: number): string => `a post on #${number} was begun earlier and may have landed; nothing was posted. Check #${number} on GitHub`
 const writeTimedOutMessage = 'The post to GitHub timed out and may or may not have gone through. Check the pull request before posting again.'
 
 export type ActionsOptions = {
@@ -461,10 +464,16 @@ export const createActions = (options: ActionsOptions): Actions => {
         // the offer derived once more from the cache as it is now, with nothing awaited between this reading and the mark below: a run that got in by a path the hold does not cover is seen here, and the hold refuses every run after it
         const again = posting.again()
         if (again.offer.report !== offer.report || again.reviewedAt !== reviewedAt) throw new ActionError('stale', 'This report is no longer the one offered for this PR; nothing was posted. Reload the PR to see its current state')
-        // the last step before the write, so a restart can never offer a post that may have landed
+        // the last step before the write, so a restart can never offer a post that may have landed: the PR's own mark, which every later run, sweep, and Post it honors, then the mark of the run or sweep row that posts
+        try {
+          cache.beginPostMark(repo, number, source)
+        } catch (error) {
+          throw new ActionError('notAllowed', `cannot record that #${number} is being posted (${messageOf(error)}), and without that record it could be posted twice; nothing was posted`)
+        }
         try {
           posting.mark(true)
         } catch (error) {
+          cache.clearPostMark(repo, number)
           throw new ActionError('notAllowed', `cannot record that #${number} is being posted (${messageOf(error)}), and without that record it could be posted twice; nothing was posted`)
         }
         marked = true
@@ -503,6 +512,7 @@ export const createActions = (options: ActionsOptions): Actions => {
         if (marked) {
           try {
             posting.mark(false)
+            cache.clearPostMark(repo, number)
           } catch (failure) {
             log(`PR #${number}: GitHub refused the post of ${source}, but its mark could not be taken off: ${messageOf(failure)}`)
           }
@@ -519,6 +529,8 @@ export const createActions = (options: ActionsOptions): Actions => {
       let recorded: R | null = null
       try {
         recorded = posting.record(posted)
+        // the outcome is known now; a mark whose post could not be recorded stays unresolved, so nothing offers the PR again
+        cache.resolvePostMark(repo, number)
       } catch (error) {
         log(`PR #${number}: the post of ${source} landed but could not be recorded: ${messageOf(error)}`)
       }
@@ -546,7 +558,7 @@ export const createActions = (options: ActionsOptions): Actions => {
       const row = cached.open.find((entry) => entry.number === number)
       if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched; nothing was posted`)
       const latest = cache.latestRuns(repo)
-      const offers = currentOffers(row.pr, config, latest.get(number), stackRunCover(latest.values(), cached.open.map((entry) => entry.pr)).get(number), cache.runsByPr(repo).get(number))
+      const offers = currentOffers(row.pr, config, latest.get(number), stackRunCover(latest.values(), cached.open.map((entry) => entry.pr)).get(number), cache.runsByPr(repo).get(number), cache.unresolvedPostMarks(repo).has(number))
       // a stored report's click names the run that report is from, which is an earlier run when the latest has no result of its own; a Post it click names the run the cell is about
       const offered = request.reviewedSha === undefined ? offers.runId : offers.storedOffer?.runId ?? offers.runId
       if (offered !== id) throw new ActionError('stale', 'This report is no longer the latest for this PR; nothing was posted. Reload the PR to see its current state')
@@ -577,6 +589,7 @@ export const createActions = (options: ActionsOptions): Actions => {
     const key = `${repo}#${number}`
     if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
     if (run.postAttemptedAt !== null) throw new ActionError('notAllowed', `run ${id} has already begun its post, which may have landed; nothing was posted. Check #${number} on GitHub`)
+    if (cache.unresolvedPostMarks(repo).has(number)) throw new ActionError('notAllowed', markedText(number))
     const { offer, reviewedAt } = offeredBy(offers)
     return deliver({
       config, request, source: `run ${id}`, noun: 'run', button: 'Post it', offer, reviewedAt, hash: run.reportHash,
@@ -600,7 +613,7 @@ export const createActions = (options: ActionsOptions): Actions => {
     const current = (): SweepOffer | null => {
       const row = cache.readView(repo).open.find((entry) => entry.number === number)
       if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched; nothing was posted`)
-      const derived = sweepOfferOf(row.pr, config, cache.sweepsFor(repo), cache.runsByPr(repo).get(number))
+      const derived = sweepOfferOf(row.pr, config, cache.sweepsFor(repo), cache.runsByPr(repo).get(number), cache.unresolvedPostMarks(repo).has(number))
       if (derived.sweepId !== id) throw new ActionError('stale', 'This report is no longer the latest for this PR; nothing was posted. Reload the PR to see its current state')
       if (headSha !== row.pr.headRefOid.toLowerCase()) {
         refresh(repo, number)
@@ -618,6 +631,7 @@ export const createActions = (options: ActionsOptions): Actions => {
     // before the mark and the offer, which a post in flight has already changed
     if (inFlight.has(`${repo}#${number}`)) throw new ActionError('busy', `an action on #${number} is already in progress`)
     if (sweep.postAttempts[number] !== undefined) throw new ActionError('notAllowed', `sweep ${id} has already begun its post on #${number}, which may have landed; nothing was posted. Check #${number} on GitHub`)
+    if (cache.unresolvedPostMarks(repo).has(number)) throw new ActionError('notAllowed', markedText(number))
     const { offer, reviewedAt } = offeredBy(derived)
     return deliver({
       config, request, source: `sweep ${id}`, noun: 'sweep', button: 'the post button', offer, reviewedAt, hash: sweep.rowReports?.[number]?.hash ?? null,
