@@ -7,12 +7,13 @@ import type { Clock, ExtraInstructions, RunRunner } from './config.ts'
 import type { RunModels } from './models.ts'
 import type { ClosedResult, GhErrorKind, OpenPage, RawOpenPr } from './github.ts'
 import type { RunResultJson, StepSlot } from './launcher.ts'
+import type { ReportVerdict } from './reports.ts'
 
 // why a run was queued (section 10 of DESIGN.md, What qualifies)
 export type QueueReason = 'requested' | 'new' | 'pushed' | 'selfReview' | 'dependabot'
 
-// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table. Version 12 added the database id of the latest reviews to the open-PR query, which the Changes requested links read, so the GitHub tables are rebuilt again. Version 13 added GitHub's stack marker (stack and stackEntry) to the open-PR query, which the stack chip, the Review stack start, and the stack report lookup read in place of the base-branch guess, so the GitHub tables are rebuilt again. Version 14 added the ticks table and auto-review's columns on runs and sweeps (origin, tick, reason, queued_at, posting, and worktree on both, and head_oid on runs), changing no GitHub table; a row from before it reads as a manual run. Version 15 added runs.extra_instructions, the extra review instructions a run used and where they came from, and changed no GitHub table; a row from before it reads as having none. Version 16 added the workflow run's identity (databaseId, createdAt, and runAttempt, and the workflow's databaseId) to the check runs of the open-PR query, which the CI readings use to drop a superseded run, so the GitHub tables are rebuilt again. Version 17 added runs.models, the roles and models a run used, and changed no GitHub table; a row from before it reads as not recorded
-export const schemaVersion = 17
+// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table. Version 12 added the database id of the latest reviews to the open-PR query, which the Changes requested links read, so the GitHub tables are rebuilt again. Version 13 added GitHub's stack marker (stack and stackEntry) to the open-PR query, which the stack chip, the Review stack start, and the stack report lookup read in place of the base-branch guess, so the GitHub tables are rebuilt again. Version 14 added the ticks table and auto-review's columns on runs and sweeps (origin, tick, reason, queued_at, posting, and worktree on both, and head_oid on runs), changing no GitHub table; a row from before it reads as a manual run. Version 15 added runs.extra_instructions, the extra review instructions a run used and where they came from, and changed no GitHub table; a row from before it reads as having none. Version 16 added the workflow run's identity (databaseId, createdAt, and runAttempt, and the workflow's databaseId) to the check runs of the open-PR query, which the CI readings use to drop a superseded run, so the GitHub tables are rebuilt again. Version 17 added runs.models, the roles and models a run used, and changed no GitHub table; a row from before it reads as not recorded. Version 18 added sweeps.row_reports and sweeps.post_attempts, for the post button on a sweep's rows, and changed no GitHub table; a sweep from before it reads as having no row's report recorded and no post begun, so none of its rows is offered
+export const schemaVersion = 18
 
 // the last version that changed what the GitHub tables hold; a cache at this version or later keeps them through a bump, since a bump after it only adds tables
 export const githubTablesVersion = 16
@@ -146,13 +147,18 @@ export type Session = {
 // one review session Pit View started (section 8 of DESIGN.md, Launching runs); resolvedByHand is set when the owner's re-read replaced the outcome recorded at exit, and firstNote keeps the note recorded at exit once a failed re-read replaced it (an empty string when that note was null); reportHash is the SHA-256 of the report a review finished with, null when it named none or the report could not be read, and postAttemptedAt is when Post it began a post, written before gh runs and cleared only when GitHub refused it; headOid is the head a scheduled run was queued for, or last moved to
 export type Run = Session & { number: number, resolvedByHand: boolean, firstNote: string | null, reportHash: string | null, postAttemptedAt: string | null, headOid: string | null, extraInstructions: ExtraInstructions | null, models: RunModels | null }
 
-// one Dependabot sweep Pit View started (section 8, Sweeps): a record of its own with no PR number
-export type Sweep = Session
+// what a --no-post sweep's settle recorded of one row's report, keyed by the row's PR number: the SHA-256 of the report as it stood then, so the post button can tell it from what a later review wrote to the same name, and its verdict, read from the same text (section 10 of DESIGN.md, Posting)
+export type SweepRowReport = { hash: string, verdict: ReportVerdict | null }
+
+// one Dependabot sweep Pit View started (section 8, Sweeps): a record of its own with no PR number. rowReports is null for a sweep whose rows nobody can post (one allowed to post, a hermes sweep, or one from before version 18); postAttempts holds, by PR number, when the post button began a post of that row, written before gh runs and taken off only when GitHub refused it
+export type Sweep = Session & { rowReports: Record<string, SweepRowReport> | null, postAttempts: Record<string, string> }
 
 type AutoFields = 'origin' | 'tick' | 'reason' | 'queuedAt' | 'posting' | 'worktree'
 export type NewRun = Omit<Run, 'id' | 'dir' | 'steps' | 'resolvedByHand' | 'firstNote' | 'reportHash' | 'postAttemptedAt' | 'headOid' | 'extraInstructions' | 'models' | AutoFields> & Partial<Pick<Run, 'headOid' | 'extraInstructions' | 'models' | AutoFields>>
-export type NewSweep = Omit<Sweep, 'id' | 'dir' | 'steps' | AutoFields> & Partial<Pick<Sweep, AutoFields>>
+export type NewSweep = Omit<Sweep, 'id' | 'dir' | 'steps' | 'rowReports' | 'postAttempts' | AutoFields> & Partial<Pick<Sweep, AutoFields>>
 export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>> & { resolvedByHand?: boolean, firstNote?: string | null, reportHash?: string | null, postAttemptedAt?: string | null, headOid?: string | null, extraInstructions?: ExtraInstructions | null, models?: RunModels | null }
+// a sweep's changes: a run's, without the columns only runs have, plus the sweep's own
+export type SweepChanges = RunChanges & { rowReports?: Record<string, SweepRowReport> | null, postAttempts?: Record<string, string> }
 
 // one scheduler tick (section 10 of DESIGN.md, Recording). state and finishedAt are null while it runs; interrupted is a tick the server stopped under or that failed on its own, and the rest are the spec's reasons to skip
 export type TickState = 'ran' | 'skipped'
@@ -213,7 +219,7 @@ export type Cache = {
   pruneRuns: () => Run[]
   // sweeps: the same, in a table of their own with ids of their own
   createSweep: (sweep: NewSweep, dirOf: (id: number) => string) => Sweep
-  updateSweep: (id: number, changes: RunChanges) => Sweep
+  updateSweep: (id: number, changes: SweepChanges) => Sweep
   getSweep: (id: number) => Sweep | null
   // a repo's sweeps, newest first
   sweepsFor: (repo: string, limit?: number) => Sweep[]
@@ -269,7 +275,7 @@ const runsSchema = [
 
 // kept across rebuilds like runs: a sweep is a record of its own, with the columns of a run except the PR number. Created when missing (version 7), never altered by a bump that only rebuilds the GitHub tables
 const sweepsSchema = [
-  'CREATE TABLE IF NOT EXISTS sweeps (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, origin TEXT NOT NULL DEFAULT \'manual\', tick INTEGER, reason TEXT, queued_at TEXT, posting INTEGER NOT NULL DEFAULT 0, worktree TEXT)',
+  'CREATE TABLE IF NOT EXISTS sweeps (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, origin TEXT NOT NULL DEFAULT \'manual\', tick INTEGER, reason TEXT, queued_at TEXT, posting INTEGER NOT NULL DEFAULT 0, worktree TEXT, row_reports TEXT, post_attempts TEXT)',
   'CREATE INDEX IF NOT EXISTS sweeps_by_repo ON sweeps (repo, id)',
   'CREATE INDEX IF NOT EXISTS sweeps_by_status ON sweeps (status)',
 ]
@@ -345,6 +351,12 @@ const toRun = (row: Row): Run => {
   return { ...toSession(row), number: int(row, 'number'), resolvedByHand: int(row, 'resolved_by_hand') === 1, firstNote: strOrNull(row, 'first_note'), reportHash: strOrNull(row, 'report_hash'), postAttemptedAt: strOrNull(row, 'post_attempted_at'), headOid: strOrNull(row, 'head_oid'), extraInstructions: extra === null ? null : JSON.parse(extra) as ExtraInstructions, models: models === null ? null : JSON.parse(models) as RunModels }
 }
 
+const toSweep = (row: Row): Sweep => {
+  const reports = strOrNull(row, 'row_reports')
+  const attempts = strOrNull(row, 'post_attempts')
+  return { ...toSession(row), rowReports: reports === null ? null : JSON.parse(reports) as Record<string, SweepRowReport>, postAttempts: attempts === null ? {} : JSON.parse(attempts) as Record<string, string> }
+}
+
 const toTick = (row: Row): Tick => ({
   id: int(row, 'id'),
   repo: str(row, 'repo'),
@@ -403,6 +415,19 @@ const runColumns: Record<keyof RunChanges, string> = {
   headOid: 'head_oid',
   extraInstructions: 'extra_instructions',
   models: 'models',
+}
+
+// the columns a sweep has of a run's, and its own; a run's column a sweep lacks is never written to the sweeps table
+const sweepFields: Partial<Record<keyof SweepChanges, string>> = {
+  ...Object.fromEntries(Object.entries(runColumns).filter(([key]) => !['resolvedByHand', 'firstNote', 'reportHash', 'postAttemptedAt', 'headOid', 'extraInstructions', 'models'].includes(key))),
+  rowReports: 'row_reports',
+  postAttempts: 'post_attempts',
+}
+
+const sweepValue = (key: keyof SweepChanges, value: unknown): SQLInputValue => {
+  if (key === 'rowReports') return value === null || value === undefined ? null : JSON.stringify(value)
+  if (key === 'postAttempts') return value === null || value === undefined || Object.keys(value).length === 0 ? null : JSON.stringify(value)
+  return runValue(key as keyof RunChanges, value)
 }
 
 const runValue = (key: keyof RunChanges, value: unknown): SQLInputValue => {
@@ -528,6 +553,9 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       if (!columns.includes('extra_instructions')) db.exec('ALTER TABLE runs ADD COLUMN extra_instructions TEXT')
       // version 17 added runs.models; a row from before it reads as not recorded
       if (!columns.includes('models')) db.exec('ALTER TABLE runs ADD COLUMN models TEXT')
+      // version 18 added sweeps.row_reports and sweeps.post_attempts; a sweep from before it reads as having neither
+      if (!sweepColumns.includes('row_reports')) db.exec('ALTER TABLE sweeps ADD COLUMN row_reports TEXT')
+      if (!sweepColumns.includes('post_attempts')) db.exec('ALTER TABLE sweeps ADD COLUMN post_attempts TEXT')
       for (const statement of ticksSchema) db.exec(statement)
       setMeta('schemaVersion', schemaVersion)
     })
@@ -862,7 +890,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
 
   const getSweep = (id: number): Sweep | null => {
     const row = get('SELECT * FROM sweeps WHERE id = $id', { id })
-    return row === undefined ? null : toSession(row)
+    return row === undefined ? null : toSweep(row)
   }
 
   const mustSweep = (id: number): Sweep => {
@@ -886,13 +914,13 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     return updateSweep(id, { ...rest, dir: dirOf(id) })
   })
 
-  const updateSweep = (id: number, changes: RunChanges): Sweep => {
-    const keys = (Object.keys(changes) as (keyof RunChanges)[]).filter((key) => key in runColumns)
+  const updateSweep = (id: number, changes: SweepChanges): Sweep => {
+    const keys = (Object.keys(changes) as (keyof SweepChanges)[]).filter((key) => key in sweepFields)
     if (keys.length > 0) {
       const params: Params = { id }
       const sets = keys.map((key) => {
-        params[key] = runValue(key, changes[key])
-        return `${runColumns[key]} = $${key}`
+        params[key] = sweepValue(key, changes[key])
+        return `${sweepFields[key]} = $${key}`
       })
       if (run(`UPDATE sweeps SET ${sets.join(', ')} WHERE id = $id`, params) === 0) throw new CacheError(`sweep ${id} does not exist`)
     }
@@ -900,22 +928,22 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
   }
 
   const sweepsFor = (repo: string, limit = keepSweeps): Sweep[] =>
-    all('SELECT * FROM sweeps WHERE repo = $repo ORDER BY id DESC LIMIT $limit', { repo, limit }).map(toSession)
+    all('SELECT * FROM sweeps WHERE repo = $repo ORDER BY id DESC LIMIT $limit', { repo, limit }).map(toSweep)
 
-  const runningSweeps = (): Sweep[] => all('SELECT * FROM sweeps WHERE status = \'running\' ORDER BY id').map(toSession)
+  const runningSweeps = (): Sweep[] => all('SELECT * FROM sweeps WHERE status = \'running\' ORDER BY id').map(toSweep)
 
-  const queuedSweeps = (): Sweep[] => all('SELECT * FROM sweeps WHERE status = \'queued\' ORDER BY id').map(toSession)
+  const queuedSweeps = (): Sweep[] => all('SELECT * FROM sweeps WHERE status = \'queued\' ORDER BY id').map(toSweep)
 
   // all but the newest sweeps are pruned, but a sweep still in flight or waiting in the queue is never pruned, however old
   const pruneSweeps = (): Sweep[] => transaction(() => {
-    const doomed = all('SELECT * FROM sweeps WHERE status NOT IN (\'running\', \'queued\') AND id NOT IN (SELECT id FROM sweeps ORDER BY id DESC LIMIT $keep) ORDER BY id', { keep: keepSweeps }).map(toSession)
+    const doomed = all('SELECT * FROM sweeps WHERE status NOT IN (\'running\', \'queued\') AND id NOT IN (SELECT id FROM sweeps ORDER BY id DESC LIMIT $keep) ORDER BY id', { keep: keepSweeps }).map(toSweep)
     for (const gone of doomed) run('DELETE FROM sweeps WHERE id = $id', { id: gone.id })
     return doomed
   })
 
   const allRuns = (): Run[] => all('SELECT * FROM runs ORDER BY id').map(toRun)
 
-  const allSweeps = (): Sweep[] => all('SELECT * FROM sweeps ORDER BY id').map(toSession)
+  const allSweeps = (): Sweep[] => all('SELECT * FROM sweeps ORDER BY id').map(toSweep)
 
   const mustTick = (id: number): Tick => {
     const row = get('SELECT * FROM ticks WHERE id = $id', { id })

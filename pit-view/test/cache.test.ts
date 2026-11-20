@@ -1221,7 +1221,7 @@ test('a cache from version 13 gains the ticks table and the auto-review columns 
     for (const column of ['origin', 'tick', 'reason', 'queued_at', 'posting', 'worktree']) old.exec(`ALTER TABLE sweeps DROP COLUMN ${column}`)
     old.exec('UPDATE meta SET value = \'13\' WHERE key = \'schemaVersion\'')
     old.close()
-    assert.equal(schemaVersion, 17)
+    assert.equal(schemaVersion, 18)
     assert.equal(githubTablesVersion, 16)
     const cache = openCache({ path, clock: handClock().clock })
     // version 16 changed what the GitHub tables hold, so a cache from version 13 refetches its PRs
@@ -1265,6 +1265,40 @@ test('a version 16 cache gains runs.models in place: its runs read as not record
     cache.close()
     const again = openCache({ path, clock: handClock().clock })
     assert.deepEqual(again.getRun(created.id)?.models, models)
+    again.close()
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a version 17 cache gains sweeps.row_reports and sweeps.post_attempts in place: its sweeps and cached PRs are kept, read as no reports recorded and no post begun, and both are stored whole', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const created = first.createSweep(newSweep({ status: 'done', result: sweepResult }), (id) => `~/sweeps/${id}`)
+    const { pages, closed } = await fetched()
+    fullCycle(first, () => {}, pages, closed)
+    first.close()
+    const old = new DatabaseSync(path)
+    old.exec('ALTER TABLE sweeps DROP COLUMN row_reports')
+    old.exec('ALTER TABLE sweeps DROP COLUMN post_attempts')
+    old.exec('UPDATE meta SET value = \'17\' WHERE key = \'schemaVersion\'')
+    old.close()
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.equal(schemaVersion, 18)
+    assert.equal(cache.getSweep(created.id)?.status, 'done')
+    assert.equal(cache.getSweep(created.id)?.rowReports, null)
+    assert.deepEqual(cache.getSweep(created.id)?.postAttempts, {})
+    assert.ok(cache.readView(scenario.repo).open.length > 0, 'the cached PRs are kept')
+    const reports = { 114: { hash: 'a'.repeat(64), verdict: 'clean' as const } }
+    assert.deepEqual(cache.updateSweep(created.id, { rowReports: reports }).rowReports, reports)
+    assert.deepEqual(cache.updateSweep(created.id, { postAttempts: { 114: '2026-10-26T14:00:00Z' } }).postAttempts, { 114: '2026-10-26T14:00:00Z' })
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
+    cache.close()
+    const again = openCache({ path, clock: handClock().clock })
+    assert.deepEqual(again.getSweep(created.id)?.rowReports, reports)
+    assert.deepEqual(again.getSweep(created.id)?.postAttempts, { 114: '2026-10-26T14:00:00Z' })
     again.close()
   } finally {
     await cleanup()

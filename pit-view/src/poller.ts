@@ -13,7 +13,7 @@ import { baselineOf, compareRows, runEvent } from './notify.ts'
 import type { NotifyEvent, RowBaseline } from './notify.ts'
 import { scanReports } from './reports.ts'
 import type { ReportInfo, ReportTarget } from './reports.ts'
-import { createSweepMemory, sweepsView } from './sweeps.ts'
+import { createSweepMemory, sweepOfferOf, sweepsView, sweepSummary } from './sweeps.ts'
 import type { SweepMemory, SweepsView } from './sweeps.ts'
 import { closedSearchWindow, iso } from './time.ts'
 
@@ -277,6 +277,8 @@ export const createPoller = (options: PollerOptions): Poller => {
     const cached = cache.readView(settings.repo)
     const runs = cache.latestRuns(settings.repo)
     const history = cache.runsByPr(settings.repo)
+    // newest first, for the post button a sweep row offers (sweepOfferOf)
+    const repoSweeps = cache.sweepsFor(settings.repo)
     // derived on every read from the runs and the PRs as they are now, so nothing remembers which layers a stack run covered
     const cover = stackRunCover(runs.values(), cached.open.map((row) => row.pr))
     const freshness = new Map<number, Freshness>(cached.open.map((row) => [row.number, { state: row.freshness.state, fetchedAt: row.freshness.fetchedAt }]))
@@ -291,7 +293,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       reports: reportMap,
       freshness: (number) => freshness.get(number) ?? { state: 'current', fetchedAt: iso(clock.now()) },
       refresh: (number) => rowRefreshes.get(prKey(settings.repo, number)) ?? null,
-      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack, queueing, cover.get(pr.number), history.get(pr.number)),
+      agent: (pr, stack) => agentCell(pr, settings, runs.get(pr.number), reportMap.get(pr.number), stack, queueing, cover.get(pr.number), history.get(pr.number), sweepOfferOf(pr, settings, repoSweeps, history.get(pr.number)).offer),
     })
     const rows = new Map<number, OpenRow>()
     for (const group of [...view.mine.groups, ...view.others.groups]) {
@@ -711,10 +713,14 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
+  // the sweeps go out whole, with the open rows of every PR one of the repo's sweeps has a row for, since a sweep that settles, starts, or records a post changes what those rows' post buttons offer
   const sweepsChanged = (repo: string): void => {
     if (stopped) return
     const settings = config()
-    if (settings.repo === repo) patch({ sweeps: sweepsView(settings, sweeps, queueingNow()) })
+    if (settings.repo !== repo) return
+    const numbers = new Set(cache.sweepsFor(repo).flatMap((sweep) => sweep.result?.schema === 'pit-crew/sweep-result@1' ? sweepSummary(sweep.result).rows.map((row) => row.number) : []))
+    const rows = [...snapshot(settings, reports).rows.values()].filter((row) => numbers.has(row.number))
+    patch({ rows, sweeps: sweepsView(settings, sweeps, queueingNow()) })
   }
 
   // what the pages last received; a server with no scheduler state has nothing to send
