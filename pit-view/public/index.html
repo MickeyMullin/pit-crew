@@ -53,7 +53,7 @@
   <span id="sync-status" class="sync-status mono" data-tone="normal">connecting…</span>
   <span id="sync-live" class="sr-only" aria-live="polite"></span>
   <div id="auto-review" class="auto-review" hidden>
-    <button id="auto-review-button" type="button" class="auto-review-button mono" data-tone="normal" aria-expanded="false" aria-haspopup="dialog" aria-controls="auto-review-popover"></button>
+    <button id="auto-review-button" type="button" class="auto-review-button mono" data-tone="normal" aria-expanded="false" aria-haspopup="dialog" aria-controls="auto-review-popover" data-focus-key="auto-review-button"></button>
     <div id="auto-review-popover" class="auto-review-popover" role="dialog" aria-label="Auto-review" hidden></div>
   </div>
   <div class="page-search" role="search">
@@ -154,6 +154,7 @@
 <div id="hovercard" class="hovercard" role="tooltip" hidden></div>
 <aside id="drawer" class="drawer" role="dialog" aria-modal="false" aria-labelledby="drawer-heading" hidden></aside>
 <aside id="sweep-drawer" class="drawer sweep-drawer" role="dialog" aria-modal="false" aria-labelledby="sweep-drawer-heading" hidden></aside>
+<aside id="auto-log" class="drawer auto-log" role="dialog" aria-modal="false" aria-labelledby="auto-log-heading" hidden></aside>
 <aside id="report-panel" class="report-panel" role="dialog" aria-modal="false" aria-labelledby="report-heading" hidden></aside>
 <div id="agent-live" class="sr-only" aria-live="polite"></div>
 </body>

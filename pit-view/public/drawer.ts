@@ -4,6 +4,7 @@
 // reports on disk, and reads the live row from the page's feed on every draw, so a patch updates
 // it in place. drawerview.ts says what every part reads; this file makes the elements, keeps the
 // confirmation's state, and moves focus
+// Opened from a line of the auto-review log it shows the run that line names, or a note in the card's place while that run is loading, could not be read, or is no longer listed, and a link back to the line (DESIGN.md section 8, Drawer; the sweep drawer's is the same link)
 import type { OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
 import { actionBound, actionDoneText, actionOffers, actionRefusalText, actionRequest } from './actionsview.ts'
@@ -14,11 +15,11 @@ import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import {
-  commentsCheckOn, confirmHolds, specialInstructionsSent, defaultRunner, drawerModel, escapeTarget, focusKeySelector, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
+  askedRun, cellOfRun, commentsCheckOn, confirmHolds, specialInstructionsSent, defaultRunner, drawerModel, escapeTarget, focusKeySelector, goneRow, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
   rereadBound, resumeReadyText, returnSelector,
 } from './drawerview.ts'
 import type { PostAllow } from './agent.ts'
-import type { Confirm, DrawerModel, ExtraLine, Loadable, ModelsLine, Opener, StartConfirmModel, StopModel, StoredAskModel, StoredButtonsModel } from './drawerview.ts'
+import type { AskedRun, Confirm, DrawerModel, ExtraLine, Loadable, ModelsLine, Opener, StartConfirmModel, StopModel, StoredAskModel, StoredButtonsModel } from './drawerview.ts'
 import { formatSince } from './format.ts'
 import type { ReportPanel } from './reportpanel.ts'
 import { getJson, sendRun } from './runapi.ts'
@@ -48,7 +49,8 @@ export type DrawerOptions = {
 export type Drawer = {
   // ask, when given, opens that start's confirmation at once (the banner's Fix session), if the
   // PR offers it and it can run now; otherwise the drawer opens as usual and says why. 'merge' (the Agent cell's Merge button) asks the Squash and merge confirmation the same way, when the row offers it
-  open: (number: number, opener: Opener, ask?: StartKind | 'merge') => void
+  // show, when given, opens the card of that run, whether or not it is the PR's newest, and opens a PR that is no longer open on it, under the title given (the auto-review log's run links). With back, the drawer shows a link to that anchor in the log, which closes the drawer and calls go; a drawer opened any other way has none
+  open: (number: number, opener: Opener, ask?: StartKind | 'merge', show?: { runId: number, title: string | null, back?: { anchor: string, go: () => void } }) => void
   close: () => void
   // after every draw: take the live row, refetch what changed, bring the elements up to date
   update: () => void
@@ -90,6 +92,10 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   let last: OpenRow | null = null
   let opener: Opener | null = null
   let runs: Loadable<RunView> = { state: 'loading' }
+  // the run the auto-review log asked to see, or null for the PR's newest
+  let shown: number | null = null
+  // the log line this drawer was opened from, when it was: where its link back leads and what it does
+  let back: { anchor: string, go: () => void } | null = null
   let reports: Loadable<ReportListing> = { state: 'loading' }
   let confirm: Confirm | null = null
   // a start or stop request is on its way
@@ -713,6 +719,30 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     build: () => h('p', { class: 'drawer-gone', role: 'status' }, text),
   })
 
+  // the run the log asked for has no card to show: the note says why, and the run's id is in it
+  const askedNote = (asked: AskedRun): Part => ({
+    key: 'asked',
+    sig: JSON.stringify(asked),
+    build: () => h('p', { class: 'drawer-gone', role: asked.state === 'error' ? 'alert' : 'status' }, asked.text),
+  })
+
+  // the link back to the log's line this drawer was opened from: a real link to the line's anchor, which closes the drawer and shows the log there
+  const backPart = (anchor: string): Part => ({
+    key: 'back-to-log',
+    sig: anchor,
+    build: () => {
+      const link = h('a', { class: 'button button-small', href: `#${anchor}`, 'data-focus-key': 'back-to-log' }, 'Back to the auto-review log')
+      link.addEventListener('click', (event) => {
+        event.preventDefault()
+        const target = back
+        if (target === null) return
+        close()
+        target.go()
+      })
+      return h('div', {}, link)
+    },
+  })
+
   // the running card is one element for the whole run; its parts rebuild only when what they
   // show changes, so Stop is never replaced under the pointer by a new step or a tick
   const runningCard = (model: DrawerModel, row: OpenRow): Keyed => ({
@@ -1033,15 +1063,17 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   // ---- drawing ----
 
   // the row's cell, or for a PR that left the open tables the newest run read from the server
-  const latest = (): AgentCell | null => {
+  const shownCell = (): AgentCell | null => {
     if (number === null || last === null) return null
     return options.rowOf(number) === undefined ? latestCell(last.agent, runs) : last.agent
   }
 
+  const latest = (): AgentCell | null => cellOfRun(shownCell(), runs, shown)
+
   const current = (): DrawerModel | null => {
     if (number === null || last === null) return null
     const cell = latest()
-    return drawerModel({ row: cell === last.agent ? last : { ...last, agent: cell }, open: options.rowOf(number) !== undefined, runs, reports, confirm, people: people ?? [] })
+    return drawerModel({ row: cell === last.agent ? last : { ...last, agent: cell }, open: options.rowOf(number) !== undefined, runs, reports, confirm, people: people ?? [], asked: askedRun(shownCell(), runs, shown, number) })
   }
 
   const render = (): void => {
@@ -1064,10 +1096,12 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     setText(refsLine, model.header.refs)
 
     const items: (Part | Keyed)[] = []
+    if (back !== null) items.push(backPart(back.anchor))
     if (model.gone !== null) items.push(goneNote(model.gone))
     items.push(startPart(model))
     const actions = actionsPart(model)
     if (actions !== null) items.push(actions)
+    if (model.asked !== null) items.push(askedNote(model.asked))
     if (model.card === 'queued') items.push(queuedCard(model, row))
     else if (model.card === 'running') items.push(runningCard(model, row))
     else if (model.card === 'waiting') items.push(waitingCard(model, number))
@@ -1199,10 +1233,13 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     render()
   }
 
-  const open = (n: number, from: Opener, ask?: StartKind | 'merge'): void => {
-    const row = options.rowOf(n)
+  const open = (n: number, from: Opener, ask?: StartKind | 'merge', show?: { runId: number, title: string | null, back?: { anchor: string, go: () => void } }): void => {
+    // a PR that is no longer open opens only for a run the log named
+    const row = options.rowOf(n) ?? (show === undefined ? undefined : goneRow(n, show.title, `https://github.com/${options.repo()}/pull/${n}`))
     if (row === undefined) return
     opener = from
+    shown = show?.runId ?? null
+    back = show?.back ?? null
     if (number !== n) {
       if (number !== null) options.reports.close()
       number = n
@@ -1238,6 +1275,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     if (n === null) return
     number = null
     last = null
+    shown = null
+    back = null
     confirm = null
     busy = false
     actionNote = ''

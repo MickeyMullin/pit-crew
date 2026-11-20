@@ -1,5 +1,6 @@
 // public/sweepdrawer.ts
 // the Dependabot sweep drawer: a non-modal panel on the right for the repository's sweeps, not for one PR. It starts a sweep behind an inline confirmation, shows the queued, running, waiting, and finished card of the sweep it is on (the whole sweep-result@1: counts, one card per PR, the merge order, and the summary's path), and lists the earlier sweeps. It reads the sweeps from the page's feed on every draw, so a patch updates it in place. sweepview.ts says what every part reads; this file makes the elements, keeps the confirmation's state, and moves focus
+// Opened from a sweep line of the auto-review log it shows first in its body a link back to that line, the Agent drawer's link (DESIGN.md section 8, Drawer and Sweeps)
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
@@ -17,6 +18,9 @@ import type { RunnerName } from './agent.ts'
 
 export type SweepOpener = { key: string }
 
+// the auto-review log line a sweep drawer was opened from: the anchor its link back points at, and what following it does once the drawer is closed
+export type SweepBack = { anchor: string, go: () => void }
+
 // what the drawer is asking about: a start waiting for its Start or a stop waiting for its Stop
 type Confirm = { type: 'start', runner: RunnerName } | { type: 'stop', id: number }
 
@@ -31,8 +35,8 @@ export type SweepDrawerOptions = {
 }
 
 export type SweepDrawer = {
-  // sweepId picks the sweep to show (the newest by default), pr scrolls to and marks that PR's card, and ask opens the start's confirmation at once
-  open: (opener: SweepOpener | null, show?: { sweepId?: number, pr?: number, ask?: boolean }) => void
+  // sweepId picks the sweep to show (the newest by default), pr scrolls to and marks that PR's card, and ask opens the start's confirmation at once. With back (the auto-review log's sweep links), the drawer shows a link to that anchor in the log first in its body, which closes the drawer and calls go; a drawer opened any other way has none
+  open: (opener: SweepOpener | null, show?: { sweepId?: number, pr?: number, ask?: boolean, back?: SweepBack }) => void
   close: () => void
   update: () => void
   isOpen: () => boolean
@@ -85,6 +89,8 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
   // a stop was accepted and the sweep has not settled yet
   let stopping: number | null = null
   let seenStatus = ''
+  // the log line this drawer was opened from, when it was: where its link back leads and what it does
+  let back: SweepBack | null = null
 
   const heading = h('h2', { id: 'sweep-drawer-heading', class: 'drawer-heading', tabindex: '-1' }, 'Dependabot sweep')
   const subLine = h('p', { class: 'drawer-pr-sub' })
@@ -291,6 +297,23 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     })
     return button
   }
+
+  // the link back to the log's line this drawer was opened from, the Agent drawer's link: a real link to the line's anchor, which closes the drawer and shows the log there
+  const backPart = (anchor: string): Part => ({
+    key: 'back-to-log',
+    sig: anchor,
+    build: () => {
+      const link = h('a', { class: 'button button-small', href: `#${anchor}`, 'data-focus-key': 'back-to-log' }, 'Back to the auto-review log')
+      link.addEventListener('click', (event) => {
+        event.preventDefault()
+        const target = back
+        if (target === null) return
+        close()
+        target.go()
+      })
+      return h('div', {}, link)
+    },
+  })
 
   const inFlight = (sweep: SweepView | null): boolean => sweep?.status === 'running' || sweep?.status === 'queued'
 
@@ -537,7 +560,9 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     const scroll = body.scrollTop
     setText(subLine, view.start.repo)
 
-    const items: (Part | Keyed)[] = [startPart(view, view.items[0] ?? null)]
+    const items: (Part | Keyed)[] = []
+    if (back !== null) items.push(backPart(back.anchor))
+    items.push(startPart(view, view.items[0] ?? null))
     if (current !== null) {
       for (const card of sweepCards(current)) {
         if (card === 'queued') items.push(queuedCard(current))
@@ -599,8 +624,9 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     render()
   }
 
-  const open = (from: SweepOpener | null, show: { sweepId?: number, pr?: number, ask?: boolean } = {}): void => {
+  const open = (from: SweepOpener | null, show: { sweepId?: number, pr?: number, ask?: boolean, back?: SweepBack } = {}): void => {
     opener = from
+    back = show.back ?? null
     if (!isOpen) {
       isOpen = true
       confirm = null
@@ -623,6 +649,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
   const close = (): void => {
     if (!isOpen) return
     isOpen = false
+    back = null
     confirm = null
     busy = false
     stopping = null
@@ -630,9 +657,9 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     scrollPending = false
     root.hidden = true
     options.reports.close()
-    const back = opener
+    const returnTo = opener
     opener = null
-    if (back !== null) document.querySelector<HTMLElement>(focusKeySelector(back.key))?.focus({ preventScroll: true })
+    if (returnTo !== null) document.querySelector<HTMLElement>(focusKeySelector(returnTo.key))?.focus({ preventScroll: true })
   }
 
   closeButton.addEventListener('click', close)

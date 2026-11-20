@@ -5,6 +5,7 @@ import type { AutoReviewView } from '../src/autoreview.ts'
 import type { Config } from '../src/config.ts'
 import type { ModelsView } from '../src/models.ts'
 import type { View } from '../src/poller.ts'
+import { defaultLogDays, logRetentionLine } from './autoreviewlogview.ts'
 import { avatar } from './cells.ts'
 import { addCustomRow, choicesNeedRedraw, editRow, fallbackChoices, readOnlyChanged, readOnlyRows, removeRow, routeWarnings, setFallback, setSlot, slotAsRead, slotChoices, slotControls, slotOf } from './models-form.ts'
 import type { RowField } from './models-form.ts'
@@ -664,6 +665,8 @@ const showAuto = (): void => {
   byId('clone-ref').replaceChildren(...(clone === ''
     ? [h('span', { class: 'warn-text' }, 'No clone folder is set, so no auto-review run can start.'), ' ', link('Set it in Agent', fieldId('cloneDir'))]
     : ['Each run works in its own worktree of ', h('span', { class: 'mono' }, clone), ', never in the checkout itself. ', link('Change in Agent', fieldId('cloneDir'))]))
+  // the days come from the config file alone: the page has no field for them
+  setText(byId('log-ref'), logRetentionLine(page.saved.autoReviewLogDays ?? defaultLogDays))
   showLimits()
 }
 

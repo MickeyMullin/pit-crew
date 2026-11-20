@@ -200,7 +200,7 @@ const extraProblem = (text: string): string | null => {
   return length > 2000 ? `Must be at most 2,000 characters; it has ${length.toLocaleString('en-US')}.` : null
 }
 
-// the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit (allowedHosts and agent) are carried over from the config it loaded
+// the config PUT /api/config receives: only known keys, trimmed; settings the page does not edit (allowedHosts, agent, and autoReviewLogDays) are carried over from the config it loaded
 export const toConfig = (form: Form, base: Config): Config => {
   const config: Config = {
     repo: form.repo.trim(),
@@ -245,6 +245,8 @@ export const toConfig = (form: Form, base: Config): Config => {
   // absent means off, so a config that never had the key and a form still at the defaults leave it out
   const auto = autoSettings(form)
   if (base.autoReview !== undefined || JSON.stringify(auto) !== JSON.stringify(autoDefaults)) config.autoReview = auto
+  // the log's days are not on the page; a value in the file is carried over, and an absent one stays absent
+  if (base.autoReviewLogDays !== undefined) config.autoReviewLogDays = base.autoReviewLogDays
   return config
 }
 

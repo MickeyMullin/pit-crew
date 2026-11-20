@@ -2,7 +2,7 @@
 // a small stand-in for the browser's document, enough for the real public/drawer.ts and public/settings.ts to run under Node: elements with attributes, children, text, form values, events, focus, and the few selectors those files use. It is strict on purpose: a selector or call it does not know throws, so a test cannot pass by the fake quietly ignoring something the page does
 
 type Listener = (event: FakeEvent) => void
-export type FakeEvent = { type: string, target: FakeElement, preventDefault: () => void }
+export type FakeEvent = { type: string, target: FakeElement, preventDefault: () => void, stopPropagation: () => void, defaultPrevented: boolean, key?: string }
 export type FakeText = { textNode: true, data: string, textContent: string, parentNode: FakeElement | null }
 type Child = FakeElement | FakeText
 type Compound = { tag: string | null, id: string | null, classes: string[], attrs: [string, string | null][], nth: number | null }
@@ -41,10 +41,14 @@ export type FakeElement = {
   replaceWith: (node: FakeElement) => void
   contains: (other: FakeElement | null) => boolean
   addEventListener: (type: string, listener: Listener) => void
-  dispatch: (type: string) => void
+  // the event's key, for a keydown
+  dispatch: (type: string, init?: { key?: string }) => void
   focus: () => void
   setSelectionRange: (start: number, end: number) => void
-  scrollIntoView: () => void
+  select: () => void
+  scrollIntoView: (options?: { block?: string }) => void
+  // how many times it was scrolled into view, and with which block
+  scrolled: { block: string | null }[]
   matches: (compound: Compound) => boolean
   querySelector: (selector: string) => FakeElement | null
   querySelectorAll: (selector: string) => FakeElement[]
@@ -266,8 +270,10 @@ const makeElement = (doc: FakeDocument, tag: string): FakeElement => {
     addEventListener: (type, listener) => {
       listeners.set(type, [...listeners.get(type) ?? [], listener])
     },
-    dispatch: (type) => {
-      const event: FakeEvent = { type, target: element, preventDefault: () => undefined }
+    dispatch: (type, init = {}) => {
+      const event: FakeEvent = { type, target: element, defaultPrevented: false, stopPropagation: () => undefined, ...init, preventDefault: () => {
+        event.defaultPrevented = true
+      } }
       for (const listener of listeners.get(type) ?? []) listener(event)
     },
     focus: () => {
@@ -277,7 +283,14 @@ const makeElement = (doc: FakeDocument, tag: string): FakeElement => {
       element.selectionStart = start
       element.selectionEnd = end
     },
-    scrollIntoView: () => undefined,
+    select: () => {
+      element.selectionStart = 0
+      element.selectionEnd = element.value.length
+    },
+    scrolled: [],
+    scrollIntoView: (options) => {
+      element.scrolled.push({ block: options?.block ?? null })
+    },
     matches,
     querySelectorAll: (selector) => {
       const compound = parseCompound(selector)

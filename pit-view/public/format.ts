@@ -91,6 +91,19 @@ export const formatClock = (at: Instant, withWeekday = false, timeZone?: string)
 export const formatDay = (at: Instant, timeZone?: string): string =>
   formatOf('day', timeZone).format(dateOf(at)).replace(',', '')
 
+const dateKeys = new Map<string, Intl.DateTimeFormat>()
+
+// an instant's local date as YYYY-MM-DD, which sorts as text: a day to filter by, not words to show
+export const localDateKey = (at: Instant, timeZone?: string): string => {
+  const key = timeZone ?? ''
+  let format = dateKeys.get(key)
+  if (format === undefined) {
+    format = new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit', ...(timeZone === undefined ? {} : { timeZone }) })
+    dateKeys.set(key, format)
+  }
+  return format.format(dateOf(at))
+}
+
 // a cache time: "10:02 AM" today, "Fri 10:02 AM" on an earlier day
 export const formatCached = (iso: string, nowMs: number, timeZone?: string): string =>
   formatClock(iso, formatDay(iso, timeZone) !== formatDay(nowMs, timeZone), timeZone)

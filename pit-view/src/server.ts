@@ -13,6 +13,8 @@ import { ActionError, createActions, createUpdateWatch } from './actions.ts'
 import type { ActionErrorCode } from './actions.ts'
 import { createScheduler } from './autoreview.ts'
 import type { Scheduler } from './autoreview.ts'
+import { logDaysOf, openAutoReviewLog } from './autoreviewlog.ts'
+import type { AutoReviewLog } from './autoreviewlog.ts'
 import { openCache } from './cache.ts'
 import type { Cache } from './cache.ts'
 import { createClients, keepsSchedule } from './clients.ts'
@@ -38,7 +40,7 @@ import { clearCookie, createSignIn, githubEndpoints, loopbackNames, openLoopback
 import type { OAuthEndpoints } from './signin.ts'
 import { createSweepMemory, sweepRequest, sweepView } from './sweeps.ts'
 import type { SweepMemory } from './sweeps.ts'
-import type { Sweep } from './cache.ts'
+import type { Session, Sweep } from './cache.ts'
 
 export const defaultPort = 4791
 // a named instance's port when PIT_VIEW_PORT is unset; any other name must set it
@@ -98,6 +100,8 @@ export type ServerOptions = {
   writeSigningKey?: (path: string) => Promise<void>
   // how sign-in removes the revocation marker; a test replaces it to pause or fail the removal
   removeRevocationMarker?: (path: string) => Promise<void>
+  // false runs the scheduler without the auto-review log, so a test can show the log changes nothing it decides; on when absent
+  autoReviewLog?: boolean
 }
 
 export type PitServer = {
@@ -114,6 +118,8 @@ export type PitServer = {
   sweeps: SweepMemory
   // auto-review's clock and ticks, which run whether or not a page is open
   scheduler: Scheduler
+  // the auto-review log, in the cache file; null only when a test turned it off
+  autoLog: AutoReviewLog | null
   // the token this start injected into its pages
   token: string
   // closes the streams, fails a running cycle, stops watching runs (which keep going), stops
@@ -396,6 +402,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     server.close()
     throw error
   }
+  // the log of what the scheduler decided, a table of its own in the cache file
+  const autoLog = options.autoReviewLog === false ? null : openAutoReviewLog({ db: cache.db, clock })
   const clients = createClients()
   const streams = new Set<ServerResponse>()
   // the streams opened through the proxy, with the cookies they were opened with: each ends once its session is no longer good
@@ -421,6 +429,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   let queueing: (() => Queueing) | null = null
   // made below from the launchers; a run recovered before then is seen by its first sweep
   let schedulerRef: Scheduler | null = null
+  // what recovery changed before the scheduler existed, each run and sweep by its newest state: the scheduler logs their outcomes once it does, and does nothing else with them
+  const recovered = new Map<string, { kind: 'run' | 'sweep', session: Session }>()
   const poller = createPoller({
     cache,
     sweeps,
@@ -476,7 +486,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     onChange: (run) => {
       poller.runChanged(run.repo, run.number)
       updates.change(run)
-      schedulerRef?.sessionChanged('run', run)
+      if (schedulerRef === null) recovered.set(`run-${run.id}`, { kind: 'run', session: run })
+      else schedulerRef.sessionChanged('run', run)
     },
     line,
     log,
@@ -513,7 +524,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     onChange: (sweep) => {
       sweeps.set(sweep)
       poller.sweepsChanged(sweep.repo)
-      schedulerRef?.sessionChanged('sweep', sweep)
+      if (schedulerRef === null) recovered.set(`sweep-${sweep.id}`, { kind: 'sweep', session: sweep })
+      else schedulerRef.sessionChanged('sweep', sweep)
     },
     // the cache pruned old sweeps: memory drops the same ids and the feed announces the removal
     onPruned: (gone) => {
@@ -548,8 +560,11 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     launcher,
     sweepLauncher,
     log,
+    ...(autoLog === null ? {} : { autoLog }),
   })
   schedulerRef = scheduler
+  for (const { kind, session } of recovered.values()) scheduler.recovered(kind, session)
+  recovered.clear()
   // once those runs have their outcomes recorded: a sweep, whether or not auto-review is on, and the one timer; no GitHub call
   scheduler.start()
   // a proxied host says at once whether it can sign anyone in, and the signing key is made on this first start; local only
@@ -1053,6 +1068,11 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'GET', pattern: /^\/api\/sweeps$/, handle: (_req, res) => json(res, 200, sweeps.list(effective().repo)) },
     { method: 'POST', pattern: /^\/api\/sweeps\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopSweep(req, res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/auto-review\/ticks$/, handle: (_req, res) => json(res, 200, cache.ticksFor(effective().repo, 50)) },
+    // the auto-review log of the repository in effect, newest first, within the days it keeps; a read, no token
+    { method: 'GET', pattern: /^\/api\/auto-review\/log$/, handle: (_req, res) => {
+      const days = logDaysOf(effective())
+      json(res, 200, { days, entries: autoLog?.list(effective().repo, days) ?? [] })
+    } },
     { method: 'POST', pattern: /^\/api\/auto-review\/run$/, handle: (req, res) => runNow(req, res) },
     // the effective model registry and slots, read-only, for the Settings page (section 1 of DESIGN.md, Configuration)
     { method: 'GET', pattern: /^\/api\/models$/, handle: (_req, res) => json(res, 200, modelsView(effective().models)) },
@@ -1189,7 +1209,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     cache.close()
   }
 
-  return { port, url: `http://${host}:${port}`, poller, clients, cache, launcher, posts, sweepLauncher, sweeps, scheduler, token, close }
+  return { port, url: `http://${host}:${port}`, poller, clients, cache, launcher, posts, sweepLauncher, sweeps, scheduler, autoLog, token, close }
 }
 
 export type Runtime = { instance: string, port: number, configPath: string, cachePath: string, stateDir: string }
