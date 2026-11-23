@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { confirmHolds, drawerModel } from '../public/drawerview.ts'
+import { confirmHolds, drawerModel, storedAskModel } from '../public/drawerview.ts'
 import type { Confirm } from '../public/drawerview.ts'
 import { openCache } from '../src/cache.ts'
 import type { Run, RunChanges } from '../src/cache.ts'
@@ -6124,6 +6124,121 @@ test('an earlier run\'s stored report is not offered when its report is not on r
   const mine = await storedRow({}, { id: 5 }, 104)
   const mineStopped = runRow({ id: 8, number: 104, args: ['104'], status: 'stopped' })
   assert.equal(currentOffers(mine.pr, config, mineStopped, undefined, [mineStopped, mine.row]).storedOffer, null)
+})
+
+// a review that posted nothing because CI had not finished or the head moved (section 10, Posting, Which buttons show): its result names the reason, and its stored report gets the post button whether or not the run was allowed to post
+
+const unpostedReasons = ['ciPending', 'headMoved'] as const
+// a run allowed to post: its command carried no --no-post
+const allowedToPost: Partial<Run> = { args: ['106'], posting: true }
+
+test('review-result@1 accepts ciPending and headMoved as notPostedReason beside the five, and still rejects any other value', () => {
+  for (const reason of ['noPost', 'ownPr', 'awaitingAnswer', 'ghFailed', 'postBlocked', 'ciPending', 'headMoved', null]) {
+    const parsed = parseResult(JSON.stringify(reviewResult({ posted: null, notPostedReason: reason })))
+    assert.equal(parsed.ok, true, String(reason))
+    assert.equal(parsed.ok && (parsed.value as ReviewResult).notPostedReason, reason)
+  }
+  for (const bad of ['ciRunning', 'ci_pending', 'CIPending', 'headmoved', 'moved', '', 7, false]) {
+    const parsed = parseResult(JSON.stringify(reviewResult({ posted: null, notPostedReason: bad })))
+    assert.equal(parsed.ok, false, String(bad))
+    assert.match(parsed.ok ? '' : parsed.error, /notPostedReason must be one of the seven or null/)
+  }
+  // a sweep's own reason is about the whole sweep, never one review's CI or head, so it takes neither
+  const sweep = { schema: 'pit-crew/sweep-result@1', command: 'review-dependabot-sweep', status: 'done', repo: scenario.repo, counts: { swept: 0, fresh: 0, reused: 0, failed: 0 }, notPostedReason: null, rows: [], mergeOrder: [], summary: null, question: null, error: null }
+  for (const reason of unpostedReasons) assert.equal(parseResult(JSON.stringify({ ...sweep, notPostedReason: reason })).ok, false, reason)
+})
+
+test('a review that posted nothing because CI had not finished or the head moved offers its stored report, with or without --no-post', async () => {
+  const config = baseConfig()
+  for (const reason of unpostedReasons) {
+    for (const [name, run] of [['allowed to post', allowedToPost], ['run with --no-post', {}]] as [string, Partial<Run>][]) {
+      const { pr, row } = await storedRow({ notPostedReason: reason }, run)
+      const offer = agentCell(pr, config, row, undefined).storedOffer
+      assert.equal(offer?.runId, 7, `${reason}, ${name}`)
+      assert.deepEqual(offer?.forms, ['approve', 'comment'], `${reason}, ${name}`)
+      assert.equal(offer?.reviewedSha, pr.headRefOid, `${reason}, ${name}`)
+      const changes = await storedRow({ notPostedReason: reason, verdict: 'changesRequested' }, run)
+      assert.deepEqual(agentCell(changes.pr, config, changes.row, undefined).storedOffer?.forms, ['requestChanges', 'comment'], `${reason}, ${name}`)
+      // a stored report is never Post it's
+      assert.equal(agentCell(pr, config, row, undefined).postOffer, null, `${reason}, ${name}`)
+    }
+  }
+  // a Dependabot review allowed to post is offered as review-pr is
+  const dependabot = await storedRow({ command: 'review-dependabot', recommendation: 'approve', notPostedReason: 'ciPending' }, { ...allowedToPost, command: 'review-dependabot' })
+  assert.deepEqual(agentCell(dependabot.pr, config, dependabot.row, undefined).storedOffer?.forms, ['approve', 'comment'])
+  // noPost still needs the run to have carried --no-post, as before
+  const told = await storedRow({ notPostedReason: 'noPost' }, allowedToPost)
+  assert.equal(agentCell(told.pr, config, told.row, undefined).storedOffer, null)
+})
+
+test('a report whose head moved is offered for the commit it reviewed, never as a review of the head now: the offer names both, as a moved head\'s confirmation does', async () => {
+  const config = baseConfig()
+  const reviewed = '0123456789abcdef0123456789abcdef01234567'
+  const { pr, row } = await storedRow({ notPostedReason: 'headMoved', reviewed: { kind: 'commit', sha: reviewed } }, allowedToPost)
+  const offer = agentCell(pr, config, row, undefined).storedOffer
+  assert.equal(offer?.reviewedSha, reviewed)
+  assert.equal(offer?.headSha, pr.headRefOid.toLowerCase())
+  assert.notEqual(offer?.reviewedSha, offer?.headSha)
+  // and the confirmation the drawer builds from it says the head moved, with Post anyway
+  const cell = agentCell(pr, config, row, undefined)
+  const ask = storedAskModel({ number: 106, title: 'An invented PR' }, cell, { type: 'storedPost', runId: 7, repo: scenario.repo, viewer: scenario.viewer, headSha: offer!.headSha, reviewedSha: reviewed, form: 'approve', ci: offer!.ci }, true)
+  assert.equal(ask?.headMoved, `New commits since this review: reviewed 0123456, now ${pr.headRefOid.slice(0, 7)}. Post this report as @${scenario.viewer} anyway?`)
+  assert.equal(ask?.confirm, 'Post anyway')
+})
+
+test('a CI-pending or moved-head report is offered nothing when its post is Post it\'s, on your own PR, with no report on record, with a post begun, with a post of unknown outcome, with a post on record at either head, once the viewer reviewed the head, or for a manual run or a stack review', async () => {
+  const config = baseConfig()
+  for (const reason of unpostedReasons) {
+    const offer = async (patch: Record<string, unknown>, run: Partial<Run> = {}, number = 106): Promise<unknown> => {
+      const { pr, row } = await storedRow({ notPostedReason: reason, ...patch }, { ...allowedToPost, args: [String(number)], ...run }, number)
+      return agentCell(pr, config, row, undefined).storedOffer
+    }
+    assert.ok(await offer({}) !== null, reason)
+    const cases: [string, Record<string, unknown>, Partial<Run>][] = [
+      ['a refused post, which Post it owns', { notPostedReason: 'postBlocked' }, {}],
+      ['a posted run', { posted: { form: 'approve', url: 'https://example.test/r/1' } }, {}],
+      ['a run that recorded no report of its own', {}, { reportHash: null }],
+      ['a post already begun', {}, { postAttemptedAt: '2026-10-26T14:04:00Z' }],
+      ['a manual run', {}, { origin: 'manual' }],
+      ['a stack review', { command: 'review-stack' }, { command: 'review-stack' }],
+      ['a review with no verdict', { verdict: null }, {}],
+      ['a report with another name', { report: '~/agents/output/PR-1060.md' }, {}],
+    ]
+    for (const [name, patch, run] of cases) assert.equal(await offer(patch, run), null, `${reason}: ${name}`)
+    assert.equal(await offer({}, {}, 104), null, `${reason}: your own PR`)
+    const { pr, row } = await storedRow({ notPostedReason: reason, reviewed: { kind: 'commit', sha: '0123456789abcdef0123456789abcdef01234567' } }, allowedToPost)
+    assert.ok(currentOffers(pr, config, row, undefined, [row]).storedOffer !== null, reason)
+    // one post per PR and head: a post on record at the commit reviewed or at the head now, and a post whose outcome is not known
+    assert.equal(currentOffers(pr, config, row, undefined, [row], { unknown: false, heads: new Set(['0123456789abcdef0123456789abcdef01234567']) }).storedOffer, null, `${reason}: on record at the reviewed commit`)
+    assert.equal(currentOffers(pr, config, row, undefined, [row], { unknown: false, heads: new Set([pr.headRefOid.toLowerCase()]) }).storedOffer, null, `${reason}: on record at the head now`)
+    assert.equal(currentOffers(pr, config, row, undefined, [row], { unknown: true, heads: new Set() }).storedOffer, null, `${reason}: a post of unknown outcome`)
+    const reviewedHead: RawOpenPr = { ...pr, latestReviews: { nodes: [{ author: { login: scenario.viewer }, state: 'CHANGES_REQUESTED', submittedAt: '2026-10-20T10:00:00Z', commit: { oid: pr.headRefOid } }] } } as unknown as RawOpenPr
+    assert.equal(agentCell(reviewedHead, config, row, undefined).storedOffer, null, `${reason}: the viewer reviewed the head`)
+  }
+})
+
+test('the cell says not posted for a review that posted nothing because CI had not finished or the head moved, whatever started it, and post failed once a post was begun and not recorded', async () => {
+  const config = baseConfig()
+  const pr = await prOf(106)
+  for (const reason of unpostedReasons) {
+    for (const origin of ['auto', 'manual'] as const) {
+      const cell = (patch: Record<string, unknown>, run: Partial<Run> = {}): ReturnType<typeof agentCell> =>
+        agentCell(pr, config, runRow({ origin, status: 'done', finishedAt: '2026-10-26T14:03:00Z', result: reviewResult({ reviewed: { kind: 'commit', sha: pr.headRefOid }, posted: null, notPostedReason: reason, ...patch }) as unknown as RunResultJson, ...run }), undefined)
+      assert.equal(cell({ verdict: 'clean', findings: [] }).text, 'Clean · not posted', `${reason}, ${origin}`)
+      assert.equal(cell({}).text, 'Changes requested · not posted', `${reason}, ${origin}`)
+      assert.equal(cell({}).posted, false, `${reason}, ${origin}`)
+      assert.equal(cell({}, { postAttemptedAt: '2026-10-26T14:04:00Z' }).text, 'Changes requested · post failed', `${reason}, ${origin}`)
+    }
+  }
+  // the reasons before them read as they did: a manual --no-post run and a null reason add nothing, and an auto --no-post run says not posted
+  const text = (patch: Record<string, unknown>, origin: 'auto' | 'manual'): string => doneText({ status: 'done', note: null, origin, result: reviewResult({ posted: null, ...patch }) as unknown as RunResultJson }, false)
+  assert.equal(text({ notPostedReason: null }, 'auto'), 'Changes requested')
+  assert.equal(text({ notPostedReason: 'noPost' }, 'manual'), 'Changes requested')
+  assert.equal(text({ notPostedReason: 'noPost' }, 'auto'), 'Changes requested · not posted')
+  assert.equal(text({ notPostedReason: 'ownPr' }, 'auto'), 'Changes requested')
+  assert.equal(text({ notPostedReason: 'awaitingAnswer' }, 'auto'), 'Changes requested')
+  assert.equal(text({ notPostedReason: 'postBlocked' }, 'auto'), 'Changes requested · post not made')
+  assert.equal(text({ notPostedReason: 'ghFailed' }, 'auto'), 'Changes requested · post failed')
 })
 
 // the cell the real derivation builds, read by the drawer's real reader (the buttons and the confirmation are the page's own, not a hand-built offer)

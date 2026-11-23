@@ -7,11 +7,12 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import type { OpenRow } from '../src/derive.ts'
+import type { NotPostedReason } from '../src/launcher.ts'
 import type { ReportListing } from '../src/reports.ts'
 import { postRequest, refusalText, rereadRequest, startRequest } from '../public/agent.ts'
 import type { AgentCell, RunView, StartOption, StepSlot } from '../public/agent.ts'
 import {
-  cardKind, commentsCheckOn, specialInstructionsSent, commitModel, readyPointer, cellFromRun, confirmHolds, closeOnOutsidePress, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
+  autoRunRows, cardKind, commentsCheckOn, specialInstructionsSent, commitModel, readyPointer, cellFromRun, confirmHolds, closeOnOutsidePress, drawerOpenerSelector, outsidePressCloses, rereadBound, rereadOffer, defaultRunner, drawerModel, escapeApplies, escapeTarget, focusKeySelector, latestCell, formatCost, headerModel, loadErrorText, newestNote, mayMoveFocus, noteText, optionOf, quoteAttr, refetchKeys,
   queuedStopModel, reportName, reportRows, resumeReadyText, returnSelector, runRows, runText, startConfirmModel, startsModel, stepModels, stepsName, stopModel, summaryOf,
 } from '../public/drawerview.ts'
 import type { DrawerInput, Loadable } from '../public/drawerview.ts'
@@ -251,6 +252,38 @@ test('a finished run shows the server\'s text, when it finished, the cost, what 
   assert.equal(clean.result?.tone, 'green')
   assert.equal(clean.result?.cost, null)
   assert.deepEqual(clean.result?.facts.map((fact) => fact.value), ['1 finding', 'none', 'nothing: the run was told not to post'])
+})
+
+test('a review that posted nothing because CI had not finished or the head moved says so: the Posted fact, the Auto-review list, and every run row, with the reason in words', () => {
+  const posted = (reason: NotPostedReason): unknown => drawerModel(input(finished({
+    text: 'Clean · not posted', result: { kind: 'review', verdict: 'clean', recommendation: null, findings: 0, ci: 'pending', posted: null, notPostedReason: reason, report: '~/agents/output/PR-101.md' },
+  }))).result?.facts.find((entry) => entry.label === 'Posted')
+  assert.deepEqual(posted('ciPending'), { label: 'Posted', value: 'nothing: CI had not finished', href: null })
+  assert.deepEqual(posted('headMoved'), { label: 'Posted', value: 'nothing: the head moved since the review', href: null })
+  // the reasons before them keep their words
+  assert.deepEqual(posted('noPost'), { label: 'Posted', value: 'nothing: the run was told not to post', href: null })
+  const run = (id: number, origin: 'auto' | 'manual', reason: string | null, verdict = 'clean'): RunView => ({
+    id, repo: 'owner/name', number: 101, command: 'review-pr', args: ['101'], label: 'Review', runner: 'claude', cwd: '~/dev/orbit', dir: `~/state/runs/${id}`,
+    sessionId: null, pid: 4000 + id, pidStartedAt: 'x', startedAt: '2026-10-28T13:00:00Z', lastStepAt: null, step: null, stepState: null, steps: slots(),
+    finishedAt: '2026-10-28T13:04:00Z', status: 'done', note: null, costUsd: null, resume: null, tandem: false, extraInstructions: null,
+    origin, tick: origin === 'auto' ? 3 : null, headOid: '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7', reason: origin === 'auto' ? 'pushed' : null, queuedAt: origin === 'auto' ? '2026-10-28T12:50:00Z' : null, posting: true, worktree: null,
+    result: {
+      schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: null, reviewed: { kind: 'commit', sha: '755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7' }, verdict, recommendation: null,
+      findings: [], ci: 'pending', fixAttempts: 0, posted: null, notPostedReason: reason, report: '~/agents/output/PR-101.md', question: null, error: null,
+    },
+  } as unknown as RunView)
+  const autoRuns = [run(9, 'auto', 'ciPending'), run(8, 'auto', 'headMoved', 'changesRequested'), run(7, 'auto', 'noPost'), run(6, 'auto', null)]
+  assert.deepEqual(autoRunRows(autoRuns).map((entry) => [entry.id, entry.text, entry.tone, entry.posted]), [
+    [9, 'Clean · not posted', 'green', 'Not posted: CI had not finished'],
+    [8, 'Changes requested · not posted', 'red', 'Not posted: the head moved'],
+    [7, 'Clean', 'green', 'Not posted: set to not post'],
+    [6, 'Clean', 'green', 'No'],
+  ])
+  // a run the owner started reads the same in Previous runs, where there is no Posted column
+  assert.deepEqual(runRows([run(5, 'manual', 'ciPending'), run(4, 'manual', 'headMoved'), run(3, 'manual', null), run(2, 'manual', 'noPost')], null).map((entry) => [entry.id, entry.text]), [
+    [5, 'Clean · not posted'], [4, 'Clean · not posted'], [3, 'Clean'], [2, 'Clean'],
+  ])
+  assert.deepEqual(runText(run(1, 'manual', 'headMoved', 'changesRequested')), { text: 'Changes requested · not posted', tone: 'red' })
 })
 
 test('a post that failed may have landed, so the fact does not say nothing was posted', () => {

@@ -38,7 +38,9 @@ export type Finding = { priority: Priority, summary: string, files: string[] }
 export type PostForm = 'approve' | 'requestChanges' | 'comment'
 // head is the full SHA of the head a post from Pit View went onto, which it records beside the form and the URL; a post a reviewer made itself names none, having gone onto the commit it reviewed (section 10 of DESIGN.md, Posting, One post per PR and head)
 export type Posted = { form: PostForm, url: string, head?: string }
-export type NotPostedReason = 'noPost' | 'ownPr' | 'awaitingAnswer' | 'ghFailed' | 'postBlocked'
+// ciPending and headMoved mark a review that posted nothing because CI had not finished or the head moved off the commit it reviewed; a result written before they existed has null for either
+export type NotPostedReason = 'noPost' | 'ownPr' | 'awaitingAnswer' | 'ghFailed' | 'postBlocked' | 'ciPending' | 'headMoved'
+export const notPostedReasons: readonly NotPostedReason[] = ['noPost', 'ownPr', 'awaitingAnswer', 'ghFailed', 'postBlocked', 'ciPending', 'headMoved']
 export type Verdict = 'changesRequested' | 'clean'
 export type Recommendation = 'approve' | 'fixBeforeMerge' | 'hold' | 'doNotMerge'
 export type CiState = 'green' | 'failed' | 'pending' | 'none'
@@ -236,7 +238,7 @@ const checkReview = (value: Record<string, unknown>): void => {
   check(oneOfOrNull(value.ci, ['green', 'failed', 'pending', 'none']), 'ci must be green, failed, pending, none or null')
   check(Number.isInteger(value.fixAttempts) && (value.fixAttempts as number) >= 0, 'fixAttempts must be a whole number')
   checkPosted(value.posted)
-  check(oneOfOrNull(value.notPostedReason, ['noPost', 'ownPr', 'awaitingAnswer', 'ghFailed', 'postBlocked']), 'notPostedReason must be one of the five or null')
+  check(oneOfOrNull(value.notPostedReason, notPostedReasons), 'notPostedReason must be one of the seven or null')
   check(isStringOrNull(value.report), 'report must be a path or null')
 }
 
@@ -957,7 +959,7 @@ export type AgentCell = {
   posted: boolean | null
   // the post a blocked run's report may still get from the drawer's Post it; null for anything else
   postOffer: PostOffer | null
-  // the post button's offer for the stored report of an auto-review run that ran with --no-post; null for anything else (section 10, Posting)
+  // the post button's offer for the stored report of an auto-review run that ran with --no-post, or that posted nothing because CI had not finished or the head moved; null for anything else (section 10, Posting)
   storedOffer: StoredOffer | null
   // set while the run on show is a stack review started from another PR: that PR's number, and the status of this PR's own latest run behind it, null with none. Null on the PR it started from, and on every other cell
   stackRun: { from: number, ownStatus: RunStatus | null } | null
@@ -1017,6 +1019,9 @@ const pushRefused = (result: RunResultJson | null): boolean =>
 
 const postNotes: Partial<Readonly<Record<NotPostedReason, string>>> = { ghFailed: ' · post failed', postBlocked: ' · post not made' }
 
+// a review that posted nothing because CI had not finished or the head moved, which leaves its report for the owner to post (section 10 of DESIGN.md, Posting, Which buttons show)
+export const notPostedForCiOrHead = (reason: NotPostedReason | null): boolean => reason === 'ciPending' || reason === 'headMoved'
+
 // the cell's text for a finished run, from section 8's mappings: a review's verdict and posted, a fix's push, an update's method
 export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'> & { resolvedByHand?: boolean, origin?: Origin }, ownDraft: boolean): string => {
   if (run.status === 'stopped') return 'Stopped'
@@ -1037,8 +1042,8 @@ export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'> & { resolv
   else if (ownDraft) text = 'Clean · mark ready?'
   else if (result.posted?.form === 'approve') text = 'Approved'
   else if (result.posted?.form === 'comment') text = 'Clean · CI failed'
-  // an auto-review run that passed --no-post says so; a manual one always read as its result alone
-  const unposted = run.origin === 'auto' && result.notPostedReason === 'noPost' ? ' · not posted' : ''
+  // an auto-review run that passed --no-post says so, and a manual one reads as its result alone; a review that posted nothing because CI had not finished or the head moved says so whatever started it
+  const unposted = (run.origin === 'auto' && result.notPostedReason === 'noPost') || notPostedForCiOrHead(result.notPostedReason) ? ' · not posted' : ''
   return `${text}${result.notPostedReason === null ? '' : postNotes[result.notPostedReason] ?? ''}${unposted}${byHand}`
 }
 
@@ -1162,7 +1167,7 @@ export const postOffer = (pr: RawOpenPr, config: Config, run: Run | undefined): 
   return { runId: run.id, form, report, reportPath, headSha: head.toLowerCase(), repo: config.repo, viewer: config.viewer, command: `gh ${postArgs(config.repo, run.number, form, reportPath).join(' ')}` }
 }
 
-// what the post button would do for the stored report of an auto-review run that ran with --no-post (section 10, Posting); the server judges every click by this same function, against the cache as it is then
+// what the post button would do for the stored report of an auto-review run that ran with --no-post, or that posted nothing because CI had not finished or the head moved (section 10, Posting); the server judges every click by this same function, against the cache as it is then
 export type StoredOffer = {
   runId: number
   // the report's recommendation first, then Comment; Comment alone when the recommendation is a comment
@@ -1209,12 +1214,15 @@ export const recommendedFormOf = (result: Pick<ReviewResult, 'verdict' | 'comman
   return result.recommendation !== null && result.recommendation !== 'approve' && viewerReview(pr, config)?.state === 'APPROVED' ? 'requestChanges' : 'comment'
 }
 
-// a stored report is offered only for an auto-review run of this PR that ran with --no-post and finished with its report on record, on someone else's open PR, with no post begun and no decided review of the head by the viewer. Unlike a blocked post it is offered after the head has moved: the confirmation says so, and the post goes on the PR's head as it is. The run's own origin and flags decide whether it was one; its result only names what there is to post, and each thing it names is checked against the run and the config
+// a stored report is offered only for an auto-review run of this PR that ran with --no-post, or that posted nothing because CI had not finished or the head moved, with or without --no-post, and finished with its report on record, on someone else's open PR, with no post begun and no decided review of the head by the viewer. Unlike a blocked post it is offered after the head has moved: the confirmation says so, and the post goes on the PR's head as it is. The run's own origin and flags decide whether it was one; its result only names what there is to post, and each thing it names is checked against the run and the config
 export const storedOffer = (pr: RawOpenPr, config: Config, run: Run | undefined): StoredOffer | null => {
-  if (run === undefined || run.status !== 'done' || run.origin !== 'auto' || !['review-pr', 'review-dependabot'].includes(run.command) || !run.args.includes('--no-post') || isMine(pr, config)) return null
+  if (run === undefined || run.status !== 'done' || run.origin !== 'auto' || !['review-pr', 'review-dependabot'].includes(run.command) || isMine(pr, config)) return null
   if (run.reportHash === null || run.postAttemptedAt !== null) return null
   const result = run.result
-  if (result?.schema !== 'pit-crew/review-result@1' || result.notPostedReason !== 'noPost' || result.posted !== null || result.verdict === null) return null
+  if (result?.schema !== 'pit-crew/review-result@1' || result.posted !== null || result.verdict === null) return null
+  // noPost counts only on a run whose own flags carried --no-post; the reason alone never makes a report postable
+  const told = result.notPostedReason === 'noPost' && run.args.includes('--no-post')
+  if (!told && !notPostedForCiOrHead(result.notPostedReason)) return null
   const target = result.target
   if (run.repo !== config.repo || run.number !== pr.number || target === null || !('pr' in target) || target.pr !== run.number || target.repo.toLowerCase() !== config.repo.toLowerCase()) return null
   const report = prReportName(run.number)
@@ -1241,10 +1249,10 @@ export const storedOffer = (pr: RawOpenPr, config: Config, run: Run | undefined)
   }
 }
 
-// a post that was begun and is not on record may or may not have landed, which is what ghFailed says, so the run reads that way whether its result said the post was blocked (Post it) or that the run was told not to post (the stored report's button); the row keeps what its result said. ownPr and awaitingAnswer are never rewritten: no post is offered on one's own PR and none on a run that waits for an answer, so neither can carry a mark
+// a post that was begun and is not on record may or may not have landed, which is what ghFailed says, so the run reads that way whether its result said the post was blocked (Post it) or that the run was told not to post or posted nothing because CI had not finished or the head moved (the stored report's button); the row keeps what its result said. ownPr and awaitingAnswer are never rewritten: no post is offered on one's own PR and none on a run that waits for an answer, so neither can carry a mark
 const withPostFate = (run: Run): Run => {
   const result = run.result
-  return run.postAttemptedAt !== null && result?.schema === 'pit-crew/review-result@1' && (result.notPostedReason === 'postBlocked' || result.notPostedReason === 'noPost') ? { ...run, result: { ...result, notPostedReason: 'ghFailed' } } : run
+  return run.postAttemptedAt !== null && result?.schema === 'pit-crew/review-result@1' && (result.notPostedReason === 'postBlocked' || result.notPostedReason === 'noPost' || notPostedForCiOrHead(result.notPostedReason)) ? { ...run, result: { ...result, notPostedReason: 'ghFailed' } } : run
 }
 
 // the layers a review-stack run covers: the run's own target stack once a result names one, otherwise the stack GitHub marks for the PR it started from. A number GitHub does not mark is left out either way, since a PR only based on another PR's branch gets nothing from a stack run
