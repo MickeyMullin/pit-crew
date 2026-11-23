@@ -158,6 +158,9 @@ export type RawOpenPr = {
   reviewDecision: RawReviewDecision | null
   // read only for the no-ticket marker; never displayed
   body: string
+  // when the description was last edited, and the latest edit with its editor (editor is null for a deleted account). A row cached before version 21 lacks both fields, and that reads as no edit
+  lastEditedAt?: string | null
+  userContentEdits?: { nodes: { createdAt: string, editor: RawLogin | null }[] }
   reviewRequests: { nodes: RawReviewRequest[] }
   latestReviews: { nodes: RawReview[] }
   // the newest approving or change-requesting review per reviewer; GitHub keeps it when a re-request
@@ -344,7 +347,8 @@ headRefName baseRefName headRefOid
 stack { size } stackEntry { position }
 createdAt updatedAt additions deletions changedFiles
 mergeable mergeStateStatus reviewDecision
-body
+body lastEditedAt
+userContentEdits(first: 1) { nodes { createdAt editor { login } } }
 reviewRequests(first: 50) { nodes { requestedReviewer { ${reviewerFields} } } }
 latestReviews(first: 50) { nodes { databaseId author { login } state submittedAt commit { oid } } }
 latestOpinionatedReviews(first: 50) { nodes { databaseId author { login } state submittedAt commit { oid } } }

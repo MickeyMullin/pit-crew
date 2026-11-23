@@ -311,14 +311,29 @@ const commitsSince = (pr: RawOpenPr, oid: string | null | undefined): { count: n
   return index === -1 ? null : { count: nodes.length - 1 - index, first: nodes[index + 1]?.commit.oid }
 }
 
+// the description's latest edit: GitHub's lastEditedAt is its time (the edit record's own time when that is missing), and the editor is null for a deleted account. Null when the row has no edit record, which is every row cached before version 21
+const descriptionEdit = (pr: RawOpenPr): { at: string, editor: string | null } | null => {
+  const node = pr.userContentEdits?.nodes[0]
+  return node === undefined ? null : { at: pr.lastEditedAt ?? node.createdAt, editor: node.editor?.login ?? null }
+}
+
+// true when the PR's author edited the description after the given time: an edit by anyone else, or by an account GitHub no longer knows, is not an update, and neither is an edit at or before the time
+const authorEditedAfter = (pr: RawOpenPr, since: string | null | undefined): boolean => {
+  const edit = descriptionEdit(pr)
+  return edit !== null && edit.editor !== null && since != null && same(edit.editor, pr.author?.login) && Date.parse(edit.at) > Date.parse(since)
+}
+
 export const deriveFlags = (pr: RawOpenPr, config: Config): Flag[] => {
   const flags: Flag[] = []
   const review = viewerReview(pr, config)
-  if (review !== undefined && review.commit?.oid !== pr.headRefOid) {
-    const since = commitsSince(pr, review.commit?.oid)
-    flags.push(since === null || since.count === 0
-      ? { kind: 'reReview', label: 'Re-review · new commits' }
-      : { kind: 'reReview', label: `Re-review · ${plural(since.count, 'push', 'pushes')} since yours`, count: since.count, ...since.first === undefined ? {} : { sinceSha: since.first } })
+  const pushed = review !== undefined && review.commit?.oid !== pr.headRefOid
+  const edited = review !== undefined && authorEditedAfter(pr, review.submittedAt)
+  if (review !== undefined && (pushed || edited)) {
+    const since = pushed ? commitsSince(pr, review.commit?.oid) : null
+    const also = edited ? ' and the description edited' : ''
+    if (!pushed) flags.push({ kind: 'reReview', label: 'Re-review · description edited since yours' })
+    else if (since === null || since.count === 0) flags.push({ kind: 'reReview', label: `Re-review · new commits${also}` })
+    else flags.push({ kind: 'reReview', label: `Re-review · ${plural(since.count, 'push', 'pushes')} since yours${also}`, count: since.count, ...since.first === undefined ? {} : { sinceSha: since.first } })
   }
   if (isRequestedOfViewer(pr, config)) flags.push({ kind: 'requestedOfYou', label: 'Requested of you' })
   return flags
@@ -467,12 +482,16 @@ const pushedSinceChangesRequest = (pr: RawOpenPr): boolean => {
   return head !== undefined && review.submittedAt !== null && Date.parse(head) > Date.parse(review.submittedAt)
 }
 
+// true when the PR was updated since the latest changes-requested review: the head moved past it, or the author edited the description after it
+const updatedSinceChangesRequest = (pr: RawOpenPr): boolean =>
+  pushedSinceChangesRequest(pr) || authorEditedAfter(pr, latestChangesRequest(pr)?.submittedAt)
+
 // how the viewer answered a changes request on their own PR: re-requested every reviewer whose
-// latest review requests changes, or pushed past the latest one; null while it is still theirs to do
+// latest review requests changes, or updated the PR past the latest one (pushed, or edited the description); null while it is still theirs to do
 export const changesResponse = (pr: RawOpenPr): 'reReviewRequested' | 'updatedNotRequested' | null => {
   const requesting = countedReviews(pr).filter((review) => review.state === 'CHANGES_REQUESTED')
   if (requesting.length > 0 && requesting.every((review) => isRequestedOf(pr, review.author?.login))) return 'reReviewRequested'
-  return pushedSinceChangesRequest(pr) ? 'updatedNotRequested' : null
+  return updatedSinceChangesRequest(pr) ? 'updatedNotRequested' : null
 }
 
 const changesRequestedBy = (pr: RawOpenPr, config: Config): ChangesRequestedBy | null => {
@@ -498,10 +517,10 @@ export const otherGroup = (pr: RawOpenPr, issues: readonly Issue[], merge: Merge
   const has = (kind: IssueKind): boolean => issues.some((issue) => issue.kind === kind)
   // Conflicts here is the chip's own old test, mergeable CONFLICTING: the Conflicts chip a DIRTY status raises, like Behind and Blocked by GitHub, moves no Others row
   if (pr.mergeable === 'CONFLICTING' || has('ciFailing') || has('ciNotRun')) return 'waitingOnAuthor'
-  if (has('changesRequested') && !pushedSinceChangesRequest(pr)) return 'waitingOnAuthor'
+  if (has('changesRequested') && !updatedSinceChangesRequest(pr)) return 'waitingOnAuthor'
   const review = viewerReview(pr, config)
-  if (isRequestedOfViewer(pr, config) || review === undefined || review.commit?.oid !== pr.headRefOid) return 'yourMove'
-  // reviewed at the head with nothing new: the author's turn
+  if (isRequestedOfViewer(pr, config) || review === undefined || review.commit?.oid !== pr.headRefOid || authorEditedAfter(pr, review.submittedAt)) return 'yourMove'
+  // reviewed at the head with nothing new, neither a push nor a description edit by the author: the author's turn
   return 'waitingOnAuthor'
 }
 
@@ -534,7 +553,7 @@ export const selfReviewOf = (report: ReportInfo | undefined, headRefOid: string)
 
 // last activity
 
-type Activity = { at: string, actor: string | null, kind: RawTimelineItem['__typename'], verb: string, anchor: ActivityAnchor | null }
+type Activity = { at: string, actor: string | null, kind: RawTimelineItem['__typename'] | 'DescriptionEdit', verb: string, anchor: ActivityAnchor | null }
 
 // bot commits carry a login or name like dependabot[bot], where the bot's other events say dependabot
 const commitActor = (item: Extract<RawTimelineItem, { __typename: 'PullRequestCommit' }>): string | null => {
@@ -586,6 +605,9 @@ const activityOf = (item: RawTimelineItem, config: Config): Activity | null => {
 // the most recent timeline event; consecutive commits by one actor count as one push
 export const deriveLastActivity = (pr: RawOpenPr, config: Config): LastActivity => {
   const activities = pr.timelineItems.nodes.map((item) => activityOf(item, config))
+  // the description edit is not on the timeline; it joins the events at its own time, and the latest one wins as any event does
+  const edit = descriptionEdit(pr)
+  if (edit !== null) activities.push({ at: edit.at, actor: edit.editor, kind: 'DescriptionEdit', verb: 'edited the description', anchor: null })
   let latest = -1
   activities.forEach((activity, index) => {
     const best = activities[latest]
