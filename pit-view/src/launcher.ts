@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { closeSync, constants, openSync, watch as watchDir } from 'node:fs'
 import { chmod, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, join, resolve, sep } from 'node:path'
-import type { Cache, NewRun, NewSweep, Origin, QueueReason, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
+import type { Cache, NewRun, NewSweep, Origin, PostRecord, QueueReason, Run, RunChanges, RunStatus, Session, Sweep, SweepChanges, SweepRowReport } from './cache.ts'
 import { defaultHermesProfile, expandHome, normalizeExtraInstructions, tildePath } from './config.ts'
 import type { AgentSettings, Clock, Config, ExtraInstructions, RunnerName, RunRunner } from './config.ts'
 import { ciStateOf, hasStandingChangeRequest, isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
@@ -17,7 +17,7 @@ import type { ModelEntry, RequestModels, RunModels } from './models.ts'
 import { keyStatus, profileEnvPath, readOpenRouterKey, readProfileEnvKey } from './openrouter.ts'
 import type { KeyRead } from './openrouter.ts'
 import type { Timers } from './poller.ts'
-import { prReportName, reportHash } from './reports.ts'
+import { parseVerdict, prReportName, reportHash } from './reports.ts'
 import type { ReportInfo } from './reports.ts'
 import { iso } from './time.ts'
 
@@ -36,7 +36,8 @@ export type ResultStatus = 'done' | 'failed' | 'needsInput'
 export type Priority = 'P0' | 'P1' | 'P2' | 'P3'
 export type Finding = { priority: Priority, summary: string, files: string[] }
 export type PostForm = 'approve' | 'requestChanges' | 'comment'
-export type Posted = { form: PostForm, url: string }
+// head is the full SHA of the head a post from Pit View went onto, which it records beside the form and the URL; a post a reviewer made itself names none, having gone onto the commit it reviewed (section 10 of DESIGN.md, Posting, One post per PR and head)
+export type Posted = { form: PostForm, url: string, head?: string }
 export type NotPostedReason = 'noPost' | 'ownPr' | 'awaitingAnswer' | 'ghFailed' | 'postBlocked'
 export type Verdict = 'changesRequested' | 'clean'
 export type Recommendation = 'approve' | 'fixBeforeMerge' | 'hold' | 'doNotMerge'
@@ -1164,8 +1165,28 @@ export type StoredOffer = {
   commands: Partial<Record<PostForm, string>>
 }
 
+// what the post button on a sweep row would do for the stored report a scheduled Dependabot sweep that ran with --no-post wrote for one PR (section 10, Posting). It reaches the page with the sweeps, never on a row, so a PR the open tables hide still gets it; the drawer and the server at click time both judge it by sweepOfferOf in sweeps.ts, against the cache as it is then
+export type SweepOffer = {
+  sweepId: number
+  number: number
+  // the report's recommendation first, then Comment; Comment alone when the recommendation is a comment
+  forms: PostForm[]
+  // the saved report's file name and its path written with ~
+  report: string
+  reportPath: string
+  // the full commit the sweep's reviewer read, and the PR's full head now; they differ when the head has moved since the sweep
+  reviewedSha: string
+  headSha: string
+  repo: string
+  viewer: string
+  // the PR's CI as the cache holds it now, shown in the confirmation and never a block
+  ci: CiReading
+  // the command each form runs, as the confirmation shows it
+  commands: Partial<Record<PostForm, string>>
+}
+
 // the form a stored report recommends, from its own verdict and, for Dependabot, its recommendation. CI is shown and never decides, so a clean review recommends the approval whatever CI says. A Dependabot review recommends the approval only when it says approve and the PR is neither a draft nor conflicting; otherwise it recommends a comment, or a request for changes when the viewer's earlier approval stands, since a comment would leave that approval vouching for a version the report says not to merge
-export const recommendedFormOf = (result: ReviewResult, pr: RawOpenPr, config: Config): PostForm => {
+export const recommendedFormOf = (result: Pick<ReviewResult, 'verdict' | 'command' | 'recommendation'>, pr: RawOpenPr, config: Config): PostForm => {
   if (result.verdict === 'changesRequested') return 'requestChanges'
   if (result.command !== 'review-dependabot') return 'approve'
   if (result.recommendation === 'approve' && !pr.isDraft && pr.mergeable !== 'CONFLICTING') return 'approve'
@@ -1255,16 +1276,26 @@ const fallbackStoredOffer = (pr: RawOpenPr, config: Config, run: Run, history: r
 }
 
 // the post offers a PR has now, from the run its cell is about and, for the stored report, from the newest earlier run that finished with a result when that run has none of its own. history holds the PR's runs, newest first. The drawer's offers and the server's check at post time both come from this one function, so a click is judged by the same derivation that showed the button: a run that is no longer the PR's latest, or that a stack run now covers, offers nothing unless its stored report is the one the latest run has fallen back to. runId is the run the cell is about; a stored offer carries the id of its own run
-export const currentOffers = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, cover: Run | undefined, history: readonly Run[] = []): { runId: number | null, postOffer: PostOffer | null, storedOffer: StoredOffer | null } => {
+// a PR with no post begun and none on record
+export const noPosts: PostRecord = { unknown: false, heads: new Set() }
+
+// whether what Pit View knows of a PR's posts withholds an offer about these heads, the commit its report reviewed and the PR's head now (section 10, Posting, One post per PR and head): a post begun whose outcome is not known withholds the PR at every head, and a post on record withholds the head it is on record at
+export const postWithheld = (posts: PostRecord, ...heads: string[]): boolean => posts.unknown || heads.some((head) => posts.heads.has(head.toLowerCase()))
+
+// posts is what Pit View knows of the PR's posts (section 10, Posting, One post per PR and head): a post begun whose outcome is not known may have landed, so no report of the PR is offered, whatever run or sweep would have offered it, and a post on record at the head a report reviewed or at the PR's head now withholds that report's offer
+export const currentOffers = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, cover: Run | undefined, history: readonly Run[] = [], posts: PostRecord = noPosts): { runId: number | null, postOffer: PostOffer | null, storedOffer: StoredOffer | null } => {
   const { run, covered } = cellRunOf(ownRun, cover)
+  if (posts.unknown) return { runId: run?.id ?? null, postOffer: null, storedOffer: null }
+  const blocked = postOffer(pr, config, run)
+  const stored = storedOffer(pr, config, run) ?? (run === undefined || covered ? null : fallbackStoredOffer(pr, config, run, history))
   return {
     runId: run?.id ?? null,
-    postOffer: postOffer(pr, config, run),
-    storedOffer: storedOffer(pr, config, run) ?? (run === undefined || covered ? null : fallbackStoredOffer(pr, config, run, history)),
+    postOffer: blocked === null || postWithheld(posts, blocked.headSha) ? null : blocked,
+    storedOffer: stored === null || postWithheld(posts, stored.reviewedSha, stored.headSha) ? null : stored,
   }
 }
 
-export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null, cover: Run | undefined = undefined, history: readonly Run[] = []): AgentCell => {
+export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined, report: ReportInfo | undefined, stack: Stack | null = null, queueing: Queueing | null = null, cover: Run | undefined = undefined, history: readonly Run[] = [], posts: PostRecord = noPosts): AgentCell => {
   const mine = isMine(pr, config)
   const plan = defaultRun(pr, config)
   // the button's text; the run's own label is unchanged
@@ -1280,7 +1311,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
   }
   const { run, covered } = cellRunOf(ownRun, cover)
   if (run === undefined) return idle
-  const offers = currentOffers(pr, config, ownRun, cover, history)
+  const offers = currentOffers(pr, config, ownRun, cover, history, posts)
   const shas = standingShas(run)
   const head = pr.headRefOid.toLowerCase()
   let state: AgentCell['state'] = 'done'
@@ -2405,6 +2436,9 @@ export type Launcher<T extends Session = Run> = {
   markPost: (id: number, posting: boolean) => void
   // records the post Post it made for a blocked run; a sweep has none
   recordPost: (id: number, posted: Posted) => T
+  // the same two for one row of a sweep: its post button's mark, and the post it made (section 10, Posting); a run has no rows
+  markRowPost: (id: number, number: number, posting: boolean) => void
+  recordRowPost: (id: number, number: number, posted: Posted) => T
   // at server start: re-watch live runs and sweeps, settle the rest, and fail what was still queued, since a start of the server starts nothing
   recover: () => Promise<void>
   // reads the one queue again, earliest first, as far as the first entry that does not fit; the server calls it after a saved config, which may have raised the cap
@@ -2509,7 +2543,8 @@ export type SessionStore<T extends Session> = {
   noun: 'run' | 'sweep'
   create: (request: StartRequest, fields: NewSweep & { headOid?: string | null }, dirOf: (id: number) => string) => T
   get: (id: number) => T | null
-  update: (id: number, changes: RunChanges) => T
+  // a run takes RunChanges alone; a sweep also takes its rows' reports and post marks
+  update: (id: number, changes: SweepChanges) => T
   running: () => T[]
   prune: () => T[]
   // what holds a start to one in flight: the PR for a run and the repository for a sweep
@@ -2527,6 +2562,12 @@ export type SessionStore<T extends Session> = {
   // whether the table has the models column (section 8 of DESIGN.md, Launching runs, Recording the models): runs do, and a sweep's request.json carries the models alone
   recordsModels: boolean
 }
+
+// a report as it stood at one reading: its hash, its modification time, and its size
+type ReportSnapshot = { hash: string, mtimeMs: number, size: number }
+
+// whether a sweep's rows can be posted from its drawer, so its rows' reports are recorded: the scheduler started it with --no-post, and its runner is not hermes
+const recordsRowReports = (row: Partial<Session>): boolean => row.origin === 'auto' && row.args?.includes('--no-post') === true && row.runner !== 'hermes'
 
 // one run being watched
 type Live = {
@@ -2547,6 +2588,8 @@ type Live = {
   offsets: { events: number, stream: number }
   // the step slots folded from every events.jsonl line read so far
   steps: StepSlot[]
+  // a scheduled --no-post sweep's reports as they stood when this server first saw its review step end, by PR number: what ties each row's report to the reviewer that returned it (section 8 of DESIGN.md, Sweeps, Settling). Null until then, and for good on a run, on any other sweep, and on a sweep recovery watches again
+  reviewed: Map<number, ReportSnapshot> | null
   stream: StreamState
   stdinOpen: boolean
   watcher: { close: () => void } | null
@@ -2785,6 +2828,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         entry.steps = foldSteps(entry.steps, events)
         // a note or time that moved on an unchanged step still changes the row
         if (JSON.stringify(entry.steps) !== JSON.stringify(run.steps)) changes.steps = entry.steps
+        // the review step covers every reviewer's return, so its end is the earliest point at which each row's report can be held as its reviewer left it; that is all the snapshot shows, since nothing names the hash a reviewer returned. Seen first while settling, it is seen too late to tell
+        if (store.schema !== null && entry.reviewed === null && !entry.settling && entry.child !== null && recordsRowReports(entry.row) && entry.steps.some((slot) => slot.step === 'review' && slot.state === 'done')) {
+          entry.reviewed = await reportsSnapshot()
+        }
       }
     }
     const streamBytes = await fs.readFrom(join(entry.dir, 'stream.jsonl'), entry.offsets.stream)
@@ -2876,7 +2923,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
   }
 
   // a run's ending written to its row, the write tried twice since the database may refuse it, and whoever awaits the run given the ending either way. When both tries fail the run still ends here: it is given as ended to whoever awaits it, its caller releases its slot and its place in the queue, and its row keeps reading as it did (queued or running) until a Stop records it or the next server start settles it
-  const end = (run: T, changes: RunChanges, what: string): T => {
+  const end = (run: T, changes: SweepChanges, what: string): T => {
     const write = (): T | null => {
       try {
         return store.update(run.id, changes)
@@ -2928,14 +2975,76 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     await clearPath(expandHome(path, home), 'the report', id, secrets, false)
   }
 
-  // the report a review finished with, recorded by its hash, so Post it can tell it from what a later run wrote to the same name. Only a run has the column, and only a review posts. A hermes child has no sandbox and may write a key into the report its result names, so for a hermes run that report is cleared of every key first and the hash is that of the cleared text
-  const finishedReport = async (value: RunResultJson, id: number, secrets: readonly string[] = [], hermes = false, named: string | null = reportPath(value)): Promise<RunChanges> => {
+  // a report read whole, with its modification time and size, only while neither changed during the read; null when it cannot be read or is not a regular file
+  const steadyRead = async (path: string): Promise<(ReportSnapshot & { text: string }) | null> => {
+    try {
+      const before = await stat(path)
+      if (!before.isFile()) return null
+      const text = await fs.readFile(path)
+      const after = await stat(path)
+      if (text === null || after.mtimeMs !== before.mtimeMs || after.size !== before.size) return null
+      return { hash: reportHash(text), mtimeMs: after.mtimeMs, size: after.size, text }
+    } catch {
+      return null
+    }
+  }
+
+  // every PR's report in the reports folder as it stands now, by number
+  const reportsSnapshot = async (): Promise<Map<number, ReportSnapshot>> => {
+    const folder = expandHome(options.config().reportsDir.replace(/\/$/, ''), home)
+    const reports = new Map<number, ReportSnapshot>()
+    for (const name of await fs.list(folder).catch(() => [])) {
+      const number = /^PR-([1-9]\d*)\.md$/.exec(name)?.[1]
+      if (number === undefined) continue
+      const read = await steadyRead(join(folder, name))
+      if (read !== null) reports.set(Number(number), { hash: read.hash, mtimeMs: read.mtimeMs, size: read.size })
+    }
+    return reports
+  }
+
+  // the record an earlier sweep of the repository made of a PR's report at the same head, from the newest earlier sweep with a row for the PR at that head: what a reused row's report is, since its reviewer ran in that sweep
+  const earlierRowReport = (sweepId: number, repo: string, number: number, head: string): SweepRowReport | undefined => {
+    for (const sweep of options.cache.sweepsFor(repo)) {
+      if (sweep.id >= sweepId || sweep.result?.schema !== 'pit-crew/sweep-result@1') continue
+      const row = sweep.result.rows.find((entry) => typeof entry === 'object' && entry !== null && (entry as Record<string, unknown>).number === number) as Record<string, unknown> | undefined
+      if (row === undefined || typeof row.head !== 'string' || row.head.toLowerCase() !== head.toLowerCase()) continue
+      return sweep.rowReports?.[String(number)]
+    }
+    return undefined
+  }
+
+  // the report each row of a scheduled --no-post sweep left unposted, recorded by its hash and verdict, so the row's post button can tell it from what anyone writes to the same name later (section 8, Sweeps, Settling, which says what this cannot prove). A report is recorded only when this server saw the sweep's review step end, held the report as it stood then, and finds it unchanged, by modification time, size, and hash, when the sweep settles; a reused row's report counts only when it is also the one an earlier sweep recorded for the same head. A sweep settled in recovery, or watched again after a restart, was not watched all along, so it records none. Only a row whose report is the PR's own file in the reports folder is read, and every other sweep records none: one started by hand or allowed to post has no post button, and a hermes sweep's reports are never cleared of keys
+  const sweepRowReports = async (value: SweepResult, id: number, row: Partial<Session> | null, reviewed: Map<number, ReportSnapshot> | null): Promise<Record<string, SweepRowReport> | null> => {
+    if (row === null || !recordsRowReports(row) || value.notPostedReason !== 'noPost') return null
+    const folder = options.config().reportsDir.replace(/\/$/, '')
+    const reports: Record<string, SweepRowReport> = {}
+    if (reviewed === null) return reports
+    for (const entry of value.rows) {
+      if (typeof entry !== 'object' || entry === null) continue
+      const { number, posted, report, reused, head } = entry as Record<string, unknown>
+      if (!Number.isInteger(number) || (number as number) <= 0 || posted !== null || report !== `${folder}/${prReportName(number as number)}`) continue
+      const seen = reviewed.get(number as number)
+      const now = await steadyRead(expandHome(report, home))
+      if (seen === undefined || now === null || now.hash !== seen.hash || now.mtimeMs !== seen.mtimeMs || now.size !== seen.size) continue
+      if (reused !== true) {
+        reports[String(number)] = { hash: now.hash, verdict: parseVerdict(now.text) }
+        continue
+      }
+      const kept = typeof head === 'string' && typeof row.repo === 'string' ? earlierRowReport(id, row.repo, number as number, head) : undefined
+      if (kept !== undefined && kept.hash === now.hash) reports[String(number)] = kept
+    }
+    return reports
+  }
+
+  // the report a review finished with, recorded by its hash, so Post it can tell it from what a later run wrote to the same name. Only a run has the column, and only a review posts; a sweep records its rows' reports instead. A hermes child has no sandbox and may write a key into the report its result names, so for a hermes run that report is cleared of every key first and the hash is that of the cleared text
+  const finishedReport = async (value: RunResultJson, id: number, secrets: readonly string[] = [], hermes = false, named: string | null = reportPath(value), row: Partial<Session> | null = null, reviewed: Map<number, ReportSnapshot> | null = null): Promise<SweepChanges> => {
     // the stored path is the redacted one; `named` is the path as the child wrote it, kept in memory for the guarded clearing and never stored, shown, or logged
     const path = hermes ? named : reportPath(value)
     const inside = path !== null && hermes && await inReports(expandHome(path, home))
     // a sweep's summary file is cleared like a review's report, but a sweep has no hash column
     if (hermes) await clearReport(value, id, secrets, named)
-    if (store.schema !== null || value.schema !== 'pit-crew/review-result@1') return {}
+    if (store.schema !== null) return value.schema === 'pit-crew/sweep-result@1' ? { rowReports: await sweepRowReports(value, id, row, reviewed) } : {}
+    if (value.schema !== 'pit-crew/review-result@1') return {}
     // a hermes child has no sandbox and may name any file, so a path outside the reports folder is never opened: it has no hash. A name that held a key is stored as [key], which names no file, so such a report has no hash either
     const text = path === null || (hermes && (!inside || path !== reportPath(value))) ? null : hermes ? await ownText(expandHome(path, home)) : await fs.readFile(expandHome(path, home)).catch(() => null)
     return { reportHash: text === null ? null : reportHash(text) }
@@ -2973,14 +3082,15 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       if (wrong !== null) parsed = { ok: false, error: wrong }
     }
     let reportExists: boolean | null = null
-    let finished: RunChanges = {}
+    let finished: SweepChanges = {}
     // any status: a blocked post leaves a finished review whose worker may have stopped to ask or failed over it
     if (parsed?.ok === true) {
       const path = reportPath(parsed.value)
       const hermes = entry.row.runner === 'hermes'
       const named = hermes ? written ?? path : path
       if (named !== null) reportExists = await fs.exists(expandHome(named, home)).catch(() => false)
-      finished = await finishedReport(parsed.value, entry.id, secrets, hermes, named)
+      // a sweep this server did not watch from its launch to its end has no snapshot to go by
+      finished = await finishedReport(parsed.value, entry.id, secrets, hermes, named, started as Partial<Session> | null, restarted || entry.child === null ? null : entry.reviewed)
     }
     const lastEvent = await hermesTail(entry, parsed, secrets)
     await clearLogs(entry, secrets)
@@ -3120,6 +3230,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       exited: false,
       offsets: { events: 0, stream: 0 },
       steps: emptySteps(),
+      reviewed: null,
       stream: emptyStream(),
       stdinOpen,
       watcher: null,
@@ -3758,6 +3869,27 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     return updated
   }
 
+  // a sweep row's post mark (section 10, Posting, How it posts): on the sweep's record before gh runs, and off it only when GitHub refused the post, as Post it's mark is on a run
+  const markRowPost = (id: number, number: number, posting: boolean): void => {
+    const sweep = store.get(id) as Partial<Sweep> | null
+    if (sweep === null || store.schema === null) throw new LaunchError('unknownRun', `${noun} ${id} does not exist`)
+    const { [String(number)]: _was, ...others } = sweep.postAttempts ?? {}
+    store.update(id, { postAttempts: posting ? { ...others, [String(number)]: now() } : others })
+  }
+
+  // the post a sweep row's button made: the row reads as posted on the sweep's record, and the sweep's folder is left as the worker wrote it
+  const recordRowPost = (id: number, number: number, posted: Posted): T => {
+    const sweep = store.get(id)
+    if (sweep === null) throw new LaunchError('unknownRun', `${noun} ${id} does not exist`)
+    const result = sweep.result
+    if (store.schema === null || result?.schema !== 'pit-crew/sweep-result@1') throw new LaunchError('notRunning', `${noun} ${id} has no sweep result to record a post on`)
+    const rows = result.rows.map((row) => typeof row === 'object' && row !== null && (row as Record<string, unknown>).number === number ? { ...row, posted } : row)
+    const updated = store.update(id, { result: { ...result, rows } })
+    log(`${noun} ${id}: post on #${number} recorded (${posted.form})`)
+    changed(updated)
+    return updated
+  }
+
   const checkAll = async (): Promise<void> => {
     await Promise.all([...live.values()].map((entry) => pumpOf(entry)))
   }
@@ -3900,5 +4032,5 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   const busy = (target: { repo: string, number?: number }): boolean => starting.has(store.key(target)) || store.inFlight(target)
 
-  return { start, stop, reread, markPost, recordPost, recover, drain: line.admit, check: checkAll, settled, queueing: line.queueing, flushed: line.flushed, close, queueScheduled, startScheduled, skipQueued, annotate, resumeInClone, busy }
+  return { start, stop, reread, markPost, recordPost, markRowPost, recordRowPost, recover, drain: line.admit, check: checkAll, settled, queueing: line.queueing, flushed: line.flushed, close, queueScheduled, startScheduled, skipQueued, annotate, resumeInClone, busy }
 }

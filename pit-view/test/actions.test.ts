@@ -1536,7 +1536,7 @@ test('Post it posts the saved report once with the worker\'s gh command, after t
     const { id, sha } = await blockedRun(h)
     const answer = await postIt(h, id, postBody(sha))
     assert.equal(answer.status, 200)
-    assert.deepEqual(answer.body.posted, { form: 'approve', url: `https://github.com/${scenario.repo}/pull/106` })
+    assert.deepEqual(answer.body.posted, { form: 'approve', url: `https://github.com/${scenario.repo}/pull/106`, head: sha })
     const posts = postsOf(h.runner)
     assert.equal(posts.length, 1)
     assert.deepEqual(posts[0]?.args.slice(0, -1), ['pr', 'review', '106', '--repo', scenario.repo, '--approve', '--body-file'])
@@ -1550,7 +1550,7 @@ test('Post it posts the saved report once with the worker\'s gh command, after t
     assert.equal(agent?.text, 'Approved')
     assert.equal(agent?.postOffer, null)
     assert.equal(agent?.result?.kind === 'review' && agent.result.notPostedReason, null)
-    assert.deepEqual(agent?.result?.kind === 'review' && agent.result.posted, { form: 'approve', url: `https://github.com/${scenario.repo}/pull/106` })
+    assert.deepEqual(agent?.result?.kind === 'review' && agent.result.posted, { form: 'approve', url: `https://github.com/${scenario.repo}/pull/106`, head: sha })
     assert.equal(agent?.steps.find((slot) => slot.step === 'post')?.state, 'done')
     // a second click writes nothing
     const again = await postIt(h, id, postBody(sha))
@@ -1579,7 +1579,7 @@ test('the form follows the findings and CI, and a comment keeps the URL gh print
     const { id, sha } = await blockedRun(comment, { ci: 'failed' })
     const answer = await postIt(comment, id, postBody(sha, 'comment'))
     assert.equal(answer.status, 200)
-    assert.deepEqual(answer.body.posted, { form: 'comment', url })
+    assert.deepEqual(answer.body.posted, { form: 'comment', url, head: sha })
     assert.deepEqual(postsOf(comment.runner)[0]?.args.slice(0, -1), ['pr', 'comment', '106', '--repo', scenario.repo, '--body-file'])
   } finally {
     await comment.cleanup()
@@ -2234,7 +2234,7 @@ test('a comment that landed and could not be recorded is not offered or posted a
     h.server.cache.db.exec('CREATE TEMP TRIGGER refuse_record BEFORE UPDATE OF result ON runs BEGIN SELECT RAISE(ABORT, \'disk is full\'); END')
     const answer = await postIt(h, id, postBody(sha, 'comment'))
     assert.equal(answer.status, 200)
-    assert.deepEqual(answer.body.posted, { form: 'comment', url })
+    assert.deepEqual(answer.body.posted, { form: 'comment', url, head: sha })
     assert.equal(answer.body.run, null)
     assert.equal(postsOf(runner).length, 1)
     h = await restart(h, runner)
@@ -2363,7 +2363,7 @@ test('the post button posts the stored report once as the form clicked, with the
     const runs = h.launch.children.length
     const answer = await postIt(h, id, storedBody(106, sha, sha, 'approve'))
     assert.equal(answer.status, 200)
-    assert.deepEqual(answer.body.posted, { form: 'approve', url: `https://github.com/${scenario.repo}/pull/106` })
+    assert.deepEqual(answer.body.posted, { form: 'approve', url: `https://github.com/${scenario.repo}/pull/106`, head: sha })
     const posts = postsOf(h.runner)
     assert.equal(posts.length, 1)
     assert.deepEqual(posts[0]?.args.slice(0, -1), ['pr', 'review', '106', '--repo', scenario.repo, '--approve', '--body-file'])
@@ -2378,7 +2378,7 @@ test('the post button posts the stored report once as the form clicked, with the
     const agent = (await rowOf(h, 106))?.agent
     assert.equal(agent?.text, 'Approved')
     assert.equal(agent?.storedOffer, null)
-    assert.deepEqual(agent?.result?.kind === 'review' && agent.result.posted, { form: 'approve', url: `https://github.com/${scenario.repo}/pull/106` })
+    assert.deepEqual(agent?.result?.kind === 'review' && agent.result.posted, { form: 'approve', url: `https://github.com/${scenario.repo}/pull/106`, head: sha })
     assert.equal(h.server.cache.getRun(id)?.postAttemptedAt !== null, true)
     // the offer is gone and a second click posts nothing
     assert.equal((await postIt(h, id, storedBody(106, sha, sha, 'approve'))).status, 422)

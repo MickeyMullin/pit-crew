@@ -756,6 +756,13 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     tempFolder: tmpdir(),
     markPost: (id, posting) => launcher.markPost(id, posting),
     recordPost: (id, posted) => runView(launcher.recordPost(id, posted)),
+    // the mark goes into memory too, unannounced as a run's is, so the sweep's next view shows a post that may have landed
+    markSweepPost: (id, number, posting) => {
+      sweepLauncher.markRowPost(id, number, posting)
+      const sweep = cache.getSweep(id)
+      if (sweep !== null) sweeps.set(sweep)
+    },
+    recordSweepPost: (id, number, posted) => sweepView(sweepLauncher.recordRowPost(id, number, posted)),
     log,
   })
 
@@ -883,6 +890,20 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     const body = await readJson(req)
     try {
       json(res, 200, await actions.post(Number(raw), body))
+    } catch (error) {
+      if (!(error instanceof ActionError)) throw error
+      json(res, actionStatus[error.code], { error: error.message, ...(error.errorKind === null ? {} : { errorKind: error.errorKind }), ...(error.detail ?? {}) })
+    }
+  }
+
+  // the post button on a sweep row (section 10 of DESIGN.md, Posting): a GitHub write, so it takes a direct action's Origin and token, and what its confirmation showed comes back whole
+  const postSweep = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
+    requireOrigin(req)
+    requireToken(req)
+    if (!/^[1-9]\d{0,9}$/.test(raw)) throw new HttpError(400, 'the sweep id must be a positive integer')
+    const body = await readJson(req)
+    try {
+      json(res, 200, await actions.postSweep(Number(raw), body))
     } catch (error) {
       if (!(error instanceof ActionError)) throw error
       json(res, actionStatus[error.code], { error: error.message, ...(error.errorKind === null ? {} : { errorKind: error.errorKind }), ...(error.detail ?? {}) })
@@ -1069,6 +1090,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'POST', pattern: /^\/api\/sweeps$/, handle: (req, res) => startSweep(req, res) },
     { method: 'GET', pattern: /^\/api\/sweeps$/, handle: (_req, res) => json(res, 200, sweeps.list(effective().repo)) },
     { method: 'POST', pattern: /^\/api\/sweeps\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopSweep(req, res, match[1] ?? '') },
+    { method: 'POST', pattern: /^\/api\/sweeps\/([^/]+)\/post$/, handle: (req, res, _url, match) => postSweep(req, res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/auto-review\/ticks$/, handle: (_req, res) => json(res, 200, cache.ticksFor(effective().repo, 50)) },
     // the auto-review log of the repository in effect, newest first, within the days it keeps; a read, no token
     { method: 'GET', pattern: /^\/api\/auto-review\/log$/, handle: (_req, res) => {

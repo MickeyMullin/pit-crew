@@ -1,5 +1,5 @@
 // public/sweepdrawer.ts
-// the Dependabot sweep drawer: a non-modal panel on the right for the repository's sweeps, not for one PR. It starts a sweep behind an inline confirmation, shows the queued, running, waiting, and finished card of the sweep it is on (the whole sweep-result@1: counts, one card per PR, the merge order, and the summary's path), and lists the earlier sweeps. It reads the sweeps from the page's feed on every draw, so a patch updates it in place. sweepview.ts says what every part reads; this file makes the elements, keeps the confirmation's state, and moves focus
+// the Dependabot sweep drawer: a non-modal panel on the right for the repository's sweeps, not for one PR. It starts a sweep behind an inline confirmation, shows the queued, running, waiting, and finished card of the sweep it is on (the whole sweep-result@1: counts, one card per PR, the merge order, and the summary's path), offers the post button on a PR's card when the offers that come with the sweeps hold one for that PR's stored report, whether or not the PR has a row on the page (section 10 of DESIGN.md, Posting), and lists the earlier sweeps. It reads the sweeps from the page's feed on every draw, so a patch updates it in place. sweepview.ts says what every part reads; this file makes the elements, keeps the confirmation's state, and moves focus
 // Opened from a sweep line of the auto-review log it shows first in its body a link back to that line, the Agent drawer's link (DESIGN.md section 8, Drawer and Sweeps)
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
@@ -8,12 +8,14 @@ import { focusKeySelector, mayMoveFocus, escapeTarget, outsidePressCloses } from
 import { formatDuration, formatSince } from './format.ts'
 import type { ReportPanel } from './reportpanel.ts'
 import { sendRun } from './runapi.ts'
+import { postAllowOf, refusalText } from './agent.ts'
+import type { PostAllow, PostForm } from './agent.ts'
 import { safeHref } from './safeurl.ts'
 import {
   defaultSweepRunner, shownSweep, sweepCards, sweepConfirmModel, sweepConfirmSignature, sweepList, sweepListSignature, sweepQueuedModel, sweepRefusal, sweepResultModel, sweepRunningModel, sweepStartRequest,
-  sweepStopModel, sweepStopRefusal, sweepStopRequest, sweepWaitingModel,
+  sweepPostAskOf, sweepPostButtons, sweepPostHolds, sweepPostModel, sweepPostRequest, sweepStopModel, sweepStopRefusal, sweepStopRequest, sweepWaitingModel,
 } from './sweepview.ts'
-import type { SweepRowModel, SweepsView, SweepView, Tone } from './sweepview.ts'
+import type { SweepPostAsk, SweepRowModel, SweepsView, SweepView, Tone } from './sweepview.ts'
 import type { RunnerName } from './agent.ts'
 
 export type SweepOpener = { key: string }
@@ -21,8 +23,8 @@ export type SweepOpener = { key: string }
 // the auto-review log line a sweep drawer was opened from: the anchor its link back points at, and what following it does once the drawer is closed
 export type SweepBack = { anchor: string, go: () => void }
 
-// what the drawer is asking about: a start waiting for its Start or a stop waiting for its Stop
-type Confirm = { type: 'start', runner: RunnerName } | { type: 'stop', id: number }
+// what the drawer is asking about: a start waiting for its Start, a stop waiting for its Stop, or a PR's stored report waiting for its Post
+type Confirm = { type: 'start', runner: RunnerName } | { type: 'stop', id: number } | SweepPostAsk
 
 export type SweepDrawerOptions = {
   root: HTMLElement
@@ -91,6 +93,11 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
   let seenStatus = ''
   // the log line this drawer was opened from, when it was: where its link back leads and what it does
   let back: SweepBack | null = null
+  // the hit set and report hash the last refusal over the scan showed, bound to the confirmation that was refused, as in the Agent drawer: only a click on that same confirmation sends it back
+  let postAllow: { confirmation: Confirm, allow: PostAllow } | null = null
+
+  // the post button's offer for a PR comes with the sweeps, whether or not the PR has a row on the page; null when there is none
+  const offerOf = (number: number) => options.sweeps()?.offers?.find((offer) => offer.number === number) ?? null
 
   const heading = h('h2', { id: 'sweep-drawer-heading', class: 'drawer-heading', tabindex: '-1' }, 'Dependabot sweep')
   const subLine = h('p', { class: 'drawer-pr-sub' })
@@ -198,8 +205,9 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
       const stop = confirm?.type === 'stop'
       const asked = confirm
       const removing = asked?.type === 'stop' && sweeps()?.items.find((sweep) => sweep.id === asked.id)?.status === 'queued'
-      const idle = removing ? 'Remove from queue' : stop ? 'Stop sweep' : 'Start sweep'
-      const working = removing ? 'Removing…' : stop ? 'Stopping…' : 'Starting sweep…'
+      const posting = asked?.type === 'post' ? postModelOf(asked) : null
+      const idle = posting !== null ? posting.confirm : removing ? 'Remove from queue' : stop ? 'Stop sweep' : 'Start sweep'
+      const working = posting !== null ? posting.busy : removing ? 'Removing…' : stop ? 'Stopping…' : 'Starting sweep…'
       setText(go, busy ? working : idle)
     }
   }
@@ -212,6 +220,53 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     error = ''
     render()
     byKey('confirm-cancel')?.focus({ preventScroll: true })
+  }
+
+  const postModelOf = (ask: SweepPostAsk) => {
+    const offer = offerOf(ask.number)
+    // the title is the one the sweep's own row gives, since the PR may have no row on the page
+    const title = options.sweeps()?.items.find((sweep) => sweep.id === ask.sweepId)?.result?.rows.find((row) => row.number === ask.number)?.title ?? ''
+    return offer === null ? null : sweepPostModel(title, offer, ask)
+  }
+
+  // one click opens the confirmation on the PR's card, which names the form, the report, the login, the CI state read now, and, when the head has moved, both heads. Nothing is sent until its own button is clicked, and what it shows now is what the request is bound to
+  const askPost = (number: number, form: PostForm): void => {
+    const offer = offerOf(number)
+    if (offer === null || !offer.forms.includes(form)) return
+    confirm = sweepPostAskOf(offer, form)
+    confirmFrom = `sweep-post:${number}:${form}`
+    error = ''
+    render()
+    byKey('confirm-cancel')?.focus({ preventScroll: true })
+  }
+
+  const doPost = async (): Promise<void> => {
+    if (busy || confirm?.type !== 'post') return
+    const asked = confirm
+    busy = true
+    error = ''
+    paintConfirm()
+    const allow = postAllow !== null && postAllow.confirmation === asked ? postAllow.allow : null
+    const answer = await sendRun(sweepPostRequest(asked, options.token, allow))
+    // a confirmation that is no longer the one this request was sent from (the drawer was closed and reopened, or another confirmation opened) is not touched by its answer
+    if (confirm !== asked) return
+    busy = false
+    if (answer.ok) {
+      confirm = null
+      confirmFrom = null
+      error = ''
+      postAllow = null
+      options.say(`#${asked.number}: report posted. The row is refreshing.`)
+      render()
+      // the card and the row arrive as a patch; the heading holds focus meanwhile
+      focusKey(null)
+      return
+    }
+    error = refusalText('post', answer.status, answer.error)
+    const kept = answer.status === 422 ? postAllowOf(answer.body, answer.error) : null
+    postAllow = kept === null ? null : { confirmation: asked, allow: kept }
+    paintConfirm()
+    byKey('confirm-go')?.focus({ preventScroll: true })
   }
 
   const askStop = (id: number): void => {
@@ -227,6 +282,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     confirm = null
     confirmFrom = null
     error = ''
+    postAllow = null
     render()
     focusKey(back)
   }
@@ -455,7 +511,32 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     return h('a', { ...newTab, class: 'chip chip-small chip-link tone-blue', href, title: 'Open the post on GitHub' }, row.posted.text)
   }
 
-  const rowCard = (row: SweepRowModel): HTMLElement => {
+  // the post button's confirmation, on the card of the PR it is about
+  const postBlock = (ask: SweepPostAsk): HTMLElement | null => {
+    const model = postModelOf(ask)
+    if (model === null) return null
+    return h('div', { class: 'confirm', role: 'group', 'aria-labelledby': 'sweep-confirm-heading' },
+      h('h4', { id: 'sweep-confirm-heading', class: 'confirm-heading' }, model.heading),
+      h('p', { class: 'confirm-title' }, model.title),
+      model.headMoved === null ? null : h('p', { class: 'confirm-moved', 'data-sweep-moved': '' }, model.headMoved),
+      facts([['Report', model.report], ['Command', model.command], ['On GitHub', model.effect], ['CI', model.ci], ['Bound to', model.bound]]),
+      errorLine(),
+      confirmActions(model.confirm, 'primary', () => void doPost()))
+  }
+
+  // the buttons for the forms the server offers, or the confirmation of the one clicked
+  const postPart = (sweep: SweepView, number: number): HTMLElement | null => {
+    if (confirm?.type === 'post' && confirm.sweepId === sweep.id && confirm.number === number) return postBlock(confirm)
+    const buttons = sweepPostButtons(offerOf(number), sweep.id, number)
+    if (buttons.length === 0) return null
+    return h('p', { class: 'sweep-row-post' }, buttons.map((button) => {
+      const element = h('button', { type: 'button', class: 'button button-small', 'data-sweep-post-form': button.form, 'data-focus-key': `sweep-post:${number}:${button.form}`, 'aria-label': `${button.text}: post the stored report on #${number}` }, button.text)
+      element.addEventListener('click', () => askPost(number, button.form))
+      return element
+    }))
+  }
+
+  const rowCard = (row: SweepRowModel, sweep: SweepView): HTMLElement => {
     const href = safeHref(row.url)
     const target = marked === row.number
     return h('li', { class: target ? 'sweep-row sweep-row-target' : 'sweep-row', id: `sweep-row-${row.number}`, 'data-sweep-row': row.number, 'aria-current': target ? 'true' : null },
@@ -479,13 +560,14 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
           ? h('code', { class: 'mono' }, row.report.path)
           : reportButton(row.report.name, `Open the report for #${row.number}`),
         row.report.name === null ? null : h('code', { class: 'mono sweep-report-path' }, row.report.path),
-        copyButton(`Copy the report path for #${row.number}`, row.report.path, `Report path for #${row.number} copied`, `copy-report-${row.number}`)))
+        copyButton(`Copy the report path for #${row.number}`, row.report.path, `Report path for #${row.number} copied`, `copy-report-${row.number}`)),
+      postPart(sweep, row.number))
   }
 
   const resultCard = (sweep: SweepView): Part => ({
     key: 'result',
-    // the scroll to a marked card is not in the signature: it must not rebuild the card, which would drop focus
-    sig: JSON.stringify([sweep, marked]),
+    // the scroll to a marked card is not in the signature: it must not rebuild the card, which would drop focus. The rows' offers and a post's confirmation are, so a changed offer redraws its buttons; a confirmation it no longer matches has already been dropped
+    sig: JSON.stringify([sweep, marked, (sweep.result?.rows ?? []).map((row) => offerOf(row.number)), confirm?.type === 'post' ? confirm : null]),
     build: () => {
       const model = sweepResultModel(sweep)
       const order = model.order.length === 0 ? null : h('ol', { class: 'sweep-order' },
@@ -516,7 +598,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
         order === null ? null : h('div', { class: 'sweep-merge' }, h('p', { class: 'drawer-label' }, 'Merge order and actions'), order),
         model.rows.length === 0 ? null : h('div', { class: 'sweep-rows' },
           h('p', { class: 'drawer-label' }, `Pull requests · ${model.rows.length}`),
-          h('ul', { class: 'drawer-list sweep-row-list' }, model.rows.map(rowCard))),
+          h('ul', { class: 'drawer-list sweep-row-list' }, model.rows.map((row) => rowCard(row, sweep)))),
         // a waiting sweep's own card carries its resume command
         sweep.status === 'needsInput' ? null : resumeBlock(sweep.resume))
     },
@@ -595,16 +677,20 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     }
   }
 
-  // a confirmation outlives nothing: a start's confirmation needs the start to still be available, and a stop's confirmation needs its sweep to still be in flight, since removing a queued sweep still holds once it has started: the stop is for the same sweep
+  // a confirmation outlives nothing: a start's confirmation needs the start to still be available; a stop's confirmation needs its sweep to still be in flight, since removing a queued sweep still holds once it has started (the stop is for the same sweep); and a post's confirmation needs the server's offer to be exactly what it showed, the CI state included, on the sweep on show
   const dropStaleConfirm = (view: SweepsView): void => {
     if (confirm === null || busy) return
-    const stillAsked = confirm.type === 'start'
+    const asked = confirm
+    const stillAsked = asked.type === 'start'
       ? view.start.unavailable === null
-      : view.items.some((sweep) => sweep.id === (confirm as Extract<Confirm, { type: 'stop' }>).id && inFlight(sweep))
+      : asked.type === 'stop'
+        ? view.items.some((sweep) => sweep.id === asked.id && inFlight(sweep))
+        : shown()?.id === asked.sweepId && sweepPostHolds(asked, offerOf(asked.number))
     if (stillAsked) return
     confirm = null
     confirmFrom = null
     error = ''
+    postAllow = null
   }
 
   const update = (): void => {
@@ -631,6 +717,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
       isOpen = true
       confirm = null
       confirmFrom = null
+      postAllow = null
       busy = false
       error = ''
       stopping = null
@@ -651,6 +738,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
     isOpen = false
     back = null
     confirm = null
+    postAllow = null
     busy = false
     stopping = null
     marked = null

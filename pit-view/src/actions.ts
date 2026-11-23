@@ -2,15 +2,18 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Cache, Run } from './cache.ts'
+import { isHeadNotOnRecord } from './cache.ts'
 import type { Config } from './config.ts'
 import { deriveIssues, deriveMerge, isPrimaryBase, offersMerge } from './derive.ts'
 import { GhError, GhTimeoutError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr, WriteLimits } from './github.ts'
 import { currentOffers, isHttpUrl, offersFix, postArgs, stackRunCover } from './launcher.ts'
-import type { Posted, PostForm, PostGuard, RunView, UpdateAction } from './launcher.ts'
+import type { Posted, PostForm, PostGuard, RunView, SweepOffer, UpdateAction } from './launcher.ts'
 import { namesInText, resolveModels } from './models.ts'
 import type { PostedTextHit } from './models.ts'
 import { parseReviewedCommit, readReport, reportHash, ReportReadError } from './reports.ts'
+import { sweepOfferOf } from './sweeps.ts'
+import type { SweepView } from './sweeps.ts'
 
 // direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs, each through gh with the viewer's own token. This module decides whether an action is allowed and what gh is asked; it never trusts the page, so every rule is checked here again. merge is always a squash into the repository's primary branch; the method is fixed, not a setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused. update writes nothing itself: it starts an agent session through the launcher, which brings the PR's branch up to date with the primary branch and pushes it. resolveConflicts is that same session, asked for on a PR the cache holds as conflicting
 export const actionNames = ['merge', 'markReady', 'convertToDraft', 'requestReview', 'update', 'resolveConflicts'] as const
@@ -146,10 +149,27 @@ const sameLogin = (a: string, b: string): boolean => a.toLowerCase() === b.toLow
 export type PostAllow = { terms: string[], reportHash: string }
 export type PostRequest = { repo: string, viewer: string, number: number, headSha: string, form: PostForm, reviewedSha?: string, allow?: PostAllow }
 export type PostResult = { number: number, runId: number, posted: Posted, run: RunView | null }
+// the post button on a sweep row answers with the sweep it posted from and the sweep as recorded after the post, null when the record failed
+export type SweepPostResult = { number: number, sweepId: number, posted: Posted, sweep: SweepView | null }
 
 const formWords: Readonly<Record<PostForm, string>> = { approve: 'an approval', requestChanges: 'a request for changes', comment: 'a comment' }
 
 const postUsage = 'send { "repo": "<owner/name shown>", "viewer": "<login shown>", "number": 106, "headSha": "<full head SHA shown>", "form": "approve" | "requestChanges" | "comment" } as the confirmation showed them, and for a stored report also "reviewedSha": "<full SHA of the commit the review read>"; after a refusal over the scan, a second request may add "allow": { "terms": ["<each term the refusal named>"], "reportHash": "<the reportHash the refusal carried>" }'
+
+const sweepPostUsage = 'send { "repo": "<owner/name shown>", "viewer": "<login shown>", "number": 114, "headSha": "<full head SHA shown>", "reviewedSha": "<full SHA of the commit the sweep\'s reviewer read>", "form": "approve" | "requestChanges" | "comment" } as the confirmation showed them; after a refusal over the scan, a second request may add "allow": { "terms": ["<each term the refusal named>"], "reportHash": "<the reportHash the refusal carried>" }'
+
+// the post button on a sweep row takes the stored report's body, and always names the commit the report reviewed
+export const parseSweepPost = (body: unknown): PostRequest & { reviewedSha: string } => {
+  let request: PostRequest
+  try {
+    request = parsePost(body)
+  } catch (error) {
+    if (error instanceof ActionError && error.code === 'badRequest') throw new ActionError('badRequest', error.message.replace(postUsage, sweepPostUsage))
+    throw error
+  }
+  if (request.reviewedSha === undefined) throw new ActionError('badRequest', sweepPostUsage)
+  return { ...request, reviewedSha: request.reviewedSha }
+}
 
 export const parsePost = (body: unknown): PostRequest => {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ActionError('badRequest', postUsage)
@@ -208,6 +228,14 @@ export const postReadDeadlineMs = 30_000
 export const postWriteDeadlineMs = 60_000
 
 const readTimedOutMessage = 'GitHub did not answer in time; nothing was posted'
+
+// the refusal for a PR whose earlier post from Pit View may have landed, whichever run or sweep began it
+// the refusal for a PR with an unresolved mark: a post begun whose outcome is not known, or a post on record without the head it went onto (source names which)
+const markedText = (number: number, source: string): string => isHeadNotOnRecord(source)
+  ? `a post on #${number} by ${source.slice(0, source.lastIndexOf(','))} is on record, but not the head it went onto, so no head of #${number} is offered; nothing was posted. Check #${number} on GitHub`
+  : `a post on #${number} was begun earlier and may have landed; nothing was posted. Check #${number} on GitHub`
+// the refusal for a head of a PR that a post is already on record at, whichever review, sweep, or button made it
+const postedText = (number: number, head: string): string => `a post on #${number} at ${head.slice(0, 7)} is already on record, and each head of a PR is posted on once; nothing was posted. A review of a newer commit can be posted`
 const writeTimedOutMessage = 'The post to GitHub timed out and may or may not have gone through. Check the pull request before posting again.'
 
 export type ActionsOptions = {
@@ -229,6 +257,9 @@ export type ActionsOptions = {
   markPost: (id: number, posting: boolean) => void
   // records a post on its run; a failure here is logged, since the post has landed by then, and the mark keeps it from being made twice
   recordPost: (id: number, posted: Posted) => RunView
+  // the same two for a row of a sweep, by the sweep's id and the row's PR
+  markSweepPost: (id: number, number: number, posting: boolean) => void
+  recordSweepPost: (id: number, number: number, posted: Posted) => SweepView
   // the posts in flight, shared with the launcher: held from before a post's first asynchronous step until its write has settled and been recorded or has failed, during which the launcher admits no run of the PR and no stack run covering it
   posts: PostGuard
   log: (line: string) => void
@@ -239,6 +270,8 @@ export type Actions = {
   run: (number: number, body: unknown) => Promise<ActionResult>
   // Post it: validates and posts one blocked run's saved report; throws ActionError on a refusal and answers once gh has finished
   post: (id: number, body: unknown) => Promise<PostResult>
+  // the post button on a sweep row: validates and posts the stored report a scheduled --no-post sweep wrote for one PR, by the same checks; throws ActionError on a refusal and answers once gh has finished
+  postSweep: (id: number, body: unknown) => Promise<SweepPostResult>
 }
 
 // a report's text in a new folder only this user can read, for gh to open
@@ -376,6 +409,161 @@ export const createActions = (options: ActionsOptions): Actions => {
     }
   }
 
+  // what a stored report's post shares, however it was offered: the hold on the PR, the one read of the report and its hash, the scan, the commit it names, the live reads and the offer derived once more just before the mark, the write from a private copy, and the record. Called in the same synchronous block as the caller's own checks, so the hold is taken before anything is awaited
+  type Delivery<R> = {
+    config: Config
+    request: PostRequest
+    // what the log and the refusals call the post's source ("run 5", "sweep 3"), and the button a post that may have landed withdraws
+    source: string
+    noun: 'run' | 'sweep'
+    button: string
+    offer: { report: string, reportPath: string }
+    reviewedAt: string
+    // the hash recorded when the run or sweep finished
+    hash: string | null
+    // the offer derived again from the cache and the settings as they are then, which throws when it is gone
+    again: () => { offer: { report: string, reportPath: string }, reviewedAt: string }
+    mark: (posting: boolean) => void
+    record: (posted: Posted) => R
+  }
+
+  const deliver = async <R>(posting: Delivery<R>): Promise<{ posted: Posted, recorded: R | null }> => {
+    // the hold is taken in the same synchronous block as the caller's checks, ahead of every asynchronous step: from here the launcher admits no run of this PR and no stack run covering it, until the finally below. A run admitted before this point has its row in the cache the check just read, and a start with no row yet is refused where it makes one
+    const { config, request, source, offer, reviewedAt } = posting
+    const { repo, viewer } = config
+    const { number, headSha, form } = request
+    const key = `${repo}#${number}`
+    const release = options.posts.hold(repo, number)
+    if (release === null) throw new ActionError('busy', `a post for #${number} is already in progress`)
+    inFlight.add(key)
+    try {
+      // the report on disk must be the one its run or sweep finished with: a later review of the PR writes the same name. One read: the text checked here is the text posted
+      const folder = options.reportsFolder()
+      let report: string
+      try {
+        report = (await readReport(folder, offer.report)).raw
+      } catch (error) {
+        if (error instanceof ReportReadError) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} cannot be posted (${error.message}); nothing was posted`)
+        throw error
+      }
+      if (reportHash(report) !== posting.hash) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} has changed since ${source} finished, so it is no longer that ${posting.noun}'s review; nothing was posted. Start a new review to post the report as it is now`)
+      // a posted report does not mention AI involvement: every registry id and full slug, every vendor, runner, and provider name, every term for AI, every phrase that credits a tool, and the review-mode words (postedTextTerms) are looked for in the very text that gets posted, and any found refuses the post before gh is asked anything, with the whole hit set and the report's hash in the refusal. The owner's second click sends exactly that back, and the post goes on only while the scan still finds the same set in a report of the same hash. The Post it path and both post buttons come through here, and nothing that posts unattended sends an override
+      const hits = namesInText(resolveModels(config.models), report)
+      if (hits.length > 0 && !overrides(request.allow, hits.map((hit) => hit.term), reportHash(report))) throw scanRefusal(offer.reportPath, hits, reportHash(report))
+      const named = parseReviewedCommit(report.split('\n').slice(0, 20))
+      if (named === null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} does not say which commit it reviewed; nothing was posted`)
+      if (!reviewedAt.startsWith(named)) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} is about another commit (${named}); nothing was posted`)
+      let marked = false
+      const check = async (read: (args: string[]) => Promise<string>): Promise<void> => {
+        let live: LivePr
+        let reviews: string
+        try {
+          live = JSON.parse(await read(['api', `repos/${repo}/pulls/${number}`])) as LivePr
+          reviews = await read(reviewsArgs(repo, number))
+        } catch (error) {
+          if (error instanceof GhError) throw error
+          throw new ActionError('ghFailed', `cannot read #${number} before posting: ${messageOf(error)}; nothing was posted`)
+        }
+        if (live.state !== 'open' || live.merged === true) throw new ActionError('notAllowed', `#${number} is no longer open; nothing was posted`)
+        if (live.head?.sha?.toLowerCase() !== headSha) throw new ActionError('notAllowed', `#${number} has new commits since you saw it; nothing was posted`)
+        if (reviewedHead(reviews, viewer, headSha)) throw new ActionError('notAllowed', `you have already reviewed this commit of #${number}; nothing was posted`)
+        // the offer derived once more from the cache as it is now, with nothing awaited between this reading and the mark below: a run that got in by a path the hold does not cover is seen here, and the hold refuses every run after it
+        const again = posting.again()
+        if (again.offer.report !== offer.report || again.offer.reportPath !== offer.reportPath || again.reviewedAt !== reviewedAt) throw new ActionError('stale', 'This report is no longer the one offered for this PR; nothing was posted. Reload the PR to see its current state')
+        // the last step before the write, so a restart can never offer a post that may have landed: the PR's own mark, which every later run, sweep, and Post it honors, then the mark of the run or sweep row that posts. When the second cannot be written the first is deleted again, so nothing is marked and nothing is posted; a server stopped between the two leaves the PR's mark alone, which withholds the PR at every head as any unresolved mark does
+        try {
+          cache.beginPostMark(repo, number, source)
+        } catch (error) {
+          throw new ActionError('notAllowed', `cannot record that #${number} is being posted (${messageOf(error)}), and without that record it could be posted twice; nothing was posted`)
+        }
+        try {
+          posting.mark(true)
+        } catch (error) {
+          cache.clearPostMark(repo, number, source)
+          throw new ActionError('notAllowed', `cannot record that #${number} is being posted (${messageOf(error)}), and without that record it could be posted twice; nothing was posted`)
+        }
+        marked = true
+      }
+      // gh reads a private copy of what was checked, so nothing that happens to the report from here on reaches GitHub
+      const copy = await privateCopy(options.tempFolder, report).catch((error: unknown) => {
+        throw new ActionError('notAllowed', `cannot make a private copy of ${offer.reportPath} (${messageOf(error)}); nothing was posted`)
+      })
+      let printed: string
+      try {
+        printed = await gh.write(postArgs(repo, number, form, copy.path), viewer, check, options.postDeadlines ?? { readMs: postReadDeadlineMs, writeMs: postWriteDeadlineMs })
+      } catch (error) {
+        if (error instanceof GhTimeoutError) {
+          refresh(repo, number)
+          // a step before the write changed nothing and left no mark, so the report stays postable. The write is different: gh was told to stop, but a post that had already reached GitHub may land, and a stopped gh cannot say. The mark taken before the write stays, so the offer is withdrawn exactly as for any write whose outcome is unknown
+          if (error.phase === 'write') {
+            log(`PR #${number}: the post of ${source} timed out, and its outcome is unknown`)
+            throw new ActionError('ghFailed', writeTimedOutMessage, 'timeout')
+          }
+          log(`PR #${number}: the post of ${source} was refused: ${error.message}`)
+          throw new ActionError('ghFailed', readTimedOutMessage, 'timeout')
+        }
+        if (error instanceof ActionError) {
+          refresh(repo, number)
+          throw error
+        }
+        if (error instanceof WriteIdentityError) {
+          if (error.login === null) throw new ActionError('identityUnknown', error.message, error.errorKind)
+          throw new ActionError('identityMismatch', error.message)
+        }
+        const kind = error instanceof GhError ? error.kind : null
+        if (marked && !refusedByGitHub(error)) {
+          refresh(repo, number)
+          throw new ActionError('ghFailed', `${messageOf(error)}; the post may have landed, so ${posting.button} will not be offered again. Check #${number} on GitHub`, kind)
+        }
+        // only the mark this post began is taken off: a record that marked the PR while the post was in flight, such as a sweep that settled saying it posted at a head it could not establish, keeps the PR marked
+        if (marked) {
+          try {
+            posting.mark(false)
+            cache.clearPostMark(repo, number, source)
+          } catch (failure) {
+            log(`PR #${number}: GitHub refused the post of ${source}, but its mark could not be taken off: ${messageOf(failure)}`)
+          }
+        }
+        refresh(repo, number)
+        throw new ActionError('ghFailed', messageOf(error), kind)
+      } finally {
+        await rm(copy.folder, { recursive: true, force: true }).catch((error: unknown) => log(`PR #${number}: cannot remove the private copy of its report: ${messageOf(error)}`))
+      }
+      // gh pr comment prints the comment's URL; gh pr review prints none, so the post links to the PR, as the prompts' own fallback does
+      const url = printed.trim().split('\n').at(-1) ?? ''
+      // the head the live read returned just before the write is recorded with it as the head it went onto, so the post is on record at that head as well as at the commit its report reviewed, from the result alone. gh cannot pin the post to a commit, so a push that lands after that read can put it on a newer head that is not recorded (section 10 of DESIGN.md, Posting, One post per PR and head)
+      const posted: Posted = { form, url: isHttpUrl(url) ? url : `https://github.com/${repo}/pull/${number}`, head: headSha }
+      log(`PR #${number}: ${source} posted its report (${form})`)
+      let recorded: R | null = null
+      try {
+        recorded = posting.record(posted)
+        // the outcome is known now, and the post is on record at the head read before the write and at the commit its report reviewed, so neither is offered again; a mark whose post could not be recorded stays unresolved, so nothing offers the PR again at any head, and only the mark this post began is resolved
+        cache.resolvePostMark(repo, number, [headSha, reviewedAt], source)
+      } catch (error) {
+        log(`PR #${number}: the post of ${source} landed but could not be recorded: ${messageOf(error)}`)
+      }
+      refresh(repo, number)
+      return { posted, recorded }
+    } finally {
+      inFlight.delete(key)
+      release()
+    }
+  }
+
+  // the settings as they are at this moment, for each derivation of a post's offer: a save while the click waits on GitHub is what the last check before the mark judges by, and a save that changed the repository or the viewer refuses the post
+  const settingsFor = (repo: string, viewer: string): Config => {
+    const settings = options.config()
+    if (settings.repo !== repo) throw new ActionError('stale', `the repository is now ${settings.repo}, not ${repo}; nothing was posted`)
+    if (!sameLogin(settings.viewer, viewer)) throw new ActionError('stale', `the viewer is now ${settings.viewer || 'nobody'}, not ${viewer}; nothing was posted`)
+    return settings
+  }
+
+  // the first of these heads that a post on the PR is on record at, or null (section 10 of DESIGN.md, Posting, One post per PR and head)
+  const postedHead = (repo: string, number: number, heads: readonly (string | undefined)[]): string | null => {
+    const record = cache.postRecords(repo).get(number)
+    return heads.find((head): head is string => head !== undefined && record?.heads.has(head.toLowerCase()) === true) ?? null
+  }
+
   const post = async (id: number, body: unknown): Promise<PostResult> => {
     const request = parsePost(body)
     const config = options.config()
@@ -388,11 +576,12 @@ export const createActions = (options: ActionsOptions): Actions => {
     if (run.repo !== repo || run.number !== number) throw new ActionError('stale', `run ${id} is not a run of #${number} in ${repo}; the confirmation was for #${number}, so nothing was posted`)
     // the offer as the cache has it at this moment, derived the way the drawer derives it: from the PR's latest run and the stack run that covers it. The requested run must be the run that offer is about (the PR's latest run, or for a stored report the earlier run it falls back to), so a run another has superseded, or a stack run now covers, posts nothing, whatever report is still on disk. Everything here is synchronous, so what it answers is true until the caller next awaits
     const current = (): ReturnType<typeof currentOffers> => {
+      const settings = settingsFor(repo, viewer)
       const cached = cache.readView(repo)
       const row = cached.open.find((entry) => entry.number === number)
       if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched; nothing was posted`)
       const latest = cache.latestRuns(repo)
-      const offers = currentOffers(row.pr, config, latest.get(number), stackRunCover(latest.values(), cached.open.map((entry) => entry.pr)).get(number), cache.runsByPr(repo).get(number))
+      const offers = currentOffers(row.pr, settings, latest.get(number), stackRunCover(latest.values(), cached.open.map((entry) => entry.pr)).get(number), cache.runsByPr(repo).get(number), cache.postRecords(repo).get(number))
       // a stored report's click names the run that report is from, which is an earlier run when the latest has no result of its own; a Post it click names the run the cell is about
       const offered = request.reviewedSha === undefined ? offers.runId : offers.storedOffer?.runId ?? offers.runId
       if (offered !== id) throw new ActionError('stale', 'This report is no longer the latest for this PR; nothing was posted. Reload the PR to see its current state')
@@ -423,115 +612,66 @@ export const createActions = (options: ActionsOptions): Actions => {
     const key = `${repo}#${number}`
     if (inFlight.has(key)) throw new ActionError('busy', `an action on #${number} is already in progress`)
     if (run.postAttemptedAt !== null) throw new ActionError('notAllowed', `run ${id} has already begun its post, which may have landed; nothing was posted. Check #${number} on GitHub`)
+    const marked = cache.unresolvedPostMark(repo, number)
+    if (marked !== null) throw new ActionError('notAllowed', markedText(number, marked))
+    const onRecord = postedHead(repo, number, [headSha, request.reviewedSha])
+    if (onRecord !== null) throw new ActionError('notAllowed', postedText(number, onRecord))
     const { offer, reviewedAt } = offeredBy(offers)
-    // the hold is taken in the same synchronous block as the check above, ahead of every asynchronous step: from here the launcher admits no run of this PR and no stack run covering it, until the finally below. A run admitted before this point has its row in the cache the check just read, and a start with no row yet is refused where it makes one
-    const release = options.posts.hold(repo, number)
-    if (release === null) throw new ActionError('busy', `a post for #${number} is already in progress`)
-    inFlight.add(key)
-    try {
-      // the report on disk must be the one this run finished with: a later run of the PR writes the same name. One read: the text checked here is the text posted
-      const folder = options.reportsFolder()
-      let report: string
-      try {
-        report = (await readReport(folder, offer.report)).raw
-      } catch (error) {
-        if (error instanceof ReportReadError) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} cannot be posted (${error.message}); nothing was posted`)
-        throw error
-      }
-      if (reportHash(report) !== run.reportHash) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} has changed since run ${id} finished, so it is no longer that run's review; nothing was posted. Start a new review to post the report as it is now`)
-      // a posted report does not mention AI involvement: every registry id and full slug, every vendor, runner, and provider name, every term for AI, every phrase that credits a tool, and the review-mode words (postedTextTerms) are looked for in the very text that gets posted, and any found refuses the post before gh is asked anything, with the whole hit set and the report's hash in the refusal. The owner's second click sends exactly that back, and the post goes on only while the scan still finds the same set in a report of the same hash. The Post it path and the post button both come through here, and nothing that posts unattended sends an override
-      const hits = namesInText(resolveModels(config.models), report)
-      if (hits.length > 0 && !overrides(request.allow, hits.map((hit) => hit.term), reportHash(report))) throw scanRefusal(offer.reportPath, hits, reportHash(report))
-      const named = parseReviewedCommit(report.split('\n').slice(0, 20))
-      if (named === null) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} does not say which commit it reviewed; nothing was posted`)
-      if (!reviewedAt.startsWith(named)) throw new ActionError('notAllowed', `the saved report ${offer.reportPath} is about another commit (${named}); nothing was posted`)
-      let marked = false
-      const check = async (read: (args: string[]) => Promise<string>): Promise<void> => {
-        let live: LivePr
-        let reviews: string
-        try {
-          live = JSON.parse(await read(['api', `repos/${repo}/pulls/${number}`])) as LivePr
-          reviews = await read(reviewsArgs(repo, number))
-        } catch (error) {
-          if (error instanceof GhError) throw error
-          throw new ActionError('ghFailed', `cannot read #${number} before posting: ${messageOf(error)}; nothing was posted`)
-        }
-        if (live.state !== 'open' || live.merged === true) throw new ActionError('notAllowed', `#${number} is no longer open; nothing was posted`)
-        if (live.head?.sha?.toLowerCase() !== headSha) throw new ActionError('notAllowed', `#${number} has new commits since you saw it; nothing was posted`)
-        if (reviewedHead(reviews, viewer, headSha)) throw new ActionError('notAllowed', `you have already reviewed this commit of #${number}; nothing was posted`)
-        // the offer derived once more from the cache as it is now, with nothing awaited between this reading and the mark below: a run that got in by a path the hold does not cover is seen here, and the hold refuses every run after it
-        const again = offeredBy(current())
-        if (again.offer.report !== offer.report || again.reviewedAt !== reviewedAt) throw new ActionError('stale', 'This report is no longer the one offered for this PR; nothing was posted. Reload the PR to see its current state')
-        // the last step before the write, so a restart can never offer a post that may have landed
-        try {
-          options.markPost(id, true)
-        } catch (error) {
-          throw new ActionError('notAllowed', `cannot record that #${number} is being posted (${messageOf(error)}), and without that record it could be posted twice; nothing was posted`)
-        }
-        marked = true
-      }
-      // gh reads a private copy of what was checked, so nothing that happens to the report from here on reaches GitHub
-      const copy = await privateCopy(options.tempFolder, report).catch((error: unknown) => {
-        throw new ActionError('notAllowed', `cannot make a private copy of ${offer.reportPath} (${messageOf(error)}); nothing was posted`)
-      })
-      let printed: string
-      try {
-        printed = await gh.write(postArgs(repo, number, form, copy.path), viewer, check, options.postDeadlines ?? { readMs: postReadDeadlineMs, writeMs: postWriteDeadlineMs })
-      } catch (error) {
-        if (error instanceof GhTimeoutError) {
-          refresh(repo, number)
-          // a step before the write changed nothing and left no mark, so the report stays postable. The write is different: gh was told to stop, but a post that had already reached GitHub may land, and a stopped gh cannot say. The mark taken before the write stays, so the offer is withdrawn exactly as for any write whose outcome is unknown
-          if (error.phase === 'write') {
-            log(`PR #${number}: the post of run ${id} timed out, and its outcome is unknown`)
-            throw new ActionError('ghFailed', writeTimedOutMessage, 'timeout')
-          }
-          log(`PR #${number}: the post of run ${id} was refused: ${error.message}`)
-          throw new ActionError('ghFailed', readTimedOutMessage, 'timeout')
-        }
-        if (error instanceof ActionError) {
-          refresh(repo, number)
-          throw error
-        }
-        if (error instanceof WriteIdentityError) {
-          if (error.login === null) throw new ActionError('identityUnknown', error.message, error.errorKind)
-          throw new ActionError('identityMismatch', error.message)
-        }
-        const kind = error instanceof GhError ? error.kind : null
-        if (marked && !refusedByGitHub(error)) {
-          refresh(repo, number)
-          throw new ActionError('ghFailed', `${messageOf(error)}; the post may have landed, so Post it will not be offered again. Check #${number} on GitHub`, kind)
-        }
-        if (marked) {
-          try {
-            options.markPost(id, false)
-          } catch (failure) {
-            log(`PR #${number}: GitHub refused the post of run ${id}, but its mark could not be taken off: ${messageOf(failure)}`)
-          }
-        }
-        refresh(repo, number)
-        throw new ActionError('ghFailed', messageOf(error), kind)
-      } finally {
-        await rm(copy.folder, { recursive: true, force: true }).catch((error: unknown) => log(`PR #${number}: cannot remove the private copy of its report: ${messageOf(error)}`))
-      }
-      // gh pr comment prints the comment's URL; gh pr review prints none, so the post links to the PR, as the prompts' own fallback does
-      const url = printed.trim().split('\n').at(-1) ?? ''
-      const posted: Posted = { form, url: isHttpUrl(url) ? url : `https://github.com/${repo}/pull/${number}` }
-      log(`PR #${number}: run ${id} posted its report (${form})`)
-      let recorded: RunView | null = null
-      try {
-        recorded = options.recordPost(id, posted)
-      } catch (error) {
-        log(`PR #${number}: the post of run ${id} landed but could not be recorded: ${messageOf(error)}`)
-      }
-      refresh(repo, number)
-      return { number, runId: id, posted, run: recorded }
-    } finally {
-      inFlight.delete(key)
-      release()
-    }
+    return deliver({
+      config, request, source: `run ${id}`, noun: 'run', button: 'Post it', offer, reviewedAt, hash: run.reportHash,
+      again: () => offeredBy(current()),
+      mark: (posting) => options.markPost(id, posting),
+      record: (posted) => options.recordPost(id, posted),
+    }).then(({ posted, recorded }) => ({ number, runId: id, posted, run: recorded }))
   }
 
-  return { run, post }
+  const postSweep = async (id: number, body: unknown): Promise<SweepPostResult> => {
+    const request = parseSweepPost(body)
+    const config = options.config()
+    const { repo, viewer } = config
+    const { number, headSha, form } = request
+    if (request.repo !== repo) throw new ActionError('stale', `the repository is now ${repo}, not ${request.repo}; the confirmation was for ${request.repo}, so nothing was posted`)
+    if (!sameLogin(request.viewer, viewer)) throw new ActionError('stale', `the viewer is now ${viewer || 'nobody'}, not ${request.viewer}; the confirmation was for ${request.viewer}, so nothing was posted`)
+    const sweep = cache.getSweep(id)
+    if (sweep === null) throw new ActionError('unknownRun', `sweep ${id} does not exist`)
+    if (sweep.repo !== repo) throw new ActionError('stale', `sweep ${id} is not a sweep of ${repo}; the confirmation was for ${repo}, so nothing was posted`)
+    // the row's offer as the cache has it at this moment, derived by the function the drawer's buttons come from: the requested sweep must be the one that has the say over the PR, so an older sweep's row, or any row while a sweep is in flight, posts nothing, whatever report is still on disk. Everything here is synchronous, so what it answers is true until the caller next awaits
+    const current = (): SweepOffer | null => {
+      const settings = settingsFor(repo, viewer)
+      const row = cache.readView(repo).open.find((entry) => entry.number === number)
+      if (row === undefined) throw new ActionError('notOpen', `#${number} is not an open PR in ${repo} that Pit View has fetched; nothing was posted`)
+      const derived = sweepOfferOf(row.pr, settings, cache.sweepsFor(repo), cache.runsByPr(repo).get(number), cache.postRecords(repo).get(number))
+      if (derived.sweepId !== id) throw new ActionError('stale', 'This report is no longer the latest for this PR; nothing was posted. Reload the PR to see its current state')
+      if (headSha !== row.pr.headRefOid.toLowerCase()) {
+        refresh(repo, number)
+        throw new ActionError('stale', `#${number} has new commits since the confirmation was shown; nothing was posted. The post button will ask again for the current head`)
+      }
+      return derived.offer
+    }
+    const offeredBy = (offer: SweepOffer | null): { offer: SweepOffer, reviewedAt: string } => {
+      if (offer === null) throw new ActionError('notAllowed', `sweep ${id} has no stored report waiting to be posted on #${number}; nothing was posted`)
+      if (offer.reviewedSha !== request.reviewedSha) throw new ActionError('stale', `this report reviewed ${offer.reviewedSha.slice(0, 7)}, not ${request.reviewedSha.slice(0, 7)}; nothing was posted. Reload its confirmation to see the current state`)
+      if (!offer.forms.includes(form)) throw new ActionError('stale', `this report offers ${orList(offer.forms.map((offered) => formWords[offered]))}, not ${formWords[form]}; nothing was posted. Reload its confirmation to see the current state`)
+      return { offer, reviewedAt: offer.reviewedSha }
+    }
+    const derived = current()
+    // before the mark and the offer, which a post in flight has already changed
+    if (inFlight.has(`${repo}#${number}`)) throw new ActionError('busy', `an action on #${number} is already in progress`)
+    if (sweep.postAttempts[number] !== undefined) throw new ActionError('notAllowed', `sweep ${id} has already begun its post on #${number}, which may have landed; nothing was posted. Check #${number} on GitHub`)
+    const marked = cache.unresolvedPostMark(repo, number)
+    if (marked !== null) throw new ActionError('notAllowed', markedText(number, marked))
+    const onRecord = postedHead(repo, number, [headSha, request.reviewedSha])
+    if (onRecord !== null) throw new ActionError('notAllowed', postedText(number, onRecord))
+    const { offer, reviewedAt } = offeredBy(derived)
+    return deliver({
+      config, request, source: `sweep ${id}`, noun: 'sweep', button: 'the post button', offer, reviewedAt, hash: sweep.rowReports?.[number]?.hash ?? null,
+      again: () => offeredBy(current()),
+      mark: (posting) => options.markSweepPost(id, number, posting),
+      record: (posted) => options.recordSweepPost(id, number, posted),
+    }).then(({ posted, recorded }) => ({ number, sweepId: id, posted, sweep: recorded }))
+  }
+
+  return { run, post, postSweep }
 }
 
 // the PR an Update session worked on is read again once the session has settled, however it ended, since it may have pushed; only a session this server watched, so a run that recovery settles at startup makes no GitHub call. Its updated row arrives as the refresh's patches

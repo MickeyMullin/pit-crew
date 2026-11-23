@@ -1,8 +1,11 @@
 // src/sweeps.ts
-import type { Cache, Sweep } from './cache.ts'
+import type { Cache, PostRecord, Run, Sweep } from './cache.ts'
 import type { Config, RunnerName, RunRunner } from './config.ts'
-import { doneText, modelLabels, stepsOf } from './launcher.ts'
-import type { CiState, PostForm, Priority, Queueing, Recommendation, RunnerModels, StartRequest, StepSlot, SweepResult } from './launcher.ts'
+import { ciStateOf, isMine, viewerReview } from './derive.ts'
+import type { RawOpenPr } from './github.ts'
+import { doneText, isFullSha, modelLabels, noPosts, postArgs, postWithheld, recommendedFormOf, stepsOf } from './launcher.ts'
+import type { CiState, PostForm, Priority, Queueing, Recommendation, RunnerModels, StartRequest, StepSlot, SweepOffer, SweepResult } from './launcher.ts'
+import { prReportName } from './reports.ts'
 
 // the Dependabot sweep as a concept of its own (section 8 of DESIGN.md, Sweeps): the command line it launches, what the confirmation says, the view the page draws from a sweep record, and the sweeps held in memory beside the runs. The launcher launches it (createSweepLauncher in launcher.ts).
 
@@ -62,7 +65,7 @@ export const sweepStartOf = (config: Config, busy: boolean, waits = false): Swee
   name: `${waits ? 'Queue' : 'Run'} a Dependabot sweep of ${config.repo}`,
 })
 
-// the parsed sweep-result@1, as far as the page draws it. Rows come through the launcher's check only as a list, so each field is read defensively here; notPostedReason is not read at all
+// the parsed sweep-result@1, as far as the page draws it. Rows come through the launcher's check only as a list, so each field is read defensively here; notPostedReason is read only by sweepOfferOf, which decides whether a row offers its stored report
 export type SweepFinding = { priority: Priority, summary: string }
 
 export type SweepRow = {
@@ -81,6 +84,8 @@ export type SweepRow = {
   reused: boolean
   report: string | null
   notes: string
+  // set when the row's post button began a post and none is on record, so the post may or may not have landed; absent otherwise
+  postUnknown?: true
 }
 
 export type SweepAction = { action: string, prs: number[] }
@@ -152,7 +157,7 @@ const sweepResultOf = (sweep: Pick<Sweep, 'result'>): SweepResult | null =>
   sweep.result?.schema === 'pit-crew/sweep-result@1' ? sweep.result : null
 
 // the sweep as the page and GET /api/sweeps see it: the record, its steps, the parsed result, and the words for how it ended
-export type SweepView = Omit<Sweep, 'result' | 'steps'> & {
+export type SweepView = Omit<Sweep, 'result' | 'steps' | 'rowReports' | 'postAttempts'> & {
   steps: StepSlot[]
   // null while it waits in the queue or runs
   text: string | null
@@ -170,15 +175,73 @@ export const sweepText = (sweep: Pick<Sweep, 'status' | 'result' | 'note'>): str
   return `Done · ${counts.swept} swept${counts.failed > 0 ? `, ${counts.failed} failed` : ''}`
 }
 
-export const sweepView = (sweep: Sweep): SweepView => {
-  const { result, steps: _steps, ...rest } = sweep
+// the row reports' hashes and the post marks stay on the server: the page reads a mark only as a row whose post may have landed. A record built without them, as a sweep that has none, shows no mark
+export const sweepView = (sweep: Omit<Sweep, 'rowReports' | 'postAttempts'> & Partial<Pick<Sweep, 'rowReports' | 'postAttempts'>>): SweepView => {
+  const { result, steps: _steps, rowReports: _reports, postAttempts = {}, ...rest } = sweep
   const parsed = sweepResultOf(sweep)
+  const summary = parsed === null || result === null ? null : sweepSummary(parsed)
   return {
     ...rest,
     steps: stepsOf(sweep),
     text: sweepText(sweep),
     question: sweep.status === 'needsInput' ? parsed?.question ?? null : null,
-    result: parsed === null || result === null ? null : sweepSummary(parsed),
+    result: summary === null ? null : { ...summary, rows: summary.rows.map((row) => row.posted === null && postAttempts[row.number] !== undefined ? { ...row, postUnknown: true } : row) },
+  }
+}
+
+const inFlight = (status: Sweep['status']): boolean => status === 'queued' || status === 'running' || status === 'needsInput'
+
+// whether a review of the PR may have written its report file after the sweep's reviewer did: one in flight, or one that spawned and had not ended before the sweep started. A run that never spawned wrote nothing, and fix-pr and update-pr write no report
+const rewroteReport = (run: Run, sweep: Sweep, pr: RawOpenPr, config: Config): boolean => {
+  if (run.repo !== config.repo || run.number !== pr.number || !['review-pr', 'review-dependabot'].includes(run.command)) return false
+  if (inFlight(run.status)) return true
+  if (run.pid === null) return false
+  const started = sweep.startedAt === null ? Number.NaN : Date.parse(sweep.startedAt)
+  return run.finishedAt === null || !(Date.parse(run.finishedAt) <= started)
+}
+
+// the stored report a sweep row offers to post, and the sweep that has the say over the PR (section 10 of DESIGN.md, Posting). sweeps holds the repo's sweeps newest first; runs holds the PR's own runs. A sweep queued, running, or waiting for an answer has the say and offers nothing, since its reviewer may write the PR's report again; otherwise the newest settled sweep with a row for the PR has it, and every older sweep is passed over. That sweep offers the row only when the scheduler started it with --no-post and it finished done saying so, on someone else's open PR, for a row that posted nothing, whose report is the PR's own file and was recorded with its hash and verdict when the sweep settled, with no post begun from it, no post begun on the PR whose outcome is not known and none on record at the head the row reviewed or at the PR's head now (posts, section 10, One post per PR and head), no decided review of the head by the viewer, and no review of the PR that may have written the report since. Like a single run's stored report it stays on offer after the head has moved, and the confirmation says so. A hermes sweep offers nothing, since its reports are never cleared of keys. The drawer's buttons and the server's check at click time both come from this one function
+export const sweepOfferOf = (pr: RawOpenPr, config: Config, sweeps: readonly Sweep[], runs: readonly Run[] = [], posts: PostRecord = noPosts): { sweepId: number | null, offer: SweepOffer | null } => {
+  for (const sweep of sweeps) {
+    if (sweep.repo !== config.repo) continue
+    if (inFlight(sweep.status)) return { sweepId: null, offer: null }
+    const parsed = sweepResultOf(sweep)
+    const row = parsed === null ? undefined : sweepSummary(parsed).rows.find((entry) => entry.number === pr.number)
+    if (parsed === null || row === undefined) continue
+    // a post begun on the PR from any sweep, run, or Post it whose outcome is not known may have landed, so no row of it is offered, and a post on record at either head is the one post that head gets
+    const offer = posts.unknown ? null : rowOffer(pr, config, sweep, parsed, row, runs)
+    return { sweepId: sweep.id, offer: offer === null || postWithheld(posts, offer.reviewedSha, offer.headSha) ? null : offer }
+  }
+  return { sweepId: null, offer: null }
+}
+
+const rowOffer = (pr: RawOpenPr, config: Config, sweep: Sweep, result: SweepResult, row: SweepRow, runs: readonly Run[]): SweepOffer | null => {
+  if (sweep.status !== 'done' || sweep.origin !== 'auto' || !sweep.args.includes('--no-post') || result.notPostedReason !== 'noPost' || sweep.runner === 'hermes' || isMine(pr, config)) return null
+  if (result.repo === null || result.repo.toLowerCase() !== config.repo.toLowerCase()) return null
+  // only the file the prompts write for this PR, in the folder they write it to: the name comes from the PR's number, never from the row
+  const report = prReportName(pr.number)
+  const reportPath = `${config.reportsDir.replace(/\/$/, '')}/${report}`
+  if (row.posted !== null || row.report !== reportPath || !isFullSha(row.head)) return null
+  const recorded = sweep.rowReports?.[pr.number]
+  if (recorded === undefined || recorded.verdict === null || sweep.postAttempts[pr.number] !== undefined) return null
+  const head = pr.headRefOid
+  const review = viewerReview(pr, config)
+  if (review?.commit?.oid === head && (review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED')) return null
+  if (runs.some((run) => rewroteReport(run, sweep, pr, config))) return null
+  const recommended = recommendedFormOf({ verdict: recorded.verdict, command: 'review-dependabot', recommendation: row.recommendation }, pr, config)
+  const forms: PostForm[] = recommended === 'comment' ? ['comment'] : [recommended, 'comment']
+  return {
+    sweepId: sweep.id,
+    number: pr.number,
+    forms,
+    report,
+    reportPath,
+    reviewedSha: row.head.toLowerCase(),
+    headSha: head.toLowerCase(),
+    repo: config.repo,
+    viewer: config.viewer,
+    ci: ciStateOf(pr),
+    commands: Object.fromEntries(forms.map((form) => [form, `gh ${postArgs(config.repo, pr.number, form, reportPath).join(' ')}`])),
   }
 }
 
@@ -221,11 +284,21 @@ export const createSweepMemory = (cache: Cache, keep = 20): SweepMemory => {
   }
 }
 
-// what the page holds about sweeps: how to start one now, and the repo's recent sweeps. Patches carry it whole whenever a sweep, the queue answer, or the config behind the start text changes
-export type SweepsView = { start: SweepStart, items: SweepView[] }
+// what the page holds about sweeps: how to start one now, the repo's recent sweeps, and the post button's offer of every PR that has one. The offers ride here rather than on the rows, so a PR the open tables hide, such as someone else's draft, still gets its button; a view built without them has none. Patches carry it whole whenever a sweep, the queue answer, the config behind the start text, or any offer changes
+export type SweepsView = { start: SweepStart, items: SweepView[], offers?: SweepOffer[] }
 
 // queueing is the launcher's answer now, which the button says; left out, nothing waits
-export const sweepsView = (config: Config, memory: SweepMemory, queueing: Queueing | null = null): SweepsView => {
+export const sweepsView = (config: Config, memory: SweepMemory, queueing: Queueing | null = null, offers: SweepOffer[] = []): SweepsView => {
   const items = memory.list(config.repo)
-  return { start: sweepStartOf(config, items.some((sweep) => sweep.status === 'running' || sweep.status === 'queued'), queueing?.review ?? false), items }
+  return { start: sweepStartOf(config, items.some((sweep) => sweep.status === 'running' || sweep.status === 'queued'), queueing?.review ?? false), items, offers }
+}
+
+// the offer of every open PR of the repository that one of its sweeps has a row for, by sweepOfferOf, in PR number order: prs holds every open PR the cache has, hidden ones included, runs each PR's runs newest first, and posts what Pit View knows of each PR's posts
+export const sweepOffersOf = (config: Config, prs: readonly RawOpenPr[], sweeps: readonly Sweep[], runs: ReadonlyMap<number, readonly Run[]>, posts: ReadonlyMap<number, PostRecord>): SweepOffer[] => {
+  const named = new Set(sweeps.flatMap((sweep) => {
+    const parsed = sweep.repo === config.repo ? sweepResultOf(sweep) : null
+    return parsed === null ? [] : sweepSummary(parsed).rows.map((row) => row.number)
+  }))
+  return prs.filter((pr) => named.has(pr.number)).sort((a, b) => a.number - b.number)
+    .flatMap((pr) => sweepOfferOf(pr, config, sweeps, runs.get(pr.number), posts.get(pr.number)).offer ?? [])
 }

@@ -391,7 +391,7 @@ export const postAskModel = (row: Pick<OpenRow, 'number' | 'title'>, offer: NonN
 }
 
 // the post button on an auto-review run that did not post (section 10, Posting): one button per form the server offers, in its order, attached to the run in the Auto-review list that the offer is about
-const storedButtonText: Readonly<Record<PostForm, string>> = { approve: 'Approve', requestChanges: 'Request Changes', comment: 'Comment' }
+export const storedButtonText: Readonly<Record<PostForm, string>> = { approve: 'Approve', requestChanges: 'Request Changes', comment: 'Comment' }
 
 export type StoredButtonsModel = { runId: number, buttons: { form: PostForm, text: string }[], disabled: boolean, reason: string | null }
 
@@ -406,7 +406,7 @@ export const storedButtonsModel = (cell: AgentCell | null, open: boolean, number
   }
 }
 
-const ciWords: Readonly<Record<StoredOffer['ci'], string>> = {
+export const ciWords: Readonly<Record<StoredOffer['ci'], string>> = {
   green: 'green',
   pending: 'pending. Checks are still running. It does not block the post.',
   failed: 'failed. It does not block the post.',
@@ -484,7 +484,7 @@ export const noteText = (note: string | null): string | null => {
   return detail === '' ? `${words}.` : `${words}: ${detail}`
 }
 
-const postedWords: Readonly<Record<string, string>> = { approve: 'an approval', requestChanges: 'a request for changes', comment: 'a comment' }
+export const postedWords: Readonly<Record<string, string>> = { approve: 'an approval', requestChanges: 'a request for changes', comment: 'a comment' }
 
 const notPostedWords: Readonly<Record<string, string>> = {
   noPost: 'nothing: the run was told not to post',

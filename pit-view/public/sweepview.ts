@@ -1,11 +1,11 @@
 // public/sweepview.ts
-// the Dependabot sweep's words and shapes, as pure functions of the sweeps the view carries: the bot group header's control, the confirmation, the group-level sweep drawer, the broom link on a PR's row, and the link in that PR's own drawer. Sweeps are their own concept (section 8 of DESIGN.md, Sweeps), so nothing here reads a row's Agent cell; sweepdrawer.ts turns the models into elements. Nothing here reads the DOM or the clock: every time is passed in
+// the Dependabot sweep's words and shapes, as pure functions of the sweeps the view carries: the bot group header's control, the confirmation, the group-level sweep drawer, the broom link on a PR's row, the link in that PR's own drawer, and the post button on a PR's card with its confirmation. Sweeps are their own concept (section 8 of DESIGN.md, Sweeps), so nothing here reads a row's Agent cell, and the post button's offers come with the sweeps (section 10, Posting); sweepdrawer.ts turns the models into elements. Nothing here reads the DOM or the clock: every time is passed in
 import type { SweepRow, SweepStart, SweepView, SweepsView } from '../src/sweeps.ts'
 import { runnerLabels, sentence, tokenHeader } from './agent.ts'
-import type { DoneTone, RunnerName, RunRequest } from './agent.ts'
-import { noteText, formatCost, newestNote, reportName, stepModels, stepsName } from './drawerview.ts'
+import type { DoneTone, PostAllow, PostForm, RunnerName, RunRequest, SweepOffer } from './agent.ts'
+import { ciWords, noteText, formatCost, newestNote, postedWords, reportName, stepModels, stepsName, storedButtonText } from './drawerview.ts'
 import type { StepModel } from './drawerview.ts'
-import { formatClock, formatDay, formatDuration, formatSince } from './format.ts'
+import { formatClock, formatDay, formatDuration, formatSince, shortSha } from './format.ts'
 
 export type { SweepRow, SweepStart, SweepView, SweepsView }
 
@@ -210,7 +210,7 @@ export const sweepRowModel = (row: SweepRow): SweepRowModel => ({
   bump: row.bump,
   recommendation: row.recommendation === null ? null : recommendations[row.recommendation] ?? null,
   ci: row.ci === null ? null : ciStates[row.ci] ?? null,
-  posted: row.posted === null ? { text: 'Not posted', url: null } : { text: postForms[row.posted.form] ?? row.posted.form, url: row.posted.url === '' ? null : row.posted.url },
+  posted: row.posted === null ? { text: row.postUnknown === true ? 'Post may have landed' : 'Not posted', url: null } : { text: postForms[row.posted.form] ?? row.posted.form, url: row.posted.url === '' ? null : row.posted.url },
   reused: row.reused,
   escalation: row.escalation,
   findings: row.findings.map((finding) => ({ priority: finding.priority, summary: finding.summary, tone: findingTones[finding.priority] ?? 'gray' })),
@@ -367,3 +367,61 @@ export const sweepStopRefusal = (status: number, error: string | null): string =
   status === 403 ? 'Reload the page to stop a sweep: Pit View has restarted since this page loaded.'
     : status === 0 ? 'Pit View did not answer. Check that it is running, then try again.'
       : sentence(error ?? '') || `Pit View refused with status ${status}.`
+
+// ---- the post button on a PR's card (section 10 of DESIGN.md, Posting) ----
+
+// what the confirmation showed, which the request carries back whole and the drawer drops when the server's offer no longer matches it, the CI state included
+export type SweepPostAsk = { type: 'post', sweepId: number, number: number, repo: string, viewer: string, headSha: string, reviewedSha: string, form: PostForm, ci: SweepOffer['ci'] }
+
+// one button per form the server offers, in its order, on the card of the PR the offer is for, and only while the sweep on show is the one the offer is from
+export const sweepPostButtons = (offer: SweepOffer | null | undefined, sweepId: number, number: number): { form: PostForm, text: string }[] =>
+  offer == null || offer.sweepId !== sweepId || offer.number !== number ? [] : offer.forms.map((form) => ({ form, text: storedButtonText[form] }))
+
+export const sweepPostAskOf = (offer: SweepOffer, form: PostForm): SweepPostAsk =>
+  ({ type: 'post', sweepId: offer.sweepId, number: offer.number, repo: offer.repo, viewer: offer.viewer, headSha: offer.headSha, reviewedSha: offer.reviewedSha, form, ci: offer.ci })
+
+export const sweepPostHolds = (ask: SweepPostAsk, offer: SweepOffer | null | undefined): boolean =>
+  offer != null && offer.sweepId === ask.sweepId && offer.number === ask.number && offer.forms.includes(ask.form) && offer.headSha === ask.headSha && offer.reviewedSha === ask.reviewedSha &&
+  offer.repo === ask.repo && offer.viewer === ask.viewer && offer.ci === ask.ci
+
+// the confirmation: the form and the report, the login it posts as, the CI state read when the button was clicked, and, when the head has moved, the plain sentence naming both heads. A moved head offers Post anyway; the sweep drawer starts no review, so there is no third button
+export type SweepPostModel = {
+  heading: string
+  title: string
+  report: string
+  command: string
+  effect: string
+  ci: string
+  // null while the head has not moved
+  headMoved: string | null
+  bound: string
+  confirm: string
+  busy: string
+}
+
+export const sweepPostModel = (title: string, offer: SweepOffer, ask: SweepPostAsk): SweepPostModel | null => {
+  if (!sweepPostHolds(ask, offer)) return null
+  const words = postedWords[ask.form] ?? ask.form
+  const moved = offer.reviewedSha !== offer.headSha
+  return {
+    heading: `Post the stored report on #${offer.number} as ${words}?`,
+    title,
+    report: offer.report,
+    command: offer.commands[ask.form] ?? '',
+    effect: `Posts the saved report ${offer.reportPath} to #${offer.number} as ${words}, under your account (@${offer.viewer}), once. Pit View cannot undo it.`,
+    ci: `CI now: ${ciWords[ask.ci]}`,
+    headMoved: moved ? `New commits since this review: reviewed ${shortSha(offer.reviewedSha)}, now ${shortSha(offer.headSha)}. Post this report as @${offer.viewer} anyway?` : null,
+    bound: `For the head ${shortSha(offer.headSha)} in ${offer.repo}, as ${offer.viewer}, the report from sweep ${offer.sweepId} reviewing ${shortSha(offer.reviewedSha)}.`,
+    confirm: moved ? 'Post anyway' : 'Post',
+    busy: 'Posting…',
+  }
+}
+
+export const sweepPostRequest = (ask: SweepPostAsk, token: string, allow: PostAllow | null): RunRequest => ({
+  url: `/api/sweeps/${ask.sweepId}/post`,
+  init: {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', [tokenHeader]: token },
+    body: JSON.stringify({ repo: ask.repo, viewer: ask.viewer, number: ask.number, headSha: ask.headSha, reviewedSha: ask.reviewedSha, form: ask.form, ...(allow === null ? {} : { allow }) }),
+  },
+})
