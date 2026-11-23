@@ -63,6 +63,14 @@ for (const { name, path } of choosers) {
     assert.match(prompt, /nothing was posted and why/)
   })
 
+  test(`${name} writes notPostedReason ciPending or headMoved, never null, when nothing is posted because CI had not finished or the head moved`, async () => {
+    const prompt = await read(path)
+    const nothing = bullet(prompt, '- **When nothing is posted because CI had not finished or the head moved**')
+    assert.ok(nothing.includes('`"notPostedReason": "ciPending"`'), 'the CI reason')
+    assert.ok(nothing.includes('`"notPostedReason": "headMoved"`'), 'the head reason')
+    assert.ok(!nothing.includes('"notPostedReason": null'), 'no null for either')
+  })
+
   test(`${name} still requests changes on P0, P1, or P2 without waiting for CI`, async () => {
     const prompt = await read(path)
     assert.match(prompt, /\*\*Any P0, P1, or P2 finding: request changes\.?\*\*[^\n]*This form never waits for CI\./)
@@ -102,7 +110,7 @@ test('review-pr waits for CI and, when the wait cannot conclude, posts nothing a
   assert.match(wait, /stop waiting and post nothing: CI had not finished/)
   assert.ok(!wait.includes('plain-comment form'), 'the wait never ends in a comment')
   const nothing = bullet(prompt, '- **When nothing is posted because CI had not finished or the head moved**')
-  assert.match(nothing, /`"posted": null` and `"notPostedReason": null`/)
+  assert.match(nothing, /`"posted": null`, with `"notPostedReason": "ciPending"` when CI had not finished and `"notPostedReason": "headMoved"` when the head moved/)
   assert.match(nothing, /add a line to its closing notes/)
 })
 
@@ -134,23 +142,35 @@ test('the sweep states the three rules for each reviewer\'s post and reviews a c
   assert.ok(rule.includes('`Posted: not posted: CI had not finished`'))
   assert.ok(rule.includes('`Posted: not posted: the head moved since the review`'))
   assert.match(prompt, /because it was not posted when CI had not finished/)
+  // the sweep's own reason is about the sweep: a row left unposted for either reason says so in its notes, and the reasons stay a single review's
+  const reason = bullet(prompt, '- `notPostedReason`: `"noPost"` when the invocation carried `--no-post`, otherwise `null`.')
+  assert.match(reason, /`ciPending` and `headMoved` are a single review's reasons in `review-result@1`, which a sweep's result never carries/)
+  assert.ok(rule.includes('its row\'s `notes` say `not posted: CI had not finished` or `not posted: the head moved since the review`'), 'the row\'s notes')
   assert.match(prompt, /the set failing now in the head's newest run of each workflow/)
 })
 
-test('emit-json lists the two new skip notes beside the others, and keeps notPostedReason to its five values', async () => {
+test('emit-json lists the two new skip notes beside the others, and notPostedReason gains ciPending and headMoved', async () => {
   const emit = await read('prompts/review/emit-json.md')
   const notes = emit.split('\n').find((line) => line.startsWith('- Each step records `started` and then `done`'))
   assert.ok(notes, 'the skip-note line is present')
   assert.ok(notes.includes(`\`run with --no-post\`, \`${ciNote}\`, or \`${headNote}\``), 'the new notes follow the existing ones')
   const nullLine = emit.split('\n').find((line) => line.startsWith('  - It is null as well when nothing was posted'))
   assert.ok(nullLine, 'the null line is present')
-  assert.match(nullLine, /the user declined the offer to post, CI had not finished, or the head moved since the review/)
+  assert.match(nullLine, /the run failed before the post, no PR exists to post to, or the user declined the offer to post\./)
+  assert.doesNotMatch(nullLine, /CI had not finished|the head moved/)
   const section = emit.slice(emit.indexOf('- `notPostedReason`: null when the post landed.'), emit.indexOf('- `report`: the report file\'s path'))
-  assert.deepEqual([...section.matchAll(/^ {2}- `"([a-zA-Z]+)"`/gm)].map((match) => match[1]), ['noPost', 'ownPr', 'awaitingAnswer', 'ghFailed', 'postBlocked'])
+  assert.deepEqual([...section.matchAll(/^ {2}- `"([a-zA-Z]+)"`/gm)].map((match) => match[1]), ['noPost', 'ownPr', 'awaitingAnswer', 'ghFailed', 'postBlocked', 'ciPending', 'headMoved'])
+  assert.match(section, /- `"ciPending"`: CI had not finished: /)
+  assert.match(section, /- `"headMoved"`: the PR's head, re-read immediately before the post, /)
   assert.doesNotMatch(emit, /on `done` for [^.]*a CI wait that gave up/, 'a CI wait that gave up is a skip, not a done post')
   const stack = emit.split('\n').find((line) => line.startsWith('- **`review-stack`\'s offer to post**'))
   assert.ok(stack?.includes(`\`${ciNote}\``), 'the stack offer names the CI note')
   assert.ok(stack?.includes(`\`${headNote}\``), 'the stack offer names the head note')
+  assert.ok(stack?.includes('with `notPostedReason` `"headMoved"`'), 'the stack offer writes headMoved')
+  assert.ok(stack?.includes('`notPostedReason` `"ciPending"`'), 'the stack offer writes ciPending')
+  assert.ok(!stack?.includes('`notPostedReason` null'), 'the stack offer writes null for neither')
+  const skipped = emit.split('\n').find((line) => line.startsWith('- Each step records `started` and then `done`'))
+  assert.match(skipped ?? '', /A run skipped for either still ends `"done"`, with its report written and `notPostedReason` `"ciPending"` or `"headMoved"`\./)
 })
 
 test('no-post is unchanged: with --no-post nothing posts and nothing waits', async () => {
@@ -158,31 +178,39 @@ test('no-post is unchanged: with --no-post nothing posts and nothing waits', asy
   assert.match(prompt, /- \*\*No CI wait\.\*\* The wait that exists only to choose the post's form \(`gh pr checks <number> --watch`\) does not run, since there is no post\./)
 })
 
-test('a run that posted nothing because CI had not finished or the head moved is an ordinary done review to Pit View', () => {
+test('a run that posted nothing because CI had not finished or the head moved reads as not posted in Pit View, and one written before the reasons existed reads as before', () => {
   const result = {
     schema: 'pit-crew/review-result@1', command: 'review-pr', status: 'done', target: { repo: 'octo-example/orbit', pr: 4123 },
     reviewed: { kind: 'commit', sha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678' }, verdict: 'clean', recommendation: null, findings: [],
-    ci: 'pending', fixAttempts: 0, posted: null, notPostedReason: null, report: '~/agents/output/PR-4123.md', question: null, error: null,
+    ci: 'pending', fixAttempts: 0, posted: null, notPostedReason: 'ciPending', report: '~/agents/output/PR-4123.md', question: null, error: null,
   }
-  const parsed = parseResult(JSON.stringify(result))
-  assert.equal(parsed.ok, true)
-  if (!parsed.ok) return
-  assert.equal(doneText({ status: 'done', note: null, result: parsed.value, origin: 'auto' }, false), 'Clean')
-  const changes = parseResult(JSON.stringify({ ...result, verdict: 'changesRequested', ci: 'green', findings: [{ priority: 'P2', summary: 'Retry never backs off', files: ['src/retry.ts'] }] }))
-  assert.equal(changes.ok, true)
-  if (!changes.ok) return
-  assert.equal(doneText({ status: 'done', note: null, result: changes.value, origin: 'auto' }, false), 'Changes requested')
+  const text = (patch: Record<string, unknown>): string => {
+    const parsed = parseResult(JSON.stringify({ ...result, ...patch }))
+    assert.equal(parsed.ok, true)
+    return parsed.ok ? doneText({ status: 'done', note: null, result: parsed.value, origin: 'auto' }, false) : ''
+  }
+  assert.equal(text({}), 'Clean · not posted')
+  const changes = { verdict: 'changesRequested', ci: 'green', findings: [{ priority: 'P2', summary: 'Retry never backs off', files: ['src/retry.ts'] }] }
+  assert.equal(text({ ...changes, notPostedReason: 'headMoved' }), 'Changes requested · not posted')
+  // a result an earlier prompt wrote, with null for either case, reads as its verdict alone, as it did
+  assert.equal(text({ notPostedReason: null }), 'Clean')
+  assert.equal(text({ ...changes, notPostedReason: null }), 'Changes requested')
 })
 
 test('the specification states the rules the prompts do', async () => {
   const design = await read('pit-view/DESIGN.md')
   const lines = design.split('\n')
   const reason = lines.find((line) => line.startsWith('| `notPostedReason` | null when posted;'))
-  assert.match(reason ?? '', /the owner declined the offer, CI had not finished, or the head moved since the review/)
+  assert.match(reason ?? '', /`ciPending` \(CI had not finished/)
+  assert.match(reason ?? '', /`headMoved` \(the PR's head, re-read before the post/)
+  assert.match(reason ?? '', /also null when nothing was posted for another reason \(the run failed first, no PR exists, or the owner declined the offer\)/)
   const ci = lines.find((line) => line.startsWith('| `ci` |'))
   assert.match(ci ?? '', /newest run of each workflow/)
   assert.match(design, /in the form the findings and CI select, and none while CI has not finished or once the head has moved off the commit reviewed/)
-  assert.match(design, /A review that posted nothing because CI had not finished or the head moved reads as its verdict alone/)
+  assert.doesNotMatch(design, /reads as its verdict alone/)
+  assert.match(design, /" · not posted" for `ciPending` or `headMoved`, whatever started the run/)
+  assert.doesNotMatch(design, /a manual run, a run allowed to post, a stack review/)
+  assert.match(design, /a run allowed to post, unless it reads `ciPending` or `headMoved`/)
 })
 
 test('the README no longer says a stack comments while CI is pending', async () => {

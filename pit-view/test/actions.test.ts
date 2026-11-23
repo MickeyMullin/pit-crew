@@ -12,6 +12,7 @@ import { LaunchError } from '../src/launcher.ts'
 import { doneTone } from '../public/agent.ts'
 import type { RunView } from '../public/agent.ts'
 import { autoRunRows, drawerModel } from '../public/drawerview.ts'
+import { defaultAutoReview } from '../src/autoreview.ts'
 import type { Config } from '../src/config.ts'
 import type { OpenRow } from '../src/derive.ts'
 import type { RawOpenResponse } from '../src/github.ts'
@@ -2307,7 +2308,7 @@ test('a post whose fate gh cannot tell keeps its mark and is not offered again; 
 const otherSha = '0123456789abcdef0123456789abcdef01234567'
 
 // an auto-review run of a PR that finished with its report on disk and posted nothing, as a run with --no-post does; reviewed names the commit the review read, which is the PR's head unless a test moves it
-const storedRun = async (h: Harness, { number = 106, reviewed, result = {}, report, command = 'review-pr', status = 'done' }: { number?: number, reviewed?: string, result?: Record<string, unknown>, report?: string | null, command?: string, status?: 'done' | 'failed' } = {}): Promise<{ id: number, sha: string, reviewed: string }> => {
+const storedRun = async (h: Harness, { number = 106, reviewed, result = {}, report, command = 'review-pr', status = 'done', posting = false }: { number?: number, reviewed?: string, result?: Record<string, unknown>, report?: string | null, command?: string, status?: 'done' | 'failed', posting?: boolean } = {}): Promise<{ id: number, sha: string, reviewed: string }> => {
   await filled(h)
   const { sha } = await listed(number)
   const read = reviewed ?? sha
@@ -2316,9 +2317,10 @@ const storedRun = async (h: Harness, { number = 106, reviewed, result = {}, repo
   if (report !== null) await writeFile(join(reports, `PR-${number}.md`), report ?? `# Review\n\nReviewed commit: \`fix/x\` @ \`${read.slice(0, 7)}\`\n\nNo actionable findings.\n`)
   const tick = h.server.cache.createTick(scenario.repo)
   const cwd = join(h.home, 'dev', 'orbit')
-  const request = { repo: scenario.repo, number, command, args: [String(number), '--no-post'], label: 'Review' }
-  const queued = h.server.launcher.queueScheduled(request, cwd, { tick: tick.id, reason: 'requested', headOid: read.slice(0, 7), posting: false })
-  await h.server.launcher.startScheduled(queued.id, request, { args: request.args, posting: false }, async () => cwd)
+  // a run allowed to post carries no --no-post
+  const request = { repo: scenario.repo, number, command, args: posting ? [String(number)] : [String(number), '--no-post'], label: 'Review' }
+  const queued = h.server.launcher.queueScheduled(request, cwd, { tick: tick.id, reason: 'requested', headOid: read.slice(0, 7), posting })
+  await h.server.launcher.startScheduled(queued.id, request, { args: request.args, posting }, async () => cwd)
   const child = h.launch.children.at(-1)!
   if (status === 'failed') {
     child.exit(1)
@@ -2596,6 +2598,92 @@ test('no stored report is offered, and none posts, for a posted run, a run that 
     assert.deepEqual(postsOf(stored.runner), [])
   } finally {
     await stored.cleanup()
+  }
+})
+
+// a run allowed to post that posted nothing because CI had not finished or the head moved: its stored report reaches the same server path, with the same checks
+
+// posting on for others' PRs, so a scheduled run of #106 starts with no --no-post
+const postingHarness = async (behavior: Behavior = {}): Promise<Harness> => setup({ config: { ...withClone, autoReview: { ...defaultAutoReview(), post: { others: true, dependabot: false } } }, runner: ghWorld(behavior) })
+
+test('a run allowed to post whose CI had not finished offers its stored report, and the click posts it once through the same path', async () => {
+  const behavior: Behavior = { bodies: [] }
+  const h = await postingHarness(behavior)
+  try {
+    const { id, sha } = await storedRun(h, { posting: true, result: { ci: 'pending', notPostedReason: 'ciPending' } })
+    assert.deepEqual(h.server.cache.getRun(id)?.args, ['106'])
+    const agent = (await rowOf(h, 106))?.agent
+    assert.equal(agent?.text, 'Clean · not posted')
+    assert.equal(agent?.postOffer, null)
+    assert.equal(agent?.storedOffer?.runId, id)
+    assert.deepEqual(agent?.storedOffer?.forms, ['approve', 'comment'])
+    // finishing posted nothing; only the click does
+    assert.deepEqual(postsOf(h.runner), [])
+    const answer = await postIt(h, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(answer.status, 200)
+    assert.equal(postsOf(h.runner).length, 1)
+    assert.equal((await rowOf(h, 106))?.agent?.text, 'Approved')
+    assert.equal((await postIt(h, id, storedBody(106, sha, sha, 'approve'))).status, 422)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a CI-pending or moved-head report rewritten since its run finished posts nothing', async () => {
+  for (const reason of ['ciPending', 'headMoved']) {
+    const h = await postingHarness()
+    try {
+      const { id, sha } = await storedRun(h, { posting: true, result: { notPostedReason: reason } })
+      await writeFile(join(h.home, 'agents', 'output', 'PR-106.md'), reportText(sha, '- **P1**\n\n**[P1] Text the run never wrote**'))
+      const answer = await postIt(h, id, storedBody(106, sha, sha, 'approve'))
+      assert.equal(answer.status, 422, reason)
+      assert.match(String(answer.body.error), /has changed since run \d+ finished/, reason)
+      assert.deepEqual(postsOf(h.runner), [], reason)
+    } finally {
+      await h.cleanup()
+    }
+  }
+})
+
+test('a report whose head moved posts only as the review of the commit it read, once the owner confirms the moved head; a click that names the head now as reviewed posts nothing', async () => {
+  const h = await postingHarness()
+  try {
+    const { id, sha } = await storedRun(h, { posting: true, reviewed: otherSha, result: { notPostedReason: 'headMoved' } })
+    const offer = (await rowOf(h, 106))?.agent?.storedOffer
+    assert.equal(offer?.reviewedSha, otherSha)
+    assert.equal(offer?.headSha, sha)
+    // claiming the report reviewed the head now is refused, with no gh call
+    const claimed = await postIt(h, id, storedBody(106, sha, sha, 'approve'))
+    assert.equal(claimed.status, 409)
+    assert.match(String(claimed.body.error), /this report reviewed 0123456, not/)
+    assert.deepEqual(postsOf(h.runner), [])
+    const answer = await postIt(h, id, storedBody(106, sha, otherSha, 'approve'))
+    assert.equal(answer.status, 200)
+    assert.equal(postsOf(h.runner).length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a CI-pending report on your own PR, or behind a refused post, is offered nothing and posts nothing', async () => {
+  const own = await postingHarness()
+  try {
+    const { id, sha } = await storedRun(own, { number: 104, posting: true, result: { notPostedReason: 'ciPending' } })
+    assert.equal((await rowOf(own, 104))?.agent?.storedOffer, null)
+    assert.equal((await postIt(own, id, storedBody(104, sha, sha, 'comment'))).status, 422)
+    assert.deepEqual(postsOf(own.runner), [])
+  } finally {
+    await own.cleanup()
+  }
+  const blocked = await postingHarness()
+  try {
+    const { id, sha } = await storedRun(blocked, { posting: true, result: { notPostedReason: 'postBlocked' } })
+    assert.equal((await rowOf(blocked, 106))?.agent?.storedOffer, null)
+    assert.equal((await postIt(blocked, id, storedBody(106, sha, sha, 'comment'))).status, 422)
+    assert.deepEqual(postsOf(blocked.runner), [])
+  } finally {
+    await blocked.cleanup()
   }
 })
 
