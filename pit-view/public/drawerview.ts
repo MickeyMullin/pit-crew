@@ -492,6 +492,8 @@ const notPostedWords: Readonly<Record<string, string>> = {
   awaitingAnswer: 'nothing yet: it waits for your answer',
   ghFailed: 'unknown: the post failed and may have landed',
   postBlocked: 'nothing: a permission check refused the post',
+  ciPending: 'nothing: CI had not finished',
+  headMoved: 'nothing: the head moved since the review',
 }
 
 export type Fact = { label: string, value: string, href: string | null }
@@ -765,11 +767,14 @@ const outcomeText = (run: Pick<RunView, 'status' | 'result' | 'note'>): { text: 
   }
   if (result === null || result.schema !== 'pit-crew/review-result@1' || result.verdict === null) return { text: 'Done', tone: 'gray' }
   if (result.notPostedReason === 'postBlocked' && result.posted === null) return { text: `${result.verdict === 'changesRequested' ? 'Changes requested' : 'Clean'} · post not made`, tone: 'amber' }
-  const failedPost = result.notPostedReason === 'ghFailed' ? ' · post failed' : ''
-  if (result.verdict === 'changesRequested') return { text: `Changes requested${failedPost}`, tone: 'red' }
-  if (result.posted?.form === 'approve') return { text: `Approved${failedPost}`, tone: 'green' }
-  if (result.posted?.form === 'comment') return { text: `Clean · CI failed${failedPost}`, tone: 'amber' }
-  return { text: `Clean${failedPost}`, tone: failedPost === '' ? 'green' : 'amber' }
+  const failed = result.notPostedReason === 'ghFailed'
+  // a review that posted nothing because CI had not finished or the head moved says so, as the cell does
+  const unposted = result.notPostedReason === 'ciPending' || result.notPostedReason === 'headMoved'
+  const suffix = failed ? ' · post failed' : unposted ? ' · not posted' : ''
+  if (result.verdict === 'changesRequested') return { text: `Changes requested${suffix}`, tone: 'red' }
+  if (result.posted?.form === 'approve') return { text: `Approved${suffix}`, tone: 'green' }
+  if (result.posted?.form === 'comment') return { text: `Clean · CI failed${suffix}`, tone: 'amber' }
+  return { text: `Clean${suffix}`, tone: failed ? 'amber' : 'green' }
 }
 
 // every run but the one the card above already shows, and the auto-review runs, which have their own list
@@ -821,6 +826,8 @@ const unpostedWords: Readonly<Record<string, string>> = {
   ghFailed: 'Post failed',
   ownPr: 'Not posted: your own PR',
   awaitingAnswer: 'Not posted: waiting for your answer',
+  ciPending: 'Not posted: CI had not finished',
+  headMoved: 'Not posted: the head moved',
 }
 
 const autoPostedWords = (run: RunView): string => {
