@@ -711,10 +711,12 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (row === undefined) throw new HttpError(422, `#${number} is not an open PR in ${config.repo} that Pit View has fetched`)
     // the stack is GitHub's marker on the cached PR; a base branch that is another PR's never makes one
     const stack = markedStack(row.pr)
+    // a Fix session's offer reads the PR's runs, the latest finished self-review among them
+    const runs = cache.runsFor(config.repo, number)
     // a start that names no kind is the first one offered, the tandem review, except that a runner that cannot run a tandem takes the plain review
-    const offered = startOptions(row.pr, config, stack, false)
+    const offered = startOptions(row.pr, config, stack, false, null, runs)
     const kind = (askedKind ?? (asked === 'codex' || asked === 'hermes' ? 'default' : offered[0]?.kind ?? 'default')) as StartKind
-    const refusal = notOffered(kind, row.pr, config, stack)
+    const refusal = notOffered(kind, row.pr, config, stack, runs)
     if (refusal !== null) throw new HttpError(422, refusal)
     const option = offered.find((candidate) => candidate.kind === kind)
     if (option === undefined) throw new HttpError(422, `${kind} is not offered for #${number}`)

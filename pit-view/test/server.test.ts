@@ -1739,8 +1739,9 @@ test('a fix session starts only on the viewer\'s own PR: fix-pr with Claude, nev
     await filled(h)
     const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
     const view = (await getJson<View>(`${h.base}/api/view`)).body
-    // offered on the viewer's own PRs, drafts included, and listed after the reviews; the default is still Self-review
-    for (const number of [101, 103, 104, 120]) assert.equal(rowIn(view, number)?.agent?.starts.at(-1)?.kind, 'fix', `#${number}`)
+    // offered on the viewer's own PR that GitHub shows as changes requested, and listed after the reviews; the default is still Self-review. The others have no request and no self-review yet
+    assert.equal(rowIn(view, 101)?.agent?.starts.at(-1)?.kind, 'fix')
+    for (const number of [103, 104, 120]) assert.ok(!(rowIn(view, number)?.agent?.starts ?? []).some((start) => start.kind === 'fix'), `#${number}`)
     for (const number of [113, 106, 114, 115]) assert.ok(!(rowIn(view, number)?.agent?.starts ?? []).some((start) => start.kind === 'fix'), `#${number}`)
     assert.deepEqual(rowIn(view, 101)?.agent?.starts.find((start) => start.kind === 'fix'), {
       kind: 'fix', label: 'Fix session', button: 'Fix requested changes', command: 'fix-pr', args: ['101'], runners: ['claude'],
@@ -1748,10 +1749,14 @@ test('a fix session starts only on the viewer\'s own PR: fix-pr with Claude, nev
       repo: scenario.repo,
       viewer: 'vera-quill',
       unavailable: null,
+      fix: { remote: true, selfReview: null },
     })
     assert.deepEqual([rowIn(view, 101)?.agent?.action.kind, rowIn(view, 101)?.agent?.action.args], ['selfReview', ['101', '--tandem', '--no-post']])
 
-    // refusals come before anything runs
+    // refusals come before anything runs: a PR with nothing to fix is refused whatever the page sends
+    const nothing = await send(url(104), 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))
+    assert.equal(nothing.status, 422)
+    assert.match(String(nothing.body.error), /GitHub shows no request to act on and no finished self-review of its current head has findings/)
     const others = await send(url(113), 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))
     assert.equal(others.status, 422)
     assert.match(String(others.body.error), /Fix session is offered only on your own PRs, and #113 is not yours/)
@@ -1885,6 +1890,61 @@ test('a checked Self-review meets the review cap as an unchecked one does: it qu
     await settled
     await until(() => h.launch.children.length === 2)
     assert.match(lastWrite(h), /"\/review-pr 104 --no-post --check-comments --emit-json=[^"]+"/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a fix start reads the self-review that finished last, not the one created last: an earlier-created run that finished later and is clean refuses it with a 422', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const url = `${h.base}/api/prs/104/runs`
+    const fixOf = async () => rowIn((await getJson<View>(`${h.base}/api/view`)).body, 104)?.agent?.starts.find((start) => start.kind === 'fix')
+    const sha = h.server.cache.readView(scenario.repo).open.find((entry) => entry.number === 104)!.pr.headRefOid
+    const record = (finishedAt: string, clean: boolean) => h.server.cache.createRun({
+      repo: scenario.repo, number: 104, command: 'review-pr', args: ['104', '--no-post'], label: 'Self-review', runner: 'claude', cwd: '~/dev/orbit', sessionId: 's', pid: null, pidStartedAt: null,
+      startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, finishedAt, status: 'done', note: null, costUsd: null, resume: 'cd ~/dev/orbit && claude --resume s',
+      result: reviewResult({ target: { repo: scenario.repo, pr: 104 }, reviewed: { kind: 'commit', sha }, posted: null, notPostedReason: 'noPost', ...(clean ? { findings: [], verdict: 'clean' } : {}) }) as never,
+    }, (runId) => `~/runs/${runId}`)
+    // the first-created run finishes last and is clean; the second-created run finished earlier and has findings
+    record('2026-10-26T15:00:00Z', true)
+    record('2026-10-26T14:05:00Z', false)
+    assert.equal(await fixOf(), undefined)
+    assert.equal((await send(url, 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))).status, 422)
+    // a run that finishes after both, with findings, is the one the offer reads
+    record('2026-10-26T16:00:00Z', false)
+    assert.deepEqual((await fixOf())?.fix, { remote: false, selfReview: { sha: sha.slice(0, 7), findings: 1 } })
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a fix start is offered and runs as fix-pr with no --source on a PR with only a finished self-review of its head, and not once that review is for another head', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const url = `${h.base}/api/prs/104/runs`
+    const fixOf = async () => rowIn((await getJson<View>(`${h.base}/api/view`)).body, 104)?.agent?.starts.find((start) => start.kind === 'fix')
+    assert.equal(await fixOf(), undefined)
+    const sha = h.server.cache.readView(scenario.repo).open.find((entry) => entry.number === 104)!.pr.headRefOid
+    const record = (reviewed: string, status: 'done' | 'failed' = 'done') => h.server.cache.createRun({
+      repo: scenario.repo, number: 104, command: 'review-pr', args: ['104', '--no-post'], label: 'Self-review', runner: 'claude', cwd: '~/dev/orbit', sessionId: 's', pid: null, pidStartedAt: null,
+      startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null, finishedAt: '2026-10-26T14:05:00Z', status, note: null, costUsd: null, resume: 'cd ~/dev/orbit && claude --resume s',
+      result: reviewResult({ target: { repo: scenario.repo, pr: 104 }, reviewed: { kind: 'commit', sha: reviewed }, posted: null, notPostedReason: 'noPost' }) as never,
+    }, (runId) => `~/runs/${runId}`)
+    // a self-review of another head offers nothing, and the start is refused
+    record('0123456789abcdef0123456789abcdef01234567')
+    assert.equal((await send(url, 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))).status, 422)
+    // a self-review of the head with findings offers it, and the start carries no --source
+    record(sha)
+    const option = await fixOf()
+    assert.deepEqual(option?.fix, { remote: false, selfReview: { sha: sha.slice(0, 7), findings: 1 } })
+    const started = await send(url, 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))
+    assert.equal(started.status, 200)
+    assert.deepEqual([started.body.command, started.body.args], ['fix-pr', ['104']])
+    assert.match(lastWrite(h), /"\/fix-pr 104 --emit-json=[^"]+"/)
+    assert.ok(!lastWrite(h).includes('--source'))
   } finally {
     await h.cleanup()
   }

@@ -1679,6 +1679,11 @@ button.agent:hover {
   color: var(--muted);
 }
 
+.confirm-sources {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .confirm-caution-line {
   margin: 0;
   color: var(--amber-fg);

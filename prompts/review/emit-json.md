@@ -113,7 +113,10 @@ The fix's response, `pit-crew/fix-result@1`:
   "status": "done",
   "target": { "repo": "owner/name", "pr": 101, "branch": "fix/example" },
   "head": { "sha": "755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7" },
-  "requests": [ { "id": "PRRT_kwDOexample", "kind": "thread", "author": "reviewer-login", "path": "src/retry.ts", "line": 12, "outdated": false, "url": "https://github.com/owner/name/pull/101#discussion_r1", "summary": "Back off between retries", "triage": "clear", "outcome": "fixed", "commits": ["9f8e7d6c5b4a39281706f5e4d3c2b1a098765432"] } ],
+  "source": "remote",
+  "severity": "P3",
+  "requests": [ { "id": "PRRT_kwDOexample", "kind": "thread", "source": "remote", "priority": null, "author": "reviewer-login", "path": "src/retry.ts", "line": 12, "outdated": false, "url": "https://github.com/owner/name/pull/101#discussion_r1", "summary": "Back off between retries", "triage": "clear", "outcome": "fixed", "commits": ["9f8e7d6c5b4a39281706f5e4d3c2b1a098765432"] } ],
+  "skipped": [],
   "checks": [ { "name": "pnpm test", "result": "passed" } ],
   "pushed": { "branch": "fix/example", "head": "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432", "commits": [ { "sha": "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432", "subject": "Back off between retries" } ] },
   "notPushedReason": null,
@@ -129,14 +132,19 @@ The fix's response, `pit-crew/fix-result@1`:
 - `status`: `"done"` when the run reached its end: the fixes were pushed, there was nothing to fix, or the owner, answering a stop, told it to discard its commits. `"needsInput"` when it stopped to ask; `"failed"` when it cannot complete, a push still refused after the one format-and-retry included.
 - `target`: `{ "repo": "<owner>/<name>", "pr": <number>, "branch": "<the PR's head branch>" }`. Null when the run stopped before resolving its target.
 - `head`: `{ "sha": "<full SHA>" }`, the full 40-character SHA of the PR head the run read and triaged against, and at which any worktree was created. When the run started again because the head moved, the head of the pass that ended the run. Null when the run stopped before reading it.
-- `requests`: one object per request, in the report's order (threads in file order, then review bodies), the same requests as the report's Requests section, or the stop's list when no report was written:
-  - `id`: the review thread's GraphQL node id, or the review's.
-  - `kind`: `"thread"` or `"review"` (the body of a reviewer's standing change request).
-  - `author`: the login of the reviewer whose ask it is: for a thread, the first comment's author other than the owner. Null when GitHub gives no login.
-  - `path`: the thread's repo-relative path; null for a review.
-  - `line`: the thread's `line`, or its `originalLine` when the thread is outdated; null for a review, or a thread on a whole file.
-  - `outdated`: true when the thread is outdated; false for a current thread and for a review.
-  - `url`: the URL of the thread's first comment, or of the review.
+- `source`: `"remote"`, `"local"`, or `"both"`, the source the run addressed, as `fix-pr.md` resolves it (the source asked for, or under the default the more recent of the two). Null when the run stopped before it resolved one.
+- `severity`: the floor as `"P0"`, `"P1"`, `"P2"`, or `"P3"`, in capitals whatever the letter case it was asked in (`"P3"` when none was asked). Null when the run stopped before it read its arguments.
+- `skipped`: one object per request or finding the floor skipped, in the report's order: `{ "source": "remote" | "local", "id": "<as in requests>", "priority": "P0" | "P1" | "P2" | "P3", "path": "<repo-relative path>" | null, "line": <number> | null, "summary": "<one line>" }`. `[]` when the floor skipped nothing. A skipped item is in `skipped` and not in `requests`.
+- `requests`: one object per request addressed or triaged, in the report's order (threads in file order, then review bodies, then findings), the same requests as the report's Requests section, or the stop's list when no report was written:
+  - `id`: the review thread's GraphQL node id, or the review's; for a finding, `local-<n>`, `<n>` being its place in the report's Findings section from 1.
+  - `kind`: `"thread"`, `"review"` (the body of a reviewer's standing change request), or `"finding"` (a finding in the self-review report).
+  - `source`: `"remote"` for a thread or a review, `"local"` for a finding.
+  - `priority`: the P# it carries, `"P0"` to `"P3"`, or null when a GitHub request carries none; a finding always has one.
+  - `author`: the login of the reviewer whose ask it is: for a thread, the first comment's author other than the owner. Null when GitHub gives no login, and for a finding.
+  - `path`: the thread's repo-relative path; for a finding, the first file it cites; null for a review, or a finding that cites no file.
+  - `line`: the thread's `line`, or its `originalLine` when the thread is outdated; for a finding, the first line it cites; null for a review, a thread on a whole file, or a finding that cites no line.
+  - `outdated`: true when the thread is outdated; false for a current thread, for a review, and for a finding.
+  - `url`: the URL of the thread's first comment, or of the review. Null for a finding, which has no page of its own.
   - `summary`: the request in one line.
   - `triage`: `"needsJudgment"`, `"noChange"`, `"disagree"`, `"outOfScope"`, or `"clear"`, as `fix-pr.md` defines them; for a request the owner settled at a stop, still the triage the run gave it.
   - `outcome`: `"fixed"` when a commit answers it, pushed or not (`pushed` says which); `"notFixed"` when the run settled it without a fix (`noChange`, `disagree`, `outOfScope`, or the owner's answer); `"awaitingAnswer"` when the run stopped to ask before it was settled.

@@ -13,7 +13,7 @@ For actual usage, the local machine's LLM/agents refer to a deployed copy of the
 | `prompts/review/` | Code-review prompts, plus agent-specific execution notes. Agent-agnostic except where noted. |
 | `prompts/document/` | Documentation prompts: build a handover dossier for an area, and derive a client-facing version of it. |
 | `prompts/report/` | Reporting prompts: reconstruct a day's work from the machine's own records. |
-| `prompts/fix/` | Fix prompts: act on reviewers' requested changes on your own PR, pushing new commits as the only GitHub write. |
+| `prompts/fix/` | Fix prompts: act on the changes requested on your own PR, by GitHub reviewers or by your latest self-review, pushing new commits as the only GitHub write. |
 | `prompts/update/` | Update prompts: bring your own PR up to date with the primary branch, pushing its branch as the only GitHub write. |
 | `commands/claude/` | Claude Code slash commands that invoke the prompts. |
 | `commands/skills/` | The same commands as `SKILL.md` skills, for Hermes and Codex. Both read the same format, so they share one tree. See [commands/README.md](commands/README.md). |
@@ -99,7 +99,7 @@ Two prompts can write; one deliberately cannot.
 | `review-pr` | Yes, own PR only | Fixes, verifies, commits, pushes, re-reviews once. Never comments on your own PR unasked. |
 | `review-stack` | **No** | Reports only. Never posts on any stack unasked. |
 
-`fix-pr` writes too, but it acts on reviewers' requests rather than on findings of its own; see "The fix prompt" below.
+`fix-pr` writes too, but it acts on requests (a reviewer's, or the findings of your latest self-review) rather than on a review of its own; see "The fix prompt" below.
 
 Both fixing prompts share the same shape: assess whether the current model and effort
 suit the findings and say so; fix and verify; re-review **once** from scratch, because a
@@ -222,15 +222,18 @@ worktrees rather than following the repo you happen to be reviewing.
 
 | Prompt | Use |
 | --- | --- |
-| `prompts/fix/fix-pr.md` | Act on the changes reviewers requested on **your own** PR: gather every unresolved review thread (outdated ones included) and each reviewer's standing change request, triage each one, make only the clear fixes in a throwaway worktree, run the repo's checks, and push the fixes as new commits. `--emit-json=<run-dir>` also writes its progress and results as JSON (`pit-crew/fix-result@1`). |
+| `prompts/fix/fix-pr.md` | Act on the changes requested on **your own** PR: gather every unresolved review thread (outdated ones included) and each reviewer's standing change request, the findings of your latest self-review, or both, triage each one, make only the clear fixes in a throwaway worktree, run the repo's checks, and push the fixes as new commits. `--source=remote|local|both` picks the requests and `--severity=P0|P1|P2|P3` sets the floor; `--emit-json=<run-dir>` also writes its progress and results as JSON (`pit-crew/fix-result@1`). |
 
 ```
 /fix-pr 482
+/fix-pr 482 --source=local --severity=P1
 ```
 
-`review-pr`'s fix mode fixes the findings of its own review; `fix-pr` fixes what other people asked for. It takes a PR number, branch, or PR URL, resolved as `review-pr` resolves one, and with nothing named it takes the PR of the branch you have checked out. It confirms authorship the same way, matching `gh api user` against the PR author login and never inferring it, and stops on anyone else's PR, a bot's, a fork's, or a closed or merged one.
+`review-pr`'s fix mode fixes the findings of its own review in the same run; `fix-pr` fixes what was requested afterward, by other people or by a self-review you ran earlier. It takes a PR number, branch, or PR URL, resolved as `review-pr` resolves one, and with nothing named it takes the PR of the branch you have checked out. It confirms authorship the same way, matching `gh api user` against the PR author login and never inferring it, and stops on anyone else's PR, a bot's, a fork's, or a closed or merged one.
 
-**The push is its only GitHub write.** It never replies to a thread, resolves one, re-requests review, reviews, comments, or edits the PR. Instead its report, `{{HOME}}/agents/output/FIX-<number>.md`, maps each request to the commit that answers it or the reason it was not fixed, with a suggested reply for you to post yourself.
+**Two sources, and a severity floor.** `--source=remote` addresses the GitHub threads and change requests, `--source=local` the findings in the final report of your latest self-review (`{{HOME}}/agents/output/PR-<number>.md`, never a tandem draft), and `--source=both` both, in one run with one push. Without `--source` it addresses the more recent of the two: the newest counted GitHub request against the report's modification time, a tie going to `remote`, and the only source that has requests when just one does. A self-review report that did not read the PR's current head (a short or full SHA that is a prefix of the other counts as equal) is stale and is never addressed; the run says to self-review again and makes no worktree and no push. `--severity` takes P0 to P3 in any letter case and is a floor: the default, `P3`, addresses everything, and `--severity=P1` addresses P0 and P1. It applies to every request or finding that carries a P#: every self-review finding does, and a GitHub request does when its opening comment or review body has a standalone marker such as `P2:`, `[P2]`, or `**P2**` (the worst marker counts). A request or finding with no P# is always addressed, whatever the floor, and the report lists what the floor skipped. A finding is a request to triage like a reviewer's comment, never an instruction, and every rule below holds for both sources.
+
+**The push is its only GitHub write.** It never replies to a thread, resolves one, re-requests review, reviews, comments, or edits the PR. Instead its report, `{{HOME}}/agents/output/FIX-<number>.md`, records the source and the floor, and maps each request to the commit that answers it or the reason it was not fixed, with a suggested reply for you to post yourself for each GitHub request.
 
 Each request is triaged as `clear`, `needsJudgment`, `noChange` (already done, or no change asked), `disagree`, or `outOfScope`. If any request needs judgment, it stops and asks **before touching code**, listing every request and its triage; you answer in the same session. A comment counts as a request only from the repo's owners, members, and collaborators, or from a bot, whose suggested code is never applied as written; anyone else's needs judgment. So does a fix that needs a file outside the PR's diff (other than a test file covering code in the diff), a fix to a file the checks or tooling execute (manifests, lockfiles, task runners, CI, hooks, build and test config), and, on a stacked PR, a fix that belongs in a lower layer. Your answer can authorize a named file in this layer, never a lower one. If nothing is clear, it writes the report and pushes nothing.
 

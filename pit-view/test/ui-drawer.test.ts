@@ -643,6 +643,19 @@ const fixed = (patch: Partial<AgentCell> = {}, summary: Partial<FixSummary> = {}
   ...patch,
 })
 
+test('a Fix session\'s confirmation says it addresses the more recent of GitHub\'s requests and the self-review report, and names the report at its short SHA when the PR has one', () => {
+  const withFix = (fix: StartOption['fix']): AgentCell => own({ starts: [...own().starts.slice(0, -1), { ...fixOption, ...(fix === undefined ? {} : { fix }) }] })
+  const lineOf = (cell: AgentCell): string | null | undefined => startConfirmModel(row(cell), cell, 'fix', 'claude')?.sources
+  assert.equal(lineOf(withFix({ remote: true, selfReview: { sha: '1a2b3c4', findings: 2 } })), 'It addresses the more recent of GitHub\'s requested changes and your self-review report at 1a2b3c4.')
+  assert.equal(lineOf(withFix({ remote: false, selfReview: { sha: '1a2b3c4', findings: 2 } })), 'It addresses the more recent of GitHub\'s requested changes and your self-review report at 1a2b3c4; GitHub shows no request, so it addresses that report.')
+  assert.equal(lineOf(withFix({ remote: true, selfReview: null })), 'It addresses the more recent of GitHub\'s requested changes and your self-review report; this PR has no self-review report for its current head, so it addresses GitHub\'s requests.')
+  // an entry from before the field, and a review's confirmation, say nothing about sources
+  assert.equal(lineOf(withFix(undefined)), null)
+  assert.equal(startConfirmModel(row(own()), own(), 'default', 'claude')?.sources, null)
+  // the command is still /fix-pr <n>: no --source, so the command's own default applies
+  assert.equal(startConfirmModel(row(withFix({ remote: true, selfReview: null })), withFix({ remote: true, selfReview: null }), 'fix', 'claude')?.command, '/fix-pr 101')
+})
+
 test('a Fix session\'s confirmation names the push: the branch in its heading, the command, what it does, and a Start of its own', () => {
   const ask = startConfirmModel(row(own()), own(), 'fix', 'codex')
   assert.ok(ask !== null)

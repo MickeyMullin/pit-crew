@@ -7,7 +7,7 @@ import { basename, join, resolve, sep } from 'node:path'
 import type { Cache, NewRun, NewSweep, Origin, QueueReason, Run, RunChanges, RunStatus, Session, Sweep } from './cache.ts'
 import { defaultHermesProfile, expandHome, normalizeExtraInstructions, tildePath } from './config.ts'
 import type { AgentSettings, Clock, Config, ExtraInstructions, RunnerName, RunRunner } from './config.ts'
-import { ciStateOf, isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
+import { ciStateOf, hasStandingChangeRequest, isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
 import type { CiReading } from './derive.ts'
 import type { Stack } from './derive.ts'
 import { fetchViewerLogin } from './github.ts'
@@ -85,23 +85,36 @@ export type CheckResult = 'passed' | 'failed' | 'notRun'
 export type NotPushedReason = 'nothingToFix' | 'awaitingAnswer' | 'checksFailed' | 'checksNotRun' | 'pushFailed'
 export const notPushedReasons: readonly NotPushedReason[] = ['nothingToFix', 'awaitingAnswer', 'checksFailed', 'checksNotRun', 'pushFailed']
 
+export type FixSource = 'remote' | 'local' | 'both'
+export const fixSourceNames: readonly FixSource[] = ['remote', 'local', 'both']
+export type FixPriority = 'P0' | 'P1' | 'P2' | 'P3'
+export const fixPriorities: readonly FixPriority[] = ['P0', 'P1', 'P2', 'P3']
+
 export type FixRequest = {
   // the review thread's or the review's node id
   id: string
-  kind: 'thread' | 'review'
+  // a finding is one of a self-review report's, which has no URL and no reviewer
+  kind: 'thread' | 'review' | 'finding'
   author: string | null
   // null for a review
   path: string | null
   // the thread's line, or its original line when outdated; null for a review or a whole file
   line: number | null
   outdated: boolean
-  url: string
+  // null for a finding
+  url: string | null
   summary: string
   triage: FixTriage
   outcome: FixOutcome
   // full SHAs
   commits: string[]
+  // which source it came from, and the P# it carries; a result that lacks them is still read
+  source?: 'remote' | 'local'
+  priority?: FixPriority | null
 }
+
+// a request or finding the severity floor skipped: not triaged, listed so the owner sees what was left
+export type FixSkipped = { source: 'remote' | 'local', id: string, priority: FixPriority, path: string | null, line: number | null, summary: string }
 
 export type FixCheck = { name: string, result: CheckResult }
 export type FixCommit = { sha: string, subject: string }
@@ -115,6 +128,10 @@ export type FixResult = {
   // the PR head the run read and triaged against
   head: { sha: string } | null
   requests: FixRequest[]
+  // the source the run addressed and the severity floor it applied; null when it stopped before it resolved them. A result that lacks all three is still read
+  source?: FixSource | null
+  severity?: FixPriority | null
+  skipped?: FixSkipped[]
   checks: FixCheck[]
   pushed: Pushed | null
   notPushedReason: NotPushedReason | null
@@ -247,17 +264,32 @@ const checkFixRequest = (request: unknown, index: number): void => {
   check(isObject(request), `${at} must be an object`)
   const value = request as Record<string, unknown>
   check(typeof value.id === 'string' && value.id !== '', `${at}.id must be a node id`)
-  check(value.kind === 'thread' || value.kind === 'review', `${at}.kind must be thread or review`)
+  check(value.kind === 'thread' || value.kind === 'review' || value.kind === 'finding', `${at}.kind must be thread, review or finding`)
   check(isStringOrNull(value.author), `${at}.author must be a login or null`)
   check(isStringOrNull(value.path), `${at}.path must be a path or null`)
   check(value.line === null || isPositiveInteger(value.line), `${at}.line must be a line number or null`)
   check(typeof value.outdated === 'boolean', `${at}.outdated must be true or false`)
   // the page may link it, so it is held to the same rule as posted.url
-  check(isHttpUrl(value.url), `${at}.url must be an absolute http or https url`)
+  if (value.kind === 'finding') check(value.url === null, `${at}.url must be null for a finding`)
+  else check(isHttpUrl(value.url), `${at}.url must be an absolute http or https url`)
   check(typeof value.summary === 'string', `${at}.summary must be a string`)
   check(fixTriages.includes(value.triage as FixTriage), `${at}.triage must be needsJudgment, noChange, disagree, outOfScope or clear`)
   check(fixOutcomes.includes(value.outcome as FixOutcome), `${at}.outcome must be fixed, notFixed or awaitingAnswer`)
   check(Array.isArray(value.commits) && value.commits.every(isFullSha), `${at}.commits must be a list of full SHAs`)
+  check(!('source' in value) || value.source === 'remote' || value.source === 'local', `${at}.source must be remote or local`)
+  check(!('priority' in value) || oneOfOrNull(value.priority, fixPriorities), `${at}.priority must be P0, P1, P2, P3 or null`)
+}
+
+const checkSkipped = (entry: unknown, index: number): void => {
+  const at = `skipped[${index}]`
+  check(isObject(entry), `${at} must be an object`)
+  const value = entry as Record<string, unknown>
+  check(value.source === 'remote' || value.source === 'local', `${at}.source must be remote or local`)
+  check(typeof value.id === 'string' && value.id !== '', `${at}.id must be an id`)
+  check(fixPriorities.includes(value.priority as FixPriority), `${at}.priority must be P0, P1, P2 or P3`)
+  check(isStringOrNull(value.path), `${at}.path must be a path or null`)
+  check(value.line === null || isPositiveInteger(value.line), `${at}.line must be a line number or null`)
+  check(typeof value.summary === 'string', `${at}.summary must be a string`)
 }
 
 const checkPushed = (pushed: unknown): void => {
@@ -278,6 +310,11 @@ const checkFix = (value: Record<string, unknown>): void => {
   check(head === null || (isObject(head) && isFullSha(head.sha)), 'head must be null or { sha } with a full 40-character SHA')
   check(Array.isArray(value.requests), 'requests must be a list')
   ;(value.requests as unknown[]).forEach(checkFixRequest)
+  // the source, the floor, and what the floor skipped are optional so a result that lacks them is still read
+  check(!('source' in value) || oneOfOrNull(value.source, fixSourceNames), 'source must be remote, local, both or null')
+  check(!('severity' in value) || oneOfOrNull(value.severity, fixPriorities), 'severity must be P0, P1, P2, P3 or null')
+  check(!('skipped' in value) || Array.isArray(value.skipped), 'skipped must be a list')
+  if (Array.isArray(value.skipped)) value.skipped.forEach(checkSkipped)
   check(Array.isArray(value.checks) && value.checks.every((entry) =>
     isObject(entry) && typeof entry.name === 'string' && ['passed', 'failed', 'notRun'].includes(entry.result as string)), 'checks must be a list of { name, result: passed, failed or notRun }')
   checkPushed(value.pushed)
@@ -680,6 +717,8 @@ export type StartOption = {
   unavailable: string | null
   // only a Self-review's default start has this: its args with the comments check on, which the page shows and the server runs, so neither builds the flag itself
   checkCommentsArgs?: string[]
+  // only a Fix session's start has this: what it has to act on, which the confirmation names
+  fix?: FixOffer
   // only a review's start has this: the standing default its box opens with, and the flag the run takes while the box holds text, so the page builds neither
   extraInstructions?: { standing: string, flag: string }
 }
@@ -690,14 +729,44 @@ export const isTandemRun = (args: readonly string[]): boolean => args.includes('
 export const offersFix = (pr: RawOpenPr, config: Config): boolean =>
   isMine(pr, config) && pr.author?.__typename !== 'Bot' && !isBotLogin(pr.author?.login, config)
 
+// what a Fix session has to act on, as far as the cached PR and its runs show (section 8 of DESIGN.md, Fix session): remote is whether GitHub has a change request standing, and selfReview is the PR's self-review that finished last when it read the PR's current head and has findings. The start passes no --source, so the command picks the more recent of the two itself
+export type FixOffer = { remote: boolean, selfReview: { sha: string, findings: number } | null }
+
+// two commits are the same when one SHA is a prefix of the other, in any letter case
+const sameCommit = (a: string, b: string): boolean => {
+  const [x, y] = [a.toLowerCase(), b.toLowerCase()]
+  return x.length > 0 && y.length > 0 && (x.startsWith(y) || y.startsWith(x))
+}
+
+// a self-review: a finished review-pr run of the viewer's own PR that posted nothing (--no-post), a tandem one included. A review that posted, and a run that stopped or failed, are not
+const isSelfReviewRun = (run: Run): boolean =>
+  run.command === 'review-pr' && run.args.includes('--no-post') && run.status === 'done' && run.result?.schema === 'pit-crew/review-result@1' && run.result.reviewed !== null
+
+export const fixOfferOf = (pr: RawOpenPr, runs: readonly Run[]): FixOffer => {
+  // only the self-review that finished last counts, the one whose report PR-<n>.md holds: an earlier one with findings never stands in for a later one that has none or has gone stale; a null or unparsable finishedAt ranks below every valid time, and ties and such times fall back to the higher run id
+  const finished = (run: Run): number => { const at = run.finishedAt === null ? NaN : Date.parse(run.finishedAt); return Number.isNaN(at) ? -Infinity : at }
+  const latest = [...runs].filter(isSelfReviewRun).sort((a, b) => (finished(b) === finished(a) ? 0 : finished(b) > finished(a) ? 1 : -1) || b.id - a.id)[0]
+  const result = latest?.result?.schema === 'pit-crew/review-result@1' ? latest.result : undefined
+  const reviewed = result?.reviewed?.sha
+  const current = reviewed !== undefined && sameCommit(reviewed, pr.headRefOid) && result !== undefined && result.findings.length > 0
+  return {
+    remote: hasStandingChangeRequest(pr),
+    selfReview: current ? { sha: pr.headRefOid.slice(0, 7).toLowerCase(), findings: result.findings.length } : null,
+  }
+}
+
 // the commands that only Claude can run: a tandem primary, the fix session, and the update session
 export const claudeOnly = (command: string, args: readonly string[]): boolean => isTandemRun(args) || command === 'fix-pr' || command === 'update-pr'
 
 // null when the kind is offered for this PR, otherwise why it is not
-export const notOffered = (kind: StartKind, pr: RawOpenPr, config: Config, stack: Stack | null): string | null => {
+export const notOffered = (kind: StartKind, pr: RawOpenPr, config: Config, stack: Stack | null, runs: readonly Run[] = []): string | null => {
   if (kind === 'tandem' && singleRun(pr, config).command !== 'review-pr') return `Review in tandem is not offered for #${pr.number}: review-dependabot has no tandem mode`
   if (kind === 'stack' && stack === null) return `Review stack is not offered for #${pr.number}: GitHub does not mark it as part of a stack`
   if (kind === 'fix' && !offersFix(pr, config)) return `Fix session is offered only on your own PRs, and #${pr.number} is not yours`
+  if (kind === 'fix') {
+    const offer = fixOfferOf(pr, runs)
+    if (!offer.remote && offer.selfReview === null) return `Fix requested changes is not offered for #${pr.number}: GitHub shows no request to act on and no finished self-review of its current head has findings`
+  }
   return null
 }
 
@@ -721,7 +790,7 @@ export const queueText = (text: string): string => `Queue ${text.charAt(0).toLow
 const buttons: Readonly<Record<RunKind, string>> = { review: 'Review PR', reReview: 'Re-review PR', selfReview: 'Self-review' }
 
 // the starts a PR offers now; busy is whether a run for it is in flight
-export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null, busy: boolean, queueing: Queueing | null = null): StartOption[] => {
+export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null, busy: boolean, queueing: Queueing | null = null, runs: readonly Run[] = []): StartOption[] => {
   const single = singleRun(pr, config)
   // a review's button says queue when a review of this PR would wait; a fix session is not a review and keeps its text
   const waits = queueing !== null && queueing[slotOf(pr, config)]
@@ -753,8 +822,8 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
       runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), repo, viewer, unavailable, ...extraBox('review-stack'),
     })
   }
-  // never --no-post: the push is what it is for
-  if (notOffered('fix', pr, config, stack) === null) {
+  // never --no-post: the push is what it is for; and no --source, so the command's own default (the more recent of the two sources) applies
+  if (notOffered('fix', pr, config, stack, runs) === null) {
     options.push({
       kind: 'fix', label: 'Fix session', button: 'Fix requested changes', command: 'fix-pr', args: [String(pr.number)], runners: ['claude'],
       posts: {
@@ -764,6 +833,7 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
       repo,
       viewer,
       unavailable,
+      fix: fixOfferOf(pr, runs),
     })
   }
   return options
@@ -1203,7 +1273,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
   // the PR's own run decides what can start here, whatever the cell shows
   const ownInFlight = ownRun?.status === 'running' || ownRun?.status === 'queued'
   const idle: AgentCell = {
-    state: 'idle', label: plan.label, action, models: modelLabels(config.agent), starts: startOptions(pr, config, stack, ownInFlight, queueing), lastReviewAt,
+    state: 'idle', label: plan.label, action, models: modelLabels(config.agent), starts: startOptions(pr, config, stack, ownInFlight, queueing, ownRun === undefined || history.some((entry) => entry.id === ownRun.id) ? history : [ownRun, ...history]), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
     finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,

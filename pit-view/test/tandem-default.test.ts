@@ -27,7 +27,7 @@ const prOf = (number: number): RawOpenPr => {
 }
 const stacked = { position: 2, size: 3 }
 
-// the PRs of the fixture: 113 never reviewed by the viewer, 106 reviewed before, 104 the viewer's own awaiting review, and 114 Dependabot's
+// the PRs of the fixture: 113 never reviewed by the viewer, 106 reviewed before, 104 the viewer's own awaiting review, 101 the viewer's own with changes requested, which offers its Fix session, and 114 Dependabot's
 const kindsOf = (number: number, stack: typeof stacked | null = null): string[] => startOptions(prOf(number), config, stack, false).map((option) => option.kind)
 
 test('the first start of a review, a re-review, and a self-review is the tandem one, with the plain review next, and the idle button and the first drawer button agree', () => {
@@ -46,13 +46,13 @@ test('a Dependabot review, a stack review, a fix session, and the plain entries 
   assert.deepEqual(kindsOf(114), ['default'])
   assert.equal(isTandemRun(defaultRun(prOf(114), config).args), false)
   assert.equal(defaultRun(prOf(114), config).command, 'review-dependabot')
-  for (const number of [113, 106, 104, 111, 114, 115]) {
+  for (const number of [113, 106, 104, 101, 111, 114, 115]) {
     for (const option of startOptions(prOf(number), config, stacked, false)) {
       assert.equal(isTandemRun(option.args), option.kind === 'tandem', `#${number} ${option.kind}`)
       if (option.command === 'review-stack' || option.command === 'fix-pr' || option.command === 'review-dependabot') assert.equal(isTandemRun(option.args), false, `#${number} ${option.command}`)
     }
   }
-  assert.ok(kindsOf(104, stacked).includes('fix') && kindsOf(104, stacked).includes('stack'))
+  assert.ok(kindsOf(101, stacked).includes('fix') && kindsOf(101, stacked).includes('stack'))
   // the one builder both the manual start and the scheduler use for a sweep
   const sweep = sweepRequest(scenario.repo)
   assert.equal(sweep.command, sweepCommand)
@@ -167,7 +167,7 @@ const noTandemEntry = (number: number): void => {
 for (const [name, number, pressed, stack, command, kind] of [
   ['a Dependabot review', 114, 'default', null, '/review-dependabot 114', 'default'],
   ['a stack review', 104, 'stack', stacked, '/review-stack 104', 'stack'],
-  ['a fix session', 104, 'fix', stacked, '/fix-pr 104', 'fix'],
+  ['a fix session', 101, 'fix', stacked, '/fix-pr 101', 'fix'],
 ] as const) {
   test(`${name} pressed in the real drawer confirms and sends no --tandem, and its own entry is not a tandem one`, async () => {
     if (number === 114) noTandemEntry(number)
