@@ -722,6 +722,8 @@ export type StartOption = {
   fix?: FixOffer
   // only a review's start has this: the standing default its box opens with, and the flag the run takes while the box holds text, so the page builds neither
   extraInstructions?: { standing: string, flag: string }
+  // only a review's start has this, and only while that start would wait: the confirmation's second start, Start immediately (jump queue), and the line that says what it does
+  jump?: { button: string, text: string }
 }
 
 export const isTandemRun = (args: readonly string[]): boolean => args.includes('--tandem')
@@ -788,6 +790,15 @@ export const slotOf = (pr: RawOpenPr, config: Config): ReviewSlot => isMine(pr, 
 // what a button that starts a review says when the review would wait in the queue
 export const queueText = (text: string): string => `Queue ${text.charAt(0).toLowerCase()}${text.slice(1)}`
 
+export const jumpButton = 'Start immediately (jump queue)'
+
+// what the jump says it does, from the count in flight now and the cap: this review starts now, the count it makes against the cap, and, when that is above the cap, that nothing else starts until the count falls below it
+export const jumpText = (running: number, cap: number): string => {
+  const count = running + 1
+  if (count <= cap) return `This review starts now, ahead of the queue (${count} running, cap ${cap}).`
+  return `This review starts now, ahead of the queue, and ${count} reviews will be running, above the review cap (${count} running, cap ${cap}). Nothing else starts until the count falls below the cap.`
+}
+
 const buttons: Readonly<Record<RunKind, string>> = { review: 'Review PR', reReview: 'Re-review PR', selfReview: 'Self-review' }
 
 // the starts a PR offers now; busy is whether a run for it is in flight
@@ -796,6 +807,8 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
   // a review's button says queue when a review of this PR would wait; a fix session is not a review and keeps its text
   const waits = queueing !== null && queueing[slotOf(pr, config)]
   const reviewButton = (text: string): string => waits ? queueText(text) : text
+  // a review that would wait also offers to start at once, past the queue; a fix session never does
+  const jump: Pick<StartOption, 'jump'> = waits ? { jump: { button: jumpButton, text: jumpText(queueing.running ?? 0, config.maxConcurrentReviews) } } : {}
   const { repo, viewer } = config
   const unavailable = busy
     ? `a run for #${pr.number} is already in flight`
@@ -808,7 +821,7 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
     const plan = defaultRun(pr, config)
     options.push({
       kind: 'tandem', label: plan.label, button: reviewButton(`${buttons[plan.kind].replace(/ PR$/, '')} in tandem`), command: 'review-pr', args: plan.args,
-      runners: ['claude'], posts: postsFor('review-pr', plan.args, viewer), repo, viewer, unavailable, ...extraBox('review-pr'),
+      runners: ['claude'], posts: postsFor('review-pr', plan.args, viewer), repo, viewer, unavailable, ...extraBox('review-pr'), ...jump,
     })
   }
   options.push({
@@ -816,11 +829,12 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
     runners: ['claude', 'codex'], posts: postsFor(single.command, single.args, viewer), repo, viewer, unavailable,
     ...(single.kind === 'selfReview' ? { checkCommentsArgs: [...single.args, '--check-comments'] } : {}),
     ...extraBox(single.command),
+    ...jump,
   })
   if (notOffered('stack', pr, config, stack) === null) {
     options.push({
       kind: 'stack', label: 'Review stack', button: reviewButton('Review stack'), command: 'review-stack', args: [String(pr.number)],
-      runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), repo, viewer, unavailable, ...extraBox('review-stack'),
+      runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), repo, viewer, unavailable, ...extraBox('review-stack'), ...jump,
     })
   }
   // never --no-post: the push is what it is for; and no --source, so the command's own default (the more recent of the two sources) applies
@@ -925,6 +939,8 @@ export type AgentCell = {
   question: string | null
   // why it failed: a kind such as noResult, optionally followed by ': ' and detail
   note: string | null
+  // the latest run was started ahead of the queue with Start immediately (jump queue)
+  jumped: boolean
   // the owner's re-read replaced the outcome recorded at exit; the note is then the original one unless the run failed again
   resolvedByHand: boolean
   // the note recorded at exit, kept once a failed re-read replaced it; null while the note is still the original
@@ -1307,7 +1323,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     state: 'idle', label: plan.label, action, models: modelLabels(config.agent), starts: startOptions(pr, config, stack, ownInFlight, queueing, ownRun === undefined || history.some((entry) => entry.id === ownRun.id) ? history : [ownRun, ...history]), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
-    finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,
+    finishedAt: null, text: null, result: null, question: null, note: null, jumped: false, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,
   }
   const { run, covered } = cellRunOf(ownRun, cover)
   if (run === undefined) return idle
@@ -1341,6 +1357,7 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
     result: agentResult(withPostFate(run).result),
     question: run.status === 'needsInput' ? run.result?.question ?? null : null,
     note: run.note,
+    jumped: run.jumped,
     resolvedByHand: run.resolvedByHand,
     firstNote: run.firstNote,
     resume: run.resume,
@@ -1900,8 +1917,8 @@ export const reviewCommands: readonly string[] = ['review-pr', 'review-dependabo
 // a review of the viewer's own PR is a self-review; a tandem review is one run, so it takes one slot like any review; a sweep takes one too, of the review kind, since it is never a self-review
 export type ReviewSlot = 'review' | 'selfReview'
 
-// whether a new review of each kind would wait in the queue now: the one answer the launcher's start acts on, and the Agent cell's and the drawer's buttons say. A sweep reads the review flag
-export type Queueing = Record<ReviewSlot, boolean>
+// whether a new review of each kind would wait in the queue now: the one answer the launcher's start acts on, and the Agent cell's and the drawer's buttons say. A sweep reads the review flag. running is the count of reviews in flight, which the server adds to the answer it derives the page's rows from, so the jump's confirmation can say how many will be running
+export type Queueing = Record<ReviewSlot, boolean> & { running?: number }
 
 // whether one more review may start beside those in flight: the reviews in flight, not counting one self-review while the setting lets one go over the cap, never number more than the cap
 export const reviewFits = (inFlight: readonly ReviewSlot[], next: ReviewSlot, cap: number, selfReviewOverCap: boolean): boolean => {
@@ -1922,8 +1939,8 @@ const safeLog = (log: ((line: string) => void) | undefined) => (line: string): v
 // the delays before each retry of a queue announcement the listener failed, so a flush is tried at most one more time than there are delays
 const QUEUE_RETRY_MS = [50, 200, 800]
 
-// how a review was admitted: the slot it was given, the attempt holding that slot until its process is watched, and the viewer its start was confirmed for
-type Admitted = { slot: ReviewSlot, attempt: number, viewer: string }
+// how a review was admitted: the slot it was given, the attempt holding that slot until its process is watched, the viewer its start was confirmed for, and whether it is the owner's jump, which goes past the cap and so is never sent back by it
+type Admitted = { slot: ReviewSlot, attempt: number, viewer: string, jump?: true }
 
 // an engine on the line: the slots its watched runs hold. Run and sweep ids are counted apart, so an entry in the line is told by its engine and its id together
 export type LineMember = { held: () => ReviewSlot[] }
@@ -2366,7 +2383,7 @@ export const createPostGuard = (onRelease: () => void = () => {}): PostGuard => 
 // the launcher
 
 export type LaunchErrorCode =
-  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner' | 'updateRunner' | 'hermesModel' | 'notRereadable' | 'rereadRefused' | 'tandemPair'
+  | 'noClone' | 'notAClone' | 'identityMismatch' | 'identityUnknown' | 'busy' | 'unknownRun' | 'notRunning' | 'tandemRunner' | 'fixRunner' | 'updateRunner' | 'hermesModel' | 'notRereadable' | 'rereadRefused' | 'tandemPair' | 'notJumpable'
 
 export class LaunchError extends Error {
   override name = 'LaunchError'
@@ -2392,6 +2409,8 @@ export type StartRequest = {
   cwd?: string
   // set by withExtraInstructions alone, with the flag it adds to args: the launch of a manual start writes this text to the run directory and records it. A scheduled review's launch reads the standing default itself instead, and what is here is only what its row shows until then
   extraInstructions?: ExtraInstructions
+  // the owner's Start immediately (jump queue), on a review started by hand: when the start would wait, it starts at once instead, ahead of the queue and past the cap. A start that would not wait ignores it, and a sweep, a Fix session, or an Update session that carries it is refused
+  jump?: boolean
 }
 
 // the actions that start the Update session, and the label each run carries: Resolve conflicts is the same session, asked for on a conflicting PR
@@ -2541,7 +2560,7 @@ export type SessionStore<T extends Session> = {
   // the folder under the state folder and the word the logs and messages use
   folder: 'runs' | 'sweeps'
   noun: 'run' | 'sweep'
-  create: (request: StartRequest, fields: NewSweep & { headOid?: string | null }, dirOf: (id: number) => string) => T
+  create: (request: StartRequest, fields: NewSweep & { headOid?: string | null, jumped?: boolean }, dirOf: (id: number) => string) => T
   get: (id: number) => T | null
   // a run takes RunChanges alone; a sweep also takes its rows' reports and post marks
   update: (id: number, changes: SweepChanges) => T
@@ -3282,7 +3301,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
   }
 
-  const newRow = (request: StartRequest, config: Config, cwd: string, status: 'running' | 'queued', scheduled: ScheduledFields | null = null): T => {
+  const newRow = (request: StartRequest, config: Config, cwd: string, status: 'running' | 'queued', scheduled: ScheduledFields | null = null, jumped = false): T => {
     // every new row is made here, so a start that passed its first test before a post began is refused where it would make its row
     const held = postHeld(request)
     if (held !== null) throw new LaunchError('busy', held)
@@ -3309,6 +3328,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       costUsd: null,
       resume: null,
       posting: scheduled?.posting ?? mayPost(request.command, request.args),
+      ...(jumped ? { jumped } : {}),
       ...(scheduled === null ? {} : {
         origin: 'auto' as const,
         tick: scheduled.tick,
@@ -3347,7 +3367,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   // a queued review's row already exists, was announced when it was queued, and was marked running as it left the queue; it starts now, in the folder the checks just confirmed
   const launch = async (request: StartRequest, config: Config, cwd: string, queued: T | null = null, admitted: Admitted | null = null, queuedSince: string | null = null): Promise<T> => {
-    let run = queued ?? newRow(request, config, cwd, 'running')
+    let run = queued ?? newRow(request, config, cwd, 'running', null, admitted?.jump === true)
     const runner = run.runner
     const sessionId = run.sessionId
     if (queued === null) watching(run)
@@ -3411,6 +3431,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
           startedAt: run.startedAt,
           models,
           ...(extra === null ? {} : { extraInstructions: extra }),
+          ...(admitted?.jump === true ? { jumped: true } : {}),
         }
         // before the spawn, so a run never carries the flag without its file; a write refused fails the start here. A scheduled run with no text takes away what an earlier pass, or a launch the cap took back, wrote in this folder
         if (extra !== null) await fs.writeFile(join(dir, extraInstructionsFile), `${extra.text}\n`)
@@ -3425,7 +3446,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
         if (why !== null) throw new Error(`not started: ${why}`)
         const pairNote = tandemRefusal(run, request, current)
         if (pairNote !== null) throw new LaunchError('tandemPair', pairNote.slice('tandemPair: '.length))
-        if (!line.fitsAtSpawn(admitted.attempt, admitted.slot, current)) return notStarted(run, request, admitted, queuedSince ?? run.startedAt)
+        // the owner's jump goes past the cap by choice, so the cap never sends it back
+        if (admitted.jump !== true && !line.fitsAtSpawn(admitted.attempt, admitted.slot, current)) return notStarted(run, request, admitted, queuedSince ?? run.startedAt)
         // the row says what the process is about to be told, and a start the cap took back above leaves its row as it was
         if (scheduledText) run = store.update(run.id, { args: argsUnderText(run.args, extra), extraInstructions: extra })
         // a scheduled run built to post keeps that leave only while its switch is still on, and otherwise takes --no-post here. This only ever adds the flag: a switch turned on since never takes it away, so a run built without leave to post stays without it. A manual run answers to no switch
@@ -3531,7 +3553,11 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
 
   const start = async (asked: StartRequest): Promise<T> => {
     const config = options.config()
-    const request = hermesRequest(asked, config)
+    // the jump is read here and nowhere else: the request a start queues or launches never carries the flag, and a jump reaches its launch through its admission, so a start that does not jump records nothing of it
+    const { jump, ...plain } = hermesRequest(asked, config)
+    const request: StartRequest = plain
+    // a review the owner starts by hand may jump; a sweep is never started past the cap, and a Fix session and an Update session stand in no line, so none of the three jumps
+    if (jump === true && !reviewCommands.includes(request.command)) throw new LaunchError('notJumpable', `Start immediately (jump queue) is offered only on a review, a re-review, a self-review, a tandem review, or a stack review, and ${request.command} is not one`)
     // a tandem primary launches its secondary in the background, and the fix and update sessions are pinned to Claude; the runner is the one asked for or the configured default, so no caller gets around this
     if (claudeOnly(request.command, request.args) && (request.runner ?? config.agent.runner) !== 'claude') {
       if (isTandemRun(request.args)) throw new LaunchError('tandemRunner', 'Review in tandem runs with Claude only; send runner claude or leave it out')
@@ -3562,7 +3588,10 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       // whatever already waits and fits goes first
       line.admit()
       // a new review or sweep starts at once only as the sole eligible start: it did not wait, it has room, and nothing ahead of it waits in the queue or is still being launched
-      if (waited || line.waits(slot, current)) {
+      const waits = waited || line.waits(slot, current)
+      // the owner's jump, when this start would wait: it starts at once, ahead of the queue and past the cap, and takes a slot like any review. The answer is read here, as the start is decided, so a jump whose start would not wait after all is the ordinary start below
+      const jumping = jump === true && waits
+      if (waits && !jumping) {
         const queued = enqueue(request, config, request.cwd ?? cloneDir)
         // a save during the checks may have left it confirmed for a repository or a viewer no longer in effect
         line.admit()
@@ -3572,7 +3601,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       line.opened(1)
       turn?.decided()
       try {
-        return await launch(request, config, request.cwd ?? cloneDir, null, { slot, attempt, viewer: config.viewer })
+        if (jumping) log(`${noun}: ${request.command} ${request.args.join(' ')} starts ahead of the queue, ${line.inFlight().length} reviews in flight with a cap of ${current.maxConcurrentReviews}`)
+        return await launch(request, config, request.cwd ?? cloneDir, null, { slot, attempt, viewer: config.viewer, ...(jumping ? { jump: true as const } : {}) })
       } finally {
         line.opened(-1)
         line.release(attempt)

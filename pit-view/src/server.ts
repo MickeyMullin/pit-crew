@@ -281,6 +281,7 @@ const launchStatus: Readonly<Record<LaunchErrorCode, number>> = {
   notRereadable: 409,
   rereadRefused: 422,
   tandemPair: 422,
+  notJumpable: 422,
 }
 
 // why a direct action was refused, as an HTTP status
@@ -495,7 +496,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     watchedPollMs: options.launch.watchedPollMs,
     stopGraceMs: options.launch.stopGraceMs,
   })
-  queueing = launcher.queueing
+  // the answer the rows are derived from carries the count in flight too, which the jump's confirmation names
+  queueing = () => ({ ...launcher.queueing(), running: line.inFlight().length })
   // runs that outlived the last server: watched again, or settled; local only, no GitHub call
   try {
     await launcher.recover()
@@ -683,11 +685,11 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   const startRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
     requireToken(req)
     const number = prNumber(raw)
-    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex" | "hermes", "model": "registry id, with hermes only", "repo": "owner/name", "viewer": "login", "checkComments": true | false, "extraInstructions": "text" }'
+    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex" | "hermes", "model": "registry id, with hermes only", "repo": "owner/name", "viewer": "login", "checkComments": true | false, "extraInstructions": "text", "jump": true | false }'
     const length = Number(req.headers['content-length'] ?? 0)
     const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
-    const { runner: asked, model: askedModel, kind: askedKind, repo: confirmedRepo, viewer: confirmed, checkComments, extraInstructions: box, ...rest } = body as Record<string, unknown>
+    const { runner: asked, model: askedModel, kind: askedKind, repo: confirmedRepo, viewer: confirmed, checkComments, extraInstructions: box, jump, ...rest } = body as Record<string, unknown>
     if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
     // the page always names the repository its confirmation showed; a start that does not is from an older page and is refused rather than guessed at
     if (typeof confirmedRepo !== 'string') throw new HttpError(400, `repo is required and must be a string; ${usage}`)
@@ -696,6 +698,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (askedModel !== undefined && typeof askedModel !== 'string') throw new HttpError(400, 'model must be a registry id, a string')
     if (askedKind !== undefined && !startKinds.includes(askedKind as StartKind)) throw new HttpError(400, 'kind must be default, tandem, stack or fix')
     if (checkComments !== undefined && typeof checkComments !== 'boolean') throw new HttpError(400, 'checkComments must be true or false')
+    if (jump !== undefined && typeof jump !== 'boolean') throw new HttpError(400, 'jump must be true or false')
     if (box !== undefined && typeof box !== 'string') throw new HttpError(400, 'extraInstructions must be a string')
     const boxProblem = box === undefined ? null : extraInstructionsProblem(box as string)
     if (boxProblem !== null) throw new HttpError(400, `extraInstructions ${boxProblem}`)
@@ -737,6 +740,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
         label: option.label,
         ...(runner === undefined ? {} : { runner }),
         ...(askedModel === undefined ? {} : { model: askedModel as string }),
+        // the launcher reads its own answer again as it decides the start, so a jump whose start would no longer wait is the ordinary start, and one on a Fix session is refused
+        ...(jump === true ? { jump: true } : {}),
       }, extra))
       json(res, 200, runView(run))
     } catch (error) {

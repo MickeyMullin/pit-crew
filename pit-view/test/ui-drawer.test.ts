@@ -53,6 +53,7 @@ const slots = (states: Partial<Record<StepSlot['step'], [StepSlot['state'], stri
   })
 
 const idle = (patch: Partial<AgentCell> = {}): AgentCell => ({
+  jumped: false,
   state: 'idle',
   label: 'Re-review',
   action: { kind: 'reReview', label: 'Re-review', command: 'review-pr', args: ['101'], runner: 'claude' },
@@ -223,6 +224,7 @@ test('a run waiting for an answer shows the question and the resume command to c
     copyName: 'Copy resume command for #101',
     extra: null,
     models: { term: 'Models', text: 'not recorded', flags: [] },
+    jumped: null,
   })
   assert.equal(model.result, null)
   assert.match(drawerModel(input(finished({ status: 'needsInput', question: null }))).waiting?.question ?? '', /did not record/)
@@ -900,7 +902,7 @@ test('a run start names the repository and viewer of the option the confirmation
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
   // the confirmation's signature holds every option, so a change of repository rebuilds it too
   assert.match(source, /sig: JSON\.stringify\(\[model\.starts,/)
-  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\), specialInstructionsSent\(asked, option\)\)/)
+  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\), specialInstructionsSent\(asked, option\), jump && option\.jump !== undefined\)\)/)
 })
 
 // an Update session's finished run: its method and why, the push, and its conflicts and checks
@@ -1422,7 +1424,7 @@ test('the real caller builds the confirmation closed and sends through the one r
   assert.equal(source.match(/extraText:/g)?.length, 1)
   assert.equal(source.match(/extraOn:/g)?.length, 1)
   // the request is built from the one rule
-  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\), specialInstructionsSent\(asked, option\)\)/)
+  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\), specialInstructionsSent\(asked, option\), jump && option\.jump !== undefined\)\)/)
   // the checkbox rebuilds the confirmation (it shows or hides the box), so its state is in the signature and the text is not
   assert.match(source, /extraBox: model\.confirm\.extraBox === null \? null : model\.confirm\.extraBox\.checked/)
   assert.match(source, /name: 'drawer-extra-on'/)

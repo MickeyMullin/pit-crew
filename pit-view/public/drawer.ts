@@ -161,7 +161,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
 
   const errorLine = (): HTMLParagraphElement => h('p', { id: 'drawer-error', class: 'confirm-error', role: 'alert' })
 
-  const confirmActions = (goText: string, tone: 'primary' | 'danger' | 'caution', onGo: () => void, fresh: { text: string, disabled: boolean, reason: string | null } | null = null): HTMLElement => {
+  const confirmActions = (goText: string, tone: 'primary' | 'danger' | 'caution', onGo: () => void, fresh: { text: string, disabled: boolean, reason: string | null } | null = null, jump: { text: string, onGo: () => void } | null = null): HTMLElement => {
     const cancel = h('button', { type: 'button', class: 'button', 'data-focus-key': 'confirm-cancel' }, 'Cancel')
     const go = h('button', { type: 'button', class: `button button-${tone}`, 'data-focus-key': 'confirm-go', 'aria-describedby': 'drawer-error' }, goText)
     cancel.addEventListener('click', () => {
@@ -175,7 +175,12 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     const why = fresh?.disabled === true ? fresh.reason : null
     const third = fresh === null ? null : h('button', { type: 'button', class: 'button', disabled: fresh.disabled, title: why, 'aria-describedby': why === null ? null : 'drawer-fresh-reason', 'data-focus-key': 'confirm-fresh' }, fresh.text)
     third?.addEventListener('click', () => askFreshReview())
-    const actions = h('div', { class: 'confirm-actions' }, cancel, go, third)
+    // a start that would wait offers its second start after Start, so Cancel stays first and Start second
+    const jumpGo = jump === null ? null : h('button', { type: 'button', class: 'button', 'data-focus-key': 'confirm-jump', 'aria-describedby': 'drawer-confirm-jump drawer-error' }, jump.text)
+    jumpGo?.addEventListener('click', () => {
+      if (!busy) jump?.onGo()
+    })
+    const actions = h('div', { class: 'confirm-actions' }, cancel, go, third, jumpGo)
     return why === null ? actions : h('div', {}, actions, h('p', { id: 'drawer-fresh-reason', class: 'drawer-reason' }, why))
   }
 
@@ -220,6 +225,13 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   const modelsDetail = (line: ModelsLine): HTMLElement =>
     h('p', { class: 'drawer-extra', 'data-models': '' }, h('span', { class: 'drawer-label' }, `${line.term}: `), line.text, ...line.flags.map((flag) => h('span', { class: 'warn-text', 'data-models-flag': '' }, ` ${flag}`)))
 
+  // the line that says a run was started ahead of the queue; nothing for a run that was not
+  const jumpedDetail = (line: string | null): HTMLElement | null =>
+    line === null ? null : h('p', { class: 'drawer-extra', 'data-jumped': '' }, line)
+
+  const jumpedParts = (line: string | null): Part[] =>
+    line === null ? [] : [{ key: 'jumped', sig: line, build: () => jumpedDetail(line) as HTMLElement }]
+
   const modelsParts = (line: ModelsLine): Part[] =>
     [{ key: 'models', sig: JSON.stringify(line), build: () => modelsDetail(line) }]
 
@@ -258,8 +270,9 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       list,
       ask.sources === null ? null : h('p', { class: 'confirm-sources' }, ask.sources),
       caution ? h('p', { id: 'drawer-confirm-caution', class: 'confirm-caution-line' }, ask.caution) : null,
+      ask.jump === null ? null : h('p', { id: 'drawer-confirm-jump', class: 'confirm-sources', 'data-confirm': 'jump' }, ask.jump.text),
       errorLine(),
-      confirmActions(ask.confirm, caution ? 'caution' : 'primary', () => void doStart()))
+      confirmActions(ask.confirm, caution ? 'caution' : 'primary', () => void doStart(), null, ask.jump === null ? null : { text: ask.jump.button, onGo: () => void doStart(true) }))
   }
 
   const stopConfirmBlock = (stop: StopModel, row: OpenRow): HTMLElement => {
@@ -353,6 +366,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     if (cancel !== null) (cancel as HTMLButtonElement).disabled = busy
     const fresh = byKey('confirm-fresh') as HTMLButtonElement | null
     if (fresh !== null) fresh.disabled = busy || model?.storedAsk?.fresh?.disabled !== false
+    const jump = byKey('confirm-jump') as HTMLButtonElement | null
+    if (jump !== null) jump.disabled = busy
     if (go !== null) {
       go.disabled = busy || (confirm?.type === 'action' && model?.actionAsk?.canConfirm === false)
       const idleText = confirm?.type === 'stop' ? (model?.stop?.confirm ?? 'Stop run')
@@ -499,7 +514,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     focusKey(back)
   }
 
-  const doStart = async (): Promise<void> => {
+  // jump is the confirmation's Start immediately (jump queue); the launcher reads its queue answer again and starts it as the ordinary start when it would no longer wait
+  const doStart = async (jump = false): Promise<void> => {
     if (busy || confirm?.type !== 'start' || number === null) return
     const asked = confirm
     const n = number
@@ -510,7 +526,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     busy = true
     error = ''
     paintConfirm()
-    const answer = await sendRun(startRequest(n, asked.kind, asked.runner, option.repo, option.viewer, options.token, commentsCheckOn(asked, option), specialInstructionsSent(asked, option)))
+    const answer = await sendRun(startRequest(n, asked.kind, asked.runner, option.repo, option.viewer, options.token, commentsCheckOn(asked, option), specialInstructionsSent(asked, option), jump && option.jump !== undefined))
     busy = false
     if (n !== number) return
     if (answer.ok) {
@@ -784,7 +800,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           build: () => h('p', { class: 'drawer-run-note' }, h('span', { class: 'drawer-label' }, `${note.label}: `), note.note),
         })
       }
-      parts.push(...extraParts(running.extra), ...modelsParts(running.models))
+      parts.push(...jumpedParts(running.jumped), ...extraParts(running.extra), ...modelsParts(running.models))
       parts.push({
         key: 'actions',
         sig: JSON.stringify([stopConfirmAsk ? ['confirm', model.stop] : settling ? 'settling' : 'buttons', cell.runId, model.stopsEnabled]),
@@ -894,6 +910,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       return h('section', { class: 'drawer-section drawer-card drawer-waiting', 'aria-labelledby': 'drawer-waiting-title' },
         h('h3', { id: 'drawer-waiting-title', class: 'drawer-section-title' }, 'Waiting for your answer'),
         h('p', { class: 'drawer-question' }, waiting?.question ?? ''),
+        waiting === null ? null : jumpedDetail(waiting.jumped),
         waiting === null ? null : extraDetail(waiting.extra),
         waiting === null ? null : modelsDetail(waiting.models),
         waiting === null ? null : resumeBlock(waiting.resume, waiting.copyName, n),
@@ -932,6 +949,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
           h('span', { class: 'drawer-meta' }, ` · ${result.runnerLabel}`),
           result.cost === null ? null : h('span', { class: 'drawer-meta' }, ` · ${result.cost}`)),
         result.note === null ? null : h('p', { class: 'drawer-note' }, result.note),
+        jumpedDetail(result.jumped),
         extraDetail(result.extra),
         modelsDetail(result.models),
         result.notPosted === null ? null : h('p', { class: 'drawer-notice', 'data-post-not-made': '' }, result.notPosted),
@@ -996,6 +1014,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
             tag(row.text, row.tone)),
           h('span', { class: 'drawer-item-meta' },
             `${row.runner} · `, ageSpan(row.startedAt, 'started ', options.nowMs()), row.cost === null ? '' : ` · ${row.cost}`),
+          jumpedDetail(row.jumped),
           extraDetail(row.extra),
           modelsDetail(row.models))))),
   })

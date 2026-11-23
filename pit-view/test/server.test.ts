@@ -1895,6 +1895,63 @@ test('a checked Self-review meets the review cap as an unchecked one does: it qu
   }
 })
 
+test('Start immediately (jump queue) through the server: the row offers it with the count from the launcher, and the start runs at once past the cap and is served as started ahead of the queue', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', maxConcurrentReviews: 1 } })
+  try {
+    await filled(h)
+    const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
+    const startsOf = async (number: number) => rowIn((await getJson<View>(`${h.base}/api/view`)).body, number)?.agent?.starts ?? []
+    // with room, no start offers the jump
+    assert.ok((await startsOf(106)).every((start) => start.jump === undefined))
+    const first = await send(url(113), 'POST', { repo: scenario.repo }, token(h))
+    assert.equal(first.body.status, 'running')
+    await until(() => h.server.launcher.queueing().review)
+    // the cap is full: every review start on another row reads Queue and offers the jump, naming one running now and two once it starts
+    const starts = await startsOf(106)
+    const reviewStarts = starts.filter((start) => start.kind !== 'fix')
+    assert.ok(reviewStarts.length > 0)
+    for (const start of reviewStarts) {
+      assert.match(start.button, /^Queue /)
+      assert.deepEqual(start.jump, { button: 'Start immediately (jump queue)', text: 'This review starts now, ahead of the queue, and 2 reviews will be running, above the review cap (2 running, cap 1). Nothing else starts until the count falls below the cap.' })
+    }
+    // the request carries the ordinary start's fields plus the flag
+    const jumped = await send(url(106), 'POST', { repo: scenario.repo, viewer: scenario.viewer, kind: 'default', runner: 'claude', jump: true }, token(h))
+    assert.deepEqual([jumped.status, jumped.body.status, jumped.body.jumped], [200, 'running', true])
+    assert.equal(h.launch.children.length, 2)
+    // nothing else starts while the count is above the cap: an ordinary start queues
+    const queued = await send(url(118), 'POST', { repo: scenario.repo, kind: 'default' }, token(h))
+    assert.deepEqual([queued.body.status, queued.body.jumped], ['queued', false])
+    assert.equal(h.launch.children.length, 2)
+    // the run's list serves the record too
+    const listed = (await getJson<Record<string, unknown>[]>(`${h.base}/api/prs/106/runs`)).body
+    assert.equal(listed.find((run) => run.id === jumped.body.id)?.jumped, true)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a stale jump is the ordinary start, and the server refuses a jump on a Fix session, on a sweep, and one that is not true or false', async () => {
+  const h = await setup({ config: { cloneDir: '~/dev/orbit', maxConcurrentReviews: 2 } })
+  try {
+    await filled(h)
+    const url = (number: number): string => `${h.base}/api/prs/${number}/runs`
+    // the cap has room and nothing is queued, so the flag changes nothing
+    const stale = await send(url(106), 'POST', { repo: scenario.repo, kind: 'default', jump: true }, token(h))
+    assert.deepEqual([stale.status, stale.body.status, stale.body.jumped], [200, 'running', false])
+    assert.equal((await send(url(113), 'POST', { repo: scenario.repo, kind: 'default', jump: 'yes' }, token(h))).status, 400)
+    // #101 is the viewer's own with a change request standing, so it offers a Fix session, which never jumps
+    const fix = await send(url(101), 'POST', { repo: scenario.repo, kind: 'fix', jump: true }, token(h))
+    assert.equal(fix.status, 422)
+    assert.match(String(fix.body.error), /Start immediately \(jump queue\) is offered only on a review/)
+    const sweep = await send(`${h.base}/api/sweeps`, 'POST', { repo: scenario.repo, jump: true }, token(h))
+    assert.equal(sweep.status, 400)
+    assert.match(String(sweep.body.error), /unknown field jump/)
+    assert.equal(h.launch.children.length, 1)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a fix start reads the self-review that finished last, not the one created last: an earlier-created run that finished later and is clean refuses it with a 422', async () => {
   const h = await setup({ config: { cloneDir: '~/dev/orbit' } })
   try {

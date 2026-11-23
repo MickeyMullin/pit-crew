@@ -65,7 +65,7 @@ export const goneRow = (number: number, title: string | null, url: string): Open
     state: 'idle', label: 'Review', action: { kind: 'review', label: 'Review', command: 'review-pr', args: [String(number)], runner: 'claude' }, starts: [],
     models: { claude: '', codex: '' }, lastReviewAt: null,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
-    steps: [], tandem: false, commit: null, finishedAt: null, text: null, result: null, question: null, note: null, resolvedByHand: false, firstNote: null, resume: null, costUsd: null,
+    steps: [], tandem: false, commit: null, finishedAt: null, text: null, result: null, question: null, note: null, jumped: false, resolvedByHand: false, firstNote: null, resume: null, costUsd: null,
     extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,
   },
 } as unknown as OpenRow)
@@ -135,6 +135,8 @@ export type StartConfirmModel = {
   caution: string | null
   confirm: string
   busy: string
+  // a review start that would wait also offers Start immediately (jump queue): the button and the line that says what it does; null otherwise
+  jump: { button: string, text: string } | null
 }
 
 // null when the PR no longer offers that start. A Fix session pushes commits, so its confirmation
@@ -186,8 +188,12 @@ export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headR
     caution: push ? `It pushes new commits to ${row.headRef} on GitHub under your account, and never force-pushes.` : null,
     confirm: push ? 'Start fix session' : 'Start',
     busy: push ? 'Starting fix session…' : 'Starting…',
+    jump: option.jump ?? null,
   }
 }
+
+// what the run details say of a run the owner started ahead of the queue; null for every other run, and for a run from before it was recorded
+export const jumpedLine = (jumped: boolean | undefined): string | null => jumped === true ? 'Started ahead of the queue with Start immediately (jump queue).' : null
 
 // the extra review instructions a run used, for its card and its line in the previous runs; a run without any shows nothing
 export type ExtraLine = { term: string, from: string, text: string }
@@ -260,6 +266,8 @@ export const newestNote = (steps: readonly StepSlot[], command: string | null = 
 export type RunningModel = {
   extra: ExtraLine | null
   models: ModelsLine
+  // whether the run was started ahead of the queue, in words; null when it was not
+  jumped: string | null
   label: string
   tandem: boolean
   runnerLabel: string
@@ -282,6 +290,7 @@ export const runningModel = (row: Pick<OpenRow, 'headOid'>, cell: AgentCell): Ru
     note: newestNote(cell.steps, cell.command),
     extra: extraLine(cell.extraInstructions),
     models: modelsLine(cell.recorded),
+    jumped: jumpedLine(cell.jumped),
   }
 }
 
@@ -454,7 +463,7 @@ export const storedAskModel = (row: Pick<OpenRow, 'number' | 'title'>, cell: Age
   }
 }
 
-export type WaitingModel = { question: string, resume: string | null, copyName: string, extra: ExtraLine | null, models: ModelsLine }
+export type WaitingModel = { question: string, resume: string | null, copyName: string, extra: ExtraLine | null, models: ModelsLine, jumped: string | null }
 
 export const waitingModel = (cell: AgentCell, number: number): WaitingModel => ({
   question: cell.question ?? 'The run stopped to ask a question but did not record it. Open its session to see it.',
@@ -462,6 +471,7 @@ export const waitingModel = (cell: AgentCell, number: number): WaitingModel => (
   copyName: `Copy resume command for #${number}`,
   extra: extraLine(cell.extraInstructions),
   models: modelsLine(cell.recorded),
+  jumped: jumpedLine(cell.jumped),
 })
 
 // why a run failed, in words; the kinds are Pit View's own, and a detail after the colon is kept
@@ -617,6 +627,8 @@ export const commitModel = (commit: string | null, repo: string | undefined, hea
 export type ResultModel = {
   extra: ExtraLine | null
   models: ModelsLine
+  // whether the run was started ahead of the queue, in words; null when it was not
+  jumped: string | null
   text: string
   tone: DoneTone
   runnerLabel: string
@@ -687,6 +699,7 @@ export const resultModel = (cell: AgentCell, number: number, headOid: string, of
   report: blockedReport(cell.result),
   extra: extraLine(cell.extraInstructions),
   models: modelsLine(cell.recorded),
+  jumped: jumpedLine(cell.jumped),
 })
 
 // which card the latest run gets
@@ -702,7 +715,7 @@ export const cardKind = (cell: AgentCell): CardKind => {
 }
 
 // previous runs: a compact line each
-export type RunRow = { id: number, label: string, runner: string, text: string, tone: Tone, startedAt: string, cost: string | null, extra: ExtraLine | null, models: ModelsLine }
+export type RunRow = { id: number, label: string, runner: string, text: string, tone: Tone, startedAt: string, cost: string | null, extra: ExtraLine | null, models: ModelsLine, jumped: string | null }
 
 const failureShort: Readonly<Record<string, string>> = {
   badResult: 'bad result',
@@ -783,6 +796,7 @@ export const runRows = (runs: readonly RunView[], shownId: number | null): RunRo
     cost: formatCost(run.costUsd),
     extra: extraLine(run.extraInstructions),
     models: modelsLine(run.models),
+    jumped: jumpedLine(run.jumped),
   }))
 
 // the Auto-review list: each auto run of the PR (section 10, In the UI). startedAt is null until the run really started: a queued run, or one that failed or was skipped before its process, holds only the time it was queued

@@ -682,6 +682,31 @@ test('a version 7 cache gains runs.resolved_by_hand in place: its runs stay, not
   }
 })
 
+test('a version 20 cache gains runs.jumped in place: its runs stay, not started ahead of the queue, and a jumped run is stored as one', async () => {
+  const { dir, cleanup } = await tempDir()
+  try {
+    const path = join(dir, 'cache.sqlite')
+    const first = openCache({ path, clock: handClock().clock })
+    const created = first.createRun(newRun(106), (id) => `~/runs/${id}`)
+    first.close()
+    const old = new DatabaseSync(path)
+    old.exec('ALTER TABLE runs DROP COLUMN jumped')
+    old.exec('UPDATE meta SET value = \'20\' WHERE key = \'schemaVersion\'')
+    old.close()
+    const cache = openCache({ path, clock: handClock().clock })
+    assert.equal(cache.getRun(created.id)?.jumped, false)
+    const jumped = cache.createRun({ ...newRun(113), jumped: true }, (id) => `~/runs/${id}`)
+    assert.equal(jumped.jumped, true)
+    assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
+    cache.close()
+    const again = openCache({ path, clock: handClock().clock })
+    assert.deepEqual([again.getRun(created.id)?.jumped, again.getRun(jumped.id)?.jumped], [false, true])
+    again.close()
+  } finally {
+    await cleanup()
+  }
+})
+
 const newSweep = (patch: Partial<NewSweep> = {}): NewSweep => ({
   repo: scenario.repo, command: 'review-dependabot-sweep', args: [scenario.repo, '--parallel', '1'], label: 'Dependabot sweep', runner: 'claude', cwd: '~/dev/orbit',
   sessionId: null, pid: null, pidStartedAt: null, startedAt: '2026-10-26T14:00:00Z', lastStepAt: null, step: null, stepState: null,
@@ -1221,7 +1246,7 @@ test('a cache from version 13 gains the ticks table and the auto-review columns 
     for (const column of ['origin', 'tick', 'reason', 'queued_at', 'posting', 'worktree']) old.exec(`ALTER TABLE sweeps DROP COLUMN ${column}`)
     old.exec('UPDATE meta SET value = \'13\' WHERE key = \'schemaVersion\'')
     old.close()
-    assert.equal(schemaVersion, 20)
+    assert.equal(schemaVersion, 21)
     assert.equal(githubTablesVersion, 16)
     const cache = openCache({ path, clock: handClock().clock })
     // version 16 changed what the GitHub tables hold, so a cache from version 13 refetches its PRs
@@ -1286,7 +1311,7 @@ test('a version 17 cache gains sweeps.row_reports and sweeps.post_attempts in pl
     old.exec('UPDATE meta SET value = \'17\' WHERE key = \'schemaVersion\'')
     old.close()
     const cache = openCache({ path, clock: handClock().clock })
-    assert.equal(schemaVersion, 20)
+    assert.equal(schemaVersion, 21)
     assert.equal(cache.getSweep(created.id)?.status, 'done')
     assert.equal(cache.getSweep(created.id)?.rowReports, null)
     assert.deepEqual(cache.getSweep(created.id)?.postAttempts, {})
@@ -1319,7 +1344,7 @@ test('a version 18 cache gains the post_marks table in place, keeping its sweeps
     old.exec('UPDATE meta SET value = \'18\' WHERE key = \'schemaVersion\'')
     old.close()
     const cache = openCache({ path, clock: handClock().clock })
-    assert.equal(schemaVersion, 20)
+    assert.equal(schemaVersion, 21)
     assert.equal(cache.getSweep(created.id)?.status, 'done')
     assert.ok(cache.readView(scenario.repo).open.length > 0, 'the cached PRs are kept')
     assert.deepEqual([...cache.unresolvedPostMarks(scenario.repo)], [])
@@ -1526,7 +1551,7 @@ for (const from of [18, 19]) {
       old.exec(`UPDATE meta SET value = '${from}' WHERE key = 'schemaVersion'`)
       old.close()
       const cache = openCache({ path, clock: handClock().clock })
-      assert.equal(schemaVersion, 20)
+      assert.equal(schemaVersion, 21)
       // #107's and #113's posts were made from Pit View, and nothing before version 20 recorded the head they went onto, so each marks its PR too, beside the reviewed head on record
       assert.deepEqual([...cache.unresolvedPostMarks(scenario.repo)].sort(), [106, 107, 113, 114])
       assert.deepEqual(cache.postRecords(scenario.repo), new Map([

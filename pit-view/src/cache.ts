@@ -12,8 +12,8 @@ import type { ReportVerdict } from './reports.ts'
 // why a run was queued (section 10 of DESIGN.md, What qualifies)
 export type QueueReason = 'requested' | 'new' | 'pushed' | 'selfReview' | 'dependabot'
 
-// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table. Version 12 added the database id of the latest reviews to the open-PR query, which the Changes requested links read, so the GitHub tables are rebuilt again. Version 13 added GitHub's stack marker (stack and stackEntry) to the open-PR query, which the stack chip, the Review stack start, and the stack report lookup read in place of the base-branch guess, so the GitHub tables are rebuilt again. Version 14 added the ticks table and auto-review's columns on runs and sweeps (origin, tick, reason, queued_at, posting, and worktree on both, and head_oid on runs), changing no GitHub table; a row from before it reads as a manual run. Version 15 added runs.extra_instructions, the extra review instructions a run used and where they came from, and changed no GitHub table; a row from before it reads as having none. Version 16 added the workflow run's identity (databaseId, createdAt, and runAttempt, and the workflow's databaseId) to the check runs of the open-PR query, which the CI readings use to drop a superseded run, so the GitHub tables are rebuilt again. Version 17 added runs.models, the roles and models a run used, and changed no GitHub table; a row from before it reads as not recorded. Version 18 added sweeps.row_reports and sweeps.post_attempts, for the post button on a sweep's rows, and changed no GitHub table; a sweep from before it reads as having no row's report recorded and no post begun, so none of its rows is offered. Version 19 added the post_marks table, one mark per PR for a post from Pit View that was begun and whose outcome is not known, and changed no GitHub table. Version 20 added the posted_heads table, every head of a PR that a post is on record at, and changed no GitHub table; a cache from before it has its runs' and sweeps' posts carried forward: a post begun and never recorded marks its PR, and a post on record is on record at its heads, or marks its PR when a head it is about cannot be established
-export const schemaVersion = 20
+// bump on any schema change; an older cache file's GitHub tables are dropped and rebuilt, since they hold nothing GitHub cannot give back. runs and sweeps are the exception: they survive a rebuild, and a change to their columns needs a migration of its own (version 5 added runs.steps with ALTER TABLE). Version 6 added latestOpinionatedReviews to the open-PR query: a cached row written before it lacks the field, and the rebuild empties prs so no such row is derived. Version 7 added the sweeps table and changed no GitHub table. Version 10 added the database ids of timeline comments and reviews to the open-PR query, which the Last activity links read, so the GitHub tables are rebuilt again. Version 11 added runs.report_hash and runs.post_attempted_at, for Post it, and changed no GitHub table. Version 12 added the database id of the latest reviews to the open-PR query, which the Changes requested links read, so the GitHub tables are rebuilt again. Version 13 added GitHub's stack marker (stack and stackEntry) to the open-PR query, which the stack chip, the Review stack start, and the stack report lookup read in place of the base-branch guess, so the GitHub tables are rebuilt again. Version 14 added the ticks table and auto-review's columns on runs and sweeps (origin, tick, reason, queued_at, posting, and worktree on both, and head_oid on runs), changing no GitHub table; a row from before it reads as a manual run. Version 15 added runs.extra_instructions, the extra review instructions a run used and where they came from, and changed no GitHub table; a row from before it reads as having none. Version 16 added the workflow run's identity (databaseId, createdAt, and runAttempt, and the workflow's databaseId) to the check runs of the open-PR query, which the CI readings use to drop a superseded run, so the GitHub tables are rebuilt again. Version 17 added runs.models, the roles and models a run used, and changed no GitHub table; a row from before it reads as not recorded. Version 18 added sweeps.row_reports and sweeps.post_attempts, for the post button on a sweep's rows, and changed no GitHub table; a sweep from before it reads as having no row's report recorded and no post begun, so none of its rows is offered. Version 19 added the post_marks table, one mark per PR for a post from Pit View that was begun and whose outcome is not known, and changed no GitHub table. Version 20 added the posted_heads table, every head of a PR that a post is on record at, and changed no GitHub table; a cache from before it has its runs' and sweeps' posts carried forward: a post begun and never recorded marks its PR, and a post on record is on record at its heads, or marks its PR when a head it is about cannot be established. Version 21 added runs.jumped, whether the owner started the run ahead of the queue with Start immediately (jump queue), and changed no GitHub table; a row from before it reads as not started that way
+export const schemaVersion = 21
 
 // the version that added posted_heads, from before which the migration carries the runs' and sweeps' posts forward
 const postedHeadsVersion = 20
@@ -147,8 +147,8 @@ export type Session = {
   worktree: string | null
 }
 
-// one review session Pit View started (section 8 of DESIGN.md, Launching runs); resolvedByHand is set when the owner's re-read replaced the outcome recorded at exit, and firstNote keeps the note recorded at exit once a failed re-read replaced it (an empty string when that note was null); reportHash is the SHA-256 of the report a review finished with, null when it named none or the report could not be read, and postAttemptedAt is when Post it began a post, written before gh runs and cleared only when GitHub refused it; headOid is the head a scheduled run was queued for, or last moved to
-export type Run = Session & { number: number, resolvedByHand: boolean, firstNote: string | null, reportHash: string | null, postAttemptedAt: string | null, headOid: string | null, extraInstructions: ExtraInstructions | null, models: RunModels | null }
+// one review session Pit View started (section 8 of DESIGN.md, Launching runs); resolvedByHand is set when the owner's re-read replaced the outcome recorded at exit, and firstNote keeps the note recorded at exit once a failed re-read replaced it (an empty string when that note was null); reportHash is the SHA-256 of the report a review finished with, null when it named none or the report could not be read, and postAttemptedAt is when Post it began a post, written before gh runs and cleared only when GitHub refused it; headOid is the head a scheduled run was queued for, or last moved to; jumped is set on a review the owner started ahead of the queue with Start immediately (jump queue), which may have taken the count above the cap
+export type Run = Session & { number: number, jumped: boolean, resolvedByHand: boolean, firstNote: string | null, reportHash: string | null, postAttemptedAt: string | null, headOid: string | null, extraInstructions: ExtraInstructions | null, models: RunModels | null }
 
 // what a --no-post sweep's settle recorded of one row's report, keyed by the row's PR number: the SHA-256 of the report as it stood then, so the post button can tell it from what a later review wrote to the same name, and its verdict, read from the same text (section 10 of DESIGN.md, Posting)
 export type SweepRowReport = { hash: string, verdict: ReportVerdict | null }
@@ -157,9 +157,9 @@ export type SweepRowReport = { hash: string, verdict: ReportVerdict | null }
 export type Sweep = Session & { rowReports: Record<string, SweepRowReport> | null, postAttempts: Record<string, string> }
 
 type AutoFields = 'origin' | 'tick' | 'reason' | 'queuedAt' | 'posting' | 'worktree'
-export type NewRun = Omit<Run, 'id' | 'dir' | 'steps' | 'resolvedByHand' | 'firstNote' | 'reportHash' | 'postAttemptedAt' | 'headOid' | 'extraInstructions' | 'models' | AutoFields> & Partial<Pick<Run, 'headOid' | 'extraInstructions' | 'models' | AutoFields>>
+export type NewRun = Omit<Run, 'id' | 'dir' | 'steps' | 'jumped' | 'resolvedByHand' | 'firstNote' | 'reportHash' | 'postAttemptedAt' | 'headOid' | 'extraInstructions' | 'models' | AutoFields> & Partial<Pick<Run, 'jumped' | 'headOid' | 'extraInstructions' | 'models' | AutoFields>>
 export type NewSweep = Omit<Sweep, 'id' | 'dir' | 'steps' | 'rowReports' | 'postAttempts' | AutoFields> & Partial<Pick<Sweep, AutoFields>>
-export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>> & { resolvedByHand?: boolean, firstNote?: string | null, reportHash?: string | null, postAttemptedAt?: string | null, headOid?: string | null, extraInstructions?: ExtraInstructions | null, models?: RunModels | null }
+export type RunChanges = Partial<Omit<Session, 'id' | 'repo'>> & { jumped?: boolean, resolvedByHand?: boolean, firstNote?: string | null, reportHash?: string | null, postAttemptedAt?: string | null, headOid?: string | null, extraInstructions?: ExtraInstructions | null, models?: RunModels | null }
 // a sweep's changes: a run's, without the columns only runs have, plus the sweep's own
 // what Pit View knows of the posts on one PR (section 10 of DESIGN.md, Posting, One post per PR and head): unknown is a post begun whose outcome is not known, which withholds the PR at every head, and heads holds every head, in lowercase, that a post is on record at, each withheld from every later offer
 export type PostRecord = { unknown: boolean, heads: ReadonlySet<string> }
@@ -286,7 +286,7 @@ const schema = [
 
 // kept across rebuilds: no status CHECK, so phase 4's queued and skipped need no rebuild
 const runsSchema = [
-  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, resolved_by_hand INTEGER NOT NULL DEFAULT 0, first_note TEXT, report_hash TEXT, post_attempted_at TEXT, origin TEXT NOT NULL DEFAULT \'manual\', tick INTEGER, head_oid TEXT, reason TEXT, queued_at TEXT, posting INTEGER NOT NULL DEFAULT 0, worktree TEXT, extra_instructions TEXT, models TEXT)',
+  'CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL, command TEXT NOT NULL, args TEXT NOT NULL, label TEXT NOT NULL, runner TEXT NOT NULL, cwd TEXT NOT NULL, dir TEXT NOT NULL, session_id TEXT, pid INTEGER, pid_started_at TEXT, started_at TEXT NOT NULL, last_step_at TEXT, step TEXT, step_state TEXT, finished_at TEXT, status TEXT NOT NULL, result TEXT, note TEXT, cost_usd REAL, resume TEXT, steps TEXT, resolved_by_hand INTEGER NOT NULL DEFAULT 0, first_note TEXT, report_hash TEXT, post_attempted_at TEXT, origin TEXT NOT NULL DEFAULT \'manual\', tick INTEGER, head_oid TEXT, reason TEXT, queued_at TEXT, posting INTEGER NOT NULL DEFAULT 0, worktree TEXT, extra_instructions TEXT, models TEXT, jumped INTEGER NOT NULL DEFAULT 0)',
   'CREATE INDEX IF NOT EXISTS runs_by_pr ON runs (repo, number, id)',
   'CREATE INDEX IF NOT EXISTS runs_by_status ON runs (status)',
 ]
@@ -435,7 +435,7 @@ const toSession = (row: Row): Session => {
 const toRun = (row: Row): Run => {
   const extra = strOrNull(row, 'extra_instructions')
   const models = strOrNull(row, 'models')
-  return { ...toSession(row), number: int(row, 'number'), resolvedByHand: int(row, 'resolved_by_hand') === 1, firstNote: strOrNull(row, 'first_note'), reportHash: strOrNull(row, 'report_hash'), postAttemptedAt: strOrNull(row, 'post_attempted_at'), headOid: strOrNull(row, 'head_oid'), extraInstructions: extra === null ? null : JSON.parse(extra) as ExtraInstructions, models: models === null ? null : JSON.parse(models) as RunModels }
+  return { ...toSession(row), number: int(row, 'number'), jumped: int(row, 'jumped') === 1, resolvedByHand: int(row, 'resolved_by_hand') === 1, firstNote: strOrNull(row, 'first_note'), reportHash: strOrNull(row, 'report_hash'), postAttemptedAt: strOrNull(row, 'post_attempted_at'), headOid: strOrNull(row, 'head_oid'), extraInstructions: extra === null ? null : JSON.parse(extra) as ExtraInstructions, models: models === null ? null : JSON.parse(models) as RunModels }
 }
 
 const toSweep = (row: Row): Sweep => {
@@ -489,6 +489,7 @@ const runColumns: Record<keyof RunChanges, string> = {
   note: 'note',
   costUsd: 'cost_usd',
   resume: 'resume',
+  jumped: 'jumped',
   resolvedByHand: 'resolved_by_hand',
   firstNote: 'first_note',
   reportHash: 'report_hash',
@@ -506,7 +507,7 @@ const runColumns: Record<keyof RunChanges, string> = {
 
 // the columns a sweep has of a run's, and its own; a run's column a sweep lacks is never written to the sweeps table
 const sweepFields: Partial<Record<keyof SweepChanges, string>> = {
-  ...Object.fromEntries(Object.entries(runColumns).filter(([key]) => !['resolvedByHand', 'firstNote', 'reportHash', 'postAttemptedAt', 'headOid', 'extraInstructions', 'models'].includes(key))),
+  ...Object.fromEntries(Object.entries(runColumns).filter(([key]) => !['jumped', 'resolvedByHand', 'firstNote', 'reportHash', 'postAttemptedAt', 'headOid', 'extraInstructions', 'models'].includes(key))),
   rowReports: 'row_reports',
   postAttempts: 'post_attempts',
 }
@@ -519,7 +520,7 @@ const sweepValue = (key: keyof SweepChanges, value: unknown): SQLInputValue => {
 
 const runValue = (key: keyof RunChanges, value: unknown): SQLInputValue => {
   if (key === 'args' || key === 'result' || key === 'steps' || key === 'extraInstructions' || key === 'models') return value === null || value === undefined ? null : JSON.stringify(value)
-  if (key === 'resolvedByHand' || key === 'posting') return value === true ? 1 : 0
+  if (key === 'jumped' || key === 'resolvedByHand' || key === 'posting') return value === true ? 1 : 0
   return (value ?? null) as SQLInputValue
 }
 
@@ -692,6 +693,8 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
       // version 18 added sweeps.row_reports and sweeps.post_attempts; a sweep from before it reads as having neither
       if (!sweepColumns.includes('row_reports')) db.exec('ALTER TABLE sweeps ADD COLUMN row_reports TEXT')
       if (!sweepColumns.includes('post_attempts')) db.exec('ALTER TABLE sweeps ADD COLUMN post_attempts TEXT')
+      // version 21 added runs.jumped; a row from before it reads as not started ahead of the queue
+      if (!columns.includes('jumped')) db.exec('ALTER TABLE runs ADD COLUMN jumped INTEGER NOT NULL DEFAULT 0')
       for (const statement of ticksSchema) db.exec(statement)
       // version 19 added post_marks
       for (const statement of postMarksSchema) db.exec(statement)
