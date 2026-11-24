@@ -137,6 +137,8 @@ export type StartConfirmModel = {
   busy: string
   // a review start that would wait also offers Start immediately (jump queue): the button and the line that says what it does; null otherwise
   jump: { button: string, text: string } | null
+  // a start on a PR whose auto-review run is only queued says the start replaces that run; null otherwise
+  replaces: string | null
 }
 
 // null when the PR no longer offers that start. A Fix session pushes commits, so its confirmation
@@ -189,6 +191,7 @@ export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headR
     confirm: push ? 'Start fix session' : 'Start',
     busy: push ? 'Starting fix session…' : 'Starting…',
     jump: option.jump ?? null,
+    replaces: option.replaces ?? null,
   }
 }
 
@@ -815,10 +818,15 @@ export type AutoRunRow = {
   // the post button, on the run it is about
   stored: StoredButtonsModel | null
   note: string | null
+  // why a run that ended without running ended, in plain words; null for any other run
+  why: string | null
   queuedAt: string | null
   startedAt: string | null
   finishedAt: string | null
 }
+
+// a run that never ran, and the plain reason its note names
+const skippedWhy: Readonly<Record<string, string>> = { superseded: 'Replaced by a review you started by hand.' }
 
 const autoReasons: Readonly<Record<string, string>> = {
   requested: 'Review requested',
@@ -861,6 +869,7 @@ export const autoRunRows = (runs: readonly RunView[], stored: StoredButtonsModel
     ...runText(run),
     posted: autoPostedWords(run),
     note: run.note,
+    why: run.status === 'skipped' ? skippedWhy[run.note ?? ''] ?? null : null,
     queuedAt: run.queuedAt,
     // started_at holds the queue time until the run really starts (section 10, Recording)
     startedAt: run.status === 'queued' || (run.status !== 'running' && run.pid === null) ? null : run.startedAt,
