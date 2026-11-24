@@ -15,6 +15,8 @@ import type { RunView } from '../public/agent.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { installFakeBrowser, press } from './fake-dom.ts'
 import type { FakeElement } from './fake-dom.ts'
+import { logEntryText } from '../public/autoreviewlogview.ts'
+import type { LogEntry } from '../src/autoreviewlog.ts'
 import { fakeTime, openPage1, openPage2 } from './helpers.ts'
 
 type Sent = { url: string, method: string, body: Record<string, unknown> | null }
@@ -160,4 +162,9 @@ test('a skipped auto run with another reason shows no superseded line', async ()
   const [closed] = rowsOf({ status: 'skipped', note: 'closed', finishedAt: '2026-10-28T14:40:00Z' })
   const model = drawerModel({ row: row(await cellOf(closed!)), open: true, runs: { state: 'ready', items: [runView(closed!) as unknown as RunView] }, reports: { state: 'loading' }, confirm: null })
   assert.deepEqual(model.autoRuns.map((entry) => entry.why), [null])
+})
+
+test('the auto-review log says a superseded run was dropped before it started, replaced by a review the owner started', () => {
+  const line = { id: 1, repo: scenario.repo, lane: 'pr', number: 106, title: 'feat(nav): an invented change', decision: 'dropped', reason: 'superseded', note: null, head: 'cccc3334444', run: { kind: 'run', id: 4 }, model: null, tick: 3, at: '2026-11-02T14:30:00Z', lastAt: '2026-11-02T14:30:00Z', count: 1 } as unknown as LogEntry
+  assert.equal(logEntryText(line), 'Dropped before start: replaced by a review you started')
 })
