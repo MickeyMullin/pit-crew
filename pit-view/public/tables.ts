@@ -6,6 +6,7 @@ import { showsMerge, showsReReview } from './agent.ts'
 import { agentCellNodes, agentCellSig } from './agentcell.ts'
 import { avatar, basedOnChip, chip, icons, issueChip, mergeChip, pip, ticketChip } from './cells.ts'
 import { closedTally, hasTickets } from './closed.ts'
+import { copilotNote, copilotRequestsChanges } from './copilot.ts'
 import { h, newTab, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import { closedSortValues, mineSortValues, othersSortValues } from './filters.ts'
@@ -222,6 +223,7 @@ export const othersColumns = (agent: boolean): Column<OtherRow>[] => [
           ? h('a', { ...newTab, class: 'chip tone-blue chip-link', href: safeHref(reReviewHref(flag.sinceSha, view.repo, row.number, row.url)) }, flag.label)
           : chip(flag.label, 'blue')),
         row.reviewers.map(pip),
+        copilotRequestsChanges(row) ? chip(copilotNote, 'red') : null,
         row.flags.length === 0 && row.reviewers.length === 0 ? h('span', { class: 'muted small' }, 'no reviews yet') : null)],
     }),
   },
