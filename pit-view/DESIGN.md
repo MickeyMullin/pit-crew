@@ -295,7 +295,7 @@ All responses are JSON. Times are ISO 8601 UTC strings; the UI formats them.
   "tiles": { "yourMove": 11, "mineChangesRequested": 1, "mineChangesRequestedDetail": { "number": 101, "by": "Alex", "at": "2026-10-26T22:14:00Z" }, "mineReadyToMerge": 4, "waitingOnAuthor": 10, "closedToday": 0, "closedPrevious": { "count": 13, "merged": 10, "closed": 3, "label": "yesterday" } },
   "counts": { "mine": { "open": 12, "drafts": 4 }, "others": { "open": 30 } },
   "mine": { "groups": [ { "key": "changesRequested", "label": "Changes requested", "sub": "your move", "collapsible": false, "rows": [ "MineRow" ] } ] },
-  "others": { "groups": [ { "key": "yourMove", "label": "Your move", "sub": "requested of you, not reviewed by you, or pushed since your review", "collapsible": false, "rows": [ "OtherRow" ] } ] },
+  "others": { "groups": [ { "key": "yourMove", "label": "Your move", "sub": "requested of you, not reviewed by you, or updated since your review", "collapsible": false, "rows": [ "OtherRow" ] } ] },
   "sweeps": "SweepsView (below)",
   "closed": {
     "today": { "label": "Today", "isMondayRule": false, "from": "2026-10-27T04:00:00Z", "to": "2026-10-27T14:05:38Z", "rows": [ "ClosedRow" ] },

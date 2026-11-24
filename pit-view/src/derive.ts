@@ -850,7 +850,7 @@ const mineGroups: Omit<Group<MineGroup, MineRow>, 'rows'>[] = [
 ]
 
 const otherGroups: Omit<Group<OtherGroup, OtherRow>, 'rows'>[] = [
-  { key: 'yourMove', label: 'Your move', sub: 'requested of you, not reviewed by you, or pushed since your review', collapsible: false },
+  { key: 'yourMove', label: 'Your move', sub: 'requested of you, not reviewed by you, or updated since your review', collapsible: false },
   { key: 'readyToMerge', label: 'Ready to merge', sub: 'only the author can act', collapsible: false },
   { key: 'waitingOnAuthor', label: 'Waiting on author', sub: 'conflicts, failing CI, changes requested, or nothing new since your review', collapsible: false },
   { key: 'bots', label: 'Bots', sub: 'dependency updates', collapsible: true },

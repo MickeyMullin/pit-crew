@@ -706,6 +706,7 @@ test('groups keep display order, hold rows in attention order, and name a lone b
     ['waitingOnAuthor', 'Waiting on author', [109, 108, 118, 116]],
     ['bots', 'Bots', [114, 115]],
   ])
+  assert.equal(others.groups.find((group) => group.key === 'yourMove')?.sub, 'requested of you, not reviewed by you, or updated since your review')
   const oneBot = groupRows((await rows()).filter((entry) => entry.number !== 115))
   assert.equal(oneBot.others.groups.find((group) => group.key === 'bots')?.label, 'dependabot')
 })
