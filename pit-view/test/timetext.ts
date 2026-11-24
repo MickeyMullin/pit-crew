@@ -18,7 +18,7 @@ export const codeExtensions = new Set(['.ts', '.mts', '.js', '.mjs'])
 
 // a page is checked through its inline scripts; the other served files are data and must hold no script
 export const pageExtensions = new Set(['.html'])
-export const inertExtensions = new Set(['.css', '.json', '.png', '.ico', '.webp', '.woff2', '.svg'])
+export const inertExtensions = new Set(['.css', '.json', '.png', '.ico', '.webp', '.woff2', '.svg', '.webmanifest'])
 
 const walk = async (dir: string): Promise<string[]> => {
   const files: string[] = []

@@ -9,7 +9,10 @@ import { test } from 'node:test'
 
 const publicDir = join(import.meta.dirname, '..', 'public')
 
-const publicFiles = async (): Promise<string[]> => (await readdir(publicDir)).filter((name) => !name.startsWith('.')).sort()
+// pictures and the manifest are data: the checks below on colors and path comments read text files, and the icon test reads the rest
+const dataExtensions = ['.png', '.ico', '.webmanifest']
+
+const publicFiles = async (): Promise<string[]> => (await readdir(publicDir)).filter((name) => !name.startsWith('.') && !dataExtensions.some((extension) => name.endsWith(extension))).sort()
 
 const read = (name: string): Promise<string> => readFile(join(publicDir, name), 'utf8')
 
@@ -52,8 +55,7 @@ test('every color is a light-dark() token in styles.css, and no other file holds
   assert.deepEqual(outside, [], 'styles.css uses colors only through tokens')
   assert.match(css, /color-scheme: light dark/)
   for (const name of await publicFiles()) {
-    // the favicon is a standalone document that cannot read the stylesheet's tokens; its own test below holds its colors to solid fills
-    if (name === 'styles.css' || name === 'favicon.svg') continue
+    if (name === 'styles.css') continue
     const text = await read(name)
     // svg path data such as M6 9l6 6 is not a color; strip d="..." before looking
     const lines = text.replace(/\sd="[^"]*"/g, '').split('\n').filter((line) => colorLiteral.test(line))
@@ -119,11 +121,10 @@ test('every public file starts with its path comment', async () => {
     '.ts': (name) => `// public/${name}`,
     '.css': (name) => `/* public/${name} */`,
     '.html': (name) => `<!-- public/${name} -->`,
-    '.svg': (name) => `<!-- public/${name} -->`,
   }
   for (const name of await publicFiles()) {
     const expected = comment[name.slice(name.lastIndexOf('.'))]
-    assert.ok(expected !== undefined, `${name} is a TypeScript, CSS, HTML, or SVG file`)
+    assert.ok(expected !== undefined, `${name} is a TypeScript, CSS, or HTML file`)
     assert.equal((await read(name)).split('\n')[0], expected(name))
   }
 })
@@ -151,18 +152,58 @@ test('every link built in public/ opens in a new tab unless it stays in the app'
   assert.deepEqual(inPlace, [])
 })
 
-// the favicon: one committed SVG, linked from every page's head, needing no outside request
-test('every page links the committed favicon, and the icon is a self-contained SVG of solid fills', async () => {
-  for (const name of (await publicFiles()).filter((file) => file.endsWith('.html'))) {
+// the icons: the owner's art as committed PNGs, linked from every page's head, with no outside request
+const pngInfo = (bytes: Buffer): { signature: string, width: number, height: number, colorType: number } =>
+  ({ signature: bytes.subarray(0, 8).toString('hex'), width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20), colorType: bytes[25]! })
+
+const pngSignature = '89504e470d0a1a0a'
+
+test('every page links the favicon sizes, the Apple touch icon, and the manifest, and no page leaves an empty icon link', async () => {
+  const pages = (await readdir(publicDir)).filter((file) => file.endsWith('.html'))
+  assert.deepEqual(pages.sort(), ['index.html', 'settings.html'])
+  for (const name of pages) {
     const head = (await read(name)).split('</head>')[0]!
-    assert.match(head, /<link rel="icon" type="image\/svg\+xml" href="\/favicon\.svg">/, `${name} links the favicon`)
+    assert.doesNotMatch(head, /rel="icon"[^>]*href="data:/, `${name} has no empty icon link that hides the favicon`)
+    assert.doesNotMatch(head, /favicon\.svg/, `${name} does not link the old SVG`)
+    assert.match(head, /<link rel="icon" type="image\/png" sizes="16x16" href="\/favicon-16\.png">/, `${name} links the 16 pixel favicon`)
+    assert.match(head, /<link rel="icon" type="image\/png" sizes="32x32" href="\/favicon-32\.png">/, `${name} links the 32 pixel favicon`)
+    assert.match(head, /<link rel="apple-touch-icon" href="\/apple-touch-icon\.png">/, `${name} links the touch icon`)
+    // the manifest is read with the page's cookies, so a signed-in proxied page can fetch it
+    assert.match(head, /<link rel="manifest" href="\/site\.webmanifest" crossorigin="use-credentials">/, `${name} links the manifest`)
   }
-  const icon = await read('favicon.svg')
-  assert.match(icon, /^<!-- public\/favicon\.svg -->\n<svg [^>]*viewBox="0 0 32 32"/)
-  // the only URL is the SVG namespace; nothing is fetched, no script runs, and no thin strokes or text
-  assert.deepEqual([...icon.matchAll(/https?:\/\/[^"'\s)]+/g)].map((match) => match[0]), ['http://www.w3.org/2000/svg'])
-  assert.doesNotMatch(icon, /<script|<image|<text|<style|href=|url\(|stroke|@import/)
-  const fills = [...icon.matchAll(/fill="([^"]+)"/g)].map((match) => match[1]!)
-  assert.ok(fills.length >= 2, 'the icon has a background and a mark')
-  for (const fill of fills) assert.match(fill, /^#[0-9A-Fa-f]{6}$/, 'solid fills only')
+})
+
+test('the icon files are the owner\'s art at the sizes the pages and the manifest name, and the app icons are opaque', async () => {
+  const bytes = (name: string): Promise<Buffer> => readFile(join(publicDir, name))
+  const designFavicon = await readFile(join(import.meta.dirname, '..', 'design', 'pit-view-favicon.png'))
+  assert.ok((await bytes('favicon-16.png')).equals(designFavicon), 'the 16 pixel favicon is the owner\'s own file')
+  const sizes: [string, number][] = [['favicon-16.png', 16], ['favicon-32.png', 32], ['apple-touch-icon.png', 180], ['icon-192.png', 192], ['icon-512.png', 512]]
+  for (const [name, size] of sizes) {
+    const info = pngInfo(await bytes(name))
+    assert.deepEqual([info.signature, info.width, info.height], [pngSignature, size, size], `${name} is a ${size} pixel square PNG`)
+  }
+  // an app icon with a transparent corner is filled in black by some systems: color type 2 is RGB with no alpha
+  for (const name of ['apple-touch-icon.png', 'icon-192.png', 'icon-512.png']) assert.equal(pngInfo(await bytes(name)).colorType, 2, `${name} is opaque`)
+  const designApp = await readFile(join(import.meta.dirname, '..', 'design', 'pit-view-icon-blue-on-white.png'))
+  assert.ok((await bytes('icon-512.png')).equals(designApp), 'the 512 pixel app icon is the owner\'s blue-on-white file')
+  // favicon.ico holds the 16, 32, and 48 pixel images as PNG entries
+  const ico = await bytes('favicon.ico')
+  assert.deepEqual([ico.readUInt16LE(0), ico.readUInt16LE(2), ico.readUInt16LE(4)], [0, 1, 3])
+  const entries = [0, 1, 2].map((at) => ({ width: ico[6 + at * 16]!, height: ico[7 + at * 16]!, length: ico.readUInt32LE(14 + at * 16), offset: ico.readUInt32LE(18 + at * 16) }))
+  assert.deepEqual(entries.map((entry) => [entry.width, entry.height]), [[16, 16], [32, 32], [48, 48]])
+  for (const entry of entries) assert.equal(ico.subarray(entry.offset, entry.offset + 8).toString('hex'), pngSignature, 'each entry is a PNG')
+})
+
+test('the manifest names the app and its two icons, which exist, and holds no color', async () => {
+  const manifest = JSON.parse(await readFile(join(publicDir, 'site.webmanifest'), 'utf8')) as Record<string, unknown>
+  assert.equal(manifest.name, 'Pit View')
+  assert.equal(manifest.short_name, 'Pit View')
+  assert.equal(manifest.start_url, '/')
+  assert.equal(manifest.display, 'standalone')
+  assert.deepEqual(manifest.icons, [
+    { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+    { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+  ])
+  for (const icon of manifest.icons as { src: string }[]) assert.ok((await readdir(publicDir)).includes(icon.src.slice(1)), `${icon.src} exists`)
+  assert.doesNotMatch(JSON.stringify(manifest), colorLiteral, 'colors live in styles.css tokens alone')
 })

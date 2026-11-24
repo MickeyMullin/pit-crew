@@ -1284,19 +1284,26 @@ test('each served page carries this start\'s token in a meta tag, added at serve
   }
 })
 
-test('the favicon is served by the static path as an SVG with no outside request, and every page head links it', async () => {
+test('every icon file is served by the static path with its type, byte for byte, and every page head links them', async () => {
   const publicDir = join(import.meta.dirname, '..', 'public')
-  const icon = await readFile(join(publicDir, 'favicon.svg'), 'utf8')
-  const files = { 'public/favicon.svg': icon, 'public/index.html': await readFile(join(publicDir, 'index.html'), 'utf8'), 'public/settings.html': await readFile(join(publicDir, 'settings.html'), 'utf8') }
+  const types: [string, string][] = [
+    ['favicon-16.png', 'image/png'], ['favicon-32.png', 'image/png'], ['favicon.ico', 'image/x-icon'], ['apple-touch-icon.png', 'image/png'],
+    ['icon-192.png', 'image/png'], ['icon-512.png', 'image/png'], ['site.webmanifest', 'application/manifest+json'],
+  ]
+  const files: Record<string, string | Buffer> = {}
+  for (const [name] of types) files[`public/${name}`] = await readFile(join(publicDir, name))
+  for (const page of ['index.html', 'settings.html']) files[`public/${page}`] = await readFile(join(publicDir, page), 'utf8')
   const h = await setup({ files })
   try {
-    const response = await fetch(`${h.base}/favicon.svg`)
-    assert.equal(response.status, 200)
-    assert.equal(response.headers.get('content-type'), 'image/svg+xml')
-    assert.equal(await response.text(), icon)
+    for (const [name, type] of types) {
+      const response = await fetch(`${h.base}/${name}`)
+      assert.equal(response.status, 200, name)
+      assert.equal(response.headers.get('content-type'), type, name)
+      assert.ok(Buffer.from(await response.arrayBuffer()).equals(files[`public/${name}`] as Buffer), `${name} is served byte for byte`)
+    }
     for (const path of ['/', '/settings.html']) {
-      const body = await (await fetch(`${h.base}${path}`)).text()
-      assert.ok(body.split('</head>')[0]!.includes('<link rel="icon" type="image/svg+xml" href="/favicon.svg">'), `${path} links the favicon`)
+      const head = (await (await fetch(`${h.base}${path}`)).text()).split('</head>')[0]!
+      for (const href of ['/favicon-16.png', '/favicon-32.png', '/apple-touch-icon.png', '/site.webmanifest']) assert.ok(head.includes(`href="${href}"`), `${path} links ${href}`)
     }
   } finally {
     await h.cleanup()

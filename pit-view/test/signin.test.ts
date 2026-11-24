@@ -247,7 +247,7 @@ test('a signed-out request through the proxy reaches nothing: a page redirects t
       assert.equal(answer.headers.location, '/auth/sign-in', path)
       assert.ok(!answer.body.includes(rig.server.token), `${path} carries no token`)
     }
-    for (const path of ['/app.ts', '/styles.css', '/favicon.svg', '/api/view', '/api/config', '/api/instance', '/api/sweeps', '/api/prs/101/runs', '/api/reports/PR-101.md']) {
+    for (const path of ['/app.ts', '/styles.css', '/favicon-32.png', '/site.webmanifest', '/api/view', '/api/config', '/api/instance', '/api/sweeps', '/api/prs/101/runs', '/api/reports/PR-101.md']) {
       const answer = await proxied(rig, path)
       assert.equal(answer.status, 401, path)
       assert.ok(!answer.body.includes(rig.server.token), `${path} carries no token`)
