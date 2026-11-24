@@ -33,7 +33,7 @@ export const actionOffers = (row: OfferRow, open: boolean): ActionOffer[] => {
   const updates = row.primaryBase && status !== 'running' && status !== 'queued'
   return [
     ...showsMerge(row) ? [{ action: 'merge', text: 'Squash and merge' } as const] : [],
-    draft ? { action: 'markReady', text: 'Mark ready for review' } : { action: 'convertToDraft', text: 'Convert to draft' },
+    draft ? { action: 'markReady', text: 'Mark ready' } : { action: 'convertToDraft', text: 'Convert to draft' },
     { action: 'requestReview', text: 'Request review' },
     ...updates ? [{ action: 'update', text: 'Update branch' } as const] : [],
     ...updates && row.issues.some((issue) => issue.kind === 'conflicts') ? [{ action: 'resolveConflicts', text: 'Resolve conflicts' } as const] : [],

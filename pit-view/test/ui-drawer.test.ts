@@ -1164,8 +1164,8 @@ test('a card rebuilt from the runs list takes the commit from the run record', (
 const cleanDraft = (patch: Partial<AgentCell> = {}): AgentCell => finished({ text: 'Clean · mark ready?', ...patch })
 const ownRow = (agent: AgentCell, state: string, section = 'mine'): OpenRow => ({ ...row(agent), section, merge: { state }, issues: [], primaryBase: true } as unknown as OpenRow)
 
-test('the ready ask on the latest-run card says where Mark ready for review is, on the viewer\'s own draft only', () => {
-  const pointer = 'Mark it ready from the Actions section above: Mark ready for review.'
+test('the ready ask on the latest-run card says where Mark ready is, on the viewer\'s own draft only', () => {
+  const pointer = 'Mark it ready from the Actions section above: Mark ready.'
   assert.equal(drawerModel(input(null, { row: ownRow(cleanDraft(), 'draft') })).result?.ready, pointer)
   assert.equal(drawerModel(input(null, { row: ownRow(cleanDraft({ text: 'Clean · mark ready? · finished by hand' }), 'draft') })).result?.ready, pointer)
   assert.equal(drawerModel(input(null, { row: ownRow(cleanDraft(), 'ready') })).result?.ready, null)
@@ -1176,11 +1176,11 @@ test('the ready ask on the latest-run card says where Mark ready for review is, 
 })
 
 test('readyPointer needs both the done text and the offered action', () => {
-  assert.equal(readyPointer('Clean · mark ready?', [{ action: 'markReady', text: 'Mark ready for review' }]) !== null, true)
+  assert.equal(readyPointer('Clean · mark ready?', [{ action: 'markReady', text: 'Mark ready' }]) !== null, true)
   assert.equal(readyPointer('Clean · mark ready?', [{ action: 'convertToDraft', text: 'Convert to draft' }]), null)
   assert.equal(readyPointer('Clean · mark ready?', []), null)
-  assert.equal(readyPointer(null, [{ action: 'markReady', text: 'Mark ready for review' }]), null)
-  assert.equal(readyPointer('Approved', [{ action: 'markReady', text: 'Mark ready for review' }]), null)
+  assert.equal(readyPointer(null, [{ action: 'markReady', text: 'Mark ready' }]), null)
+  assert.equal(readyPointer('Approved', [{ action: 'markReady', text: 'Mark ready' }]), null)
 })
 
 // Post it, on the latest-run card (section 8, Drawer)

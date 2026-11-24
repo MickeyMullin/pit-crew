@@ -663,7 +663,7 @@ export type ResultModel = {
   stale: string | null
   // set when the owner's re-read replaced this run's recorded outcome, and why it had one
   byHand: string | null
-  // set when the run's ask is "Clean · mark ready?" and the drawer offers Mark ready for review: says where the action is, and does nothing itself
+  // set when the run's ask is "Clean · mark ready?" and the drawer offers Mark ready: says where the action is, and does nothing itself
   ready: string | null
   // set when the review finished and its post was refused: says so and says that nothing reached GitHub
   notPosted: string | null
@@ -671,10 +671,10 @@ export type ResultModel = {
   report: { name: string, openName: string } | null
 }
 
-// the quiet line that points the "Clean · mark ready?" ask at the Actions section; null unless the done text is that ask and Mark ready for review is offered now, which already means the viewer's own open draft
+// the quiet line that points the "Clean · mark ready?" ask at the Actions section; null unless the done text is that ask and Mark ready is offered now, which already means the viewer's own open draft
 export const readyPointer = (text: string | null, offers: readonly ActionOffer[]): string | null =>
   text !== null && text.startsWith('Clean · mark ready?') && offers.some((offer) => offer.action === 'markReady')
-    ? 'Mark it ready from the Actions section above: Mark ready for review.'
+    ? 'Mark it ready from the Actions section above: Mark ready.'
     : null
 
 // how the original failure reads beside a result the owner finished by hand

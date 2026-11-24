@@ -76,7 +76,7 @@ const input = (row: OpenRow, patch: Partial<DrawerInput> = {}): DrawerInput => (
 
 test('only the viewer\'s own open PRs offer actions: Merge when ready, Mark ready on a draft, Convert to draft otherwise, Request review, and Update branch', () => {
   assert.deepEqual(actionOffers(mine('draft'), true).map((offer) => [offer.action, offer.text]), [
-    ['markReady', 'Mark ready for review'], ['requestReview', 'Request review'], ['update', 'Update branch'],
+    ['markReady', 'Mark ready'], ['requestReview', 'Request review'], ['update', 'Update branch'],
   ])
   for (const state of ['needsReview', 'needsApproval', 'checking', 'blocked']) {
     assert.deepEqual(actionOffers(mine(state), true).map((offer) => offer.action), ['convertToDraft', 'requestReview', 'update'], state)
