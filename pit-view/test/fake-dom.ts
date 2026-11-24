@@ -70,6 +70,8 @@ export type FakeDocument = {
   querySelector: (selector: string) => FakeElement | null
   querySelectorAll: (selector: string) => FakeElement[]
   addEventListener: (type: string, listener: Listener) => void
+  // the text a drag selected, for the code that reads it; a test replaces it
+  getSelection: () => { isCollapsed: boolean, containsNode: (node: FakeElement, partly?: boolean) => boolean } | null
   hear: (event: FakeEvent) => void
   settleFocus: () => void
   loadPage: (html: string) => void
@@ -367,6 +369,7 @@ export const makeDocument = (): FakeDocument => {
     addEventListener: (type, listener) => {
       heard.set(type, [...heard.get(type) ?? [], listener])
     },
+    getSelection: () => null,
     hear: (event) => {
       for (const listener of heard.get(event.type) ?? []) listener(event)
     },
@@ -398,12 +401,13 @@ export type FakeBrowser = { document: FakeDocument, restore: () => void }
 // installs the fake as the page's globals, with the fetch the test supplies; restore puts back what was there
 export const installFakeBrowser = (fetchImpl: typeof fetch, hash = ''): FakeBrowser => {
   const doc = makeDocument()
-  const names = ['document', 'HTMLElement', 'HTMLTextAreaElement', 'window', 'fetch', 'ResizeObserver', 'IntersectionObserver']
+  const names = ['document', 'Element', 'HTMLElement', 'HTMLTextAreaElement', 'window', 'fetch', 'ResizeObserver', 'IntersectionObserver']
   const saved = names.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const)
   const set = (name: string, value: unknown): void => {
     Object.defineProperty(globalThis, name, { value, configurable: true, writable: true })
   }
   set('document', doc)
+  set('Element', { [Symbol.hasInstance]: (value: unknown) => typeof value === 'object' && value !== null && everyElement.has(value) })
   set('HTMLElement', { [Symbol.hasInstance]: (value: unknown) => typeof value === 'object' && value !== null && everyElement.has(value) })
   set('HTMLTextAreaElement', { [Symbol.hasInstance]: (value: unknown) => typeof value === 'object' && value !== null && everyTextArea.has(value) })
   set('window', { location: { hash }, addEventListener: () => undefined })

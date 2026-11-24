@@ -1197,12 +1197,20 @@ export const outsidePressCloses = (press: OutsidePressState): boolean => !press.
 export type PressTarget = { closest: (selector: string) => unknown }
 export type OutsideDrawer = { isOpen: () => boolean, outside: (where: { inPanel: boolean, opener: boolean }) => boolean }
 
+// a PR's row in one of the tables, and what inside a row keeps its own click
+export const prRowSelector = 'tr[data-pr][data-table]'
+export const rowControlSelector = 'a[href], button, input, select, textarea, label, summary, [role="button"], [contenteditable]'
+
+// the PR row a press or click landed on, when it landed on the row itself rather than on a link or control in it: such a click opens that PR's drawer, so such a press closes none
+export const plainRowOf = <E = unknown>(target: PressTarget): E | null =>
+  target.closest(rowControlSelector) === null ? target.closest(prRowSelector) as E | null : null
+
 export const drawerPanelSelector = '#drawer, #sweep-drawer, #report-panel'
 
 export const closeOnOutsidePress = (drawers: readonly OutsideDrawer[], target: PressTarget | null): boolean => {
   const where = {
     inPanel: target !== null && target.closest(drawerPanelSelector) !== null,
-    opener: target !== null && target.closest(drawerOpenerSelector) !== null,
+    opener: target !== null && (target.closest(drawerOpenerSelector) !== null || plainRowOf(target) !== null),
   }
   let closed = false
   for (const open of drawers) if (open.isOpen() && open.outside(where)) closed = true

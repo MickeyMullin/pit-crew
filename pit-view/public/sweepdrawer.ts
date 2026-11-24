@@ -45,6 +45,8 @@ export type SweepDrawer = {
   escape: () => boolean
   // a press on the page: closes the drawer when the press starts outside it and its report panel, off the controls that open a drawer, and with no request on its way; false otherwise
   outside: (where: { inPanel: boolean, opener: boolean }) => boolean
+  // whether a request of this drawer's is on its way
+  busy: () => boolean
   focusKey: (key: string | null, force?: boolean) => void
 }
 
@@ -770,6 +772,7 @@ export const createSweepDrawer = (options: SweepDrawerOptions): SweepDrawer => {
       close()
       return true
     },
+    busy: () => isOpen && busy,
     focusKey,
   }
 }

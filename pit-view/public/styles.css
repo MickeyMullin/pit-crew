@@ -887,6 +887,11 @@ button {
   }
 }
 
+/* a click on a row opens its PR's drawer (public/rowclick.ts) */
+.prs tr[data-pr] {
+  cursor: pointer;
+}
+
 .prs tr.row-changes td {
   background: var(--red-row);
 }

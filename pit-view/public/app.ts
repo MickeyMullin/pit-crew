@@ -22,6 +22,7 @@ import { shownCounts, slashApplies } from './pagesearch.ts'
 import { createReportPanel } from './reportpanel.ts'
 import { closedRangeOf, render } from './render.ts'
 import type { Settings, UiState } from './render.ts'
+import { mountRowClicks } from './rowclick.ts'
 import { readToken } from './runapi.ts'
 import { emptyFeed, findOpenRow, openRows, receivePatch, receiveView, restartFeed } from './state.ts'
 import type { FeedStep } from './state.ts'
@@ -470,6 +471,9 @@ document.addEventListener('click', (event) => {
   else if (banner !== null) drawer.open(Number(banner.dataset.openAgent), { key: `banner-open:${banner.dataset.openAgent}`, number: Number(banner.dataset.openAgent) })
   else if (fix !== null) drawer.open(Number(fix.dataset.fixSession), { key: `banner-fix:${fix.dataset.fixSession}`, number: Number(fix.dataset.fixSession) }, 'fix')
 })
+
+// a click anywhere else in a PR's row opens the same drawer
+mountRowClicks({ drawer, sweepDrawer, logPanel, seedRuns })
 
 // Escape closes what is topmost: the report panel, a confirmation in the drawer, then the drawer
 document.addEventListener('keydown', (event) => {

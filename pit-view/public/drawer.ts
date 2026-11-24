@@ -60,6 +60,8 @@ export type Drawer = {
   escape: () => boolean
   // a press on the page: closes the drawer when the press starts outside it and its report panel, off the controls that open a drawer, and with no request on its way; false otherwise
   outside: (where: { inPanel: boolean, opener: boolean }) => boolean
+  // whether a request of this drawer's is on its way
+  busy: () => boolean
   // focus the control with this data-focus-key, or the heading when it is gone; without force
   // only while focus is inside the drawer or on nothing, so a page's field in use keeps it
   focusKey: (key: string | null, force?: boolean) => void
@@ -1336,6 +1338,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       close()
       return true
     },
+    busy: () => number !== null && busy,
     focusKey,
   }
 }
