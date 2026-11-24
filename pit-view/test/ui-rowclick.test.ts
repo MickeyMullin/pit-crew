@@ -1,5 +1,5 @@
 // test/ui-rowclick.test.ts
-// a click on a PR's row opens its drawer (section 6 of DESIGN.md, Columns, Opening): real rows, derived from the fixture PRs and drawn by the real table renderer, clicked on the fake document in test/fake-dom.ts with the real drawer, sweep drawer, and handler
+// a click on a PR's row opens its drawer (section 6 of DESIGN.md, Columns, Row click): real rows, derived from the fixture PRs and drawn by the real table renderer, clicked on the fake document in test/fake-dom.ts with the real drawer, sweep drawer, and handler
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -108,6 +108,8 @@ for (const [number, section] of [[101, 'Mine'], [106, 'Others\'']] as const) {
       assert.equal(drawerRoot.hidden, false)
       assert.match(drawerRoot.textContent, new RegExp(`Agent for #${number}`))
       assert.deepEqual(did, ['seed', 'log'])
+      // an open row takes no keyboard focus of its own: its Agent button is the keyboard path
+      assert.equal(row(number).getAttribute('tabindex'), null)
       // it starts nothing and asks nothing
       assert.deepEqual(sent, [])
       assert.equal(drawerRoot.querySelector('[data-confirm]'), null)

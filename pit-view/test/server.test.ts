@@ -1515,19 +1515,24 @@ test('a closed PR keeps its run history and reports on their own routes, and eve
     const origin = { Origin: h.server.url, ...token(h) }
     for (const number of [106, 97, 95]) {
       for (const kind of ['default', 'tandem', 'stack', 'fix']) {
-        assert.equal((await send(`${h.base}/api/prs/${number}/runs`, 'POST', { repo: scenario.repo, kind }, token(h))).status, 422, `#${number} ${kind}`)
+        const refused = await send(`${h.base}/api/prs/${number}/runs`, 'POST', { repo: scenario.repo, kind }, token(h))
+        assert.equal(refused.status, 422, `#${number} ${kind}`)
+        assert.match(String(refused.body.error), /not an open PR/)
       }
-      for (const action of ['merge', 'markReady', 'update']) {
-        const refused = await send(`${h.base}/api/prs/${number}/actions`, 'POST', { action, repo: scenario.repo, viewer: scenario.viewer, headSha: 'a'.repeat(40), baseRef: 'main' }, origin)
-        assert.ok(refused.status >= 400 && refused.status < 500, `#${number} ${action}: ${refused.status}`)
+      const bound = { repo: scenario.repo, headSha: 'a'.repeat(40), base: scenario.defaultBranch }
+      for (const body of [{ action: 'merge', ...bound }, { action: 'update', viewer: scenario.viewer, ...bound }, { action: 'resolveConflicts', viewer: scenario.viewer, ...bound }, { action: 'markReady', repo: scenario.repo }, { action: 'convertToDraft', repo: scenario.repo }]) {
+        const refused = await send(`${h.base}/api/prs/${number}/actions`, 'POST', body, origin)
+        assert.equal(refused.status, 422, `#${number} ${body.action}: ${String(refused.body.error)}`)
+        assert.match(String(refused.body.error), /not an open PR/)
       }
     }
-    const run = `${h.base}/api/runs/${String(started.body.id)}`
-    const bound = { repo: scenario.repo, viewer: scenario.viewer, number: 106, headSha: 'a'.repeat(40), base: 'main' }
-    for (const [path, body] of [['reread', bound], ['post', { ...bound, form: 'comment' }]] as const) {
-      const refused = await send(`${run}/${path}`, 'POST', body, origin)
-      assert.ok(refused.status >= 400 && refused.status < 500, `${path}: ${refused.status}`)
-    }
+    const shown = { repo: scenario.repo, viewer: scenario.viewer, number: 106, headSha: 'a'.repeat(40) }
+    const reread = await send(`${h.base}/api/runs/${String(started.body.id)}/reread`, 'POST', { ...shown, base: scenario.defaultBranch }, token(h))
+    assert.equal(reread.status, 409)
+    assert.match(String(reread.body.error), /not an open PR/)
+    const posted = await send(`${h.base}/api/runs/${String(started.body.id)}/post`, 'POST', { ...shown, form: 'comment' }, origin)
+    assert.equal(posted.status, 422, String(posted.body.error))
+    assert.match(String(posted.body.error), /not an open PR/)
     assert.equal(h.launch.children.length, children)
     assert.equal(githubCalls(h.runner).length, asked)
   } finally {
