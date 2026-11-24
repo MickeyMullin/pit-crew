@@ -682,7 +682,7 @@ test('a version 7 cache gains runs.resolved_by_hand in place: its runs stay, not
   }
 })
 
-test('a version 20 cache gains runs.jumped in place: its runs stay, not started ahead of the queue, and a jumped run is stored as one', async () => {
+test('a version 21 cache gains runs.jumped in place: its runs stay, not started ahead of the queue, and a jumped run is stored as one', async () => {
   const { dir, cleanup } = await tempDir()
   try {
     const path = join(dir, 'cache.sqlite')
@@ -691,7 +691,7 @@ test('a version 20 cache gains runs.jumped in place: its runs stay, not started 
     first.close()
     const old = new DatabaseSync(path)
     old.exec('ALTER TABLE runs DROP COLUMN jumped')
-    old.exec('UPDATE meta SET value = \'20\' WHERE key = \'schemaVersion\'')
+    old.exec('UPDATE meta SET value = \'21\' WHERE key = \'schemaVersion\'')
     old.close()
     const cache = openCache({ path, clock: handClock().clock })
     assert.equal(cache.getRun(created.id)?.jumped, false)
@@ -1231,7 +1231,7 @@ test('a version 8 cache gains runs.first_note in place: its runs stay with no fi
   }
 })
 
-test('a cache from version 13 gains the ticks table and the auto-review columns on the runs and sweeps it keeps, and its GitHub tables are rebuilt for version 16', async () => {
+test('a cache from version 13 gains the ticks table and the auto-review columns on the runs and sweeps it keeps, and its GitHub tables are rebuilt for version 21', async () => {
   const { dir, cleanup } = await tempDir()
   try {
     const path = join(dir, 'cache.sqlite')
@@ -1246,10 +1246,10 @@ test('a cache from version 13 gains the ticks table and the auto-review columns 
     for (const column of ['origin', 'tick', 'reason', 'queued_at', 'posting', 'worktree']) old.exec(`ALTER TABLE sweeps DROP COLUMN ${column}`)
     old.exec('UPDATE meta SET value = \'13\' WHERE key = \'schemaVersion\'')
     old.close()
-    assert.equal(schemaVersion, 21)
-    assert.equal(githubTablesVersion, 16)
+    assert.equal(schemaVersion, 22)
+    assert.equal(githubTablesVersion, 21)
     const cache = openCache({ path, clock: handClock().clock })
-    // version 16 changed what the GitHub tables hold, so a cache from version 13 refetches its PRs
+    // version 21 changed what the GitHub tables hold, so a cache from version 13 refetches its PRs
     assert.equal(count(cache, 'prs'), 0)
     const run = cache.getRun(created.id)
     assert.equal(run?.origin, 'manual')
@@ -1296,7 +1296,7 @@ test('a version 16 cache gains runs.models in place: its runs read as not record
   }
 })
 
-test('a version 17 cache gains sweeps.row_reports and sweeps.post_attempts in place: its sweeps and cached PRs are kept, read as no reports recorded and no post begun, and both are stored whole', async () => {
+test('a version 17 cache gains sweeps.row_reports and sweeps.post_attempts in place: its sweeps are kept and its cached PRs are refetched, read as no reports recorded and no post begun, and both are stored whole', async () => {
   const { dir, cleanup } = await tempDir()
   try {
     const path = join(dir, 'cache.sqlite')
@@ -1311,11 +1311,11 @@ test('a version 17 cache gains sweeps.row_reports and sweeps.post_attempts in pl
     old.exec('UPDATE meta SET value = \'17\' WHERE key = \'schemaVersion\'')
     old.close()
     const cache = openCache({ path, clock: handClock().clock })
-    assert.equal(schemaVersion, 21)
+    assert.equal(schemaVersion, 22)
     assert.equal(cache.getSweep(created.id)?.status, 'done')
     assert.equal(cache.getSweep(created.id)?.rowReports, null)
     assert.deepEqual(cache.getSweep(created.id)?.postAttempts, {})
-    assert.ok(cache.readView(scenario.repo).open.length > 0, 'the cached PRs are kept')
+    assert.equal(cache.readView(scenario.repo).open.length, 0, 'the cached PRs are refetched, since version 21 changed what a row holds')
     const reports = { 114: { hash: 'a'.repeat(64), verdict: 'clean' as const } }
     assert.deepEqual(cache.updateSweep(created.id, { rowReports: reports }).rowReports, reports)
     assert.deepEqual(cache.updateSweep(created.id, { postAttempts: { 114: '2026-10-26T14:00:00Z' } }).postAttempts, { 114: '2026-10-26T14:00:00Z' })
@@ -1330,7 +1330,7 @@ test('a version 17 cache gains sweeps.row_reports and sweeps.post_attempts in pl
   }
 })
 
-test('a version 18 cache gains the post_marks table in place, keeping its sweeps and cached PRs, and a PR\'s mark withholds until it is resolved or cleared and outlives a reopen', async () => {
+test('a version 18 cache gains the post_marks table in place, keeping its sweeps and refetching its cached PRs, and a PR\'s mark withholds until it is resolved or cleared and outlives a reopen', async () => {
   const { dir, cleanup } = await tempDir()
   try {
     const path = join(dir, 'cache.sqlite')
@@ -1344,9 +1344,9 @@ test('a version 18 cache gains the post_marks table in place, keeping its sweeps
     old.exec('UPDATE meta SET value = \'18\' WHERE key = \'schemaVersion\'')
     old.close()
     const cache = openCache({ path, clock: handClock().clock })
-    assert.equal(schemaVersion, 21)
+    assert.equal(schemaVersion, 22)
     assert.equal(cache.getSweep(created.id)?.status, 'done')
-    assert.ok(cache.readView(scenario.repo).open.length > 0, 'the cached PRs are kept')
+    assert.equal(cache.readView(scenario.repo).open.length, 0, 'the cached PRs are refetched, since version 21 changed what a row holds')
     assert.deepEqual([...cache.unresolvedPostMarks(scenario.repo)], [])
     cache.beginPostMark(scenario.repo, 114, 'sweep 1')
     assert.deepEqual([...cache.unresolvedPostMarks(scenario.repo)], [114])
@@ -1551,7 +1551,7 @@ for (const from of [18, 19]) {
       old.exec(`UPDATE meta SET value = '${from}' WHERE key = 'schemaVersion'`)
       old.close()
       const cache = openCache({ path, clock: handClock().clock })
-      assert.equal(schemaVersion, 21)
+      assert.equal(schemaVersion, 22)
       // #107's and #113's posts were made from Pit View, and nothing before version 20 recorded the head they went onto, so each marks its PR too, beside the reviewed head on record
       assert.deepEqual([...cache.unresolvedPostMarks(scenario.repo)].sort(), [106, 107, 113, 114])
       assert.deepEqual(cache.postRecords(scenario.repo), new Map([
