@@ -261,6 +261,10 @@ test('the click rules are the open rows\' rules: links keep theirs, a selection 
     press(row(97))
     await settle()
     assert.deepEqual([drawer.number(), asked.length], [97, reads])
+    // opening the PR it already shows read-only, by any caller, reads nothing again
+    drawer.open(97, { key: 'closed-row:97', number: 97 })
+    await settle()
+    assert.equal(asked.length, reads)
     assert.equal(closeOnOutsidePress([drawer, sweepDrawer], row(95) as unknown as Element), false)
     press(row(95))
     assert.equal(drawer.number(), 95)
@@ -282,12 +286,14 @@ for (const key of ['Enter', ' ']) {
   })
 }
 
-test('a key on a link inside a Closed row, and any other key on the row, open nothing', async () => {
+test('a key on a link or cell inside a Closed row, and any other key on the row, open nothing', async () => {
   await withPage('today', {}, async ({ row, drawer }) => {
     const link = row(100).querySelector('a[href]')
     assert.ok(link)
     assert.equal(link.dispatch('keydown', { key: 'Enter' }), false)
     row(100).dispatch('keydown', { key: 'a' })
+    // a key that bubbles up from a cell is not the row's own
+    row(100).querySelector('td')!.dispatch('keydown', { key: 'Enter' })
     assert.equal(drawer.isOpen(), false)
   })
 })

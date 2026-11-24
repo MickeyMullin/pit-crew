@@ -16,6 +16,7 @@ import type { PitServer } from '../src/server.ts'
 import { iso } from '../src/time.ts'
 import { cellModel, showsMerge, showsReReview } from '../public/agent.ts'
 import { scenario } from './fixtures/scenario.ts'
+import { ciStateOf } from '../src/derive.ts'
 import type { LastReadings, MineRow, OpenRow } from '../src/derive.ts'
 import type { RawOpenPr, RunResult } from '../src/github.ts'
 import { emptySweepResult, failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, gate, gatedRunner, githubCalls, ok, openPage1, openPage2, reviewResult, singlePr, sweepResult, tempDir, waitFor } from './helpers.ts'
@@ -1466,6 +1467,10 @@ test('GET /api/prs/<n>/last answers what the cache last held of a closed PR, its
     await filled(h)
     const before = rowIn((await getJson<View>(`${h.base}/api/view`)).body, 106)
     assert.ok(before)
+    const pr = (await openPage1()).data.repository?.pullRequests.nodes.find((each) => each.number === 106)
+    assert.ok(pr)
+    // found closed two minutes after it was last read open, which is the time the readings carry
+    h.time.advance(2 * 60_000)
     assert.equal((await send(`${h.base}/api/prs/106/refresh`, 'POST')).body.outcome, 'closed')
     await h.server.poller.idle()
     assert.equal(rowIn((await getJson<View>(`${h.base}/api/view`)).body, 106), undefined)
@@ -1473,9 +1478,8 @@ test('GET /api/prs/<n>/last answers what the cache last held of a closed PR, its
     const { status, body } = await getJson<{ last: LastReadings | null }>(`${h.base}/api/prs/106/last`)
     assert.equal(status, 200)
     assert.deepEqual(body.last, {
-      headRef: before.headRef, baseRef: before.baseRef, headSha: before.headSha, asOf: before.freshness.fetchedAt, reviewers: before.reviewers, ci: body.last?.ci, merge: before.merge,
+      headRef: before.headRef, baseRef: before.baseRef, headSha: before.headSha, asOf: before.freshness.fetchedAt, reviewers: before.reviewers, ci: ciStateOf(pr), merge: before.merge,
     })
-    assert.ok(['green', 'pending', 'failed', 'none'].includes(String(body.last?.ci)))
     assert.equal(h.runner.calls.length, asked)
   } finally {
     await h.cleanup()
