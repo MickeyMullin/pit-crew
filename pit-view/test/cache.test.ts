@@ -1674,3 +1674,17 @@ test('ticks are recorded, read newest first, kept to the last 500, closed at the
     await cleanup()
   }
 })
+
+test('readPr answers one PR open or closed, for its repository only, and null once the cache holds none', async () => {
+  const { pages, closed } = await fetched()
+  const { cache, tick } = memoryCache()
+  fullCycle(cache, tick, pages, closed)
+  const open = cache.readPr(scenario.repo, 106)
+  assert.deepEqual([open?.number, open?.state], [106, 'open'])
+  assert.equal(cache.closePr(scenario.repo, 106), true)
+  const shut = cache.readPr(scenario.repo, 106)
+  // closing changes the state and keeps what was last read, and when it was last seen open
+  assert.deepEqual([shut?.state, shut?.pr, shut?.lastSeenAt], ['closed', open?.pr, open?.lastSeenAt])
+  assert.equal(cache.readPr('octo-example/other', 106), null)
+  assert.equal(cache.readPr(scenario.repo, 9_999), null)
+})

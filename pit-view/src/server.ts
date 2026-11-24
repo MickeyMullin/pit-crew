@@ -23,7 +23,7 @@ import { autoConcurrencyProblem, cacheFile, ConfigError, configFile, defaultHerm
 import type { Clock, Config, RunnerName, RunRunner } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner, WriteLimits } from './github.ts'
-import { latestReviewsOf, markedStack } from './derive.ts'
+import { deriveLastReadings, latestReviewsOf, markedStack } from './derive.ts'
 import { chooseExtraInstructions, createLauncher, createPostGuard, createReviewLine, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest, withExtraInstructions } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, PostGuard, Procs, Queueing, Spawn, StartKind } from './launcher.ts'
 import { modelsSaveProblem, modelsView } from './models.ts'
@@ -793,6 +793,13 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     json(res, 200, await listPrReports(reportsFolder(), prNumber(raw)))
   }
 
+  // what the cache last held of one PR, for the read-only drawer on a Closed row: a read of the cache alone, which asks GitHub nothing. null when the cache holds nothing of it
+  const serveLast = (res: ServerResponse, raw: string): void => {
+    const config = effective()
+    const held = cache.readPr(config.repo, prNumber(raw))
+    json(res, 200, { last: held === null ? null : deriveLastReadings(held.pr, held.lastSeenAt, config) })
+  }
+
   // one report as rendered HTML and as raw Markdown; never anything outside reportsDir
   const serveReport = async (res: ServerResponse, encoded: string): Promise<void> => {
     let name: string
@@ -1088,6 +1095,7 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     { method: 'POST', pattern: /^\/api\/prs\/([^/]+)\/runs$/, handle: (req, res, _url, match) => startRun(req, res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/prs\/([^/]+)\/runs$/, handle: (_req, res, _url, match) => json(res, 200, cache.runsFor(effective().repo, prNumber(match[1] ?? '')).map(runView)) },
     { method: 'GET', pattern: /^\/api\/prs\/([^/]+)\/reports$/, handle: (_req, res, _url, match) => listReportsFor(res, match[1] ?? '') },
+    { method: 'GET', pattern: /^\/api\/prs\/([^/]+)\/last$/, handle: (_req, res, _url, match) => serveLast(res, match[1] ?? '') },
     { method: 'GET', pattern: /^\/api\/reports\/([^/]+)$/, handle: (_req, res, _url, match) => serveReport(res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/runs\/([^/]+)\/stop$/, handle: (req, res, _url, match) => stopRun(req, res, match[1] ?? '') },
     { method: 'POST', pattern: /^\/api\/runs\/([^/]+)\/reread$/, handle: (req, res, _url, match) => rereadRun(req, res, match[1] ?? '') },

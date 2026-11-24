@@ -904,6 +904,19 @@ export const deriveClosedRow = (pr: RawClosedPr, config: Config): ClosedRow => (
   tickets: deriveTickets(pr, isBotLogin(pr.author?.login, config), config),
 })
 
+// what the cache last held of a PR while it was open, for the read-only drawer on a Closed row: the closed search reads none of it. asOf is when it was last read open
+export type LastReadings = { headRef: string, baseRef: string, headSha: string, asOf: string, reviewers: Reviewer[], ci: CiReading, merge: MergeState }
+
+export const deriveLastReadings = (pr: RawOpenPr, asOf: string, config: Config): LastReadings => ({
+  headRef: pr.headRefName,
+  baseRef: pr.baseRefName,
+  headSha: pr.headRefOid,
+  asOf,
+  reviewers: reviewerPips(pr, config),
+  ci: ciStateOf(pr),
+  merge: deriveMerge(pr, deriveIssues(pr)),
+})
+
 // splits the closed search into Today and Yesterday, newest first; search order is not closedAt order
 export const deriveClosed = (prs: readonly RawClosedPr[], ctx: DeriveContext): ClosedView => {
   const { today, yesterday } = closedRanges(ctx.clock, { todayStartsAt: ctx.config.todayStartsAt, timeZone: ctx.timeZone })

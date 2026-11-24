@@ -24,7 +24,7 @@ import { closedRangeOf, render } from './render.ts'
 import type { Settings, UiState } from './render.ts'
 import { mountRowClicks } from './rowclick.ts'
 import { readToken } from './runapi.ts'
-import { emptyFeed, findOpenRow, openRows, receivePatch, receiveView, restartFeed } from './state.ts'
+import { emptyFeed, findClosedRow, findOpenRow, openRows, receivePatch, receiveView, restartFeed } from './state.ts'
 import type { FeedStep } from './state.ts'
 import { lastUpdateOf, readLastUpdate, writeLastUpdate } from './schedule.ts'
 import type { ScheduleStorage } from './schedule.ts'
@@ -384,6 +384,7 @@ const drawer = createDrawer({
   token: readToken(document),
   nowMs,
   rowOf: (number) => feed.view === null ? undefined : findOpenRow(feed.view, number),
+  closedOf: (number) => feed.view === null ? undefined : findClosedRow(feed.view, number),
   repo: () => feed.view?.repo ?? '',
   viewer: () => feed.view?.viewer.login ?? '',
   say,
@@ -472,7 +473,7 @@ document.addEventListener('click', (event) => {
   else if (fix !== null) drawer.open(Number(fix.dataset.fixSession), { key: `banner-fix:${fix.dataset.fixSession}`, number: Number(fix.dataset.fixSession) }, 'fix')
 })
 
-// a click anywhere else in a PR's row opens the same drawer
+// a click anywhere else in a PR's row opens the same drawer, a Closed row's read-only
 mountRowClicks({ drawer, sweepDrawer, logPanel, seedRuns })
 
 // Escape closes what is topmost: the report panel, a confirmation in the drawer, then the drawer

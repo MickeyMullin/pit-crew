@@ -5,7 +5,7 @@
 // it in place. drawerview.ts says what every part reads; this file makes the elements, keeps the
 // confirmation's state, and moves focus
 // Opened from a line of the auto-review log it shows the run that line names, or a note in the card's place while that run is loading, could not be read, or is no longer listed, and a link back to the line (DESIGN.md section 8, Drawer; the sweep drawer's is the same link)
-import type { OpenRow } from '../src/derive.ts'
+import type { ClosedRow, LastReadings, OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
 import { actionBound, actionDoneText, actionOffers, actionRefusalText, actionRequest } from './actionsview.ts'
 import type { ActionConfirmModel, ActionKind, PersonChoice } from './actionsview.ts'
@@ -15,11 +15,11 @@ import { copyText, tickTimers, timerLine } from './agentcell.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import {
-  askedRun, cellOfRun, commentsCheckOn, confirmHolds, specialInstructionsSent, defaultRunner, drawerModel, escapeTarget, focusKeySelector, goneRow, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
+  askedRun, cellOfRun, closedDrawerRow, commentsCheckOn, confirmHolds, specialInstructionsSent, defaultRunner, drawerModel, escapeTarget, focusKeySelector, goneRow, latestCell, loadErrorText, mayMoveFocus, optionOf, outsidePressCloses, refetchKeys,
   rereadBound, resumeReadyText, returnSelector,
 } from './drawerview.ts'
 import type { PostAllow } from './agent.ts'
-import type { AskedRun, Confirm, DrawerModel, ExtraLine, Loadable, ModelsLine, Opener, StartConfirmModel, StopModel, StoredAskModel, StoredButtonsModel } from './drawerview.ts'
+import type { AskedRun, ClosedModel, Confirm, DrawerModel, ExtraLine, LastState, Loadable, ModelsLine, Opener, StartConfirmModel, StopModel, StoredAskModel, StoredButtonsModel } from './drawerview.ts'
 import { formatSince } from './format.ts'
 import type { ReportPanel } from './reportpanel.ts'
 import { getJson, sendRun } from './runapi.ts'
@@ -33,6 +33,8 @@ export type DrawerOptions = {
   nowMs: () => number
   // the live row by number, from the page's feed; undefined once the PR has left the open tables
   rowOf: (number: number) => OpenRow | undefined
+  // the Closed row by number, from either range of the page's feed; undefined when neither has it. Without it nothing opens on a Closed row
+  closedOf?: (number: number) => ClosedRow | undefined
   // the repository the page shows now, from the page's feed; empty before the first view
   repo: () => string
   // the viewer's login the page shows now, from the page's feed; empty before the first view
@@ -56,6 +58,8 @@ export type Drawer = {
   update: () => void
   isOpen: () => boolean
   number: () => number | null
+  // what it shows: an open PR, a PR that left the open tables while the drawer was on it or that the log named, or the read-only form of a Closed row; null when it is closed
+  form: () => 'open' | 'gone' | 'closed' | null
   // Escape: closes what is topmost; false when there is nothing to close
   escape: () => boolean
   // a press on the page: closes the drawer when the press starts outside it and its report panel, off the controls that open a drawer, and with no request on its way; false otherwise
@@ -99,6 +103,9 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   // the log line this drawer was opened from, when it was: where its link back leads and what it does
   let back: { anchor: string, go: () => void } | null = null
   let reports: Loadable<ReportListing> = { state: 'loading' }
+  // the Closed row the read-only form shows, kept after the row leaves the Closed ranges, and what the cache last held of that PR
+  let closed: ClosedRow | null = null
+  let held: LastState = { state: 'loading' }
   let confirm: Confirm | null = null
   // a start or stop request is on its way
   let busy = false
@@ -127,6 +134,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   let goneRunning = false
   let runsRequest = 0
   let reportsRequest = 0
+  let lastRequest = 0
 
   const heading = h('h2', { id: 'drawer-heading', class: 'drawer-heading', tabindex: '-1' })
   const headingLabel = document.createTextNode('Agent for ')
@@ -1005,10 +1013,10 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
 
   const runsPart = (model: DrawerModel): Part => ({
     key: 'runs',
-    sig: JSON.stringify([model.runs.state, model.runs.message, model.runs.rows.map((row) => ({ ...row, startedAt: '' }))]),
+    sig: JSON.stringify([model.runs.state, model.runs.message, model.closed?.noRuns ?? null, model.runs.rows.map((row) => ({ ...row, startedAt: '' }))]),
     build: () => section('runs', 'Previous runs',
       listState('runs', model.runs.state, model.runs.message, () => void loadRuns()),
-      model.runs.state === 'ready' && model.runs.rows.length === 0 ? h('p', { class: 'muted' }, 'No earlier runs.') : null,
+      model.runs.state === 'ready' && model.runs.rows.length === 0 ? h('p', { class: 'muted' }, model.closed?.noRuns ?? 'No earlier runs.') : null,
       model.runs.rows.length === 0 ? null : h('ul', { class: 'drawer-list' },
         model.runs.rows.map((row) => h('li', { class: 'drawer-item' },
           h('span', { class: 'drawer-item-main' },
@@ -1082,6 +1090,24 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
         }))),
   })
 
+  // ---- the read-only form on a Closed row ----
+
+  const closedPart = (shut: ClosedModel): Part => ({
+    key: 'closed',
+    sig: JSON.stringify([shut.note, shut.facts, shut.last, shut.lastNote]),
+    build: () => section('closed', 'Closed',
+      h('p', { class: 'muted', role: 'status' }, shut.note),
+      h('dl', { class: 'drawer-facts' }, shut.facts.map(([label, value]) => h('div', { class: 'drawer-fact' }, h('dt', {}, label), h('dd', {}, value)))),
+      listState('last readings', shut.last.state, shut.last.message, () => void loadLast()),
+      shut.lastNote === null ? null : h('p', { class: 'muted' }, shut.lastNote)),
+  })
+
+  const emptyPart = (text: string): Part => ({
+    key: 'empty',
+    sig: text,
+    build: () => h('p', { class: 'muted' }, text),
+  })
+
   // ---- drawing ----
 
   // the row's cell, or for a PR that left the open tables the newest run read from the server
@@ -1095,7 +1121,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   const current = (): DrawerModel | null => {
     if (number === null || last === null) return null
     const cell = latest()
-    return drawerModel({ row: cell === last.agent ? last : { ...last, agent: cell }, open: options.rowOf(number) !== undefined, runs, reports, confirm, people: people ?? [], asked: askedRun(shownCell(), runs, shown, number) })
+    return drawerModel({ row: cell === last.agent ? last : { ...last, agent: cell }, open: options.rowOf(number) !== undefined, runs, reports, confirm, people: people ?? [], asked: askedRun(shownCell(), runs, shown, number), closed: closed === null ? null : { row: closed, last: held, nowMs: options.nowMs() } })
   }
 
   const render = (): void => {
@@ -1120,7 +1146,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     const items: (Part | Keyed)[] = []
     if (back !== null) items.push(backPart(back.anchor))
     if (model.gone !== null) items.push(goneNote(model.gone))
-    items.push(startPart(model))
+    if (model.closed === null) items.push(startPart(model))
+    else items.push(closedPart(model.closed))
     const actions = actionsPart(model)
     if (actions !== null) items.push(actions)
     if (model.asked !== null) items.push(askedNote(model.asked))
@@ -1131,7 +1158,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     const sweepLink = options.sweepLink(number)
     if (sweepLink !== null) items.push(sweepPart(sweepLink))
     if (model.autoRuns.length > 0) items.push(autoRunsPart(model))
-    items.push(runsPart(model), reportsPart(model))
+    if (model.closed?.empty != null) items.push(emptyPart(model.closed.empty))
+    else items.push(...model.closed === null ? [runsPart(model), reportsPart(model)] : [reportsPart(model), runsPart(model)])
     sync(body, items)
 
     refreshAges(root, options.nowMs())
@@ -1194,6 +1222,36 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     render()
   }
 
+  // what the cache last held of the closed PR: read once when its Closed row opens, since nothing more of it is ever fetched
+  const loadLast = async (): Promise<void> => {
+    const n = number
+    if (n === null || closed === null) return
+    lastRequest += 1
+    const mine = lastRequest
+    held = { state: 'loading' }
+    const answer = await getJson<{ last: LastReadings | null }>(`/api/prs/${n}/last`)
+    if (mine !== lastRequest || n !== number || closed === null) return
+    held = answer.ok
+      ? { state: 'ready', value: answer.value.last }
+      : { state: 'error', message: loadErrorText('the last readings', answer.status, answer.error) }
+    last = closedDrawerRow(closed, held.state === 'ready' ? held.value : null)
+    render()
+  }
+
+  // the read-only form takes over the drawer, whatever it showed of this PR before
+  const showClosed = (row: ClosedRow): void => {
+    closed = row
+    last = closedDrawerRow(row, null)
+    shown = null
+    back = null
+    confirm = null
+    confirmFrom = null
+    error = ''
+    actionNote = ''
+    actionFail = ''
+    void loadLast()
+  }
+
   // a stop the server accepted is over when the row's run is no longer running
   const settleStop = (cell: AgentCell | null): void => {
     if (stopping === null || number === null) return
@@ -1225,7 +1283,15 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   const update = (): void => {
     if (number === null) return
     const live = options.rowOf(number)
-    if (live !== undefined) last = live
+    if (live !== undefined) {
+      last = live
+      // reopened: the open form, which reads its own runs and reports
+      closed = null
+      lastRequest += 1
+    } else if (closed !== null) {
+      closed = options.closedOf?.(number) ?? closed
+      last = closedDrawerRow(closed, held.state === 'ready' ? held.value : null)
+    }
     if (last === null) return
     const gone = live === undefined
     if (gone !== seen.gone) {
@@ -1256,8 +1322,11 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
   }
 
   const open = (n: number, from: Opener, ask?: StartKind | 'merge', show?: { runId: number, title: string | null, back?: { anchor: string, go: () => void } }): void => {
-    // a PR that is no longer open opens only for a run the log named
-    const row = options.rowOf(n) ?? (show === undefined ? undefined : goneRow(n, show.title, `https://github.com/${options.repo()}/pull/${n}`))
+    // a PR that is no longer open opens for a run the log named, or read-only from its Closed row
+    const live = options.rowOf(n)
+    const shut = live === undefined && show === undefined ? options.closedOf?.(n) : undefined
+    const named = show === undefined ? undefined : goneRow(n, show.title, `https://github.com/${options.repo()}/pull/${n}`)
+    const row = live ?? (shut === undefined ? named : closedDrawerRow(shut, null))
     if (row === undefined) return
     opener = from
     shown = show?.runId ?? null
@@ -1282,6 +1351,16 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       goneRunning = false
       runsRequest += 1
       reportsRequest += 1
+      closed = null
+      lastRequest += 1
+      if (shut !== undefined) showClosed(shut)
+    } else if (shut !== undefined) {
+      if (closed === null) showClosed(shut)
+    } else if (closed !== null) {
+      // the log's run link on a PR the read-only form shows
+      closed = null
+      lastRequest += 1
+      last = row
     }
     root.hidden = false
     update()
@@ -1297,6 +1376,8 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     if (n === null) return
     number = null
     last = null
+    closed = null
+    lastRequest += 1
     shown = null
     back = null
     confirm = null
@@ -1325,6 +1406,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     update,
     isOpen: () => number !== null,
     number: () => number,
+    form: () => number === null ? null : closed !== null ? 'closed' : options.rowOf(number) === undefined ? 'gone' : 'open',
     escape: () => {
       const target = escapeTarget({ report: options.reports.isOpen(), confirm: confirm !== null, busy, drawer: number !== null })
       if (target === 'report') options.reports.close()

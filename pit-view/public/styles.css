@@ -892,6 +892,12 @@ button {
   cursor: pointer;
 }
 
+/* inside the row, so the card's edge never clips it */
+.prs tr[data-table="closed"]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
 .prs tr.row-changes td {
   background: var(--red-row);
 }

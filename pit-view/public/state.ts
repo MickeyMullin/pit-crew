@@ -1,7 +1,7 @@
 // public/state.ts
 // the page's data model: the view from /api/view with patches applied in order, regrouped
 // client-side, plus the freshness and sync readings the header and rows show; no DOM here
-import type { FreshnessState, MineRow, MineSection, OpenRow, OtherRow, OthersSection } from '../src/derive.ts'
+import type { ClosedRow, ClosedView, FreshnessState, MineRow, MineSection, OpenRow, OtherRow, OthersSection } from '../src/derive.ts'
 import type { Patch, Sync, View } from '../src/poller.ts'
 
 export type { Patch, View }
@@ -130,6 +130,10 @@ export const rowFreshness = (row: Pick<OpenRow, 'freshness'>, sync: Pick<Sync, '
   if (cycle !== null && cycle.state === 'running' && Date.parse(row.freshness.fetchedAt) < Date.parse(cycle.startedAt)) return 'pending'
   return row.freshness.state
 }
+
+// a Closed row of either range, whichever the table shows
+export const findClosedRow = (view: { closed: ClosedView }, number: number): ClosedRow | undefined =>
+  [...view.closed.today.rows, ...view.closed.yesterday.rows].find((row) => row.number === number)
 
 export const findOpenRow = (view: View, number: number): OpenRow | undefined =>
   openRows(view).find((row) => row.number === number)

@@ -2,14 +2,14 @@
 // the Agent drawer's words and shapes, as pure functions of the open row, the runs and reports
 // fetched for it, and the drawer's own confirmation state; drawer.ts turns the model into
 // elements. Nothing here reads the DOM or the clock: every time is passed in
-import type { OpenRow } from '../src/derive.ts'
+import type { ClosedRow, LastReadings, OpenRow, ReviewerState } from '../src/derive.ts'
 import type { RunModels } from '../src/models.ts'
 import type { ReportListing } from '../src/reports.ts'
 import { actionConfirmModel, actionOffers } from './actionsview.ts'
 import type { ActionConfirm, ActionConfirmModel, ActionOffer, PersonChoice } from './actionsview.ts'
 import { commandLine, doneTone, runnerLabels, sentence, stepTitle } from './agent.ts'
 import type { AgentCell, AgentResult, DoneTone, PostForm, RunnerModels, RunnerName, RunView, StartKind, StartOption, StepSlot, StoredOffer } from './agent.ts'
-import { shortSha } from './format.ts'
+import { formatCached, shortSha } from './format.ts'
 import { safeHref } from './safeurl.ts'
 
 export type Loadable<T> = { state: 'loading' } | { state: 'error', message: string } | { state: 'ready', items: T[] }
@@ -43,6 +43,12 @@ export type HeaderModel = {
   refs: string
 }
 
+// a Closed row alone knows its head branch and neither its base nor its head
+const refsText = (row: Pick<OpenRow, 'headRef' | 'baseRef' | 'headOid'>): string => {
+  if (row.headRef === '' || row.baseRef === '') return row.headRef
+  return `${row.headRef} → ${row.baseRef} · head ${shortSha(row.headOid)}`
+}
+
 export const headerModel = (row: OpenRow): HeaderModel => ({
   number: row.number,
   url: row.url,
@@ -50,7 +56,7 @@ export const headerModel = (row: OpenRow): HeaderModel => ({
   // a PR the auto-review log opened after it closed has neither an author nor refs to show
   author: row.author.login === '' ? '' : `${row.author.alias} · @${row.author.login}`,
   title: row.title,
-  refs: row.headRef === '' ? '' : `${row.headRef} → ${row.baseRef} · head ${shortSha(row.headOid)}`,
+  refs: refsText(row),
 })
 
 // the row of a PR that is no longer open, for a run the auto-review log names: the title the log kept and the PR's address, and an idle cell with no start to offer, so the drawer has the run's own card, its previous runs, and its reports, and nothing it could start or change
@@ -69,6 +75,14 @@ export const goneRow = (number: number, title: string | null, url: string): Open
     extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,
   },
 } as unknown as OpenRow)
+
+// the row the read-only drawer draws a Closed PR from: what the closed search says of it and, when the cache still holds them, the base and head it last had, with goneRow's idle cell, which offers no start
+export const closedDrawerRow = (row: ClosedRow, last: LastReadings | null): OpenRow => ({
+  ...goneRow(row.number, row.title, row.url),
+  author: row.author,
+  headRef: row.headRef,
+  ...last === null ? {} : { baseRef: last.baseRef, headOid: shortSha(last.headSha), headSha: last.headSha },
+})
 
 export const goneText = (number: number): string => `#${number} is no longer open`
 
@@ -902,6 +916,52 @@ export const loadErrorText = (what: string, status: number, error: string | null
   return reason === '' ? `Could not load ${what}: Pit View answered ${status}.` : `Could not load ${what}. ${reason}`
 }
 
+// what the cache last held of a closed PR, as the drawer read it; null when it holds nothing of it
+export type LastState = { state: 'loading' } | { state: 'error', message: string } | { state: 'ready', value: LastReadings | null }
+
+// the read-only form of the drawer, on a Closed row (section 8 of DESIGN.md, Drawer, Closed PRs)
+export type ClosedInput = { row: ClosedRow, last: LastState, nowMs: number }
+
+export type ClosedModel = {
+  note: string
+  facts: [string, string][]
+  last: { state: LastState['state'], message: string | null }
+  // in place of the last readings, when the cache holds none
+  lastNote: string | null
+  // in place of both lists, once both have been read and neither has anything
+  empty: string | null
+  // in place of the runs list's own empty line, while no run is shown above it either
+  noRuns: string | null
+}
+
+const reviewWords: Readonly<Record<ReviewerState, string>> = { approved: 'approved', changes: 'changes requested', commented: 'commented', requested: 'review requested' }
+const lastCiWords: Readonly<Record<LastReadings['ci'], string>> = { green: 'green', pending: 'pending', failed: 'failed', none: 'no checks had run' }
+
+const lastFacts = (last: LastReadings, nowMs: number): [string, string][] => [
+  ['Review', last.reviewers.length === 0 ? 'no reviews' : last.reviewers.map((reviewer) => `${reviewer.alias}: ${reviewWords[reviewer.state]}`).join(', ')],
+  ['CI', lastCiWords[last.ci]],
+  ['Merge', last.merge.label],
+  ['Last read', formatCached(last.asOf, nowMs)],
+]
+
+const closedModel = ({ row, last, nowMs }: ClosedInput, runs: Loadable<RunView>, reports: Loadable<ReportListing>): ClosedModel => {
+  const held = last.state === 'ready' ? last.value : null
+  const noRuns = runs.state === 'ready' && runs.items.length === 0
+  return {
+    note: `#${row.number} is closed, so this drawer is read-only.`,
+    facts: [
+      ['State', row.outcome === 'merged' ? 'Merged' : 'Closed unmerged'],
+      ['By', row.closedBy.text],
+      ['When', formatCached(row.closedAt, nowMs)],
+      ...held === null ? [] : lastFacts(held, nowMs),
+    ],
+    last: { state: last.state, message: last.state === 'error' ? last.message : null },
+    lastNote: last.state === 'ready' && last.value === null ? 'The cache no longer holds this PR\'s last review, CI, and merge readings.' : null,
+    empty: noRuns && reports.state === 'ready' && reports.items.length === 0 ? 'This PR has no reports on disk and no run history.' : null,
+    noRuns: noRuns ? 'No run history for this PR.' : null,
+  }
+}
+
 export type DrawerInput = {
   row: OpenRow
   // false once the PR has left the open tables; the last row stays shown
@@ -913,10 +973,14 @@ export type DrawerInput = {
   people?: readonly PersonChoice[]
   // the run the log asked for when its card cannot be shown; the card is then none, so no other run's card stands for it
   asked?: AskedRun | null
+  // set for the read-only form on a Closed row
+  closed?: ClosedInput | null
 }
 
 export type DrawerModel = {
   asked: AskedRun | null
+  // the read-only form; every action below is then absent
+  closed: ClosedModel | null
   header: HeaderModel
   gone: string | null
   starts: StartsModel
@@ -951,15 +1015,20 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
   const { row, confirm } = input
   const cell = row.agent
   const asked = input.asked ?? null
-  const card = cell === null || asked !== null ? 'none' : cardKind(cell)
+  const closed = input.closed ?? null
+  const kind = cell === null || asked !== null ? 'none' : cardKind(cell)
+  // the read-only form has no Stop, so a run still going there is a line of its history
+  const card = closed !== null && (kind === 'queued' || kind === 'running') ? 'none' : kind
+  const act = closed === null
   const startAsk = confirm?.type === 'start' && cell !== null ? startConfirmModel(row, cell, confirm.kind, confirm.runner, confirm.checkComments, confirm.extraText, confirm.extraOn) : null
   const runs = input.runs
   const reports = input.reports
   return {
     asked,
+    closed: closed === null ? null : closedModel(closed, input.runs, input.reports),
     header: headerModel(row),
-    gone: input.open ? null : goneText(row.number),
-    starts: cell === null ? { buttons: [], shared: null } : startsModel(cell, input.open, row.number),
+    gone: input.open || !act ? null : goneText(row.number),
+    starts: cell === null || !act ? { buttons: [], shared: null } : startsModel(cell, input.open, row.number),
     confirm: startAsk,
     actions: actionOffers(row, input.open),
     actionAsk: confirm?.type === 'action' ? actionConfirmModel(row, confirm, input.people ?? []) : null,
@@ -967,20 +1036,20 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
     queued: cell !== null && card === 'queued' ? queuedModel(cell) : null,
     running: cell !== null && card === 'running' ? runningModel(row, cell) : null,
     stop: cell === null ? null : card === 'running' ? stopModel(row.number, cell, confirm?.type === 'stop' && confirm.andOpen) : card === 'queued' ? queuedStopModel(row.number, cell) : null,
-    reread: cell !== null && (card === 'result' || card === 'waiting') ? rereadOffer(cell, input.open, row.number) : null,
-    rereadAsk: cell !== null && confirm?.type === 'reread' && (card === 'result' || card === 'waiting') && rereadOffer(cell, input.open, row.number)?.disabled === false ? rereadAskModel(row, cell, confirm) : null,
-    postIt: cell !== null && card === 'result' ? postItOffer(cell, input.open, row.number) : null,
-    postAsk: cell !== null && card === 'result' && confirm?.type === 'post' && input.open && cell.postOffer !== null ? postAskModel(row, cell.postOffer) : null,
-    storedAsk: cell !== null && confirm?.type === 'storedPost' ? storedAskModel(row, cell, confirm, input.open) : null,
-    stopsEnabled: input.open || input.runs.state === 'ready',
+    reread: act && cell !== null && (card === 'result' || card === 'waiting') ? rereadOffer(cell, input.open, row.number) : null,
+    rereadAsk: act && cell !== null && confirm?.type === 'reread' && (card === 'result' || card === 'waiting') && rereadOffer(cell, input.open, row.number)?.disabled === false ? rereadAskModel(row, cell, confirm) : null,
+    postIt: act && cell !== null && card === 'result' ? postItOffer(cell, input.open, row.number) : null,
+    postAsk: act && cell !== null && card === 'result' && confirm?.type === 'post' && input.open && cell.postOffer !== null ? postAskModel(row, cell.postOffer) : null,
+    storedAsk: act && cell !== null && confirm?.type === 'storedPost' ? storedAskModel(row, cell, confirm, input.open) : null,
+    stopsEnabled: act && (input.open || input.runs.state === 'ready'),
     waiting: cell !== null && card === 'waiting' ? waitingModel(cell, row.number) : null,
     result: cell !== null && card === 'result' ? resultModel(cell, row.number, row.headOid, actionOffers(row, input.open)) : null,
     runs: {
       state: runs.state,
       message: runs.state === 'error' ? runs.message : null,
-      rows: runs.state === 'ready' ? runRows(runs.items, cell?.runId ?? null) : [],
+      rows: runs.state === 'ready' ? runRows(runs.items, card === 'none' && !act ? null : cell?.runId ?? null) : [],
     },
-    autoRuns: runs.state === 'ready' ? autoRunRows(runs.items, storedButtonsModel(cell, input.open, row.number)) : [],
+    autoRuns: runs.state === 'ready' ? autoRunRows(runs.items, act ? storedButtonsModel(cell, input.open, row.number) : null) : [],
     reports: {
       state: reports.state,
       message: reports.state === 'error' ? reports.message : null,

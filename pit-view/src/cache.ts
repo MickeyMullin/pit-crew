@@ -203,6 +203,8 @@ export type Cache = {
   // a null error marks the cycle successful; one that reached the last page of the open list also removes the PRs absent from it and sets the repo's floor
   finishCycle: (cycleId: number, error?: string | null, errorKind?: CycleErrorKind | null) => FinishResult
   readView: (repo: string) => CachedView
+  // one PR as the cache last held it, open or closed; null when it holds none, or no longer does
+  readPr: (repo: string, number: number) => CachedPr | null
   cycle: (id: number) => Cycle | null
   latestCycle: (repo: string) => Cycle | null
   runningCycle: () => Cycle | null
@@ -753,6 +755,11 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     all('SELECT * FROM prs WHERE repo = $repo AND state = \'open\' ORDER BY updated_at DESC, number DESC', { repo })
       .map((row) => toPr(row, latest))
 
+  const readPr = (repo: string, number: number): CachedPr | null => {
+    const row = get('SELECT * FROM prs WHERE repo = $repo AND number = $number', { repo, number })
+    return row === undefined ? null : toPr(row, latestCycle(repo))
+  }
+
   const insertSnapshot = (snapshot: {
     cycle: number, repo: string, kind: SnapshotKind, page: number | null, at: string, error: string | null, payload: string | null,
   }): void => {
@@ -1180,6 +1187,7 @@ export const openCache = ({ path, clock, keepCycles = 200, keepSnapshotCycles = 
     recordError,
     finishCycle,
     readView,
+    readPr,
     cycle,
     latestCycle,
     runningCycle,

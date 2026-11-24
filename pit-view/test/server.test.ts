@@ -16,9 +16,9 @@ import type { PitServer } from '../src/server.ts'
 import { iso } from '../src/time.ts'
 import { cellModel, showsMerge, showsReReview } from '../public/agent.ts'
 import { scenario } from './fixtures/scenario.ts'
-import type { MineRow, OpenRow } from '../src/derive.ts'
+import type { LastReadings, MineRow, OpenRow } from '../src/derive.ts'
 import type { RawOpenPr, RunResult } from '../src/github.ts'
-import { emptySweepResult, failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, gate, gatedRunner, githubCalls, ok, openPage1, openPage2, reviewResult, singlePr, sweepResult, tempDir } from './helpers.ts'
+import { emptySweepResult, failed, fakeLaunch, fakeRunner, fakeTime, field, fixtureRunner, gate, gatedRunner, githubCalls, ok, openPage1, openPage2, reviewResult, singlePr, sweepResult, tempDir, waitFor } from './helpers.ts'
 import type { FakeLaunch, FakeRunner, FakeTime, Gate } from './helpers.ts'
 
 type Harness = { server: PitServer, time: FakeTime, runner: FakeRunner, launch: FakeLaunch, home: string, configPath: string, base: string, cleanup: () => Promise<void> }
@@ -1456,6 +1456,84 @@ for (const [name, reviewed, button] of [['stale', '0123abc', 'Re-review'], ['cur
     }
   })
 }
+
+// the read-only drawer on a Closed row (section 8, Drawer, Closed PRs): what the server still says of a PR that closed, and that it still refuses every action on it
+
+test('GET /api/prs/<n>/last answers what the cache last held of a closed PR, its review, CI, and merge readings, and asks GitHub nothing', async () => {
+  const runner = withSingle(async (number) => number === 106 ? ok(JSON.stringify(await singlePr(106, { state: 'MERGED' }))) : null)
+  const h = await setup({ runner, config: { cloneDir: '~/dev/orbit' } })
+  try {
+    await filled(h)
+    const before = rowIn((await getJson<View>(`${h.base}/api/view`)).body, 106)
+    assert.ok(before)
+    assert.equal((await send(`${h.base}/api/prs/106/refresh`, 'POST')).body.outcome, 'closed')
+    await h.server.poller.idle()
+    assert.equal(rowIn((await getJson<View>(`${h.base}/api/view`)).body, 106), undefined)
+    const asked = h.runner.calls.length
+    const { status, body } = await getJson<{ last: LastReadings | null }>(`${h.base}/api/prs/106/last`)
+    assert.equal(status, 200)
+    assert.deepEqual(body.last, {
+      headRef: before.headRef, baseRef: before.baseRef, headSha: before.headSha, asOf: before.freshness.fetchedAt, reviewers: before.reviewers, ci: body.last?.ci, merge: before.merge,
+    })
+    assert.ok(['green', 'pending', 'failed', 'none'].includes(String(body.last?.ci)))
+    assert.equal(h.runner.calls.length, asked)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('GET /api/prs/<n>/last says null for a PR the cache does not hold, and refuses what is not a PR number', async () => {
+  const h = await setup()
+  try {
+    await filled(h)
+    assert.deepEqual(await getJson(`${h.base}/api/prs/97/last`), { status: 200, body: { last: null } })
+    for (const bad of ['0', 'x', '1e3', '-4']) assert.equal((await getJson(`${h.base}/api/prs/${bad}/last`)).status, 400, bad)
+    assert.notEqual((await send(`${h.base}/api/prs/97/last`, 'POST', {}, token(h))).status, 200)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a closed PR keeps its run history and reports on their own routes, and every action on it is refused with nothing started and nothing written', async () => {
+  const runner = withSingle(async (number) => number === 106 ? ok(JSON.stringify(await singlePr(106, { state: 'MERGED' }))) : null)
+  const h = await setup({ runner, config: { cloneDir: '~/dev/orbit' }, files: { 'agents/output/PR-97.md': '# Review\n' } })
+  try {
+    await filled(h)
+    const started = await send(`${h.base}/api/prs/106/runs`, 'POST', { repo: scenario.repo }, token(h))
+    assert.equal(started.status, 200)
+    assert.equal((await send(`${h.base}/api/runs/${String(started.body.id)}/stop`, 'POST', undefined, token(h))).status, 200)
+    await waitFor(() => h.server.cache.getRun(Number(started.body.id))?.status === 'stopped')
+    assert.equal((await send(`${h.base}/api/prs/106/refresh`, 'POST')).body.outcome, 'closed')
+    await h.server.poller.idle()
+    const list = async (number: number, what: string): Promise<unknown[]> => (await getJson<unknown[]>(`${h.base}/api/prs/${number}/${what}`)).body
+    // one with run history only, one with a report only, and one with neither
+    assert.deepEqual([(await list(106, 'runs')).length, (await list(106, 'reports')).length], [1, 0])
+    assert.deepEqual([(await list(97, 'runs')).length, (await list(97, 'reports')).length], [0, 1])
+    assert.deepEqual([(await list(95, 'runs')).length, (await list(95, 'reports')).length], [0, 0])
+    const children = h.launch.children.length
+    const asked = githubCalls(h.runner).length
+    const origin = { Origin: h.server.url, ...token(h) }
+    for (const number of [106, 97, 95]) {
+      for (const kind of ['default', 'tandem', 'stack', 'fix']) {
+        assert.equal((await send(`${h.base}/api/prs/${number}/runs`, 'POST', { repo: scenario.repo, kind }, token(h))).status, 422, `#${number} ${kind}`)
+      }
+      for (const action of ['merge', 'markReady', 'update']) {
+        const refused = await send(`${h.base}/api/prs/${number}/actions`, 'POST', { action, repo: scenario.repo, viewer: scenario.viewer, headSha: 'a'.repeat(40), baseRef: 'main' }, origin)
+        assert.ok(refused.status >= 400 && refused.status < 500, `#${number} ${action}: ${refused.status}`)
+      }
+    }
+    const run = `${h.base}/api/runs/${String(started.body.id)}`
+    const bound = { repo: scenario.repo, viewer: scenario.viewer, number: 106, headSha: 'a'.repeat(40), base: 'main' }
+    for (const [path, body] of [['reread', bound], ['post', { ...bound, form: 'comment' }]] as const) {
+      const refused = await send(`${run}/${path}`, 'POST', body, origin)
+      assert.ok(refused.status >= 400 && refused.status < 500, `${path}: ${refused.status}`)
+    }
+    assert.equal(h.launch.children.length, children)
+    assert.equal(githubCalls(h.runner).length, asked)
+  } finally {
+    await h.cleanup()
+  }
+})
 
 // the owner's re-read of a failed run (section 8, Launching runs, Re-reading a result)
 

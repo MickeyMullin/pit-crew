@@ -425,7 +425,8 @@ const rowItem = <R>(model: TableModel<R>, row: R): Keyed => {
   const number = model.numberOf(row)
   return {
     key: `pr-${number}`,
-    create: () => h('tr', { 'data-pr': number, 'data-table': model.table }),
+    // an open row's keyboard path is its Agent button; a Closed row has none, so the row itself takes focus (public/rowclick.ts)
+    create: () => h('tr', { 'data-pr': number, 'data-table': model.table, ...model.table === 'closed' ? { tabindex: '0', 'data-focus-key': `closed-row:${number}`, 'aria-label': `#${number}: open details` } : {} }),
     update: (element) => {
       element.className = model.rowClass(row)
       const freshness = model.freshnessOf(row)
