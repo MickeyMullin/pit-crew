@@ -25,7 +25,7 @@ export type TickLogReason = TickSkip | 'outsideHours' | 'off' | 'capFull'
 // why a qualifying PR was not queued, or a queued one not started
 export type PrSkipReason = 'alreadyReviewed' | 'inFlight' | 'ownersRun' | 'stoppedAtHead' | 'postUnknown' | 'optedOut' | 'postInFlight'
 // every reason a line may carry: those above, a check's outcome, a queue reason, why a row was dropped, and how a run finished
-export type LogReason = TickLogReason | PrSkipReason | 'nothingNew' | 'queued' | QueueReason | 'closed' | 'ready' | 'done' | 'needsInput'
+export type LogReason = TickLogReason | PrSkipReason | 'nothingNew' | 'queued' | QueueReason | 'closed' | 'ready' | 'superseded' | 'done' | 'needsInput'
 
 export type LogRun = { kind: 'run' | 'sweep', id: number }
 

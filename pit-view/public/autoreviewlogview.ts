@@ -97,6 +97,7 @@ const reasonWords: Readonly<Record<string, string>> = {
   dependabot: 'Dependabot sweep',
   closed: 'the PR closed',
   ready: 'marked ready for review',
+  superseded: 'replaced by a review you started',
 }
 
 // the tick-level reasons the header shows in amber

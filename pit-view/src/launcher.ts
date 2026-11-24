@@ -726,6 +726,8 @@ export type StartOption = {
   extraInstructions?: { standing: string, flag: string }
   // only a review's start has this, and only while that start would wait: the confirmation's second start, Start immediately (jump queue), and the line that says what it does
   jump?: { button: string, text: string }
+  // only a start on a PR whose latest run is an auto-review run still waiting in the scheduler's queue has this: the line the confirmation shows, which says the start replaces that run
+  replaces?: string
 }
 
 export const isTandemRun = (args: readonly string[]): boolean => args.includes('--tandem')
@@ -801,16 +803,23 @@ export const jumpText = (running: number, cap: number): string => {
   return `This review starts now, ahead of the queue, and ${count} reviews will be running, above the review cap (${count} running, cap ${cap}). Nothing else starts until the count falls below the cap.`
 }
 
+// the note a queued auto-review run ends with when a start by hand takes its place
+export const supersededNote = 'superseded'
+
+// what a start says when the PR's auto-review run is only queued: the start takes that run's place
+export const replacesText = 'This PR has an auto-review waiting in the queue. Starting now replaces it.'
+
 const buttons: Readonly<Record<RunKind, string>> = { review: 'Review PR', reReview: 'Re-review PR', selfReview: 'Self-review' }
 
-// the starts a PR offers now; busy is whether a run for it is in flight
-export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null, busy: boolean, queueing: Queueing | null = null, runs: readonly Run[] = []): StartOption[] => {
+// the starts a PR offers now; busy is whether a run for it is in flight, and replaces whether the only run in flight is an auto-review run still queued, which a start takes the place of (so the PR is not busy and each start says it replaces that run)
+export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null, busy: boolean, queueing: Queueing | null = null, runs: readonly Run[] = [], replaces = false): StartOption[] => {
   const single = singleRun(pr, config)
   // a review's button says queue when a review of this PR would wait; a fix session is not a review and keeps its text
   const waits = queueing !== null && queueing[slotOf(pr, config)]
   const reviewButton = (text: string): string => waits ? queueText(text) : text
   // a review that would wait also offers to start at once, past the queue; a fix session never does
   const jump: Pick<StartOption, 'jump'> = waits ? { jump: { button: jumpButton, text: jumpText(queueing.running ?? 0, config.maxConcurrentReviews) } } : {}
+  const replacing: Pick<StartOption, 'replaces'> = replaces && !busy ? { replaces: replacesText } : {}
   const { repo, viewer } = config
   const unavailable = busy
     ? `a run for #${pr.number} is already in flight`
@@ -823,7 +832,7 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
     const plan = defaultRun(pr, config)
     options.push({
       kind: 'tandem', label: plan.label, button: reviewButton(`${buttons[plan.kind].replace(/ PR$/, '')} in tandem`), command: 'review-pr', args: plan.args,
-      runners: ['claude'], posts: postsFor('review-pr', plan.args, viewer), repo, viewer, unavailable, ...extraBox('review-pr'), ...jump,
+      runners: ['claude'], posts: postsFor('review-pr', plan.args, viewer), repo, viewer, unavailable, ...extraBox('review-pr'), ...jump, ...replacing,
     })
   }
   options.push({
@@ -832,11 +841,12 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
     ...(single.kind === 'selfReview' ? { checkCommentsArgs: [...single.args, '--check-comments'] } : {}),
     ...extraBox(single.command),
     ...jump,
+    ...replacing,
   })
   if (notOffered('stack', pr, config, stack) === null) {
     options.push({
       kind: 'stack', label: 'Review stack', button: reviewButton('Review stack'), command: 'review-stack', args: [String(pr.number)],
-      runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), repo, viewer, unavailable, ...extraBox('review-stack'), ...jump,
+      runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), repo, viewer, unavailable, ...extraBox('review-stack'), ...jump, ...replacing,
     })
   }
   // never --no-post: the push is what it is for; and no --source, so the command's own default (the more recent of the two sources) applies
@@ -851,6 +861,7 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
       viewer,
       unavailable,
       fix: fixOfferOf(pr, runs),
+      ...replacing,
     })
   }
   return options
@@ -1326,9 +1337,11 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
   const action: AgentAction = { ...plan, label: queueing !== null && reviewCommands.includes(plan.command) && queueing[slotOf(pr, config)] ? queueText(plan.label) : plan.label, runner: isTandemRun(plan.args) ? 'claude' : config.agent.runner }
   const lastReviewAt = mine ? report?.at ?? null : viewerReview(pr, config)?.submittedAt ?? null
   // the PR's own run decides what can start here, whatever the cell shows
-  const ownInFlight = ownRun?.status === 'running' || ownRun?.status === 'queued'
+  // an auto-review run still waiting in the scheduler's queue holds no slot, so a start by hand takes its place and the PR is not busy for it
+  const queuedAuto = ownRun?.status === 'queued' && ownRun.origin === 'auto'
+  const ownInFlight = (ownRun?.status === 'running' || ownRun?.status === 'queued') && !queuedAuto
   const idle: AgentCell = {
-    state: 'idle', label: plan.label, action, models: modelLabels(config.agent), starts: startOptions(pr, config, stack, ownInFlight, queueing, ownRun === undefined || history.some((entry) => entry.id === ownRun.id) ? history : [ownRun, ...history]), lastReviewAt,
+    state: 'idle', label: plan.label, action, models: modelLabels(config.agent), starts: startOptions(pr, config, stack, ownInFlight, queueing, ownRun === undefined || history.some((entry) => entry.id === ownRun.id) ? history : [ownRun, ...history], queuedAuto), lastReviewAt,
     runId: null, runner: null, command: null, args: null, status: null, startedAt: null, lastStepAt: null, step: null,
     steps: emptySteps(), tandem: false, commit: null,
     finishedAt: null, text: null, result: null, question: null, note: null, jumped: false, resolvedByHand: false, firstNote: null, resume: null, costUsd: null, extraInstructions: null, recorded: null, origin: null, queuedAt: null, posted: null, postOffer: null, storedOffer: null, stackRun: null,
@@ -2577,6 +2590,8 @@ export type SessionStore<T extends Session> = {
   // what holds a start to one in flight: the PR for a run and the repository for a sweep
   key: (target: { repo: string, number?: number }) => string
   inFlight: (request: { repo: string, number?: number }) => boolean
+  // the auto-review row that is the only thing in flight for this target and still waits in the scheduler's queue, which a start by hand takes the place of; null when there is none, and always for a sweep
+  replaceable: (request: { repo: string, number?: number }) => T | null
   busyText: (request: StartRequest) => string
   // the schema result.json must carry, when the kind of launch fixes it
   schema: SweepResult['schema'] | null
@@ -2654,6 +2669,10 @@ export const runStore = (cache: Cache): SessionStore<Run> => ({
   key: (request) => `${request.repo}#${request.number}`,
   // a queued review holds its PR as a running one does
   inFlight: (request) => ['running', 'queued'].includes(cache.runsFor(request.repo, request.number ?? 0, 1)[0]?.status ?? ''),
+  replaceable: (request) => {
+    const latest = cache.runsFor(request.repo, request.number ?? 0, 1)[0]
+    return latest?.status === 'queued' && latest.origin === 'auto' ? latest : null
+  },
   busyText: (request) => `a run for #${request.number} is already in flight`,
   schema: null,
   counted: (command) => reviewCommands.includes(command),
@@ -2679,6 +2698,7 @@ export const sweepStore = (cache: Cache): SessionStore<Sweep> => ({
   key: (request) => request.repo,
   // a queued sweep holds its repository as a running one does
   inFlight: (request) => ['running', 'queued'].includes(cache.sweepsFor(request.repo, 1)[0]?.status ?? ''),
+  replaceable: () => null,
   busyText: (request) => `a sweep for ${request.repo} is already in flight`,
   schema: 'pit-crew/sweep-result@1',
   // every sweep the owner starts counts as one review: never a self-review, so it fits only in a slot of the cap's own and the overage is never for it. Its serial reviewers run inside this one slot
@@ -3574,7 +3594,8 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
     }
     const key = store.key(request)
     // one run per PR (one sweep per repository) in flight, counting a start still between its checks and its row
-    if (starting.has(key) || store.inFlight(request)) {
+    // except a run that is only an auto-review run waiting in the scheduler's queue: it holds no slot, and the start takes its place below
+    if (starting.has(key) || (store.inFlight(request) && store.replaceable(request) === null)) {
       throw new LaunchError('busy', store.busyText(request))
     }
     const held = postHeld(request)
@@ -3591,6 +3612,12 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       await turn?.ahead
       // a config saved during the checks is the one admission reads, and whether it is a self-review is read from the cache now, with nothing awaited before the slot is held
       const current = options.config()
+      // the checks have passed, so the start goes on: the PR's queued auto-review run is ended as superseded, and the start's hold on the PR keeps the scheduler from queueing it again meanwhile. It is not a failure and it never started, so it counts for neither failedTwice nor the daily limit, which no manual start reads
+      const queuedAuto = store.replaceable(request)
+      if (queuedAuto !== null) {
+        log(`${noun} ${queuedAuto.id}: superseded by a ${request.command} started by hand`)
+        end(queuedAuto, { status: 'skipped', finishedAt: now(), note: supersededNote }, 'was superseded')
+      }
       const slot = store.slot(request, current)
       if (slot === null) return await launch(request, config, request.cwd ?? cloneDir)
       // whatever already waits and fits goes first

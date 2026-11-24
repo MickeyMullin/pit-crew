@@ -280,6 +280,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       list,
       ask.sources === null ? null : h('p', { class: 'confirm-sources' }, ask.sources),
       caution ? h('p', { id: 'drawer-confirm-caution', class: 'confirm-caution-line' }, ask.caution) : null,
+      ask.replaces === null ? null : h('p', { class: 'confirm-sources', 'data-confirm': 'replaces' }, ask.replaces),
       ask.jump === null ? null : h('p', { id: 'drawer-confirm-jump', class: 'confirm-sources', 'data-confirm': 'jump' }, ask.jump.text),
       errorLine(),
       confirmActions(ask.confirm, caution ? 'caution' : 'primary', () => void doStart(), null, ask.jump === null ? null : { text: ask.jump.button, onGo: () => void doStart(true) }))
@@ -1059,6 +1060,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
             h('span', { class: 'drawer-item-name' }, row.reason),
             tag(row.text, row.tone)),
           h('span', { class: 'drawer-item-meta' }, row.sha === null ? '' : `${row.sha} · `, row.posted),
+          row.why === null ? null : h('span', { class: 'drawer-item-meta' }, row.why),
           h('span', { class: 'drawer-item-meta' },
             row.queuedAt === null ? null : ageSpan(row.queuedAt, 'queued ', options.nowMs()),
             row.startedAt === null ? null : ' · ',
