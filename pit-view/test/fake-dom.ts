@@ -2,7 +2,7 @@
 // a small stand-in for the browser's document, enough for the real public/drawer.ts and public/settings.ts to run under Node: elements with attributes, children, text, form values, events, focus, and the few selectors those files use. It is strict on purpose: a selector or call it does not know throws, so a test cannot pass by the fake quietly ignoring something the page does
 
 type Listener = (event: FakeEvent) => void
-export type FakeEvent = { type: string, target: FakeElement, preventDefault: () => void, stopPropagation: () => void, defaultPrevented: boolean, key?: string }
+export type FakeEvent = { type: string, target: FakeElement, preventDefault: () => void, stopPropagation: () => void, defaultPrevented: boolean, key?: string, button?: number }
 export type FakeText = { textNode: true, data: string, textContent: string, parentNode: FakeElement | null }
 type Child = FakeElement | FakeText
 type Compound = { tag: string | null, id: string | null, classes: string[], attrs: [string, string | null][], nth: number | null }
@@ -41,8 +41,10 @@ export type FakeElement = {
   replaceWith: (node: FakeElement) => void
   contains: (other: FakeElement | null) => boolean
   addEventListener: (type: string, listener: Listener) => void
-  // the event's key, for a keydown
-  dispatch: (type: string, init?: { key?: string }) => void
+  // the event's key, for a keydown; the event reaches the element's own listeners, then those of every element above it and the document's, as a browser's bubbling does, until one stops it. It answers whether the default was prevented
+  dispatch: (type: string, init?: { key?: string, button?: number }) => boolean
+  // the nearest element, this one included, that the selector matches
+  closest: (selector: string) => FakeElement | null
   focus: () => void
   setSelectionRange: (start: number, end: number) => void
   select: () => void
@@ -50,6 +52,8 @@ export type FakeElement = {
   // how many times it was scrolled into view, and with which block
   scrolled: { block: string | null }[]
   matches: (compound: Compound) => boolean
+  // the event reaches this element's own listeners, for dispatch
+  hear: (event: FakeEvent) => void
   querySelector: (selector: string) => FakeElement | null
   querySelectorAll: (selector: string) => FakeElement[]
 }
@@ -65,6 +69,8 @@ export type FakeDocument = {
   getElementById: (id: string) => FakeElement | null
   querySelector: (selector: string) => FakeElement | null
   querySelectorAll: (selector: string) => FakeElement[]
+  addEventListener: (type: string, listener: Listener) => void
+  hear: (event: FakeEvent) => void
   settleFocus: () => void
   loadPage: (html: string) => void
 }
@@ -94,6 +100,19 @@ const parseCompound = (selector: string): Compound => {
     rest = rest.slice(hit[0].length)
   }
   return found
+}
+
+// a selector as its alternatives, each a chain of compounds joined by descendant spaces; a comma or a space inside an attribute's brackets separates nothing
+const parseSelector = (selector: string): Compound[][] =>
+  (selector.match(/(?:\[[^\]]*\]|[^,])+/g) ?? []).map((part) => (part.trim().match(/(?:\[[^\]]*\]|\S)+/g) ?? []).map(parseCompound))
+
+// whether the chain's last compound is this element and each earlier one is an element above the one after it
+const chainMatches = (element: FakeElement, chain: readonly Compound[]): boolean => {
+  const last = chain.at(-1)
+  if (last === undefined || !element.matches(last)) return false
+  if (chain.length === 1) return true
+  for (let at = element.parentNode; at !== null; at = at.parentNode) if (chainMatches(at, chain.slice(0, -1))) return true
+  return false
 }
 
 const isText = (node: Child): node is FakeText => 'textNode' in node
@@ -162,6 +181,9 @@ const makeElement = (doc: FakeDocument, tag: string): FakeElement => {
     },
     get className() {
       return attrs.get('class') ?? ''
+    },
+    set className(text: string) {
+      attrs.set('class', text)
     },
     // an attribute sets the starting value, as in a browser, until the user or a script changes the property
     get value() {
@@ -270,11 +292,29 @@ const makeElement = (doc: FakeDocument, tag: string): FakeElement => {
     addEventListener: (type, listener) => {
       listeners.set(type, [...listeners.get(type) ?? [], listener])
     },
+    hear: (event) => {
+      for (const listener of listeners.get(event.type) ?? []) listener(event)
+    },
     dispatch: (type, init = {}) => {
-      const event: FakeEvent = { type, target: element, defaultPrevented: false, stopPropagation: () => undefined, ...init, preventDefault: () => {
+      let stopped = false
+      const event: FakeEvent = { type, target: element, defaultPrevented: false, ...init, stopPropagation: () => {
+        stopped = true
+      }, preventDefault: () => {
         event.defaultPrevented = true
       } }
-      for (const listener of listeners.get(type) ?? []) listener(event)
+      for (let at: FakeElement | null = element; at !== null && !stopped; at = at.parentNode) {
+        at.hear(event)
+        if (at === doc.documentElement && !stopped) doc.hear(event)
+      }
+      return event.defaultPrevented
+    },
+    closest: (selector) => {
+      const chains = parseSelector(selector)
+      for (let at: FakeElement | null = element; at !== null; at = at.parentNode) {
+        const here = at
+        if (chains.some((chain) => chainMatches(here, chain))) return here
+      }
+      return null
     },
     focus: () => {
       doc.activeElement = element
@@ -293,11 +333,11 @@ const makeElement = (doc: FakeDocument, tag: string): FakeElement => {
     },
     matches,
     querySelectorAll: (selector) => {
-      const compound = parseCompound(selector)
+      const chains = parseSelector(selector)
       const found: FakeElement[] = []
       const walk = (parent: FakeElement): void => {
         for (const child of parent.children) {
-          if (child.matches(compound)) found.push(child)
+          if (chains.some((chain) => chainMatches(child, chain))) found.push(child)
           walk(child)
         }
       }
@@ -312,6 +352,7 @@ const makeElement = (doc: FakeDocument, tag: string): FakeElement => {
 }
 
 export const makeDocument = (): FakeDocument => {
+  const heard = new Map<string, Listener[]>()
   const doc: FakeDocument = {
     documentElement: undefined as unknown as FakeElement,
     body: undefined as unknown as FakeElement,
@@ -323,6 +364,12 @@ export const makeDocument = (): FakeDocument => {
     getElementById: (id) => doc.documentElement.querySelector(`#${id}`),
     querySelector: (selector) => doc.documentElement.querySelector(selector),
     querySelectorAll: (selector) => doc.documentElement.querySelectorAll(selector),
+    addEventListener: (type, listener) => {
+      heard.set(type, [...heard.get(type) ?? [], listener])
+    },
+    hear: (event) => {
+      for (const listener of heard.get(event.type) ?? []) listener(event)
+    },
     // as in a browser, focus falls back to the body when the focused element leaves the page
     settleFocus: () => {
       if (doc.activeElement !== null && !doc.activeElement.isConnected) doc.activeElement = doc.body
@@ -387,4 +434,6 @@ export const typeInto = (field: FakeElement, text: string): void => {
   field.dispatch('input')
 }
 
-export const press = (button: FakeElement): void => button.dispatch('click')
+export const press = (button: FakeElement): void => {
+  button.dispatch('click')
+}

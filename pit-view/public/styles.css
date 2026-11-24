@@ -863,6 +863,30 @@ button {
   text-transform: uppercase;
 }
 
+/* each table's own column headers stay pinned beneath the page's header while any of the table shows, in windows wide enough that every table fits its box. The boxes around a table give up their clipping scroll here, so the headers pin to the window rather than to a box that never scrolls down. The line is a shadow, as a collapsed border stays behind when its cell is pinned, and the 1px overlap leaves no gap under the header's rounded-up height. A focused control in a row lands below both */
+@media (min-width: 1280px) {
+  .dashboard .card {
+    overflow: clip;
+  }
+
+  .dashboard .table-box {
+    overflow-x: visible;
+  }
+
+  .prs thead th {
+    position: sticky;
+    top: calc(var(--header-height, 56px) - 1px);
+    z-index: 1;
+    background: var(--surface);
+    box-shadow: inset 0 -1px 0 var(--line);
+  }
+
+  .prs tbody,
+  .prs tbody * {
+    scroll-margin-top: calc(var(--header-height, 56px) + 44px);
+  }
+}
+
 .prs tr.row-changes td {
   background: var(--red-row);
 }
