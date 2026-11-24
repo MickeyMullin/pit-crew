@@ -14,6 +14,7 @@ import { keyPrefix } from '../src/openrouter.ts'
 import { hostAllowed, originAllowed, PortInUseError, resolveRuntime, startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
 import { iso } from '../src/time.ts'
+import { cellModel, showsMerge, showsReReview } from '../public/agent.ts'
 import { scenario } from './fixtures/scenario.ts'
 import type { MineRow, OpenRow } from '../src/derive.ts'
 import type { RawOpenPr, RunResult } from '../src/github.ts'
@@ -1428,6 +1429,28 @@ for (const [name, reviewed, state] of [['whose head has moved', '0123abc', 'stal
       assert.equal(started.status, 200)
       assert.deepEqual([started.body.args, started.body.label, started.body.origin], [['101', '--no-post'], 'Self-review', 'manual'])
       assert.match(h.launch.children[0]!.writes[0] ?? '', /\/review-pr 101 --no-post --emit-json=/)
+    } finally {
+      await h.cleanup()
+    }
+  })
+}
+
+for (const [name, reviewed, button] of [['stale', '0123abc', 'Re-review'], ['current', 'e37eacd', 'Tandem self-review']] as const) {
+  test(`the served row of an own PR with a ${name} self-review draws ${button}, and the run it leads to is the same one`, async () => {
+    const h = await setup({ config: { cloneDir: '~/dev/orbit' }, files: { 'agents/output/PR-101.md': `Reviewed commit: \`fix/webhook-retry\` @ \`${reviewed}\`\n` } })
+    try {
+      await filled(h)
+      const row = rowIn((await getJson<View>(`${h.base}/api/view`)).body, 101) as MineRow
+      assert.ok(row.agent !== null)
+      assert.equal(row.selfReview.state, name)
+      const model = cellModel(row.agent, 101, Date.parse(scenario.now), showsMerge(row), showsReReview(row))
+      assert.deepEqual([model.state, model.state === 'idle' ? model.button : null, model.name], ['idle', button, `${button} #101: open agent`])
+      // the drawer's first Start, and the route's default, are the tandem self-review either way
+      const first = row.agent.starts[0]
+      assert.deepEqual([first?.kind, first?.args], ['tandem', ['101', '--tandem', '--no-post']])
+      const started = await send(`${h.base}/api/prs/101/runs`, 'POST', { repo: scenario.repo, viewer: scenario.viewer, kind: first?.kind, runner: 'claude' }, token(h))
+      assert.deepEqual([started.status, started.body.args, started.body.label], [200, ['101', '--tandem', '--no-post'], 'Tandem self-review'])
+      assert.match(h.launch.children[0]!.writes[0] ?? '', /\/review-pr 101 --tandem --no-post --emit-json=/)
     } finally {
       await h.cleanup()
     }

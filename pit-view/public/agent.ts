@@ -99,7 +99,8 @@ export const doneTone = (cell: Pick<AgentCell, 'status' | 'text'>): DoneTone => 
 // with the PR number; starting, stopping and copying happen in the drawer
 export type CellModel =
   // ask is present only on the Merge button: the drawer opens with that confirmation already asked
-  | { state: 'idle', button: string, name: string, under: string | null, ask?: 'merge' }
+  // reReview is present only on the Re-review button, which is drawn in its own color and opens the drawer as any idle button does
+  | { state: 'idle', button: string, name: string, under: string | null, ask?: 'merge', reReview?: true }
   | { state: 'queued', label: string, line: string, name: string }
   | { state: 'running', label: string, line: string, step: string, name: string }
   | {
@@ -121,7 +122,18 @@ const failureTip = (note: string | null): string | null => {
 export const showsMerge = (row: Pick<OpenRow, 'section' | 'merge' | 'primaryBase' | 'group' | 'issues'>): boolean =>
   row.section === 'mine' && mergeOffered(row)
 
-export const cellModel = (cell: AgentCell, number: number, nowMs: number, merge = false): CellModel => {
+// the idle cell reads Re-review instead of the row's default run on the viewer's own PR whose self-review is stale (section 5, Self-review detection): its head has moved since that review. The page derives it from the row it already has, and the run the drawer offers first is the same tandem self-review
+export const showsReReview = (row: Pick<OpenRow, 'section'> & { selfReview?: { state: string } }): boolean =>
+  row.section === 'mine' && row.selfReview?.state === 'stale'
+
+// the idle button's text: Merge over Re-review over the row's default run. Re-review says when it would wait, as the server's own label does (section 8, Button wording)
+const idleText = (label: string, merge: boolean, reReview: boolean): string => {
+  if (merge) return 'Merge'
+  if (!reReview) return label
+  return label.startsWith('Queue ') ? 'Queue re-review' : 'Re-review'
+}
+
+export const cellModel = (cell: AgentCell, number: number, nowMs: number, merge = false, reReview = false): CellModel => {
   if (cell.state === 'queued') {
     const label = labelOf(cell)
     return { state: 'queued', label, line: queuedLine(cell, nowMs), name: `Open agent for #${number}, ${label} queued` }
@@ -152,13 +164,13 @@ export const cellModel = (cell: AgentCell, number: number, nowMs: number, merge 
       name: `Open agent for #${number}, ${text}`,
     }
   }
-  const button = merge ? 'Merge' : cell.action.label
+  const button = idleText(cell.action.label, merge, reReview)
   return {
     state: 'idle',
     button,
     name: `${button} #${number}: open agent`,
     under: cell.lastReviewAt === null ? null : `last review ${formatSince(cell.lastReviewAt, nowMs)}`,
-    ...merge ? { ask: 'merge' as const } : {},
+    ...merge ? { ask: 'merge' as const } : reReview ? { reReview: true as const } : {},
   }
 }
 

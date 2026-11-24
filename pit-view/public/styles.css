@@ -1504,6 +1504,17 @@ button.agent:hover {
   border-color: var(--blue-fg);
 }
 
+/* an own PR's stale self-review: the Self-review column's stale amber, so the pushed work stands out */
+.agent-rereview {
+  border-color: var(--amber-fg);
+  color: var(--amber-fg);
+}
+
+.agent-rereview:hover {
+  background: var(--amber-bg);
+  border-color: var(--amber-fg);
+}
+
 .agent-head {
   display: flex;
   flex-wrap: wrap;

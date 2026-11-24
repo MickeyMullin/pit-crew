@@ -11,9 +11,9 @@ import { h, setText } from './dom.ts'
 // the running timer, the finish age) and a running cell's step: a minute going by or a new step
 // never rebuilds the cell, so its button stays the same element under the pointer and the
 // keyboard; updateAgentCells sets those texts in place after each draw, and the ticker the timer
-export const agentCellSig = (cell: AgentCell | null, number: number, nowMs: number, merge = false): unknown => {
+export const agentCellSig = (cell: AgentCell | null, number: number, nowMs: number, merge = false, reReview = false): unknown => {
   if (cell === null) return null
-  const model = cellModel(cell, number, nowMs, merge)
+  const model = cellModel(cell, number, nowMs, merge, reReview)
   if (model.state === 'idle') return { ...model, under: model.under !== null }
   if (model.state === 'queued') return { state: model.state, label: model.label, name: model.name, runId: cell.runId }
   if (model.state === 'running') return { state: model.state, label: model.label, name: model.name, runId: cell.runId, startedAt: cell.startedAt }
@@ -90,12 +90,12 @@ const openButton = (number: number, name: string, extra: string, children: (Node
     'data-focus-key': `agent-open:${number}`,
   }, children)
 
-export const agentCellNodes = (cell: AgentCell | null, number: number, nowMs: number, merge = false): Node[] => {
+export const agentCellNodes = (cell: AgentCell | null, number: number, nowMs: number, merge = false, reReview = false): Node[] => {
   if (cell === null) return [h('span', { class: 'muted' }, '—')]
-  const model = cellModel(cell, number, nowMs, merge)
+  const model = cellModel(cell, number, nowMs, merge, reReview)
   if (model.state === 'idle') {
     return [h('span', { class: 'agent agent-idle' },
-      openButton(number, model.name, 'agent-start', [model.button], model.ask ?? null),
+      openButton(number, model.name, model.reReview === true ? 'agent-start agent-rereview' : 'agent-start', [model.button], model.ask ?? null),
       model.under === null ? null : h('span', { class: 'agent-line', 'data-agent-line': '' }, model.under))]
   }
   if (model.state === 'queued') {
