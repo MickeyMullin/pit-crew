@@ -50,6 +50,7 @@ test('dismissing hides one, clearing hides every one listed and none that comes 
   const cleared = clearAll(dismissNotice(emptyRead(), 4), items)
   assert.deepEqual(shownNotices(items, cleared), [])
   assert.deepEqual([cleared.clearedThrough, cleared.dismissed], [5, []])
+  assert.equal(clearAll(cleared, [notice(3)]).clearedThrough, 5, 'and never moves back')
   assert.deepEqual(shownNotices([notice(6), ...items], cleared).map((item) => item.id), [6])
   assert.equal(unreadCount([notice(6), ...items], cleared), 1)
   assert.equal(items.length, 3)
@@ -301,7 +302,7 @@ test('a notification with no drawer is a link to GitHub in a new tab, and one wi
     const [none, held] = panel.querySelectorAll('.notice-item') as [FakeElement, FakeElement]
     const link = none.querySelector('.notice-open') as FakeElement
     assert.deepEqual([link.tag, link.getAttribute('href'), link.getAttribute('target'), link.getAttribute('rel')], ['a', 'https://github.com/octo-example/orbit/pull/105', '_blank', 'noopener'])
-    assert.equal(none.querySelector('.notice-github'), null)
+    assert.ok(none.querySelector('.notice-github') === null)
     assert.equal(held.querySelector('.notice-open')?.tag, 'button')
     assert.equal(held.querySelector('.notice-github')?.getAttribute('href'), 'https://github.com/octo-example/orbit/pull/104')
   })
@@ -355,7 +356,7 @@ test('a focused toast that is dismissed hands focus to the bell', async () => {
     const dismiss = toastBox.children[0]?.querySelector('.notice-dismiss') as FakeElement
     dismiss.focus()
     dismiss.dispatch('click')
-    assert.equal(doc.activeElement, bell)
+    assert.ok(doc.activeElement === bell)
   })
 })
 
@@ -364,6 +365,7 @@ test('the notification classes are their own: no rule outside the block names on
   const start = css.indexOf('/* the notifications area')
   const end = css.indexOf('/* end of the notifications area */')
   const outside = css.slice(0, start) + css.slice(end)
+  assert.ok(start >= 0 && end > start)
   const inside = new Set([...css.slice(start, end).matchAll(/^\.([a-z-]+)/gm)].map(([, name]) => name ?? ''))
   for (const name of inside) assert.doesNotMatch(outside, new RegExp(`\\.${name}(?![\\w-])`), name)
 })
@@ -386,7 +388,7 @@ test('Escape and a press outside close the panel, Escape returning focus to the 
     assert.equal(panel.dispatch('keydown', { key: 'Escape' }), true)
     assert.equal(panel.hidden, true)
     assert.equal(bell.getAttribute('aria-expanded'), 'false')
-    assert.equal(doc.activeElement, bell)
+    assert.ok(doc.activeElement === bell)
     bell.dispatch('click')
     outside.dispatch('pointerdown')
     assert.equal(panel.hidden, true)
@@ -399,7 +401,7 @@ test('a redraw that changes nothing keeps the panel\'s own controls', async () =
     bell.dispatch('click')
     const before = panel.querySelector('.notice-open')
     notices.update()
-    assert.equal(panel.querySelector('.notice-open'), before)
+    assert.ok(before !== null && panel.querySelector('.notice-open') === before)
   })
 })
 
@@ -515,6 +517,21 @@ test('app.ts hands the stream\'s notifications over, reads the list with every v
   assert.ok(app.includes('holds: (number) => feed.view !== null && (findOpenRow(feed.view, number) !== undefined || findClosedRow(feed.view, number) !== undefined),'))
   assert.ok(app.includes("window.addEventListener('storage', (event) => notices.storageChanged(event.key))"))
   assert.ok(app.includes('storage: () => window.localStorage,'))
+})
+
+test('the panel\'s Escape is heard before the page\'s own, which leaves a handled one alone', () => {
+  const app = read('app.ts')
+  const made = app.indexOf('const notices = createNotices({')
+  assert.ok(made >= 0 && made < app.indexOf("// Escape closes what is topmost"))
+  assert.ok(app.includes("if (event.key !== 'Escape' || event.defaultPrevented) return"))
+})
+
+test('the Settings card says its switch is the desktop banners\' and that the bell works without them', () => {
+  const html = read('settings.html')
+  assert.ok(html.includes('Show desktop banners'))
+  assert.ok(html.includes('The bell in the header works without them.'))
+  assert.ok(html.includes('The bell\'s panel lists every kind.'))
+  assert.equal(html.includes('Notify me when a PR changes state'), false)
 })
 
 test('a press on a notification that opens a drawer is left to its own click', () => {

@@ -265,7 +265,8 @@ test('a settled run is stored with banners off, read back, and still there after
 // what an open page receives on its event stream while `work` runs, until it has `count` notifications
 const pushedDuring = async (url: string, count: number, work: () => void): Promise<NonNullable<Patch['notifications']>> => {
   const controller = new AbortController()
-  const response = await fetch(`${url}/api/events?client=c1&visible=false&paused=true`, { signal: controller.signal })
+  // one that never comes fails the test here, with its stream closed, rather than holding the server open
+  const response = await fetch(`${url}/api/events?client=c1&visible=false&paused=true`, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]) })
   const reader = response.body!.getReader()
   work()
   const pushed: NonNullable<Patch['notifications']> = []
