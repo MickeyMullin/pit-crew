@@ -115,7 +115,7 @@ test('/fix-pr\'s report and result record the source used, the floor, each item 
 
 test('the command and the skill name both flags, and any other flag is still bad usage', async () => {
   const command = await read('commands/claude/fix-pr.md')
-  assert.match(command, /argument-hint: "\[PR number \| branch \| PR URL\] \[--source=remote\|local\|both\] \[--severity=P0\|P1\|P2\|P3\] \[--emit-json=<run-dir>\]"/)
+  assert.match(command, /argument-hint: "\[PR number \| branch \| PR URL\] \[--source=remote\|local\|both\] \[--severity=P0\|P1\|P2\|P3\] \[--extra-instructions\] \[--emit-json=<run-dir>\]"/)
   assert.match(command, /`--source=<remote\|local\|both>` and `--severity=<P0\|P1\|P2\|P3>`/)
   assert.match(command, /Any other flag is bad usage/)
   const skill = await read('commands/skills/fix-pr/SKILL.md')

@@ -407,8 +407,8 @@ test('review-pr and review-stack point to the file as they point to their other 
   assert.match(stack.slice(stack.indexOf('Tandem mode:'), stack.indexOf('Setup:')), /Extra instructions:/)
 })
 
-test('the wrappers and the docs list the flag, and no other prompt accepts it', async () => {
-  for (const name of ['review-pr', 'review-stack']) {
+test('the wrappers and the docs list the flag, fix-pr accepts it too, and no other prompt accepts it', async () => {
+  for (const name of ['review-pr', 'review-stack', 'fix-pr']) {
     const claude = await read(`commands/claude/${name}.md`)
     assert.match(claude, /argument-hint: .*\[--extra-instructions\]/, name)
     assert.match(claude, /^description: .*--extra-instructions/m, name)
@@ -422,8 +422,17 @@ test('the wrappers and the docs list the flag, and no other prompt accepts it', 
   for (const other of ['review-local', 'review-dependabot', 'review-dependabot-sweep', 'no-post', 'check-comments']) {
     assert.ok(!(await read(`prompts/review/${other}.md`)).includes('--extra-instructions'), other)
   }
-  assert.ok(!(await read('prompts/fix/fix-pr.md')).includes('--extra-instructions'))
+  // fix-pr takes the flag under its own rules, for the relevancy check's fix prompt, and never loads the review file
+  const fix = await read('prompts/fix/fix-pr.md')
+  assert.ok(fix.includes('--extra-instructions'))
+  assert.ok(fix.includes('<run-dir>/extra-instructions.txt'))
+  assert.ok(!fix.includes('read `{{HOME}}/agents/prompts/review/extra-instructions.md`'), 'fix-pr does not load the review file')
   assert.ok(!(await read('prompts/update/update-pr.md')).includes('--extra-instructions'))
+  assert.ok(!(await read('prompts/relevancy/relevancy-pr.md')).includes('--extra-instructions'))
+  for (const name of ['update-pr', 'relevancy-pr']) {
+    assert.ok(!(await read(`commands/claude/${name}.md`)).includes('--extra-instructions'), name)
+    assert.ok(!(await read(`commands/skills/${name}/SKILL.md`)).includes('--extra-instructions'), name)
+  }
 })
 
 test('the specification states the rules the prompt does', async () => {

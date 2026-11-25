@@ -1,4 +1,4 @@
-Machine-readable output: a review invoked with `--emit-json=<run-dir>` records its progress and its outcome as JSON files in `<run-dir>`, for the program that started the run and is watching it. This file is loaded by `review-pr.md`, `review-stack.md`, `review-dependabot.md`, and `review-dependabot-sweep.md`, by `prompts/fix/fix-pr.md`, and by `prompts/update/update-pr.md`, when the invocation carries the flag. It adds two files and changes nothing else: everything in the calling prompt applies as written, and the human-readable report is written, printed, and posted, or not posted, exactly as it would be without the flag (for `fix-pr`, the fixes are pushed, or not pushed, exactly as they would be, and for `update-pr`, which writes no report, the update is pushed, or not pushed, exactly as it would be).
+Machine-readable output: a review invoked with `--emit-json=<run-dir>` records its progress and its outcome as JSON files in `<run-dir>`, for the program that started the run and is watching it. This file is loaded by `review-pr.md`, `review-stack.md`, `review-dependabot.md`, and `review-dependabot-sweep.md`, by `prompts/fix/fix-pr.md`, and by `prompts/update/update-pr.md`, when the invocation carries the flag. It is loaded by `prompts/relevancy/relevancy-pr.md` too, when its invocation carries the flag. It adds two files and changes nothing else: everything in the calling prompt applies as written, and the human-readable report is written, printed, and posted, or not posted, exactly as it would be without the flag (for `fix-pr`, the fixes are pushed, or not pushed, exactly as they would be, and for `update-pr`, which writes no report, the update is pushed, or not pushed, exactly as it would be).
 
 The flag:
 
@@ -137,16 +137,16 @@ The fix's response, `pit-crew/fix-result@1`:
 - `source`: `"remote"`, `"local"`, or `"both"`, the source the run addressed, as `fix-pr.md` resolves it (the source asked for, or under the default the more recent of the two). Null when the run stopped before it resolved one.
 - `severity`: the floor as `"P0"`, `"P1"`, `"P2"`, or `"P3"`, in capitals whatever the letter case it was asked in (`"P3"` when none was asked). Null when the run stopped before it read its arguments.
 - `skipped`: one object per request or finding the floor skipped, in the report's order: `{ "source": "remote" | "local", "id": "<as in requests>", "priority": "P0" | "P1" | "P2" | "P3", "path": "<repo-relative path>" | null, "line": <number> | null, "summary": "<one line>" }`. `[]` when the floor skipped nothing. A skipped item is in `skipped` and not in `requests`.
-- `requests`: one object per request addressed or triaged, in the report's order (threads in file order, then review bodies, then findings), the same requests as the report's Requests section, or the stop's list when no report was written:
-  - `id`: the review thread's GraphQL node id, or the review's; for a finding, `local-<n>`, `<n>` being its place in the report's Findings section from 1.
-  - `kind`: `"thread"`, `"review"` (the body of a reviewer's standing change request), or `"finding"` (a finding in the self-review report).
-  - `source`: `"remote"` for a thread or a review, `"local"` for a finding.
-  - `priority`: the P# it carries, `"P0"` to `"P3"`, or null when a GitHub request carries none; a finding always has one.
-  - `author`: the login of the reviewer whose ask it is: for a thread, the first comment's author other than the owner. Null when GitHub gives no login, and for a finding.
-  - `path`: the thread's repo-relative path; for a finding, the first file it cites; null for a review, or a finding that cites no file.
-  - `line`: the thread's `line`, or its `originalLine` when the thread is outdated; for a finding, the first line it cites; null for a review, a thread on a whole file, or a finding that cites no line.
-  - `outdated`: true when the thread is outdated; false for a current thread, for a review, and for a finding.
-  - `url`: the URL of the thread's first comment, or of the review. Null for a finding, which has no page of its own.
+- `requests`: one object per request addressed or triaged, in the report's order (threads in file order, then review bodies, then findings, then prompt requests), the same requests as the report's Requests section, or the stop's list when no report was written:
+  - `id`: the review thread's GraphQL node id, or the review's; for a finding, `local-<n>`, `<n>` being its place in the report's Findings section from 1; for a prompt request, `prompt-<n>`, `<n>` being its place in the relevancy prompt's order from 1.
+  - `kind`: `"thread"`, `"review"` (the body of a reviewer's standing change request), or `"finding"` (a finding in the self-review report); with `--extra-instructions`, also `"prompt"` (a request from the relevancy prompt, as `fix-pr.md`'s "Relevancy prompt" says).
+  - `source`: `"remote"` for a thread or a review, `"local"` for a finding, and `"prompt"` for a prompt request.
+  - `priority`: the P# it carries, `"P0"` to `"P3"`, or null when a GitHub request carries none; a finding always has one; a prompt request carries none, so it is null.
+  - `author`: the login of the reviewer whose ask it is: for a thread, the first comment's author other than the owner. Null when GitHub gives no login, and for a finding or a prompt request.
+  - `path`: the thread's repo-relative path; for a finding or a prompt request, the first file it cites; null for a review, or a finding or a prompt request that cites no file.
+  - `line`: the thread's `line`, or its `originalLine` when the thread is outdated; for a finding or a prompt request, the first line it cites; null for a review, a thread on a whole file, or a finding or a prompt request that cites no line.
+  - `outdated`: true when the thread is outdated; false for a current thread, for a review, and for a finding or a prompt request.
+  - `url`: the URL of the thread's first comment, or of the review. Null for a finding or a prompt request, which has no page of its own.
   - `summary`: the request in one line.
   - `triage`: `"needsJudgment"`, `"noChange"`, `"disagree"`, `"outOfScope"`, or `"clear"`, as `fix-pr.md` defines them; for a request the owner settled at a stop, still the triage the run gave it.
   - `outcome`: `"fixed"` when a commit answers it, pushed or not (`pushed` says which); `"notFixed"` when the run settled it without a fix (`noChange`, `disagree`, `outOfScope`, or the owner's answer); `"awaitingAnswer"` when the run stopped to ask before it was settled.
@@ -213,6 +213,41 @@ The update's response, `pit-crew/update-result@1`:
 - `worktree`: the throwaway worktree's path, with the home directory written as `~`, when the run left one behind: an update not pushed, or a removal that refused. Otherwise null.
 - `question`, `error`: as in `review-result@1`; `error` also carries git's error for a refused push.
 
+The relevancy check's response, `pit-crew/relevancy-result@1`:
+
+- This schema applies only to `prompts/relevancy/relevancy-pr.md`, which loads this file when its invocation carries the flag. That prompt says what each of the five steps above covers in a relevancy check, and where each is recorded; its step meanings replace the single-review ones above, so a relevancy check records `review` for reading the PR's body and the evidence and judging, `consolidate` for writing the fix prompt, or once as `skipped` with the note `no updates needed` (or `irrelevant` for an `irrelevant` verdict), `writeReport` always as `skipped` with the note `no report file` (it writes no report file), and `post` always as `skipped` with the note `read-only: nothing to post` (it makes no GitHub write).
+- `relevancy-pr`'s instructions to stop and say so are failures under "Failing" below. It has no stop to ask of its own: a `"needsInput"` result comes only from a stop to ask that this file itself names.
+- `result.json` is written as the run's last act, under the rules above. Every field is always present, with null where it does not apply:
+
+```json
+{
+  "schema": "pit-crew/relevancy-result@1",
+  "command": "relevancy-pr",
+  "status": "done",
+  "target": { "repo": "owner/name", "pr": 101, "base": "main" },
+  "head": { "sha": "755b78b2c4e1f0a9d3b6e8c7a5f4d2e1b0c9a8f7" },
+  "upstream": { "sha": "1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d" },
+  "verdict": "relevant",
+  "reason": "The retry loop this PR fixes still never backs off on main, but #120 renamed the logger it calls.",
+  "needsUpdates": true,
+  "fixPrompt": "1. In src/retry.ts, call createLogger instead of makeLogger, which #120 renamed on main.\n2. In test/retry.test.ts, update the logger stub to createLogger to match.",
+  "question": null,
+  "error": null
+}
+```
+
+- `schema`: `"pit-crew/relevancy-result@1"`.
+- `command`: `"relevancy-pr"`.
+- `status`: `"done"` when the run reached its verdict; `"failed"` when it cannot complete, at any instruction to stop and say so included, with `error`; `"needsInput"` when it stopped to ask under "Stopping to ask" below, with `question`. A `"done"` result always carries a `verdict`, a `reason`, and `needsUpdates`.
+- `target`: `{ "repo": "<owner>/<name>", "pr": <number>, "base": "<the PR's base branch>" }`, the PR and its base branch. Null when the run stopped before resolving it.
+- `head`: `{ "sha": "<full SHA>" }`, the full 40-character SHA of the PR head the run read. Null when the run stopped before reading it.
+- `upstream`: `{ "sha": "<full SHA>" }`, the full 40-character SHA of the base branch's commit the run judged against. Null when the run stopped before reading it.
+- `verdict`: `"relevant"` or `"irrelevant"`, as `relevancy-pr.md` judges it against the problem or feature the PR's body states. Null when the run stopped before judging.
+- `reason`: one concise sentence, at most 500 characters, plain text with no line breaks or other control characters; for `"irrelevant"` it names why. It never names a model, provider, or agent. Null exactly when `verdict` is.
+- `needsUpdates`: `true` or `false`, whether the PR's own changes need editing because of what landed on the base branch since its merge base; being behind the base branch alone is `false`. Always `false` for `"irrelevant"`. Null exactly when `verdict` is.
+- `fixPrompt`: the fix prompt, as `relevancy-pr.md` writes it (plain text, at most 2,000 characters, line breaks and tabs allowed and no other control characters), when `needsUpdates` is `true`; null otherwise.
+- `question`, `error`: as in `review-result@1`.
+
 Stopping to ask:
 
 - **Wherever the calling prompt, or `tandem.md`, says to stop and ask, a run with the flag stops there too.** That includes a closed or merged PR under `review-pr.md`; a missing stack identity with more than one stack open; whether to fix, and at which model or effort; the one-attempt bound when the re-review after a fix finds anything; a tandem secondary that failed, or a draft that fails its checks; an unreachable pinned SHA; a prior invocation that cannot be repeated as written; and `review-stack`'s closing offer to post, which waits for an explicit yes.
@@ -238,5 +273,6 @@ What the flag never changes:
 - `review-stack` never fixing, on any stack, under any authorship.
 - `fix-pr` acting only on the viewer's own PR, confirmed the same way; its push as its only GitHub write; its one fix attempt; and its report written before the push.
 - `update-pr` acting only on the viewer's own PR, confirmed the same way; its push of the PR's branch as its only GitHub write, a rebase only with `--force-with-lease` on the head it read; and its never rewriting a commit of the primary branch.
+- `relevancy-pr` acting only on the viewer's own PR, confirmed the same way; and its making no GitHub write and no change to any file, branch, or worktree, with `git fetch origin` its only write.
 - Where the report goes, what it says, and when it is written. The JSON describes the run; it never replaces the report or the chat response.
 - The no-attribution rules, which apply to both files exactly as to the report: no model, provider, or agent names anywhere in them, and escalation is reported by its trigger, never by which model ran.
