@@ -12,7 +12,7 @@ import { setTimeFormat } from '../public/format.ts'
 import { openNotice } from '../public/noticeopen.ts'
 import { createNotices, toastLimit, toastMs } from '../public/notices.ts'
 import type { NoticeTarget } from '../public/noticesview.ts'
-import { arrivalAge, arrivalMs, bellModel, clearAll, dismissNotice, emptyRead, isUnread, markAllRead, markRead, mergeNotices, noticeTarget, panelModel, parseRead, readKey, settleRead, shownNotices, toastGap, toastPlace, toastRight, unreadCount } from '../public/noticesview.ts'
+import { arrivalAge, arrivalMs, bellModel, clearAll, dismissNotice, emptyRead, isUnread, keptScroll, markAllRead, markRead, mergeNotices, noticeTarget, panelModel, parseRead, readKey, settleRead, shownNotices, toastGap, toastPlace, toastRight, unreadCount } from '../public/noticesview.ts'
 import { fieldId, notifyChoices, toConfig, toForm, toastDefaults as pageToastDefaults } from '../public/settings-form.ts'
 import { installFakeBrowser, tick } from './fake-dom.ts'
 import type { FakeElement } from './fake-dom.ts'
@@ -129,6 +129,14 @@ test('only an entry that arrived while the panel was open is highlighted, for 2.
   assert.equal(arrivalAge(now, now + 2_499), 2_499)
   assert.equal(arrivalAge(now, now + 2_500), null)
   assert.equal(arrivalAge(now, now - 1), null, 'a clock that went back starts nothing over')
+})
+
+test('a redraw keeps the list where it was scrolled to, and a panel that has just opened, or had no list, starts at the top', () => {
+  assert.equal(keptScroll(false, 240), 240)
+  assert.equal(keptScroll(false, 0), 0)
+  assert.equal(keptScroll(false, undefined), 0)
+  assert.equal(keptScroll(true, 240), 0)
+  assert.equal(keptScroll(true, undefined), 0)
 })
 
 // the component
@@ -612,6 +620,74 @@ test('a redraw that changes nothing keeps the panel\'s own controls', async () =
   })
 })
 
+const listOf = (panel: FakeElement): FakeElement => {
+  const list = panel.querySelector('.notices-list')
+  assert.ok(list !== null)
+  return list
+}
+
+test('a list scrolled down stays there when an arrival, a dismissal, a newer time, or a list read again redraws the panel', async () => {
+  const served = { lastId: 6, entries: [notice(6), notice(5), notice(4)] }
+  await withNotices(served, async ({ notices, bell, panel, around }) => {
+    await notices.load()
+    bell.dispatch('click')
+    assert.equal(listOf(panel).scrollTop, 0)
+    listOf(panel).scrollTop = 240
+    const redraws: [string, () => unknown][] = [
+      ['an arrival', () => notices.take([pushed(7, false)])],
+      ['a dismissal', () => panel.querySelector('[data-notice-dismiss="5"]')?.dispatch('click')],
+      ['a newer time', () => {
+        around.nowMs = now + 600_000
+        notices.update()
+      }],
+      ['a list read again', () => {
+        served.lastId = 8
+        served.entries = [notice(8), notice(7), ...served.entries]
+        return notices.load()
+      }],
+    ]
+    for (const [what, redraw] of redraws) {
+      const before = listOf(panel)
+      await redraw()
+      assert.ok(listOf(panel) !== before, `${what} draws a new list`)
+      assert.equal(listOf(panel).scrollTop, 240, what)
+    }
+  })
+})
+
+test('a panel opened again starts at the top, wherever its list was scrolled to as it closed', async () => {
+  await withNotices({ lastId: 6, entries: [notice(6), notice(4)] }, async ({ notices, bell, panel }) => {
+    await notices.load()
+    bell.dispatch('click')
+    listOf(panel).scrollTop = 240
+    notices.take([pushed(7, false)])
+    assert.equal(listOf(panel).scrollTop, 240, 'kept while it is open')
+    bell.dispatch('click')
+    bell.dispatch('click')
+    assert.equal(listOf(panel).scrollTop, 0)
+    // and once open, a redraw keeps it as before
+    listOf(panel).scrollTop = 120
+    notices.take([pushed(8, false)])
+    assert.equal(listOf(panel).scrollTop, 120)
+  })
+})
+
+test('a redraw that changes nothing leaves the scrolled list as it is, and one drawn after an empty panel starts at the top', async () => {
+  await withNotices({ lastId: 6, entries: [notice(6), notice(4)] }, async ({ notices, bell, panel }) => {
+    await notices.load()
+    bell.dispatch('click')
+    const list = listOf(panel)
+    list.scrollTop = 240
+    notices.update()
+    assert.ok(listOf(panel) === list)
+    assert.equal(list.scrollTop, 240)
+    panel.querySelector('[data-notices-clear]')?.dispatch('click')
+    assert.equal(panel.querySelector('.notices-list'), null)
+    notices.take([pushed(7, false)])
+    assert.equal(listOf(panel).scrollTop, 0)
+  })
+})
+
 test('opening a target closes the other panels, opens its drawer with focus to come back to the bell, and waits while a request is on its way', () => {
   const calls: unknown[][] = []
   const state = { drawerBusy: false, sweepBusy: false }
@@ -782,6 +858,13 @@ test('the toasts sit at the top right under the measured header, above the panel
   assert.equal(toasts.get('z-index'), '25')
   assert.equal(rule(block, '.notifications-panel').get('z-index'), '20')
   assert.ok(read('notices.ts').includes("toastBox.style.setProperty('--toasts-right', "))
+})
+
+test('the panel scrolls in its list, the element the script keeps the position of', () => {
+  const block = areaBlock()
+  assert.equal(rule(block, '.notices-list').get('overflow-y'), 'auto')
+  for (const name of ['overflow', 'overflow-y']) assert.equal(rule(block, '.notifications-panel').has(name), false, name)
+  assert.ok(read('notices.ts').includes("h('ol', { class: 'notices-list' }"))
 })
 
 test('phone width is defined once, by the stylesheet\'s media query, and the script reads what it set', () => {

@@ -95,6 +95,9 @@ export const noticeModel = (item: StoredNotification, state: ReadState, { nowMs,
 export const panelModel = (items: readonly StoredNotification[], state: ReadState, context: NoticeContext): NoticeModel[] =>
   shownNotices(items, state).map((item) => noticeModel(item, state, context))
 
+// where the panel's list is scrolled to as it is drawn: where it was, and the top when the panel has just opened or had no list
+export const keptScroll = (opened: boolean, scrollTop: number | undefined): number => opened ? 0 : scrollTop ?? 0
+
 // the space between the toasts and the open panel, and at least as much between them and the window's left edge
 export const toastGap = 16
 

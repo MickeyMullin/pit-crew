@@ -165,12 +165,19 @@ const makeElement = (doc: FakeDocument, tag: string): FakeElement => {
     }
     return true
   }
+  let scrolled = 0
   const element: FakeElement = {
     tag: tag.toLowerCase(),
     doc,
     parentNode: null,
     childNodes: [],
-    scrollTop: 0,
+    // as in a browser, an element out of the document has no scroll position to read or set
+    get scrollTop() {
+      return element.isConnected ? scrolled : 0
+    },
+    set scrollTop(top: number) {
+      if (element.isConnected) scrolled = top
+    },
     style: {
       colorScheme: '',
       setProperty: (name, value) => void styles.set(name, value),

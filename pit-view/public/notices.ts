@@ -3,7 +3,7 @@
 import type { PushedNotification, StoredNotification } from '../src/notifications.ts'
 import { popoverFocus } from './autoreviewbar.ts'
 import { append, h, newTab, setText, svg } from './dom.ts'
-import { arrivalAge, bellModel, clearAll, dismissNotice, emptyRead, markAllRead, markRead, mergeNotices, noticeModel, panelModel, parseRead, readKey, settleRead, toastPlace, unreadCount } from './noticesview.ts'
+import { arrivalAge, bellModel, clearAll, dismissNotice, emptyRead, keptScroll, markAllRead, markRead, mergeNotices, noticeModel, panelModel, parseRead, readKey, settleRead, toastPlace, unreadCount } from './noticesview.ts'
 import type { NoticeModel, NoticeTarget, ReadState } from './noticesview.ts'
 import { getJson } from './runapi.ts'
 import { safeHref } from './safeurl.ts'
@@ -140,6 +140,7 @@ export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, pho
     // rebuilt only when what it says changes, so a focused control is never replaced under the keyboard
     const sig = JSON.stringify([models, empty, days])
     if (sig === drawn) return
+    const scroll = keptScroll(drawn === '', panel.querySelector<HTMLElement>('.notices-list')?.scrollTop)
     drawn = sig
     const active = document.activeElement
     const focused = active instanceof HTMLElement && panel.contains(active) ? active.dataset.focusKey ?? '' : null
@@ -149,13 +150,16 @@ export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, pho
       opening = clearAll(opening, items)
       paint()
     })
+    const list = models.length === 0 ? null : h('ol', { class: 'notices-list' }, models.map(entry))
     panel.replaceChildren()
     append(panel, [
       h('div', { class: 'notices-head' }, h('h2', { class: 'auto-title' }, 'Notifications'), clear),
       empty === null ? null : h('p', { class: 'notices-empty muted' }, empty),
-      models.length === 0 ? null : h('ol', { class: 'notices-list' }, models.map(entry)),
+      list,
       days === 0 ? null : h('p', { class: 'auto-note' }, `Kept for ${days} days. Clearing and dismissing hide entries in this browser only.`),
     ])
+    // once it is in the page, since an element outside it cannot be scrolled
+    if (list !== null) list.scrollTop = scroll
     const keys = [...panel.querySelectorAll<HTMLButtonElement>('[data-focus-key]')].filter((control) => !control.disabled).map((control) => control.dataset.focusKey ?? '')
     const focus = popoverFocus(focused, keys)
     if (focus.target === 'toggle') button.focus({ preventScroll: true })
