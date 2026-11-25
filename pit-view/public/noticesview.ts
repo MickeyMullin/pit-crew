@@ -1,5 +1,5 @@
 // public/noticesview.ts
-// the notifications area's pure parts (section 6 of DESIGN.md, Notifications area): what this browser has read, dismissed, and cleared, the merged list, the bell's count, where a notification leads, and the panel's entries; no DOM here. The server's rows are never changed by any of it
+// the notifications area's pure parts (section 6 of DESIGN.md, Notifications area): what this browser has read, dismissed, and cleared, the merged list, the bell's count, where a notification leads, the panel's entries, where the toasts sit around the panel, and which entry has just arrived; no DOM here. The server's rows are never changed by any of it
 import type { StoredNotification } from '../src/notifications.ts'
 import { formatCached, formatSince } from './format.ts'
 import { safeHref } from './safeurl.ts'
@@ -94,3 +94,28 @@ export const noticeModel = (item: StoredNotification, state: ReadState, { nowMs,
 // the panel's entries, newest first; state is what was read as it opened, so what was new then still reads as new
 export const panelModel = (items: readonly StoredNotification[], state: ReadState, context: NoticeContext): NoticeModel[] =>
   shownNotices(items, state).map((item) => noticeModel(item, state, context))
+
+// the space between the toasts and the open panel, and at least as much between them and the window's left edge
+export const toastGap = 16
+
+// how far from the window's right edge the toasts sit while the panel is open, so their right edge is a gap short of the panel's left one; null when the whole stack does not fit there
+export const toastRight = (panelLeft: number, stackWidth: number, windowWidth: number): number | null =>
+  panelLeft < stackWidth + 2 * toastGap ? null : Math.ceil(windowWidth - panelLeft) + toastGap
+
+export type ToastPlace = { shown: boolean, right: number | null }
+
+// whether a toast may show, and where; a null right is the stylesheet's own place. An open panel moves the stack aside, and where it leaves no room, at phone width or in a window too narrow for both, no toast shows
+export const toastPlace = ({ open, phone, left, stackWidth, windowWidth }: { open: boolean, phone: boolean, left: number, stackWidth: number, windowWidth: number }): ToastPlace => {
+  if (!open) return { shown: true, right: null }
+  const right = phone ? null : toastRight(left, stackWidth, windowWidth)
+  return { shown: right !== null, right }
+}
+
+// how long an entry that arrives while the panel is open is highlighted; the stylesheet's animation lasts as long
+export const arrivalMs = 2_500
+
+// how far into its highlight an entry is, so a redraw goes on from there; null for one that did not arrive while the panel was open, or whose highlight is over
+export const arrivalAge = (arrivedMs: number | undefined, nowMs: number): number | null => {
+  const age = arrivedMs === undefined ? arrivalMs : nowMs - arrivedMs
+  return age >= 0 && age < arrivalMs ? age : null
+}

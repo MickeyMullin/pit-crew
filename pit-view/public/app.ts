@@ -451,12 +451,15 @@ const notices = createNotices({
   panel: byId('notifications-panel'),
   toastBox: byId('toasts'),
   nowMs,
+  phone: () => getComputedStyle(byId('notifications-panel')).getPropertyValue('--phone-width').trim() === '1',
+  windowWidth: () => document.documentElement.clientWidth,
   holds: (number) => feed.view !== null && (findOpenRow(feed.view, number) !== undefined || findClosedRow(feed.view, number) !== undefined),
   open: openNotice({ drawer, sweepDrawer, logPanel, seedRuns }),
   storage: () => window.localStorage,
   timers: { set: (run, ms) => setTimeout(run, ms), clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>) },
 })
 window.addEventListener('storage', (event) => notices.storageChanged(event.key))
+window.addEventListener('resize', () => notices.resize())
 
 document.addEventListener('click', (event) => {
   const target = event.target instanceof Element ? event.target : null

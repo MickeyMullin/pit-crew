@@ -12,7 +12,7 @@ import { setTimeFormat } from '../public/format.ts'
 import { openNotice } from '../public/noticeopen.ts'
 import { createNotices, toastLimit, toastMs } from '../public/notices.ts'
 import type { NoticeTarget } from '../public/noticesview.ts'
-import { bellModel, clearAll, dismissNotice, emptyRead, isUnread, markAllRead, markRead, mergeNotices, noticeTarget, panelModel, parseRead, readKey, settleRead, shownNotices, unreadCount } from '../public/noticesview.ts'
+import { arrivalAge, arrivalMs, bellModel, clearAll, dismissNotice, emptyRead, isUnread, markAllRead, markRead, mergeNotices, noticeTarget, panelModel, parseRead, readKey, settleRead, shownNotices, toastGap, toastPlace, toastRight, unreadCount } from '../public/noticesview.ts'
 import { fieldId, notifyChoices, toConfig, toForm, toastDefaults as pageToastDefaults } from '../public/settings-form.ts'
 import { installFakeBrowser, tick } from './fake-dom.ts'
 import type { FakeElement } from './fake-dom.ts'
@@ -99,6 +99,38 @@ test('the panel lists every kind newest first with its label, PR, title, time, d
   ].map((item) => ({ ...item, tip: item.tip.replace(/.*/, () => new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', hourCycle: 'h12' }).format(new Date(items.find((found) => found.id === item.id)!.at))) })))
 })
 
+// where the toasts sit
+
+test('the stack sits a gap to the left of the panel\'s real left edge, wherever the panel is, and has no place there when it would not fit', () => {
+  assert.equal(toastGap, 16)
+  assert.equal(toastRight(760, 360, 1400), 656, 'the stack\'s right edge is at 744, the gap short of the panel')
+  assert.equal(toastRight(500, 360, 1400), 916)
+  assert.equal(toastRight(760.4, 360, 1400), 656, 'a part of a pixel never closes the gap')
+  // a gap on each side of the stack, and not a pixel less
+  assert.equal(toastRight(392, 360, 1000), 624)
+  assert.equal(toastRight(391, 360, 1000), null)
+  assert.equal(toastRight(-40, 360, 800), null)
+})
+
+test('a closed panel leaves the stack its own place, an open one shifts it, and at phone width or with no room an open one lets no toast show', () => {
+  const at = { left: 760, stackWidth: 360, windowWidth: 1400 }
+  assert.deepEqual(toastPlace({ ...at, open: false, phone: false }), { shown: true, right: null })
+  assert.deepEqual(toastPlace({ ...at, open: false, phone: true }), { shown: true, right: null })
+  assert.deepEqual(toastPlace({ ...at, open: true, phone: false }), { shown: true, right: 656 })
+  assert.deepEqual(toastPlace({ ...at, open: true, phone: true }), { shown: false, right: null })
+  assert.deepEqual(toastPlace({ ...at, open: true, phone: false, left: 300, windowWidth: 900 }), { shown: false, right: null })
+})
+
+test('only an entry that arrived while the panel was open is highlighted, for 2.5 seconds from its arrival', () => {
+  assert.equal(arrivalMs, 2_500)
+  assert.equal(arrivalAge(undefined, now), null)
+  assert.equal(arrivalAge(now, now), 0)
+  assert.equal(arrivalAge(now, now + 900), 900)
+  assert.equal(arrivalAge(now, now + 2_499), 2_499)
+  assert.equal(arrivalAge(now, now + 2_500), null)
+  assert.equal(arrivalAge(now, now - 1), null, 'a clock that went back starts nothing over')
+})
+
 // the component
 
 const settle = async (): Promise<void> => {
@@ -112,6 +144,8 @@ const pushed = (id: number, toast: boolean, patch: Partial<StoredNotification> =
 const withNotices = async (served: { repo?: string, lastId?: number, entries?: StoredNotification[], status?: number, hold?: Promise<void> }, check: (page: {
   notices: ReturnType<typeof createNotices>, doc: ReturnType<typeof installFakeBrowser>['document'], bell: FakeElement, badge: FakeElement, panel: FakeElement, toastBox: FakeElement, outside: FakeElement
   opened: NoticeTarget[], stored: Map<string, string>, timers: Map<number, () => void>, refuse: (on: boolean) => void
+  // what the page around it says, for a test to change: the clock, the phone-width query, and the window's width
+  around: { nowMs: number, phone: boolean, windowWidth: number, panelLeft: number, stackWidth: number }
 }) => Promise<void>): Promise<void> => {
   const fake = installFakeBrowser((async (input: string) => {
     assert.equal(String(input), '/api/notifications')
@@ -128,6 +162,10 @@ const withNotices = async (served: { repo?: string, lastId?: number, entries?: S
     }
     const [root, bell, badge, panel, toastBox, outside] = [make('div', 'notifications'), make('button', 'notifications-button'), make('span', 'notifications-count'), make('div', 'notifications-panel'), make('div', 'toasts'), make('button', 'elsewhere')]
     panel.hidden = true
+    const around = { nowMs: now, phone: false, windowWidth: 1400, panelLeft: 760, stackWidth: 360 }
+    // a hidden element has no box
+    panel.getBoundingClientRect = () => panel.hidden ? { height: 0, width: 0, left: 0 } : { height: 300, width: 420, left: around.panelLeft }
+    toastBox.getBoundingClientRect = () => ({ height: 0, width: around.stackWidth, left: 0 })
     bell.append(badge)
     root.append(bell, panel)
     doc.body.append(root, toastBox, outside)
@@ -138,7 +176,7 @@ const withNotices = async (served: { repo?: string, lastId?: number, entries?: S
     let accepts = true
     const notices = createNotices({
       root: root as never, button: bell as never, badge: badge as never, panel: panel as never, toastBox: toastBox as never,
-      nowMs: () => now, holds: (number) => number === 104,
+      nowMs: () => around.nowMs, phone: () => around.phone, windowWidth: () => around.windowWidth, holds: (number) => number === 104,
       open: (target) => {
         if (accepts) opened.push(target)
         return accepts
@@ -151,7 +189,7 @@ const withNotices = async (served: { repo?: string, lastId?: number, entries?: S
         return nextTimer
       }, clear: (handle) => void timers.delete(handle as number) },
     })
-    await check({ notices, doc, bell, badge, panel, toastBox, outside, opened, stored, timers, refuse: (on) => {
+    await check({ notices, doc, bell, badge, panel, toastBox, outside, opened, stored, timers, around, refuse: (on) => {
       accepts = !on
     } })
   } finally {
@@ -395,6 +433,175 @@ test('Escape and a press outside close the panel, Escape returning focus to the 
   })
 })
 
+test('the toasts shift to the left of the panel while it is open, follow it on a resize and a redraw, and go back when it closes', async () => {
+  await withNotices({}, async ({ notices, bell, toastBox, around, doc, outside }) => {
+    await notices.load()
+    const right = (): string => toastBox.style.getPropertyValue('--toasts-right')
+    notices.take([pushed(1, true)])
+    const toast = toastBox.children[0]
+    assert.equal(right(), '')
+    bell.dispatch('click')
+    assert.equal(right(), '656px')
+    assert.ok(toast !== undefined && toastBox.children[0] === toast, 'a toast already showing moves with the stack')
+    notices.take([pushed(2, true)])
+    assert.equal(toastBox.children.length, 2, 'and one that arrives joins it there')
+    around.windowWidth = 1200
+    around.panelLeft = 560
+    notices.resize()
+    assert.equal(right(), '656px')
+    around.panelLeft = 500
+    notices.resize()
+    assert.equal(right(), '716px')
+    // the header can wrap with no resize, and the bell with it
+    around.panelLeft = 480
+    notices.update()
+    assert.equal(right(), '736px')
+    bell.dispatch('click')
+    assert.equal(right(), '')
+    bell.dispatch('click')
+    assert.equal(right(), '736px')
+    doc.body.dispatch('keydown', { key: 'Escape' })
+    assert.equal(right(), '', 'Escape')
+    bell.dispatch('click')
+    outside.dispatch('pointerdown')
+    assert.equal(right(), '', 'a press outside')
+    notices.resize()
+    assert.equal(right(), '')
+    assert.equal(toastBox.children.length, 2)
+  })
+})
+
+test('a push shifts the stack from where the panel is as it lands, before its toast shows', async () => {
+  await withNotices({}, async ({ notices, bell, toastBox, around }) => {
+    await notices.load()
+    bell.dispatch('click')
+    around.panelLeft = 300
+    around.windowWidth = 900
+    notices.take([pushed(1, true)])
+    assert.equal(toastBox.children.length, 0, 'the window has no room beside the panel now')
+  })
+})
+
+test('a press on a toast leaves the panel open, so the stack does not move from under the pointer; opening its target closes the panel', async () => {
+  await withNotices({}, async ({ notices, bell, panel, toastBox, opened }) => {
+    await notices.load()
+    bell.dispatch('click')
+    notices.take([pushed(4, true), pushed(5, true)])
+    const [first, second] = toastBox.children as [FakeElement, FakeElement]
+    const dismiss = second.querySelector('.notice-dismiss') as FakeElement
+    dismiss.dispatch('pointerdown')
+    assert.equal(panel.hidden, false)
+    assert.equal(toastBox.style.getPropertyValue('--toasts-right'), '656px')
+    dismiss.dispatch('click')
+    assert.equal(panel.hidden, false)
+    assert.equal(toastBox.children.length, 1)
+    ;(first.querySelector('.notice-open') as FakeElement).dispatch('click')
+    assert.deepEqual(opened, [{ kind: 'drawer', number: 104 }])
+    assert.equal(panel.hidden, true)
+    assert.equal(toastBox.style.getPropertyValue('--toasts-right'), '')
+  })
+})
+
+test('at phone width an open panel lets no toast show: those showing go, with their timers, one that arrives makes none, and closing brings none back', async () => {
+  await withNotices({}, async ({ notices, bell, badge, panel, toastBox, timers, around, doc }) => {
+    await notices.load()
+    around.phone = true
+    notices.take([pushed(1, true)])
+    assert.equal(toastBox.children.length, 1, 'a closed panel leaves toasts alone')
+    ;(toastBox.children[0]?.querySelector('.notice-open') as FakeElement).focus()
+    bell.dispatch('click')
+    assert.equal(toastBox.children.length, 0)
+    assert.equal(timers.size, 0)
+    assert.ok(doc.activeElement === bell, 'focus in one goes to the bell')
+    notices.take([pushed(2, true)])
+    assert.equal(toastBox.children.length, 0)
+    assert.equal(timers.size, 0)
+    assert.equal(panel.querySelectorAll('.notice-item').length, 2)
+    assert.equal(badge.hidden, true)
+    bell.dispatch('click')
+    assert.equal(toastBox.children.length, 0)
+    notices.take([pushed(3, true)])
+    assert.equal(toastBox.children.length, 1)
+    assert.equal(badge.textContent, '1')
+  })
+})
+
+test('a window narrowed to phone width, or to one with no room beside the panel, lets no toast show while the panel is open', async () => {
+  for (const narrow of [{ phone: true }, { panelLeft: 300, windowWidth: 900 }]) {
+    await withNotices({}, async ({ notices, bell, toastBox, timers, around }) => {
+      await notices.load()
+      bell.dispatch('click')
+      notices.take([pushed(1, true)])
+      assert.equal(toastBox.children.length, 1)
+      Object.assign(around, narrow)
+      notices.resize()
+      assert.equal(toastBox.children.length, 0)
+      assert.equal(timers.size, 0)
+      assert.equal(toastBox.style.getPropertyValue('--toasts-right'), '')
+    })
+  }
+})
+
+const arrived = (panel: FakeElement): [string | null, string][] => panel.querySelectorAll('.notice-item').filter((entry) => entry.getAttribute('data-arrived') !== null)
+  .map((entry) => [entry.querySelector('.notice-open')?.textContent.slice(0, 4) ?? null, entry.style.getPropertyValue('--arrived-age')])
+
+test('an entry that arrives while the panel is open is highlighted, whatever its kind\'s toast, and one already listed as it opened is not', async () => {
+  for (const phone of [false, true]) {
+    await withNotices({ lastId: 4, entries: [notice(4)] }, async ({ notices, bell, panel, around }) => {
+      around.phone = phone
+      await notices.load()
+      notices.take([pushed(5, true)])
+      bell.dispatch('click')
+      assert.deepEqual(arrived(panel), [])
+      notices.take([pushed(6, true), pushed(7, false), pushed(5, true)])
+      assert.deepEqual(arrived(panel), [['#107', '0ms'], ['#106', '0ms']])
+      assert.equal(panel.querySelectorAll('[data-unread]').length, 4, 'the unread marks are unchanged by it')
+      assert.deepEqual(texts(panel, '.notice-open')[0], '#107 feat(nav): invented change 7')
+    })
+  }
+})
+
+test('a redraw goes on with the highlight from the entry\'s age, and never plays it again once it is over or the panel has closed', async () => {
+  await withNotices({ lastId: 4, entries: [notice(4)] }, async ({ notices, bell, panel, around }) => {
+    await notices.load()
+    bell.dispatch('click')
+    notices.take([pushed(5, false)])
+    around.nowMs = now + 1_000
+    const before = panel.querySelector('.notice-item')
+    notices.update()
+    assert.ok(before !== null && panel.querySelector('.notice-item') === before, 'a redraw that changes nothing keeps the entry, and its animation')
+    notices.take([pushed(6, false)])
+    assert.deepEqual(arrived(panel), [['#106', '0ms'], ['#105', '1000ms']])
+    around.nowMs = now + 2_600
+    notices.take([pushed(7, false)])
+    assert.deepEqual(arrived(panel), [['#107', '0ms'], ['#106', '1600ms']])
+    // over is over, even when the clock is set back
+    around.nowMs = now + 500
+    notices.take([pushed(8, false)])
+    assert.equal(arrived(panel).some(([text]) => text === '#105'), false)
+    bell.dispatch('click')
+    bell.dispatch('click')
+    assert.deepEqual(arrived(panel), [], 'every entry was listed as it opened again')
+  })
+})
+
+test('a list read from the server highlights nothing, even while the panel is open, and keeps the highlight of what was pushed', async () => {
+  const served = { lastId: 4, entries: [notice(4)] }
+  await withNotices(served, async ({ notices, bell, panel, around }) => {
+    await notices.load()
+    bell.dispatch('click')
+    notices.take([pushed(5, false)])
+    served.lastId = 6
+    served.entries = [notice(6), notice(5), notice(4)]
+    around.nowMs = now + 400
+    await notices.load()
+    assert.deepEqual(texts(panel, '.notice-open').length, 3)
+    assert.deepEqual(arrived(panel), [['#105', '400ms']])
+    notices.take([pushed(6, false)])
+    assert.deepEqual(arrived(panel), [['#105', '400ms']], 'one the list already held did not just arrive')
+  })
+})
+
 test('a redraw that changes nothing keeps the panel\'s own controls', async () => {
   await withNotices({ lastId: 4, entries: [notice(4)] }, async ({ notices, bell, panel }) => {
     await notices.load()
@@ -548,6 +755,74 @@ test('the notification styles use the theme\'s variables only, and every class h
   const block = css.slice(css.indexOf('/* the notifications area'), css.indexOf('/* end of the notifications area */'))
   assert.ok(block.length > 200)
   assert.doesNotMatch(block, /font-family|#[0-9a-f]{3,8}\b|rgba?\(|light-dark\(/i)
+})
+
+// the declarations of the first rule with exactly this selector, in the text given
+const rule = (text: string, selector: string): Map<string, string> => {
+  const body = text.split(`\n${selector} {\n`)[1]?.split('}')[0]
+  assert.ok(body !== undefined, `a rule for ${selector}`)
+  return new Map(body.split(';').map((line) => line.trim()).filter((line) => line !== '').map((line) => {
+    const at = line.indexOf(':')
+    return [line.slice(0, at), line.slice(at + 1).trim()]
+  }))
+}
+
+const areaBlock = (): string => {
+  const css = read('styles.css')
+  return css.slice(css.indexOf('/* the notifications area'), css.indexOf('/* end of the notifications area */'))
+}
+
+test('the toasts sit at the top right under the measured header, above the panel, and take the script\'s shift', () => {
+  const block = areaBlock()
+  const toasts = rule(block, '.toasts')
+  assert.equal(toasts.get('position'), 'fixed')
+  assert.equal(toasts.get('top'), 'calc(var(--header-height, 56px) + 16px)')
+  assert.equal(toasts.get('right'), 'var(--toasts-right, 16px)')
+  for (const side of ['bottom', 'left']) assert.equal(toasts.has(side), false, side)
+  assert.equal(toasts.get('z-index'), '25')
+  assert.equal(rule(block, '.notifications-panel').get('z-index'), '20')
+  assert.ok(read('notices.ts').includes("toastBox.style.setProperty('--toasts-right', "))
+})
+
+test('phone width is defined once, by the stylesheet\'s media query, and the script reads what it set', () => {
+  const block = areaBlock()
+  const phone = block.slice(block.indexOf('@media (max-width: 720px) {'))
+  assert.match(phone, /^@media \(max-width: 720px\) \{\n  \.notifications-panel \{\n    --phone-width: 1;\n    position: fixed;/)
+  assert.equal(block.match(/--phone-width:/g)?.length, 1)
+  const app = read('app.ts')
+  assert.ok(app.includes("phone: () => getComputedStyle(byId('notifications-panel')).getPropertyValue('--phone-width').trim() === '1',"))
+  assert.ok(app.includes('windowWidth: () => document.documentElement.clientWidth,'), 'without the scroll bar, which a fixed element\'s right edge is measured from')
+  assert.ok(app.includes("window.addEventListener('resize', () => notices.resize())"))
+  for (const name of ['app.ts', 'notices.ts', 'noticesview.ts']) assert.doesNotMatch(read(name), /\b720\b/, name)
+})
+
+test('the highlight is an animation from a tint of the theme\'s blue, as long as the script counts, begun at the entry\'s age, and absent under reduced motion', () => {
+  const block = areaBlock()
+  assert.equal(rule(block, '.notice-item[data-arrived]').get('animation'), `notice-arrived ${arrivalMs / 1_000}s ease-out calc(-1 * var(--arrived-age, 0ms))`)
+  assert.equal(rule(block, '.notice-item[data-arrived]').size, 1, 'the tint is the animation\'s alone')
+  assert.match(block, /@keyframes notice-arrived \{\n  from \{\n    background: color-mix\(in srgb, var\(--blue-fg\) 10%, var\(--surface\)\);\n  \}\n\}/)
+  assert.match(block, /@media \(prefers-reduced-motion: reduce\) \{\n  \.notice-item\[data-arrived\] \{\n    animation: none;\n  \}\n\}/)
+  assert.ok(read('notices.ts').includes("'data-arrived': age !== null"))
+})
+
+test('text on the highlight at its strongest meets 4.5:1 contrast in both color schemes', () => {
+  const css = read('styles.css')
+  const token = (name: string): number[][] => {
+    const found = new RegExp(`--${name}: light-dark\\(#(\\w{6}), #(\\w{6})\\);`).exec(css)
+    assert.ok(found !== null, name)
+    return found.slice(1).map((hex) => [0, 2, 4].map((at) => parseInt(hex.slice(at, at + 2), 16)))
+  }
+  const share = Number(/var\(--blue-fg\) (\d+)%, var\(--surface\)/.exec(css)?.[1]) / 100
+  assert.ok(share > 0)
+  const luminance = (rgb: number[]): number => rgb.map((value) => value / 255).map((c) => c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4).reduce((sum, c, index) => sum + c * [0.2126, 0.7152, 0.0722][index]!, 0)
+  for (const scheme of [0, 1]) {
+    const blue = token('blue-fg')[scheme]!
+    const tint = token('surface')[scheme]!.map((value, index) => value * (1 - share) + blue[index]! * share)
+    for (const name of ['ink', 'muted', 'blue-fg', 'link-hover']) {
+      const [high, low] = [luminance(token(name)[scheme]!), luminance(tint)].sort((a, b) => b - a) as [number, number]
+      assert.ok((high + 0.05) / (low + 0.05) >= 4.5, `${name} on the tint, scheme ${scheme}`)
+    }
+  }
 })
 
 test('times in the notifications area come from format.ts alone', () => {

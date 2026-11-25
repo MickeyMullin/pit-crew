@@ -27,8 +27,10 @@ export type FakeElement = {
   scrollTop: number
   selectionStart: number
   selectionEnd: number
-  style: { colorScheme: string, setProperty: (name: string, value: string) => void }
-  getBoundingClientRect: () => { height: number }
+  // custom properties only, as set and removed; one never set reads as ''
+  style: { colorScheme: string, setProperty: (name: string, value: string) => void, removeProperty: (name: string) => void, getPropertyValue: (name: string) => string }
+  // the fake has no layout, so a test that needs a rectangle replaces this
+  getBoundingClientRect: () => { height: number, width: number, left: number }
   prepend: (...nodes: (Child | string)[]) => void
   setAttribute: (name: string, value: string) => void
   getAttribute: (name: string) => string | null
@@ -136,6 +138,7 @@ const makeElement = (doc: FakeDocument, tag: string): FakeElement => {
   const attrs = new Map<string, string>()
   const listeners = new Map<string, Listener[]>()
   const live: { value?: string, checked?: boolean } = {}
+  const styles = new Map<string, string>()
   const flag = (name: string): boolean => attrs.has(name)
   const setFlag = (name: string, on: boolean): void => {
     if (on) attrs.set(name, '')
@@ -168,8 +171,13 @@ const makeElement = (doc: FakeDocument, tag: string): FakeElement => {
     parentNode: null,
     childNodes: [],
     scrollTop: 0,
-    style: { colorScheme: '', setProperty: () => undefined },
-    getBoundingClientRect: () => ({ height: 0 }),
+    style: {
+      colorScheme: '',
+      setProperty: (name, value) => void styles.set(name, value),
+      removeProperty: (name) => void styles.delete(name),
+      getPropertyValue: (name) => styles.get(name) ?? '',
+    },
+    getBoundingClientRect: () => ({ height: 0, width: 0, left: 0 }),
     prepend: (...nodes) => {
       element.childNodes.unshift(...nodes.map(adopt))
     },

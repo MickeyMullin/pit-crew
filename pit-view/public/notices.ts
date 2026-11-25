@@ -1,9 +1,9 @@
 // public/notices.ts
-// the header's bell, its panel, and the toasts (noticesview.ts says what each reads): the stored list is read with every view, new ones come on the event stream, and what is read, dismissed, or cleared is kept in this browser's localStorage and nowhere else
+// the header's bell, its panel, and the toasts (noticesview.ts says what each reads and where the toasts sit): the stored list is read with every view, new ones come on the event stream, and what is read, dismissed, or cleared is kept in this browser's localStorage and nowhere else
 import type { PushedNotification, StoredNotification } from '../src/notifications.ts'
 import { popoverFocus } from './autoreviewbar.ts'
 import { append, h, newTab, setText, svg } from './dom.ts'
-import { bellModel, clearAll, dismissNotice, emptyRead, markAllRead, markRead, mergeNotices, noticeModel, panelModel, parseRead, readKey, settleRead, unreadCount } from './noticesview.ts'
+import { arrivalAge, bellModel, clearAll, dismissNotice, emptyRead, markAllRead, markRead, mergeNotices, noticeModel, panelModel, parseRead, readKey, settleRead, toastPlace, unreadCount } from './noticesview.ts'
 import type { NoticeModel, NoticeTarget, ReadState } from './noticesview.ts'
 import { getJson } from './runapi.ts'
 import { safeHref } from './safeurl.ts'
@@ -18,10 +18,12 @@ export type Notices = {
   load: () => Promise<void>
   // new ones from the event stream
   take: (pushed: readonly PushedNotification[]) => void
-  // after each draw: the times, and what each entry leads to
+  // after each draw: the times, what each entry leads to, and the toasts' place
   update: () => void
   // another tab changed this browser's marks
   storageChanged: (key: string | null) => void
+  // the window's size changed, and the panel's place with it
+  resize: () => void
   isOpen: () => boolean
   close: (returnFocus?: boolean) => void
 }
@@ -33,6 +35,10 @@ export type NoticesOptions = {
   panel: HTMLElement
   toastBox: HTMLElement
   nowMs: () => number
+  // whether the stylesheet's phone-width layout is on
+  phone: () => boolean
+  // the window's width without its scroll bar
+  windowWidth: () => number
   // whether the page holds this PR, open or in Closed, so its drawer can open
   holds: (number: number) => boolean
   // opens the target's drawer; false when it cannot open now
@@ -42,7 +48,7 @@ export type NoticesOptions = {
   timers: { set: (run: () => void, ms: number) => unknown, clear: (handle: unknown) => void }
 }
 
-export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, holds, open: openTarget, storage, timers }: NoticesOptions): Notices => {
+export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, phone, windowWidth, holds, open: openTarget, storage, timers }: NoticesOptions): Notices => {
   let repo: string | null = null
   let items: StoredNotification[] = []
   let days = 0
@@ -51,6 +57,8 @@ export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, hol
   // the marks as the panel opened, so what was new then reads as new until it closes
   let opening: ReadState = state
   let isShown = false
+  // when each entry arrived while the panel was open, until its highlight is over
+  const arrivals = new Map<number, number>()
   let drawn = ''
   // only the newest read counts; what is pushed while it runs is added to its answer
   let request = 0
@@ -104,7 +112,7 @@ export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, hol
     h('span', { class: 'muted', title: model.tip }, model.when),
     model.unread ? h('span', { class: 'sr-only' }, 'Unread') : null)
 
-  const entry = (model: NoticeModel): HTMLElement => h('li', { class: 'notice-item', 'data-unread': model.unread },
+  const entryParts = (model: NoticeModel): (HTMLElement | null)[] => [
     meta(model),
     openControl(model, () => close()),
     model.detail === null ? null : h('p', { class: 'notice-detail' }, model.detail),
@@ -113,7 +121,17 @@ export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, hol
       keep(dismissNotice(state, model.id))
       opening = dismissNotice(opening, model.id)
       paint()
-    }))
+    }),
+  ]
+
+  const entry = (model: NoticeModel): HTMLElement => {
+    // an entry drawn again goes on from its age, and one whose highlight is over is never highlighted again
+    const age = arrivalAge(arrivals.get(model.id), nowMs())
+    if (age === null) arrivals.delete(model.id)
+    const element = h('li', { class: 'notice-item', 'data-unread': model.unread, 'data-arrived': age !== null }, ...entryParts(model))
+    if (age !== null) element.style.setProperty('--arrived-age', `${age}ms`)
+    return element
+  }
 
   const paintPanel = (): void => {
     if (!isShown) return
@@ -158,6 +176,8 @@ export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, hol
     isShown = false
     panel.hidden = true
     button.setAttribute('aria-expanded', 'false')
+    arrivals.clear()
+    placeToasts()
     if (returnFocus) button.focus()
   }
 
@@ -169,10 +189,23 @@ export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, hol
     panel.hidden = false
     button.setAttribute('aria-expanded', 'true')
     paint()
+    placeToasts()
   }
 
   // the toasts on screen, oldest first, each with what takes it off
   const toastList: (() => void)[] = []
+
+  // moves the toasts out of the panel's way, or takes them off where it leaves them no room; answers whether one may show
+  const placeToasts = (): boolean => {
+    const place = toastPlace({ open: isShown, phone: phone(), left: panel.getBoundingClientRect().left, stackWidth: toastBox.getBoundingClientRect().width, windowWidth: windowWidth() })
+    if (place.right === null) toastBox.style.removeProperty('--toasts-right')
+    else toastBox.style.setProperty('--toasts-right', `${place.right}px`)
+    if (!place.shown) {
+      if (toastBox.contains(document.activeElement)) button.focus({ preventScroll: true })
+      for (const remove of [...toastList]) remove()
+    }
+    return place.shown
+  }
 
   const addToast = (item: StoredNotification): void => {
     let timer: unknown = null
@@ -193,7 +226,10 @@ export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, hol
     const model = noticeModel(item, state, context())
     const element = h('div', { class: 'toast' },
       h('div', { class: 'notice-meta' }, h('span', { class: 'notice-label' }, model.label)),
-      openControl(model, remove),
+      openControl(model, () => {
+        remove()
+        close()
+      }),
       model.detail === null ? null : h('p', { class: 'notice-detail' }, model.detail),
       dismissControl(model, `Dismiss ${model.text}`, () => {
         const focused = element.contains(document.activeElement)
@@ -217,8 +253,11 @@ export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, hol
     if (fresh.length === 0) return
     items = mergeNotices(items, fresh)
     // one that arrives while the panel is open is seen
-    if (isShown) keep(markAllRead(state, items))
-    for (const item of fresh) if (item.toast) addToast(item)
+    if (isShown) {
+      keep(markAllRead(state, items))
+      for (const item of fresh) arrivals.set(item.id, nowMs())
+    }
+    if (placeToasts()) for (const item of fresh) if (item.toast) addToast(item)
     paint()
   }
 
@@ -254,6 +293,12 @@ export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, hol
     paint()
   }
 
+  // the header can wrap, and the bell move with it, on any draw
+  const update = (): void => {
+    paint()
+    placeToasts()
+  }
+
   button.addEventListener('click', () => isShown ? close() : show())
 
   document.addEventListener('keydown', (event) => {
@@ -263,10 +308,11 @@ export const createNotices = ({ root, button, badge, panel, toastBox, nowMs, hol
     }
   })
   document.addEventListener('pointerdown', (event) => {
-    if (isShown && event.target instanceof Node && !root.contains(event.target)) close()
+    // a press on a toast leaves the panel open: closing it would move the toast from under the pointer before its click
+    if (isShown && event.target instanceof Node && !root.contains(event.target) && !toastBox.contains(event.target)) close()
   })
 
   paint()
 
-  return { load, take, update: paint, storageChanged, isOpen: () => isShown, close }
+  return { load, take, update, storageChanged, resize: () => void placeToasts(), isOpen: () => isShown, close }
 }
