@@ -10,7 +10,7 @@ import { weekdayNames } from '../src/config.ts'
 import { ConfigError, defaultConfig, idleRange, validateConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import { deriveOpenRows, groupRows, personView } from '../src/derive.ts'
-import { notificationKinds } from '../src/notify.ts'
+import { bannerKinds, notificationKinds } from '../src/notify.ts'
 import { cycleKeys } from '../src/poller.ts'
 import type { View } from '../src/poller.ts'
 import {
@@ -390,14 +390,14 @@ test('notifications round-trip: absent stays absent until the form leaves its de
   const config = defaultConfig()
   assert.equal('notifications' in toConfig(formOf(config), config), false)
   const form = formOf(config)
-  assert.deepEqual([form.notifyEnabled, form.notifyKinds], [false, [...notificationKinds]])
+  assert.deepEqual([form.notifyEnabled, form.notifyKinds], [false, [...bannerKinds]])
   form.notifyEnabled = true
   form.notifyKinds = ['ciFailing', 'readyToMerge']
   // saved in the page's order, not the order they were ticked
   assert.deepEqual(toConfig(form, config).notifications, { enabled: true, kinds: ['readyToMerge', 'ciFailing'] })
   assert.equal(isDirty(form, config), true)
   // off with every kind is the default; a config that had the key keeps it
-  const off = { ...config, notifications: { enabled: false, kinds: [...notificationKinds] } }
+  const off = { ...config, notifications: { enabled: false, kinds: [...bannerKinds] } }
   assert.deepEqual(toConfig(formOf(off), off).notifications, off.notifications)
   assert.equal(isDirty(formOf(off), off), false)
   // the server accepts what the page sends

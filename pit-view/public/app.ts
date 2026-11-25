@@ -18,6 +18,8 @@ import { createHoverCard } from './hovercard.ts'
 import { createIdleTracker } from './idle.ts'
 import { loadInstance, showInstance, showSignOut } from './instance.ts'
 import { createLive } from './live.ts'
+import { openNotice } from './noticeopen.ts'
+import { createNotices } from './notices.ts'
 import { shownCounts, slashApplies } from './pagesearch.ts'
 import { createReportPanel } from './reportpanel.ts'
 import { closedRangeOf, render } from './render.ts'
@@ -189,6 +191,7 @@ const draw = (): void => {
   // one part failing must not stop the rest of the page drawing
   try {
     autoReviewMenu.update()
+    notices.update()
     drawer.update()
     sweepDrawer.update()
     logPanel.update()
@@ -266,6 +269,7 @@ const take = (step: FeedStep): void => {
 }
 
 const loadView = async (): Promise<void> => {
+  void notices.load()
   viewRequest += 1
   const request = viewRequest
   clearTimeout(viewRetry)
@@ -284,6 +288,9 @@ const loadView = async (): Promise<void> => {
 const onPatch = (patch: Patch): void => {
   skewMs = Date.parse(patch.now) - Date.now()
   if (patch.repo !== undefined || patch.viewer !== undefined) void loadSettings()
+  // handed over before the feed's own order is settled, since each is added once by its id; the list belongs to one repository
+  if (patch.notifications !== undefined) notices.take(patch.notifications)
+  if (patch.repo !== undefined) void notices.load()
   take(receivePatch(feed, patch))
 }
 
@@ -435,6 +442,21 @@ const logPanel = createAutoReviewLogPanel({
   openRun: openLoggedRun({ drawer, sweepDrawer, seedRuns, backToLog: (entryId) => logPanel.restore(entryId) }),
   returnTo: () => document.getElementById('auto-review-button'),
 })
+
+// the header's bell, its panel, and the toasts (section 6 of DESIGN.md, Notifications area); another tab's marks show here at once
+const notices = createNotices({
+  root: byId('notifications'),
+  button: byId<HTMLButtonElement>('notifications-button'),
+  badge: byId('notifications-count'),
+  panel: byId('notifications-panel'),
+  toastBox: byId('toasts'),
+  nowMs,
+  holds: (number) => feed.view !== null && (findOpenRow(feed.view, number) !== undefined || findClosedRow(feed.view, number) !== undefined),
+  open: openNotice({ drawer, sweepDrawer, logPanel, seedRuns }),
+  storage: () => window.localStorage,
+  timers: { set: (run, ms) => setTimeout(run, ms), clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>) },
+})
+window.addEventListener('storage', (event) => notices.storageChanged(event.key))
 
 document.addEventListener('click', (event) => {
   const target = event.target instanceof Element ? event.target : null

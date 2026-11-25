@@ -368,15 +368,29 @@ const fillStatic = (): void => {
   showPostAsk()
   byId('notify-kinds').replaceChildren(...notifyChoices.map((choice) => {
     const id = fieldId(`notifyKind.${choice.kind}`)
-    const box = h('input', { id, type: 'checkbox', 'aria-describedby': `${id}-hint` })
-    box.checked = form.notifyKinds.includes(choice.kind)
-    box.addEventListener('change', () => {
-      if (page === null) return
-      const without = page.form.notifyKinds.filter((kind) => kind !== choice.kind)
-      page.form.notifyKinds = box.checked ? [...without, choice.kind] : without
-      changed()
-    })
-    return h('div', { class: 'kind' }, h('label', { class: 'check' }, box, choice.label), h('p', { id: `${id}-hint`, class: 'hint' }, choice.hint))
+    const box = (boxId: string, name: string, checked: boolean, set: (on: boolean) => void): HTMLElement => {
+      const input = h('input', { id: boxId, type: 'checkbox', 'aria-label': `${name}: ${choice.label}`, 'aria-describedby': `${id}-hint` })
+      input.checked = checked
+      input.addEventListener('change', () => {
+        if (page === null) return
+        set(input.checked)
+        changed()
+      })
+      return h('label', { class: 'check' }, input, name)
+    }
+    const { kind } = choice
+    return h('div', { class: 'kind' },
+      h('span', { class: 'kind-name' }, choice.label),
+      h('div', { class: 'kind-boxes' },
+        box(fieldId(`notifyToast.${kind}`), 'Toast', form.notifyToasts.includes(kind), (on) => {
+          if (page !== null) page.form.notifyToasts = [...page.form.notifyToasts.filter((other) => other !== kind), ...(on ? [kind] : [])]
+        }),
+        choice.banner
+          ? box(id, 'Desktop banner', form.notifyKinds.includes(choice.kind), (on) => {
+            if (page !== null) page.form.notifyKinds = [...page.form.notifyKinds.filter((other) => other !== choice.kind), ...(on ? [choice.kind] : [])]
+          })
+          : null),
+      h('p', { id: `${id}-hint`, class: 'hint' }, choice.hint))
   }))
 }
 

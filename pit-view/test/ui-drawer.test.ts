@@ -498,15 +498,15 @@ test('a press outside the drawer closes it, unless it is in a panel, on a drawer
 
 test('the page closes the drawer on a press outside it and leaves the controls that open a drawer to their own click', async () => {
   const read = (name: string): Promise<string> => readFile(join(import.meta.dirname, '..', 'public', name), 'utf8')
-  const [app, drawer, tables] = [await read('app.ts'), await read('drawer.ts'), await read('tables.ts')]
+  const [app, drawer, tables, notices] = [await read('app.ts'), await read('drawer.ts'), await read('tables.ts'), await read('notices.ts')]
   // the press is caught on the page, and the drawer owns the guard for a request on its way
   assert.match(app, /addEventListener\('pointerdown', \(event\) => \{/)
   assert.match(app, /closeOnOutsidePress\(\[drawer, sweepDrawer\], target\)/)
   assert.match(drawer, /if \(number === null \|\| !outsidePressCloses\(\{ \.\.\.where, busy \}\)\) return false\s+close\(\)/)
   // every control that opens a drawer is named, so none of them closes it first
-  for (const attribute of ['data-agent="open"', 'data-open-agent', 'data-fix-session', 'data-sweep']) {
+  for (const attribute of ['data-agent="open"', 'data-open-agent', 'data-fix-session', 'data-sweep', 'data-notice-open']) {
     assert.ok(drawerOpenerSelector.includes(attribute), attribute)
-    assert.ok(app.includes(attribute) || tables.includes(attribute), attribute)
+    assert.ok(app.includes(attribute) || tables.includes(attribute) || notices.includes(attribute), attribute)
   }
 })
 

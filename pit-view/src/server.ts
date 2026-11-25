@@ -30,7 +30,8 @@ import { modelsSaveProblem, modelsView } from './models.ts'
 import { keyStatus, openRouterFileName, profileEnvPath, readOpenRouterKey, readProfileEnvKey } from './openrouter.ts'
 import type { OpenRouterStatus } from './openrouter.ts'
 import { renderMarkdown } from './markdown.ts'
-import { createNotifier, noDeliver, systemDeliver, systemExec } from './notify.ts'
+import { notificationDays, openNotifications } from './notifications.ts'
+import { createNotifier, noDeliver, systemDeliver, systemExec, toasts } from './notify.ts'
 import type { Deliver } from './notify.ts'
 import { createPoller, systemTimers } from './poller.ts'
 import type { Patch, Poller, Timers } from './poller.ts'
@@ -406,6 +407,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
   }
   // the log of what the scheduler decided, a table of its own in the cache file
   const autoLog = options.autoReviewLog === false ? null : openAutoReviewLog({ db: cache.db, clock })
+  // what reached the notifier, a table of its own in the cache file too
+  const notifications = openNotifications({ db: cache.db, clock })
   const clients = createClients()
   const streams = new Set<ServerResponse>()
   // the streams opened through the proxy, with the cookies they were opened with: each ends once its session is no longer good
@@ -424,7 +427,13 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     for (const stream of streams) stream.write(frame)
   }
 
-  const notifier = createNotifier({ config: effective, deliver: options.deliver ?? noDeliver, log })
+  const notifier = createNotifier({
+    config: effective,
+    deliver: options.deliver ?? noDeliver,
+    log,
+    // stored first, then pushed on the pages' own event stream with whether each toasts under the config in effect now
+    record: (events) => poller.notified(events.map((event) => ({ ...notifications.record(event), toast: toasts(event.kind, effective().notifications) }))),
+  })
   // the sweeps' own memory state, beside the runs: read from the cache here, then kept current by the sweep launcher's changes (recovery included)
   const sweeps = createSweepMemory(cache)
   // the launcher is made below, from the poller's own callbacks; the poller asks it only once running
@@ -1111,6 +1120,8 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
       const days = logDaysOf(effective())
       json(res, 200, { days, entries: autoLog?.list(effective().repo, days) ?? [] })
     } },
+    // the notifications of the repository in effect, newest first, within the days kept; a read, no token
+    { method: 'GET', pattern: /^\/api\/notifications$/, handle: (_req, res) => json(res, 200, { repo: effective().repo, days: notificationDays, lastId: notifications.lastId(), entries: notifications.list(effective().repo) }) },
     { method: 'POST', pattern: /^\/api\/auto-review\/run$/, handle: (req, res) => runNow(req, res) },
     // the effective model registry and slots, read-only, for the Settings page (section 1 of DESIGN.md, Configuration)
     { method: 'GET', pattern: /^\/api\/models$/, handle: (_req, res) => json(res, 200, modelsView(effective().models)) },

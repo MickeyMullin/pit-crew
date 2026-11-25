@@ -2,8 +2,8 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { projectModels } from './models.ts'
-import { isNotificationKind, notificationKinds } from './notify.ts'
-import type { NotificationKind } from './notify.ts'
+import { bannerKinds, isBannerKind, isNotificationKind, notificationKinds } from './notify.ts'
+import type { BannerKind, NotificationKind } from './notify.ts'
 
 export type Clock = { now: () => number }
 
@@ -27,7 +27,8 @@ export type TicketSystem = {
 }
 
 // absent means off; kinds lists the transitions to notify about (section 9 of DESIGN.md)
-export type Notifications = { enabled: boolean, kinds: NotificationKind[] }
+// enabled and kinds are the macOS banners' alone; toasts is the kinds that toast in the page, and absent means toastDefaults in src/notify.ts
+export type Notifications = { enabled: boolean, kinds: BannerKind[], toasts?: NotificationKind[] }
 
 // the days auto-review's active hours name, Sunday first, as the time helpers number them
 export const weekdayNames = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const
@@ -317,14 +318,19 @@ const toTicketSystem = (value: unknown, index: number): TicketSystem => {
 
 const toNotifications = (value: unknown): Notifications => {
   if (!isObject(value)) return fail('config.notifications must be an object')
-  onlyKeys(value, ['enabled', 'kinds'], 'notifications')
-  const kinds = list(value, 'kinds', 'notifications')
-  const known: NotificationKind[] = []
-  for (const kind of kinds) {
-    if (!isNotificationKind(kind)) fail(`notifications.kinds must hold only ${notificationKinds.join(', ')}; got ${typeof kind === 'string' ? kind : typeof kind}`)
-    else if (!known.includes(kind)) known.push(kind)
+  onlyKeys(value, ['enabled', 'kinds', 'toasts'], 'notifications')
+  const known = <K extends string>(key: 'kinds' | 'toasts', allowed: readonly K[], is: (kind: unknown) => kind is K): K[] => {
+    const found: K[] = []
+    for (const kind of list(value, key, 'notifications')) {
+      if (!is(kind)) fail(`notifications.${key} must hold only ${allowed.join(', ')}; got ${typeof kind === 'string' ? kind : typeof kind}`)
+      else if (!found.includes(kind)) found.push(kind)
+    }
+    return found
   }
-  return { enabled: bool(value, 'enabled', 'notifications'), kinds: known }
+  const kinds = known('kinds', bannerKinds, isBannerKind)
+  const settings: Notifications = { enabled: bool(value, 'enabled', 'notifications'), kinds }
+  if (value.toasts !== undefined) settings.toasts = known('toasts', notificationKinds, isNotificationKind)
+  return settings
 }
 
 // an absolute path or one under ~; an empty value means unset

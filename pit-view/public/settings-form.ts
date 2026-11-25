@@ -3,7 +3,7 @@
 // server's refusals placed on their fields, people suggestions, and ticket samples
 import type { AutoReviewView } from '../src/autoreview.ts'
 import type { AutoReviewSettings, Config, Person, TicketSystem, WeekdayName } from '../src/config.ts'
-import type { NotificationKind } from '../src/notify.ts'
+import type { BannerKind, NotificationKind } from '../src/notify.ts'
 import type { View } from '../src/poller.ts'
 import { indicatorWords } from './autoreviewbar.ts'
 import type { Reading } from './autoreviewbar.ts'
@@ -55,7 +55,9 @@ export type Form = {
   // the models setting (registry, fallback, and slots, section 1 of DESIGN.md), one control for each part (public/models-form.ts)
   models: ModelsForm
   notifyEnabled: boolean
-  notifyKinds: NotificationKind[]
+  // the kinds with a macOS banner, and the kinds that toast in the page
+  notifyKinds: BannerKind[]
+  notifyToasts: NotificationKind[]
   // the clone folder as typed: an absolute path or one under ~, empty for none
   cloneDir: string
   // auto-review (section 10): the numbers as typed, the days in week order, the times as HH:MM
@@ -94,18 +96,26 @@ export const weekdayChoices: readonly { value: WeekdayName, label: string }[] = 
 
 const inWeekOrder = (days: readonly WeekdayName[]): WeekdayName[] => weekdayChoices.map((day) => day.value).filter((day) => days.includes(day))
 
-// the notification kinds in the order the page lists them; the same names as notificationKinds in src/notify.ts, which a test keeps in step (the page cannot import that module's code)
-export const notifyChoices: readonly { kind: NotificationKind, label: string, hint: string }[] = [
-  { kind: 'changesRequested', label: 'Changes requested on your PR', hint: 'A PR of yours moves to Changes requested.' },
-  { kind: 'readyToMerge', label: 'Your PR is ready to merge', hint: 'A PR of yours reaches the Ready to merge state.' },
-  { kind: 'reviewRequested', label: 'Review requested of you', hint: 'Someone else\'s PR newly asks for your review.' },
-  { kind: 'ciFailing', label: 'CI failing on your PR', hint: 'A PR of yours starts failing checks.' },
-  { kind: 'runFinished', label: 'Review session finished', hint: 'A review session started from the Agent column finishes or fails.' },
-  { kind: 'runNeedsInput', label: 'Review session waiting for input', hint: 'A review session stops with a question for you.' },
+// the notification kinds in the order the page lists them; the same names as notificationKinds in src/notify.ts, and banner as its bannerKinds, which a test keeps in step (the page cannot import that module's code)
+type NotifyChoice = { label: string, hint: string } & ({ kind: BannerKind, banner: true } | { kind: Exclude<NotificationKind, BannerKind>, banner: false })
+export const notifyChoices: readonly NotifyChoice[] = [
+  { kind: 'changesRequested', banner: true, label: 'Changes requested on your PR', hint: 'A PR of yours moves to Changes requested.' },
+  { kind: 'readyToMerge', banner: true, label: 'Your PR is ready to merge', hint: 'A PR of yours reaches the Ready to merge state.' },
+  { kind: 'reviewRequested', banner: true, label: 'Review requested of you', hint: 'Someone else\'s PR newly asks for your review.' },
+  { kind: 'newForReview', banner: false, label: 'PR awaiting your review', hint: 'Someone else\'s PR that you have not reviewed arrives in, or first moves to, Your move. It has no desktop banner.' },
+  { kind: 'ciFailing', banner: true, label: 'CI failing on your PR', hint: 'A PR of yours starts failing checks.' },
+  { kind: 'runFinished', banner: true, label: 'Review session finished', hint: 'A review session finishes, whether or not it posted, or fails. Its banner also covers the three kinds below that name how one ended.' },
+  { kind: 'runNeedsInput', banner: true, label: 'Review session waiting for input', hint: 'A review session stops with a question for you.' },
+  { kind: 'postBlocked', banner: false, label: 'Review done, post blocked', hint: 'A review finished and a permission check refused its post. The report is saved, and the drawer offers Post it.' },
+  { kind: 'postFailed', banner: false, label: 'Review done, post failed', hint: 'A review finished and its post to GitHub failed. Nothing tries it again by itself.' },
+  { kind: 'commandDenied', banner: false, label: 'Command denied in a session', hint: 'A session failed because a tool call other than a lone post was denied.' },
 ]
 
-// turning notifications on starts with every kind selected
-const allKinds: NotificationKind[] = notifyChoices.map((choice) => choice.kind)
+// the kinds that toast while the config has no list; the same as toastDefaults in src/notify.ts, which a test keeps in step
+export const toastDefaults: readonly NotificationKind[] = ['runNeedsInput', 'postFailed', 'commandDenied']
+
+// turning banners on starts with every kind that has one selected
+const allKinds: BannerKind[] = notifyChoices.flatMap((choice) => choice.banner ? [choice.kind] : [])
 
 export type MakeId = () => string
 
@@ -128,6 +138,7 @@ export const toForm = (config: Config, makeId: MakeId): Form => ({
   models: toModelsForm(config.models, makeId),
   notifyEnabled: config.notifications?.enabled ?? false,
   notifyKinds: config.notifications?.kinds ?? allKinds,
+  notifyToasts: [...config.notifications?.toasts ?? toastDefaults],
   cloneDir: config.cloneDir ?? '',
   ...autoForm(config.autoReview ?? autoDefaults),
 })
@@ -241,7 +252,10 @@ export const toConfig = (form: Form, base: Config): Config => {
   // absent means off, so a config that never had the key and a form still at that default leave it out
   const kinds = allKinds.filter((kind) => form.notifyKinds.includes(kind))
   const untouched = !form.notifyEnabled && kinds.length === allKinds.length
-  if (base.notifications !== undefined || !untouched) config.notifications = { enabled: form.notifyEnabled, kinds }
+  // a list at the defaults is left out unless the file holds one, so an old config is saved as it was
+  const toasts = notifyChoices.map((choice) => choice.kind).filter((kind) => form.notifyToasts.includes(kind))
+  const ownToasts = base.notifications?.toasts !== undefined || JSON.stringify(toasts) !== JSON.stringify(toastDefaults)
+  if (base.notifications !== undefined || !untouched || ownToasts) config.notifications = { enabled: form.notifyEnabled, kinds, ...(ownToasts ? { toasts } : {}) }
   // absent means off, so a config that never had the key and a form still at the defaults leave it out
   const auto = autoSettings(form)
   if (base.autoReview !== undefined || JSON.stringify(auto) !== JSON.stringify(autoDefaults)) config.autoReview = auto

@@ -310,6 +310,20 @@ test('readConfig keeps an empty viewer, as the file stores it', async () => {
   }
 })
 
+test('the toasts list is optional, holds any kind, drops repeats, and leaves the banner list to the kinds a banner has', () => {
+  const base = defaultConfig()
+  const old = { enabled: true, kinds: ['readyToMerge'] }
+  assert.deepEqual(validateConfig({ ...base, notifications: old }).notifications, old, 'an old config loads as it was, with no toasts key')
+  const toasting = { ...old, toasts: ['newForReview', 'postBlocked', 'postFailed', 'commandDenied', 'readyToMerge'] }
+  assert.deepEqual(validateConfig({ ...base, notifications: { ...toasting, toasts: [...toasting.toasts, 'postBlocked'] } }).notifications, toasting)
+  assert.deepEqual(validateConfig({ ...base, notifications: { ...old, toasts: [] } }).notifications, { ...old, toasts: [] })
+  assert.throws(() => validateConfig({ ...base, notifications: { ...old, toasts: ['mineReady'] } }), /notifications\.toasts must hold only changesRequested.*commandDenied; got mineReady/)
+  assert.throws(() => validateConfig({ ...base, notifications: { ...old, toasts: true } }), /notifications\.toasts must be a list/)
+  for (const kind of ['newForReview', 'postBlocked', 'postFailed', 'commandDenied']) {
+    assert.throws(() => validateConfig({ ...base, notifications: { enabled: true, kinds: [kind] } }), new RegExp(`notifications\\.kinds must hold only .*; got ${kind}`))
+  }
+})
+
 test('notifications validate their kinds, drop repeats, and are optional', () => {
   const base = defaultConfig()
   assert.equal('notifications' in validateConfig(base), false)

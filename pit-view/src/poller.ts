@@ -9,6 +9,8 @@ import { fetchClosedPrs, fetchOpenPrs, fetchPr, GhError } from './github.ts'
 import type { Gh, RawOpenPr } from './github.ts'
 import { agentCell, stackRunCover } from './launcher.ts'
 import type { Queueing } from './launcher.ts'
+import { runDetail } from './notifications.ts'
+import type { PushedNotification } from './notifications.ts'
 import { baselineOf, compareRows, runEvent } from './notify.ts'
 import type { NotifyEvent, RowBaseline } from './notify.ts'
 import { scanReports } from './reports.ts'
@@ -74,6 +76,8 @@ export type Patch = {
   sweeps?: SweepsView
   // the scheduler as it now stands, replacing the page's: sent whole whenever it differs from what was last sent
   autoReview?: AutoReviewView | null
+  // the notifications just stored, for pages that are open; the rest are read from GET /api/notifications
+  notifications?: PushedNotification[]
   repo?: string
   viewer?: PersonView
 }
@@ -117,6 +121,8 @@ export type Poller = {
   sweepsChanged: (repo: string) => void
   // the scheduler's state may have changed: one patch carrying it, when it differs from what was last sent
   autoReviewChanged: () => void
+  // these were just stored: one patch carrying them
+  notified: (stored: PushedNotification[]) => void
   // the open rows of the repository in effect, derived from the cache as it is now, every group included
   openRows: () => OpenRow[]
   // resolves once no cycle is running, including any follow-up cycle
@@ -722,7 +728,7 @@ export const createPoller = (options: PollerOptions): Poller => {
       // the repository in effect is the run's own, decided here and not by any scan in flight
       if (run === null || config().repo !== repo) continue
       const row = snapshot(config(), reports, queueingNow()).rows.get(number)
-      const event = runEvent(repo, { number, title: row?.title ?? null }, run.status)
+      const event = runEvent(repo, { number, title: row?.title ?? null }, run, runDetail(run))
       if (event !== null) notify([event])
     }
   }
@@ -745,6 +751,10 @@ export const createPoller = (options: PollerOptions): Poller => {
     if (text === sentAutoReview) return
     sentAutoReview = text
     patch({ autoReview: now })
+  }
+
+  const notified = (stored: PushedNotification[]): void => {
+    if (!stopped) patch({ notifications: stored })
   }
 
   const openRows = (): OpenRow[] => [...snapshot(config(), reports).rows.values()]
@@ -790,5 +800,5 @@ export const createPoller = (options: PollerOptions): Poller => {
     }
   }
 
-  return { view, refresh, refreshPr, refreshPrAfterWrite, setActive, identityChanged, configChanged, runWatched, runChanged, queueingChanged, sweepsChanged, autoReviewChanged, openRows, idle, patchRecords: () => records.size, stop, version: () => version }
+  return { view, refresh, refreshPr, refreshPrAfterWrite, setActive, identityChanged, configChanged, runWatched, runChanged, queueingChanged, sweepsChanged, autoReviewChanged, notified, openRows, idle, patchRecords: () => records.size, stop, version: () => version }
 }

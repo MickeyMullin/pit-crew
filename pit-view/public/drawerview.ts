@@ -1295,5 +1295,5 @@ export const closeOnOutsidePress = (drawers: readonly OutsideDrawer[], target: P
   return closed
 }
 
-// the page's controls whose click opens a drawer: another row's Agent cell, the changes-requested banner's Open agent and Fix session buttons, and a sweep's broom or status
-export const drawerOpenerSelector = 'button[data-agent="open"][data-pr], button[data-open-agent], button[data-fix-session], button[data-sweep]'
+// the page's controls whose click opens a drawer: another row's Agent cell, the changes-requested banner's Open agent and Fix session buttons, a sweep's broom or status, a notification's button in the panel, and anything in a toast, so dismissing one leaves the drawer open
+export const drawerOpenerSelector = 'button[data-agent="open"][data-pr], button[data-open-agent], button[data-fix-session], button[data-sweep], button[data-notice-open], #toasts'

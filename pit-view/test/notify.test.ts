@@ -9,7 +9,7 @@ import type { OpenRow, OtherRow } from '../src/derive.ts'
 import { createGh } from '../src/github.ts'
 import type { RawOpenPr, RawOpenResponse } from '../src/github.ts'
 import {
-  appleScript, baselineOf, compareRows, createNotifier, noticeOf, notificationKinds, osascriptArgs, noRowState, rowEvents, rowState, runEvent, systemDeliver,
+  appleScript, bannerKinds, baselineOf, compareRows, createNotifier, noticeOf, osascriptArgs, noRowState, rowEvents, rowState, runEvent, systemDeliver,
 } from '../src/notify.ts'
 import type { Exec, Notice, NotifyEvent } from '../src/notify.ts'
 import { createPoller } from '../src/poller.ts'
@@ -225,6 +225,71 @@ test('a PR with no previous state has no transition, and later changes to it fir
   poller.stop()
 })
 
+// the rows of one finished cycle, by number
+const cycleRows = async (): Promise<Map<number, OpenRow>> => {
+  const { poller } = await harness()
+  poller.refresh('manual')
+  await poller.idle()
+  const view = await poller.view()
+  poller.stop()
+  return new Map([...view.mine.groups, ...view.others.groups].flatMap((group) => group.rows.map((row) => [row.number, row] as const)))
+}
+
+// an Others' row that awaits the viewer's review: in Your move, never reviewed, with or without a request
+const awaiting = (row: OtherRow, patch: Partial<OtherRow> = {}): OtherRow => ({ ...row, group: 'yourMove', flags: [], ...patch })
+
+test('a PR that arrives awaiting the viewer\'s review fires newForReview once, requested or not, and nothing else', async () => {
+  const rows = await cycleRows()
+  const plain = awaiting(rows.get(113) as OtherRow)
+  for (const row of [plain, { ...plain, flags: [{ kind: 'requestedOfYou' as const, label: 'Requested of you' }] }]) {
+    const others = [...rows.values()].filter((other) => other.number !== 113)
+    const baseline = baselineOf(scenario.repo, scenario.viewer, others, true)
+    assert.deepEqual(only(compareRows(baseline, new Map([...rows, [113, row]]))), [['newForReview', 113]])
+    assert.deepEqual(compareRows(baseline, new Map([...rows, [113, row]])), [])
+  }
+})
+
+test('a PR that arrives in another group, as the viewer\'s own, waiting on a re-review, stale, or on the first load fires no newForReview', async () => {
+  const rows = await cycleRows()
+  const other = rows.get(113) as OtherRow
+  for (const row of [
+    awaiting(other, { group: 'waitingOnAuthor' }), awaiting(other, { group: 'bots' }), awaiting(other, { flags: [{ kind: 'reReview', label: 'Re-review · new commits' }] }),
+    awaiting(other, { freshness: { ...other.freshness, state: 'stale' } }),
+  ]) {
+    const baseline = baselineOf(scenario.repo, scenario.viewer, [...rows.values()].filter((found) => found.number !== 113), true)
+    assert.deepEqual(compareRows(baseline, new Map([...rows, [113, row]])), [])
+  }
+  const mine = baselineOf(scenario.repo, scenario.viewer, [...rows.values()].filter((found) => found.number !== 104), true)
+  assert.deepEqual(compareRows(mine, rows), [])
+  const first = baselineOf(scenario.repo, scenario.viewer, [], true)
+  assert.deepEqual(compareRows(first, new Map([...rows, [113, awaiting(other)]])), [])
+  assert.deepEqual(compareRows(baselineOf(scenario.repo, scenario.viewer, [], false), new Map([[113, awaiting(other)]]), 113), [])
+})
+
+test('a PR that comes to await the viewer\'s review fires newForReview once while it stays open, however often CI sends it back and forth', async () => {
+  const rows = await cycleRows()
+  const other = rows.get(113) as OtherRow
+  const waiting = new Map<number, OpenRow>([...rows, [113, awaiting(other, { group: 'waitingOnAuthor' })]])
+  const ready = new Map<number, OpenRow>([...rows, [113, awaiting(other)]])
+  const baseline = baselineOf(scenario.repo, scenario.viewer, [...waiting.values()], true)
+  assert.deepEqual(compareRows(baseline, waiting), [])
+  assert.deepEqual(only(compareRows(baseline, ready)), [['newForReview', 113]])
+  assert.deepEqual(compareRows(baseline, waiting), [])
+  assert.deepEqual(compareRows(baseline, ready), [])
+  // nor when it closes and is opened again
+  const gone = new Map([...rows].filter(([number]) => number !== 113))
+  assert.deepEqual(compareRows(baseline, gone), [])
+  assert.deepEqual(compareRows(baseline, ready), [])
+})
+
+test('one change that is both a request and a PR newly awaiting review is the request alone', async () => {
+  const rows = await cycleRows()
+  const other = rows.get(113) as OtherRow
+  const baseline = baselineOf(scenario.repo, scenario.viewer, [...rows.values()].map((row) => row.number === 113 ? awaiting(other, { group: 'waitingOnAuthor' }) : row), true)
+  const asked = awaiting(other, { flags: [{ kind: 'requestedOfYou', label: 'Requested of you' }] })
+  assert.deepEqual(only(compareRows(baseline, new Map([...rows, [113, asked]]))), [['reviewRequested', 113]])
+})
+
 test('an empty baseline stays silent until a nonempty one has been recorded', async () => {
   const { poller } = await harness()
   poller.refresh('manual')
@@ -366,7 +431,7 @@ test('a one-PR refresh that started before an away-and-back notifies nothing and
   poller.stop()
 })
 
-test('a one-PR refresh that began before a completed cycle omitted the uncached PR leaves no row and no stale baseline, so the PR coming back fires nothing', async () => {
+test('a one-PR refresh that began before a completed cycle omitted the uncached PR leaves no row and no stale baseline, so the PR coming back is new and fires no transition', async () => {
   const { poller, cycle, cache, state } = await harness()
   state.omit.add(113)
   await cycle()
@@ -380,10 +445,10 @@ test('a one-PR refresh that began before a completed cycle omitted the uncached 
   assert.equal((await refreshing).outcome, 'closed')
   assert.equal(cache.readView(scenario.repo).open.some((row) => row.number === 113), false)
   state.singleGate = undefined
-  // had the stale row entered the baseline, this would read as a transition; a row with no previous state records and fires nothing
+  // had the stale row entered the baseline, this would read as a transition, a review request; a row with no previous state records and fires only that it is new for review
   state.omit.clear()
   state.edits.set(113, asRequested)
-  assert.deepEqual(await cycle(), [])
+  assert.deepEqual(only(await cycle()), [['newForReview', 113]])
   poller.stop()
 })
 
@@ -938,19 +1003,20 @@ test('a run settling after its PR left the open rows still notifies, by number a
 
 test('runEvent maps a settled status to its kind, and stopped and running to nothing', () => {
   const row: { number: number, title: string | null } = { number: 106, title: 'Fix the thing' }
-  assert.equal(runEvent(scenario.repo, row, 'done')?.kind, 'runFinished')
-  assert.equal(runEvent(scenario.repo, row, 'failed')?.kind, 'runFinished')
-  assert.equal(runEvent(scenario.repo, row, 'needsInput')?.kind, 'runNeedsInput')
-  assert.equal(runEvent(scenario.repo, row, 'stopped'), null)
-  assert.equal(runEvent(scenario.repo, row, 'running'), null)
-  assert.equal(runEvent(scenario.repo, { number: 106, title: null }, 'done')?.title, null)
+  const of = (status: RunStatus) => ({ id: 41, status, result: null, note: null, pid: null })
+  assert.equal(runEvent(scenario.repo, row, of('done'), null)?.kind, 'runFinished')
+  assert.equal(runEvent(scenario.repo, row, of('failed'), null)?.kind, 'runFinished')
+  assert.equal(runEvent(scenario.repo, row, of('needsInput'), null)?.kind, 'runNeedsInput')
+  assert.equal(runEvent(scenario.repo, row, of('stopped'), null), null)
+  assert.equal(runEvent(scenario.repo, row, of('running'), null), null)
+  assert.equal(runEvent(scenario.repo, { number: 106, title: null }, of('done'), null)?.title, null)
 })
 
-const event = (kind: NotifyEvent['kind']): NotifyEvent => ({ kind, number: 7, title: 'Title', repo: scenario.repo })
+const event = (kind: NotifyEvent['kind']): NotifyEvent => ({ kind, number: 7, title: 'Title', repo: scenario.repo, run: null, detail: null })
 
 test('the notifier delivers nothing when notifications are absent or disabled', () => {
   const delivered: Notice[] = []
-  for (const notifications of [undefined, { enabled: false, kinds: [...notificationKinds] }]) {
+  for (const notifications of [undefined, { enabled: false, kinds: [...bannerKinds] }]) {
     createNotifier({ config: () => ({ notifications }), deliver: async (notice) => void delivered.push(notice), log: () => {} }).send([event('readyToMerge')])
   }
   assert.deepEqual(delivered, [])

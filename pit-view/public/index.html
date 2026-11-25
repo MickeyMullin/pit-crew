@@ -64,6 +64,13 @@
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg>
     </button>
   </div>
+  <div id="notifications" class="notifications">
+    <button id="notifications-button" type="button" class="icon-button notifications-button" aria-label="Notifications" title="Notifications" aria-expanded="false" aria-haspopup="dialog" aria-controls="notifications-panel" data-focus-key="notifications-button">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 9a6 6 0 0 1 12 0c0 6 2 7 2 7H4s2-1 2-7"></path><path d="M10 20a2 2 0 0 0 4 0"></path></svg>
+      <span id="notifications-count" class="notifications-count" aria-hidden="true" hidden></span>
+    </button>
+    <div id="notifications-panel" class="notifications-panel" role="dialog" aria-label="Notifications" hidden></div>
+  </div>
   <button id="refresh" type="button" class="icon-button" aria-label="Refresh now" title="Refresh now">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M20 12a8 8 0 1 1-2.3-5.6"></path><path d="M20 4v5h-5"></path></svg>
   </button>
@@ -158,6 +165,7 @@
 <aside id="sweep-drawer" class="drawer sweep-drawer" role="dialog" aria-modal="false" aria-labelledby="sweep-drawer-heading" hidden></aside>
 <aside id="auto-log" class="drawer auto-log" role="dialog" aria-modal="false" aria-labelledby="auto-log-heading" hidden></aside>
 <aside id="report-panel" class="report-panel" role="dialog" aria-modal="false" aria-labelledby="report-heading" hidden></aside>
+<div id="toasts" class="toasts" role="status" aria-label="New notifications"></div>
 <div id="agent-live" class="sr-only" aria-live="polite"></div>
 </body>
 </html>

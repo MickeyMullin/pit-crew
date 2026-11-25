@@ -62,7 +62,7 @@ const count = (cache: Cache, table: string): number => Number(cache.db.prepare(`
 test('a new cache has the schema, its version, and nothing fetched', () => {
   const { cache } = memoryCache()
   const tables = cache.db.prepare('SELECT name FROM sqlite_master WHERE type = \'table\' AND name NOT LIKE \'sqlite_%\' ORDER BY name').all()
-  assert.deepEqual(tables.map((row) => row.name), ['cycles', 'meta', 'post_marks', 'posted_heads', 'prs', 'runs', 'snapshots', 'sweeps', 'ticks'])
+  assert.deepEqual(tables.map((row) => row.name), ['cycles', 'meta', 'notifications', 'post_marks', 'posted_heads', 'prs', 'runs', 'snapshots', 'sweeps', 'ticks'])
   assert.equal(cache.db.prepare('SELECT value FROM meta WHERE key = \'schemaVersion\'').get()?.value, String(schemaVersion))
 
   const view = cache.readView(scenario.repo)
@@ -1246,7 +1246,7 @@ test('a cache from version 13 gains the ticks table and the auto-review columns 
     for (const column of ['origin', 'tick', 'reason', 'queued_at', 'posting', 'worktree']) old.exec(`ALTER TABLE sweeps DROP COLUMN ${column}`)
     old.exec('UPDATE meta SET value = \'13\' WHERE key = \'schemaVersion\'')
     old.close()
-    assert.equal(schemaVersion, 22)
+    assert.equal(schemaVersion, 23)
     assert.equal(githubTablesVersion, 21)
     const cache = openCache({ path, clock: handClock().clock })
     // version 21 changed what the GitHub tables hold, so a cache from version 13 refetches its PRs
@@ -1311,7 +1311,7 @@ test('a version 17 cache gains sweeps.row_reports and sweeps.post_attempts in pl
     old.exec('UPDATE meta SET value = \'17\' WHERE key = \'schemaVersion\'')
     old.close()
     const cache = openCache({ path, clock: handClock().clock })
-    assert.equal(schemaVersion, 22)
+    assert.equal(schemaVersion, 23)
     assert.equal(cache.getSweep(created.id)?.status, 'done')
     assert.equal(cache.getSweep(created.id)?.rowReports, null)
     assert.deepEqual(cache.getSweep(created.id)?.postAttempts, {})
@@ -1344,7 +1344,7 @@ test('a version 18 cache gains the post_marks table in place, keeping its sweeps
     old.exec('UPDATE meta SET value = \'18\' WHERE key = \'schemaVersion\'')
     old.close()
     const cache = openCache({ path, clock: handClock().clock })
-    assert.equal(schemaVersion, 22)
+    assert.equal(schemaVersion, 23)
     assert.equal(cache.getSweep(created.id)?.status, 'done')
     assert.equal(cache.readView(scenario.repo).open.length, 0, 'the cached PRs are refetched, since version 21 changed what a row holds')
     assert.deepEqual([...cache.unresolvedPostMarks(scenario.repo)], [])
@@ -1551,7 +1551,7 @@ for (const from of [18, 19]) {
       old.exec(`UPDATE meta SET value = '${from}' WHERE key = 'schemaVersion'`)
       old.close()
       const cache = openCache({ path, clock: handClock().clock })
-      assert.equal(schemaVersion, 22)
+      assert.equal(schemaVersion, 23)
       // #107's and #113's posts were made from Pit View, and nothing before version 20 recorded the head they went onto, so each marks its PR too, beside the reviewed head on record
       assert.deepEqual([...cache.unresolvedPostMarks(scenario.repo)].sort(), [106, 107, 113, 114])
       assert.deepEqual(cache.postRecords(scenario.repo), new Map([

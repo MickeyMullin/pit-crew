@@ -396,13 +396,14 @@
           <span class="field-label">Desktop notifications</span>
           <label class="check">
             <input id="f-notifyEnabled" type="checkbox" aria-describedby="f-notifyEnabled-hint">
-            Notify me when a PR changes state
+            Show desktop banners
           </label>
-          <p id="f-notifyEnabled-hint" class="hint">Off by default. Delivered on macOS through the built-in notification command; other systems show nothing yet. A notification names the PR but clicking it does not open Pit View or the PR.</p>
+          <p id="f-notifyEnabled-hint" class="hint">Off by default. Delivered on macOS through the built-in notification command; other systems show nothing yet. A banner names the PR but clicking it does not open Pit View or the PR. The bell in the header works without them.</p>
           <p id="f-notifyEnabled-error" class="field-error" hidden></p>
         </div>
         <fieldset id="f-notifyKinds" class="field kinds">
-          <legend class="field-label">Notify about</legend>
+          <legend class="field-label">Kinds</legend>
+          <p class="hint">The bell's panel lists every kind. Toast pops a short note in the page as well, and Desktop banner sends one to macOS while banners are on.</p>
           <div id="notify-kinds" class="kinds-list"></div>
         </fieldset>
       </div>
