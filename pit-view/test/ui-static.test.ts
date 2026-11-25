@@ -207,3 +207,15 @@ test('the manifest names the app and its two icons, which exist, and holds no co
   for (const icon of manifest.icons as { src: string }[]) assert.ok((await readdir(publicDir)).includes(icon.src.slice(1)), `${icon.src} exists`)
   assert.doesNotMatch(JSON.stringify(manifest), colorLiteral, 'colors live in styles.css tokens alone')
 })
+
+// the logo in the page header is the owner's art, drawn as a mask in a theme token, not the old inline branch glyph
+test('the header brand is the logo picture masked in a theme color, and the old inline branch glyph is gone', async () => {
+  const brand = (await read('index.html')).split('<div class="brand">')[1]!.split('</div>')[0]!
+  assert.match(brand, /<span class="brand-logo" aria-hidden="true"><\/span>/)
+  assert.doesNotMatch(brand, /<svg/, 'no inline glyph in the brand')
+  const rule = (await read('styles.css')).match(/\.brand-logo \{[^}]*\}/)?.[0] ?? ''
+  assert.match(rule, /mask: url\("\/logo\.png"\) center \/ contain no-repeat/)
+  assert.match(rule, /background-color: var\(--blue-fg\)/)
+  const logo = await readFile(join(publicDir, 'logo.png'))
+  assert.deepEqual([logo.subarray(0, 8).toString('hex'), logo.readUInt32BE(16), logo.readUInt32BE(20), logo[25]], ['89504e470d0a1a0a', 96, 96, 6], 'a 96 pixel square PNG with an alpha channel')
+})

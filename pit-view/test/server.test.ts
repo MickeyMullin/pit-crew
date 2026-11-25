@@ -1288,7 +1288,7 @@ test('every icon file is served by the static path with its type, byte for byte,
   const publicDir = join(import.meta.dirname, '..', 'public')
   const types: [string, string][] = [
     ['favicon-16.png', 'image/png'], ['favicon-32.png', 'image/png'], ['favicon.ico', 'image/x-icon'], ['apple-touch-icon.png', 'image/png'],
-    ['icon-192.png', 'image/png'], ['icon-512.png', 'image/png'], ['site.webmanifest', 'application/manifest+json'],
+    ['icon-192.png', 'image/png'], ['icon-512.png', 'image/png'], ['logo.png', 'image/png'], ['site.webmanifest', 'application/manifest+json'],
   ]
   const files: Record<string, string | Buffer> = {}
   for (const [name] of types) files[`public/${name}`] = await readFile(join(publicDir, name))

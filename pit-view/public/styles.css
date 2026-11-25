@@ -195,6 +195,15 @@ button {
   gap: 10px;
 }
 
+.brand-logo {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  background-color: var(--blue-fg);
+  mask: url("/logo.png") center / contain no-repeat;
+  -webkit-mask: url("/logo.png") center / contain no-repeat;
+}
+
 .brand-name {
   font-size: 16px;
   font-weight: 700;
