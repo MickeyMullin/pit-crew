@@ -368,6 +368,7 @@ test('a PR offers the tandem review first, the plain review one click after it, 
   assert.deepEqual(summary(await options(104)), [
     ['tandem', 'Tandem self-review', 'Self-review in tandem', 'review-pr', ['104', '--tandem', '--no-post']],
     ['default', 'Self-review', 'Self-review', 'review-pr', ['104', '--no-post']],
+    ['relevancy', 'Relevancy check', 'Check relevancy', 'relevancy-pr', ['104']],
     ['fix', 'Fix session', 'Fix requested changes', 'fix-pr', ['104']],
   ])
   // review-dependabot has no tandem mode; Renovate's PRs are ordinary reviews and do
@@ -391,6 +392,7 @@ test('only a Self-review offers the comments check, which adds --check-comments 
     ['tandem', '/review-pr 104 --tandem --no-post --emit-json=/r/1', undefined],
     ['default', '/review-pr 104 --no-post --emit-json=/r/1', ['104', '--no-post', '--check-comments']],
     ['stack', '/review-stack 104 --emit-json=/r/1', undefined],
+    ['relevancy', '/relevancy-pr 104 --emit-json=/r/1', undefined],
     ['fix', '/fix-pr 104 --emit-json=/r/1', undefined],
   ])
   // a review, a re-review, and a bot's review of someone else's PR offer none of it
@@ -430,7 +432,8 @@ test('each start says which runners it works with and what it does on GitHub', a
   assert.deepEqual(await posts(113), { default: [['claude', 'codex'], review], tandem: [['claude'], review], stack: [['claude', 'codex'], stack] })
   const nothing = { kind: 'nothing', text: 'Posts nothing; writes the report only.' }
   const push = { kind: 'push', text: 'Pushes new commits to feat/sync-status-endpoint on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.' }
-  assert.deepEqual(await posts(104), { default: [['claude', 'codex'], nothing], tandem: [['claude'], nothing], stack: [['claude', 'codex'], stack], fix: [['claude'], push] })
+  const reads = { kind: 'nothing', text: 'Posts nothing and changes nothing: it reads the PR and its base branch and says whether the PR is still needed and whether it needs updates.' }
+  assert.deepEqual(await posts(104), { default: [['claude', 'codex'], nothing], tandem: [['claude'], nothing], stack: [['claude', 'codex'], stack], relevancy: [['claude', 'codex'], reads], fix: [['claude'], push] })
   assert.deepEqual((await posts(114)).default, [['claude', 'codex'], { kind: 'autoApprove', text: 'Posts its report to the PR as @vera-quill and may approve the PR automatically.' }])
 })
 
@@ -794,7 +797,8 @@ test('every start a row offers gets the same answer through the launcher: hooks 
         await h.launcher.settled(run.id)
       }
     }
-    assert.deepEqual([...seen].sort(), ['default', 'fix', 'tandem'])
+    // the relevancy check is read-only, so it runs with hooks off as every review does
+    assert.deepEqual([...seen].sort(), ['default', 'fix', 'relevancy', 'tandem'])
   } finally {
     await h.cleanup()
   }
@@ -4086,25 +4090,25 @@ test('a fix start is offered on the viewer\'s own PR when GitHub has a request t
   const remote = await fixOf(101)
   assert.ok(remote !== undefined)
   assert.deepEqual([remote.label, remote.button, remote.command, remote.args, remote.runners, remote.posts.kind, remote.unavailable], ['Fix session', 'Fix requested changes', 'fix-pr', ['101'], ['claude'], 'push', null])
-  assert.deepEqual(remote.fix, { remote: true, selfReview: null })
+  assert.deepEqual(remote.fix, { remote: true, selfReview: null, relevancy: null })
   assert.ok(!remote.args.includes('--no-post'))
   assert.equal(notOffered('fix', await prOf(101), config, null), null)
   assert.equal(remote.posts.text, 'Pushes new commits to fix/webhook-retry on GitHub. It posts no replies or reviews, and stops to ask when a request needs judgment.')
   // 103 is a draft, 104 awaits review, 120 is approved: no request on GitHub and no self-review, so no start
   for (const number of [103, 104, 120]) {
     assert.equal(await fixOf(number), undefined, `#${number}`)
-    assert.match(notOffered('fix', await prOf(number), config, null) ?? '', new RegExp(`GitHub shows no request to act on and no finished self-review of its current head has findings`), `#${number}`)
+    assert.match(notOffered('fix', await prOf(number), config, null) ?? '', new RegExp(`GitHub shows no request to act on, no finished self-review of its current head has findings, and no relevancy check of its current head wrote a prompt`), `#${number}`)
   }
   // a finished self-review of the current head with findings offers it, drafts and approved PRs included, and names the short SHA
   for (const number of [103, 104, 120]) {
     const pr = await prOf(number)
     const fix = await fixOf(number, [selfReviewRun(pr)])
-    assert.deepEqual(fix?.fix, { remote: false, selfReview: { sha: pr.headRefOid.slice(0, 7), findings: 1 } }, `#${number}`)
+    assert.deepEqual(fix?.fix, { remote: false, selfReview: { sha: pr.headRefOid.slice(0, 7), findings: 1 }, relevancy: null }, `#${number}`)
     assert.equal(notOffered('fix', pr, config, null, [selfReviewRun(pr)]), null)
   }
   // both sources: the standing change request and the self-review
   const both = await prOf(101)
-  assert.deepEqual((await fixOf(101, [selfReviewRun(both)]))?.fix, { remote: true, selfReview: { sha: both.headRefOid.slice(0, 7), findings: 1 } })
+  assert.deepEqual((await fixOf(101, [selfReviewRun(both)]))?.fix, { remote: true, selfReview: { sha: both.headRefOid.slice(0, 7), findings: 1 }, relevancy: null })
   // a self-review that is not for the head, one with no findings, one that did not finish, one that posted (a review, not a self-review), and a fix run offer nothing; the newest finished self-review alone counts
   const pr = await prOf(104)
   const stale = selfReviewRun(pr, {}, { reviewed: { kind: 'commit', sha: '0123456789abcdef0123456789abcdef01234567' } })
@@ -4133,12 +4137,12 @@ test('a fix start is offered on the viewer\'s own PR when GitHub has a request t
   // the default stays Self-review, changes requested or not, and the fix comes last; the cell passes the PR's runs through
   const cell = agentCell(await prOf(101), config, undefined, undefined)
   assert.deepEqual([cell.action.kind, cell.action.command, cell.action.args, cell.label], ['selfReview', 'review-pr', ['101', '--tandem', '--no-post'], 'Tandem self-review'])
-  assert.deepEqual(cell.starts.map((option) => option.kind), ['tandem', 'default', 'fix'])
+  assert.deepEqual(cell.starts.map((option) => option.kind), ['tandem', 'default', 'relevancy', 'fix'])
   const ownRun = selfReviewRun(await prOf(104))
-  assert.deepEqual(agentCell(await prOf(104), config, ownRun, undefined, null, null, undefined, [ownRun]).starts.map((option) => option.kind), ['tandem', 'default', 'fix'])
+  assert.deepEqual(agentCell(await prOf(104), config, ownRun, undefined, null, null, undefined, [ownRun]).starts.map((option) => option.kind), ['tandem', 'default', 'relevancy', 'fix'])
   // the PR's own latest run counts even when the history handed in lacks it
-  assert.deepEqual(agentCell(await prOf(104), config, ownRun, undefined).starts.map((option) => option.kind), ['tandem', 'default', 'fix'])
-  assert.deepEqual(agentCell(await prOf(104), config, selfReviewRun(await prOf(104), {}, { findings: [] }), undefined).starts.map((option) => option.kind), ['tandem', 'default'])
+  assert.deepEqual(agentCell(await prOf(104), config, ownRun, undefined).starts.map((option) => option.kind), ['tandem', 'default', 'relevancy', 'fix'])
+  assert.deepEqual(agentCell(await prOf(104), config, selfReviewRun(await prOf(104), {}, { findings: [] }), undefined).starts.map((option) => option.kind), ['tandem', 'default', 'relevancy'])
   // while a run is in flight, the fix is as unavailable as the rest
   assert.ok(agentCell(await prOf(101), config, runRow({ number: 101 }), undefined).starts.every((option) => option.unavailable?.includes('in flight')))
 })
@@ -4177,9 +4181,9 @@ test('GitHub\'s own review decision of changes requested offers the fix start ev
   const config = baseConfig()
   const pr = await prOf(104)
   const decided = (reviewDecision: RawOpenPr['reviewDecision']): RawOpenPr => ({ ...pr, reviewDecision, latestReviews: { nodes: [] }, latestOpinionatedReviews: { nodes: [] } })
-  assert.deepEqual(fixOfferOf(decided('CHANGES_REQUESTED'), []), { remote: true, selfReview: null })
+  assert.deepEqual(fixOfferOf(decided('CHANGES_REQUESTED'), []), { remote: true, selfReview: null, relevancy: null })
   assert.equal(notOffered('fix', decided('CHANGES_REQUESTED'), config, null), null)
-  for (const decision of ['APPROVED', 'REVIEW_REQUIRED', null] as const) assert.deepEqual(fixOfferOf(decided(decision), []), { remote: false, selfReview: null }, String(decision))
+  for (const decision of ['APPROVED', 'REVIEW_REQUIRED', null] as const) assert.deepEqual(fixOfferOf(decided(decision), []), { remote: false, selfReview: null, relevancy: null }, String(decision))
 })
 
 const fixParsed = (patch: Record<string, unknown> = {}) => parseResult(JSON.stringify(fixResult(patch)))

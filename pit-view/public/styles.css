@@ -2294,6 +2294,33 @@ button.agent:hover {
   gap: 4px;
 }
 
+/* a relevancy check's verdict, its reason, and the prompt it wrote for a Fix session */
+.drawer-relevancy,
+.drawer-relevancy-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.drawer-relevancy-reason {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* the prompt as it is handed over: its line breaks kept, long lines wrapped */
+.drawer-prompt {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--gray-bg);
+  color: var(--gray-fg);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 16em;
+  overflow-y: auto;
+}
+
 .drawer-commits,
 .drawer-checks {
   display: flex;

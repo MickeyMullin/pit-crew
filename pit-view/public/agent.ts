@@ -42,6 +42,15 @@ const sweepTitles: Readonly<Record<string, string>> = {
   post: 'Post',
 }
 
+// the relevancy check records them too (section 8, Relevancy command): it resolves the PR and its base branch, judges the PR against them, writes the fix prompt when one is needed, and writes no report and posts nothing
+const relevancyTitles: Readonly<Record<string, string>> = {
+  resolveBase: 'Resolve',
+  review: 'Judge',
+  consolidate: 'Write prompt',
+  writeReport: 'Write report',
+  post: 'Post',
+}
+
 // the Update session records them too (section 8, the update command): it resolves the PR and the primary branch, chooses rebase or merge, makes the update with its conflicts and checks, writes no report, and pushes
 const updateTitles: Readonly<Record<string, string>> = {
   resolveBase: 'Resolve',
@@ -54,6 +63,7 @@ const updateTitles: Readonly<Record<string, string>> = {
 const titlesByCommand: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   'fix-pr': fixTitles,
   'update-pr': updateTitles,
+  'relevancy-pr': relevancyTitles,
   'review-dependabot-sweep': sweepTitles,
 }
 
@@ -86,11 +96,11 @@ export const stepText = (step: AgentCell['step'], command: string | null = null)
 
 export type DoneTone = 'red' | 'amber' | 'green' | 'gray'
 
-// the done text's color follows what the owner should do next; the words carry the meaning. A fix or an update that left something unpushed wants a look (amber), and so does a review whose post was not made; one with nothing to fix, or a branch already up to date, needs nothing (gray)
+// the done text's color follows what the owner should do next; the words carry the meaning. A fix or an update that left something unpushed wants a look (amber), and so does a review whose post was not made and a PR a relevancy check found irrelevant; one with nothing to fix, or a branch already up to date, needs nothing (gray)
 export const doneTone = (cell: Pick<AgentCell, 'status' | 'text'>): DoneTone => {
   const text = cell.text ?? ''
   if (cell.status === 'failed') return 'red'
-  if (cell.status === 'needsInput' || text.endsWith('post failed') || text.includes('· post not made') || text === 'Clean · CI failed' || text.startsWith('Not pushed')) return 'amber'
+  if (cell.status === 'needsInput' || text.endsWith('post failed') || text.includes('· post not made') || text === 'Clean · CI failed' || text.startsWith('Not pushed') || text === 'Irrelevant') return 'amber'
   if (cell.status === 'stopped' || cell.status === 'skipped' || text === 'Done' || text === 'Nothing to fix' || text === 'Already up to date') return 'gray'
   return text === 'Changes requested' || text === 'Changes requested · not posted' ? 'red' : 'green'
 }
@@ -189,13 +199,15 @@ export const tokenHeader = 'X-Pit-View-Token'
 
 export type RunRequest = { url: string, init: { method: 'POST', headers: Record<string, string>, body?: string } }
 
-// a Fix session names no runner: it runs with Claude only, which the server picks. A start also names the repository and viewer the confirmation showed, so the server refuses it when either is no longer the one in effect. The comments check and the jump are named only when they are on, so every other start's body stays as it was
-export const startRequest = (number: number, kind: StartKind, runner: RunnerName, repo: string, viewer: string, token: string, checkComments = false, extraInstructions?: string, jump = false): RunRequest => ({
+// a Fix session names no runner: it runs with Claude only, which the server picks. A start also names the repository and viewer the confirmation showed, so the server refuses it when either is no longer the one in effect. The comments check and the jump are named only when they are on, and a Fix session's relevancy prompt only when it was started from the prompt, so every other start's body stays as it was
+export type FixPromptAsk = { runId: number, text: string }
+
+export const startRequest = (number: number, kind: StartKind, runner: RunnerName, repo: string, viewer: string, token: string, checkComments = false, extraInstructions?: string, jump = false, fixPrompt?: FixPromptAsk): RunRequest => ({
   url: `/api/prs/${number}/runs`,
   init: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', [tokenHeader]: token },
-    body: JSON.stringify(kind === 'fix' ? { kind, repo, viewer } : { kind, runner, repo, viewer, ...(checkComments ? { checkComments } : {}), ...(extraInstructions === undefined ? {} : { extraInstructions }), ...(jump ? { jump } : {}) }),
+    body: JSON.stringify(kind === 'fix' ? { kind, repo, viewer, ...(fixPrompt === undefined ? {} : { fixPrompt: { runId: fixPrompt.runId, text: fixPrompt.text } }) } : { kind, runner, repo, viewer, ...(checkComments ? { checkComments } : {}), ...(extraInstructions === undefined ? {} : { extraInstructions }), ...(jump ? { jump } : {}) }),
   },
 })
 

@@ -1,5 +1,5 @@
 // public/copyreport.ts
-// the Copy report button: a two-square icon that puts one report's raw Markdown on the clipboard; it lives in the report panel only.
+// the Copy report button: a two-square icon that puts one report's raw Markdown on the clipboard; it lives in the report panel only. The Copy prompt button beside a relevancy check's prompt in the drawer is the same icon, and copies the text it is given exactly as shown.
 // It reads the report from the route Open uses (GET /api/reports/<name>, read-only, the same read the post path makes) and copies its `raw` field untouched, through the drawer's one clipboard helper (copyText). An unreadable or refused report copies nothing and says why. A fresh read whose text differs from the text the panel loaded copies nothing and says the report changed
 import { copyText } from './agentcell.ts'
 import { h, svg } from './dom.ts'
@@ -50,6 +50,29 @@ export const copyReportButton = (name: string, key: string, say: (text: string) 
       } finally {
         busy = false
       }
+    })()
+  })
+  return button
+}
+
+// the relevancy check's prompt, copied exactly as the drawer shows it; `key` is the focus key the drawer's redraws restore focus by
+export const copyPromptButton = (text: string, key: string, say: (text: string) => void): HTMLButtonElement => {
+  const button = h('button', { type: 'button', class: 'button button-small copy-report', 'aria-label': 'Copy prompt', title: 'Copy prompt', 'data-focus-key': key }, squares())
+  let revert: ReturnType<typeof setTimeout> | undefined
+  button.addEventListener('click', () => {
+    void (async () => {
+      if (!await copyText(text)) {
+        say('Could not copy the prompt: the browser refused the clipboard.')
+        return
+      }
+      say('Prompt copied')
+      button.setAttribute('data-copied', 'true')
+      button.replaceChildren(check())
+      clearTimeout(revert)
+      revert = setTimeout(() => {
+        button.removeAttribute('data-copied')
+        if (button.isConnected) button.replaceChildren(squares())
+      }, 2_000)
     })()
   })
   return button

@@ -62,7 +62,8 @@ export const defaultHermesProfile = 'pitview'
 export const defaultClaudeModel = 'sonnet'
 
 // the owner's extra review instructions (section 8 of DESIGN.md, Extra instructions): what a run used, and whether it came from Settings or was typed for this run
-export type ExtraInstructions = { text: string, source: 'default' | 'box' }
+// the text a run works under from extra-instructions.txt: a review's standing default or its box, or for a Fix session the prompt a relevancy check wrote (section 8 of DESIGN.md, Relevancy command)
+export type ExtraInstructions = { text: string, source: 'default' | 'box' | 'relevancy' }
 
 export const maxExtraInstructions = 2000
 

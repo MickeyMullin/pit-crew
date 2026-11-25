@@ -7,11 +7,12 @@
 // Opened from a line of the auto-review log it shows the run that line names, or a note in the card's place while that run is loading, could not be read, or is no longer listed, and a link back to the line (DESIGN.md section 8, Drawer; the sweep drawer's is the same link)
 import type { ClosedRow, LastReadings, OpenRow } from '../src/derive.ts'
 import type { ReportListing } from '../src/reports.ts'
-import { actionBound, actionDoneText, actionOffers, actionRefusalText, actionRequest } from './actionsview.ts'
+import { actionBound, actionDoneText, actionOffers, actionRefusalText, actionRequest, closeAsk } from './actionsview.ts'
 import type { ActionConfirmModel, ActionKind, PersonChoice } from './actionsview.ts'
 import { postAllowOf, postRequest, refusalText, rereadRequest, startRequest, stopRequest } from './agent.ts'
-import type { AgentCell, PostForm, RunView, StartKind } from './agent.ts'
+import type { AgentCell, FixPromptAsk, PostForm, RunView, StartKind } from './agent.ts'
 import { copyText, tickTimers, timerLine } from './agentcell.ts'
+import { copyPromptButton } from './copyreport.ts'
 import { h, newTab, setText, svg, sync } from './dom.ts'
 import type { Keyed, Part } from './dom.ts'
 import {
@@ -19,7 +20,7 @@ import {
   rereadBound, resumeReadyText, returnSelector,
 } from './drawerview.ts'
 import type { PostAllow } from './agent.ts'
-import type { AskedRun, ClosedModel, Confirm, DrawerModel, ExtraLine, LastState, Loadable, ModelsLine, Opener, StartConfirmModel, StopModel, StoredAskModel, StoredButtonsModel } from './drawerview.ts'
+import type { AskedRun, ClosedModel, Confirm, DrawerModel, ExtraLine, LastState, Loadable, ModelsLine, Opener, RelevancyModel, StartConfirmModel, StopModel, StoredAskModel, StoredButtonsModel } from './drawerview.ts'
 import { formatSince } from './format.ts'
 import type { ReportPanel } from './reportpanel.ts'
 import { getJson, sendRun } from './runapi.ts'
@@ -279,6 +280,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       h('p', { class: 'confirm-title' }, ask.title),
       list,
       ask.sources === null ? null : h('p', { class: 'confirm-sources' }, ask.sources),
+      ask.prompt === null ? null : h('pre', { class: 'drawer-prompt mono', 'data-confirm': 'prompt' }, ask.prompt),
       caution ? h('p', { id: 'drawer-confirm-caution', class: 'confirm-caution-line' }, ask.caution) : null,
       ask.replaces === null ? null : h('p', { class: 'confirm-sources', 'data-confirm': 'replaces' }, ask.replaces),
       ask.jump === null ? null : h('p', { id: 'drawer-confirm-jump', class: 'confirm-sources', 'data-confirm': 'jump' }, ask.jump.text),
@@ -301,6 +303,17 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       confirmActions(stop.confirm, 'danger', () => void doStop()))
   }
 
+  // Close PR's comment box: it opens with the check's reason, and what it holds when Close PR is clicked is what is sent
+  const closeCommentBox = (box: NonNullable<ActionConfirmModel['comment']>): HTMLElement => {
+    const input = h('textarea', { id: 'drawer-close-comment', name: 'drawer-close-comment', class: 'input confirm-extra', rows: '3', spellcheck: 'true', 'data-focus-key': 'confirm-close-comment', 'aria-label': box.label, 'aria-describedby': 'drawer-close-comment-detail' })
+    input.value = box.text
+    input.addEventListener('input', () => {
+      if (confirm?.type !== 'action') return
+      confirm = { ...confirm, comment: input.value }
+    })
+    return h('span', {}, input, h('span', { id: 'drawer-close-comment-detail', class: 'muted confirm-detail' }, box.detail))
+  }
+
   const actionConfirmBlock = (ask: ActionConfirmModel): HTMLElement => {
     const picker = ask.reviewers === null ? null : h('select', { id: 'drawer-reviewer', class: 'confirm-select', 'data-focus-key': 'action-reviewer', disabled: ask.reviewers.length === 0 },
       ask.reviewers.map((choice) => h('option', { value: choice.login, selected: choice.login === ask.reviewer }, choice.label)))
@@ -311,6 +324,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     })
     const list = facts([
       ...(picker === null ? [] : [['Reviewer', picker] as [string, Node]]),
+      ...(ask.comment === null ? [] : [[ask.comment.label, closeCommentBox(ask.comment)] as [string, Node]]),
       ...(ask.session === null ? [] : [['Runner', ask.session.runner] as [string, string], ['Model', ask.session.model] as [string, string]]),
       ['On GitHub', h('span', { 'data-confirm': 'effect' }, ask.effect)],
     ])
@@ -369,6 +383,12 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       if (extra.value !== wanted) extra.value = wanted
       extra.disabled = busy
     }
+    const closeComment = root.querySelector<HTMLTextAreaElement>('textarea[name="drawer-close-comment"]')
+    if (closeComment !== null) {
+      const wanted = model?.actionAsk?.comment?.text ?? ''
+      if (closeComment.value !== wanted) closeComment.value = wanted
+      closeComment.disabled = busy
+    }
     const line = root.querySelector<HTMLElement>('#drawer-error')
     if (line !== null) setText(line, error)
     const cancel = byKey('confirm-cancel')
@@ -397,13 +417,14 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     }
   }
 
-  const askStart = (kind: StartKind): void => {
+  // fixPrompt is the relevancy check's prompt, when its own button asked for the Fix session; focus goes back to that button
+  const askStart = (kind: StartKind, fixPrompt?: FixPromptAsk): void => {
     const cell = latest()
     if (cell === null) return
     const option = optionOf(cell, kind)
     if (option === undefined || option.unavailable !== null || options.rowOf(number ?? 0) === undefined) return
-    confirm = { type: 'start', kind, runner: defaultRunner(option, cell.action.runner) }
-    confirmFrom = `start:${kind}`
+    confirm = { type: 'start', kind, runner: defaultRunner(option, cell.action.runner), ...(fixPrompt === undefined ? {} : { fixPrompt }) }
+    confirmFrom = fixPrompt === undefined ? `start:${kind}` : 'relevancy-fix'
     error = ''
     render()
     byKey('confirm-cancel')?.focus({ preventScroll: true })
@@ -425,10 +446,14 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
       }
       people = answer.value.people.map((person) => ({ login: person.login, alias: person.alias }))
     }
-    // the head and base shown now are the ones a merge or an update is bound to
+    // the head and base shown now are the ones a merge or an update is bound to; a close is bound to the head and the relevancy check shown now, and opens with the check's reason in its box
     const row = options.rowOf(n)
     if (row === undefined) return
-    confirm = { type: 'action', action, repo: options.repo(), viewer: options.viewer(), reviewer: '', headSha: row.headSha, baseRef: row.baseRef }
+    if (action === 'close') {
+      const ask = closeAsk(row, options.repo(), options.viewer())
+      if (ask === null) return
+      confirm = ask
+    } else confirm = { type: 'action', action, repo: options.repo(), viewer: options.viewer(), reviewer: '', headSha: row.headSha, baseRef: row.baseRef }
     confirmFrom = `action:${action}`
     error = ''
     render()
@@ -537,7 +562,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     busy = true
     error = ''
     paintConfirm()
-    const answer = await sendRun(startRequest(n, asked.kind, asked.runner, option.repo, option.viewer, options.token, commentsCheckOn(asked, option), specialInstructionsSent(asked, option), jump && option.jump !== undefined))
+    const answer = await sendRun(startRequest(n, asked.kind, asked.runner, option.repo, option.viewer, options.token, commentsCheckOn(asked, option), specialInstructionsSent(asked, option), jump && option.jump !== undefined, asked.fixPrompt))
     busy = false
     if (n !== number) return
     if (answer.ok) {
@@ -725,7 +750,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     if (model.actions.length === 0) return null
     return {
       key: 'actions',
-      sig: JSON.stringify([model.actions, model.actionAsk === null ? null : { ...model.actionAsk, reviewer: '', effect: '' }, actionNote, actionFail]),
+      sig: JSON.stringify([model.actions, model.actionAsk === null ? null : { ...model.actionAsk, reviewer: '', effect: '', comment: model.actionAsk.comment === null ? null : '' }, actionNote, actionFail]),
       build: () => {
         if (model.actionAsk !== null) return section('actions', 'Actions', actionConfirmBlock(model.actionAsk))
         return section('actions', 'Actions',
@@ -929,6 +954,28 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
     },
   })
 
+  // the relevancy check's prompt, its copy control, and the button that asks the Fix session's confirmation with it; nothing is started until that confirmation's own Start
+  const promptBlock = (relevancy: { prompt: NonNullable<RelevancyModel['prompt']> }, cell: AgentCell | null): HTMLElement => {
+    const reasonId = 'drawer-relevancy-fix-reason'
+    const fix = h('button', { type: 'button', class: 'button', disabled: relevancy.prompt.fix.disabled, 'data-focus-key': 'relevancy-fix', 'aria-describedby': relevancy.prompt.fix.reason === null ? null : reasonId }, relevancy.prompt.fix.text)
+    fix.addEventListener('click', () => {
+      if (cell === null || cell.runId === null || busy) return
+      askStart('fix', { runId: cell.runId, text: relevancy.prompt.text })
+    })
+    return h('div', { class: 'drawer-relevancy-prompt' },
+      h('p', { class: 'drawer-label' }, 'Fix prompt ', copyPromptButton(relevancy.prompt.text, 'copy-relevancy-prompt', options.say)),
+      h('pre', { class: 'drawer-prompt mono', tabindex: '0' }, relevancy.prompt.text),
+      h('div', { class: 'drawer-start' }, fix, relevancy.prompt.fix.reason === null ? null : h('p', { id: reasonId, class: 'drawer-reason' }, relevancy.prompt.fix.reason)))
+  }
+
+  // a relevancy check's verdict and reason, then the next step it points at
+  const relevancyBlock = (relevancy: RelevancyModel, cell: AgentCell | null): HTMLElement =>
+    h('div', { class: 'drawer-relevancy', 'data-relevancy': relevancy.verdict.toLowerCase() },
+      h('p', { class: 'drawer-relevancy-reason' }, h('span', { class: 'drawer-label' }, `${relevancy.verdict}: `), relevancy.reason),
+      relevancy.updates === null ? null : h('p', { class: 'drawer-note' }, relevancy.updates),
+      relevancy.close === null ? null : h('p', { class: 'drawer-note', 'data-close-pointer': '' }, relevancy.close),
+      relevancy.prompt === null ? null : promptBlock({ prompt: relevancy.prompt }, cell))
+
   const resultCard = (model: DrawerModel, n: number): Part => ({
     key: 'result',
     sig: JSON.stringify([model.result === null ? null : { ...model.result, finishedAt: model.result.finishedAt !== null }, model.reread, model.rereadAsk, model.postIt, model.postAsk]),
@@ -967,6 +1014,7 @@ export const createDrawer = (options: DrawerOptions): Drawer => {
         result.byHand === null ? null : h('p', { class: 'drawer-note', 'data-by-hand': '' }, result.byHand),
         result.stale === null ? null : h('p', { class: 'drawer-note' }, result.stale),
         result.ready === null ? null : h('p', { class: 'drawer-note', 'data-ready-pointer': '' }, result.ready),
+        result.relevancy === null ? null : relevancyBlock(result.relevancy, latest()),
         fix?.pushed == null ? null : h('div', { class: 'drawer-pushed' },
           h('p', { class: 'drawer-label' }, 'Pushed to ', h('code', { class: 'mono' }, fix.pushed.branch)),
           h('ul', { class: 'drawer-commits' }, fix.pushed.commits.map((commit) => h('li', {},

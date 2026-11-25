@@ -497,3 +497,23 @@ export const updateResult = (patch: Record<string, unknown> = {}): Record<string
   error: null,
   ...patch,
 })
+
+// an invented relevancy-pr result: #104 judged still relevant against main, with nothing to update
+export const relevancyHead = '1234567890abcdef1234567890abcdef12345678'
+export const relevancyUpstream = '9999999999999999999999999999999999999903'
+
+export const relevancyResult = (patch: Record<string, unknown> = {}): Record<string, unknown> => ({
+  schema: 'pit-crew/relevancy-result@1',
+  command: 'relevancy-pr',
+  status: 'done',
+  target: { repo: 'octo-example/orbit', pr: 104, base: 'main' },
+  head: { sha: relevancyHead },
+  upstream: { sha: relevancyUpstream },
+  verdict: 'relevant',
+  reason: 'The retry backoff the PR adds is still missing on main.',
+  needsUpdates: false,
+  fixPrompt: null,
+  question: null,
+  error: null,
+  ...patch,
+})

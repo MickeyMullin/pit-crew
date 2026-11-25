@@ -681,14 +681,14 @@ const fixed = (patch: Partial<AgentCell> = {}, summary: Partial<FixSummary> = {}
 test('a Fix session\'s confirmation says it addresses the more recent of GitHub\'s requests and the self-review report, and names the report at its short SHA when the PR has one', () => {
   const withFix = (fix: StartOption['fix']): AgentCell => own({ starts: [...own().starts.slice(0, -1), { ...fixOption, ...(fix === undefined ? {} : { fix }) }] })
   const lineOf = (cell: AgentCell): string | null | undefined => startConfirmModel(row(cell), cell, 'fix', 'claude')?.sources
-  assert.equal(lineOf(withFix({ remote: true, selfReview: { sha: '1a2b3c4', findings: 2 } })), 'It addresses the more recent of GitHub\'s requested changes and your self-review report at 1a2b3c4.')
-  assert.equal(lineOf(withFix({ remote: false, selfReview: { sha: '1a2b3c4', findings: 2 } })), 'It addresses the more recent of GitHub\'s requested changes and your self-review report at 1a2b3c4; GitHub shows no request, so it addresses that report.')
-  assert.equal(lineOf(withFix({ remote: true, selfReview: null })), 'It addresses the more recent of GitHub\'s requested changes and your self-review report; this PR has no self-review report for its current head, so it addresses GitHub\'s requests.')
+  assert.equal(lineOf(withFix({ remote: true, selfReview: { sha: '1a2b3c4', findings: 2 }, relevancy: null })), 'It addresses the more recent of GitHub\'s requested changes and your self-review report at 1a2b3c4.')
+  assert.equal(lineOf(withFix({ remote: false, selfReview: { sha: '1a2b3c4', findings: 2 }, relevancy: null })), 'It addresses the more recent of GitHub\'s requested changes and your self-review report at 1a2b3c4; GitHub shows no request, so it addresses that report.')
+  assert.equal(lineOf(withFix({ remote: true, selfReview: null, relevancy: null })), 'It addresses the more recent of GitHub\'s requested changes and your self-review report; this PR has no self-review report for its current head, so it addresses GitHub\'s requests.')
   // an entry from before the field, and a review's confirmation, say nothing about sources
   assert.equal(lineOf(withFix(undefined)), null)
   assert.equal(startConfirmModel(row(own()), own(), 'default', 'claude')?.sources, null)
   // the command is still /fix-pr <n>: no --source, so the command's own default applies
-  assert.equal(startConfirmModel(row(withFix({ remote: true, selfReview: null })), withFix({ remote: true, selfReview: null }), 'fix', 'claude')?.command, '/fix-pr 101')
+  assert.equal(startConfirmModel(row(withFix({ remote: true, selfReview: null, relevancy: null })), withFix({ remote: true, selfReview: null, relevancy: null }), 'fix', 'claude')?.command, '/fix-pr 101')
 })
 
 test('a Fix session\'s confirmation names the push: the branch in its heading, the command, what it does, and a Start of its own', () => {
@@ -762,7 +762,7 @@ test('a start that does not offer the comments check shows no box and sends none
 test('the box\'s state lives in the confirmation: a change of a start\'s entry keeps it without a rebuild for the toggle, and Start, Cancel, or a new ask leave nothing behind', async () => {
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
   // a new ask opens it off, and nothing else in the drawer holds the state
-  assert.match(source, /confirm = \{ type: 'start', kind, runner: defaultRunner\(option, cell\.action\.runner\) \}/)
+  assert.match(source, /confirm = \{ type: 'start', kind, runner: defaultRunner\(option, cell\.action\.runner\), \.\.\.\(fixPrompt === undefined \? \{\} : \{ fixPrompt \}\) \}/)
   assert.equal(source.match(/checkComments:/g)?.length, 1)
   // the signature ignores whether it is checked, so toggling the box or a patch never rebuilds it under the pointer, and the paint keeps it true to the state
   assert.match(source, /commentsCheck: model\.confirm\.commentsCheck === null \? null : ''/)
@@ -935,7 +935,7 @@ test('a run start names the repository and viewer of the option the confirmation
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
   // the confirmation's signature holds every option, so a change of repository rebuilds it too
   assert.match(source, /sig: JSON\.stringify\(\[model\.starts,/)
-  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\), specialInstructionsSent\(asked, option\), jump && option\.jump !== undefined\)\)/)
+  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\), specialInstructionsSent\(asked, option\), jump && option\.jump !== undefined, asked\.fixPrompt\)\)/)
 })
 
 // an Update session's finished run: its method and why, the push, and its conflicts and checks
@@ -1453,11 +1453,11 @@ test('a Fix session, an update, and a Dependabot review show no box', () => {
 test('the real caller builds the confirmation closed and sends through the one rule, and the drawer repaints on a toggle without losing the caret', async () => {
   const source = await readFile(join(import.meta.dirname, '..', 'public', 'drawer.ts'), 'utf8')
   // a new ask opens with the box unchecked and no typed text, and nothing but the confirmation holds either
-  assert.match(source, /confirm = \{ type: 'start', kind, runner: defaultRunner\(option, cell\.action\.runner\) \}/)
+  assert.match(source, /confirm = \{ type: 'start', kind, runner: defaultRunner\(option, cell\.action\.runner\), \.\.\.\(fixPrompt === undefined \? \{\} : \{ fixPrompt \}\) \}/)
   assert.equal(source.match(/extraText:/g)?.length, 1)
   assert.equal(source.match(/extraOn:/g)?.length, 1)
   // the request is built from the one rule
-  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\), specialInstructionsSent\(asked, option\), jump && option\.jump !== undefined\)\)/)
+  assert.match(source, /startRequest\(n, asked\.kind, asked\.runner, option\.repo, option\.viewer, options\.token, commentsCheckOn\(asked, option\), specialInstructionsSent\(asked, option\), jump && option\.jump !== undefined, asked\.fixPrompt\)\)/)
   // the checkbox rebuilds the confirmation (it shows or hides the box), so its state is in the signature and the text is not
   assert.match(source, /extraBox: model\.confirm\.extraBox === null \? null : model\.confirm\.extraBox\.checked/)
   assert.match(source, /name: 'drawer-extra-on'/)

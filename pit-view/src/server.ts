@@ -19,12 +19,12 @@ import { openCache } from './cache.ts'
 import type { Cache } from './cache.ts'
 import { createClients, keepsSchedule } from './clients.ts'
 import type { ClientState, Clients } from './clients.ts'
-import { autoConcurrencyProblem, cacheFile, ConfigError, configFile, defaultHermesProfile, expandHome, extraInstructionsProblem, readConfig, runnerNames, saveConfig, stateDir, tildePath, validateConfig } from './config.ts'
+import { autoConcurrencyProblem, cacheFile, ConfigError, configFile, defaultHermesProfile, expandHome, extraInstructionsProblem, normalizeExtraInstructions, readConfig, runnerNames, saveConfig, stateDir, tildePath, validateConfig } from './config.ts'
 import type { Clock, Config, RunnerName, RunRunner } from './config.ts'
 import { commandRunner, createGh, fetchViewerLogin } from './github.ts'
 import type { Runner, WriteLimits } from './github.ts'
 import { deriveLastReadings, latestReviewsOf, markedStack } from './derive.ts'
-import { chooseExtraInstructions, createLauncher, createPostGuard, createReviewLine, createSweepLauncher, LaunchError, notOffered, procsFrom, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest, withExtraInstructions } from './launcher.ts'
+import { chooseExtraInstructions, createLauncher, createPostGuard, createReviewLine, createSweepLauncher, fixNeedsPrompt, LaunchError, notOffered, procsFrom, relevancyPromptOf, runView, startKinds, startOptions, systemFs, systemSpawn, updateRequest, withExtraInstructions } from './launcher.ts'
 import type { Kill, Launcher, LaunchErrorCode, LauncherFs, PostGuard, Procs, Queueing, Spawn, StartKind } from './launcher.ts'
 import { modelsSaveProblem, modelsView } from './models.ts'
 import { keyStatus, openRouterFileName, profileEnvPath, readOpenRouterKey, readProfileEnvKey } from './openrouter.ts'
@@ -689,29 +689,38 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (confirmed !== undefined && confirmed.toLowerCase() !== viewer.toLowerCase()) throw new HttpError(409, `the viewer is now ${viewer}, not ${confirmed}; the confirmation was for ${confirmed}, so nothing was started`)
   }
 
-  // a start from the drawer (section 8 of DESIGN.md): the row's default run, the same review in
-  // tandem, a review of its stack, or a fix session on the viewer's own PR, with the configured
-  // runner or the one asked for
+  // the relevancy check's prompt a Fix session start hands over, as the confirmation showed it: the check's run and the text, and nothing else; null when the start sends none
+  const fixPromptOf = (value: unknown): { runId: number, text: string } | null => {
+    if (value === undefined) return null
+    const shape = 'fixPrompt must be { "runId": <the relevancy check\'s run>, "text": "<its prompt as shown>" }'
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new HttpError(400, shape)
+    const { runId, text, ...rest } = value as Record<string, unknown>
+    if (Object.keys(rest).length > 0 || !Number.isInteger(runId) || (runId as number) < 1 || typeof text !== 'string') throw new HttpError(400, shape)
+    return { runId: runId as number, text }
+  }
+
+  // a start from the drawer (section 8 of DESIGN.md): the row's default run, the same review in tandem, a review of its stack, or a relevancy check or a fix session on the viewer's own PR, with the configured runner or the one asked for
   const startRun = async (req: IncomingMessage, res: ServerResponse, raw: string): Promise<void> => {
     requireToken(req)
     const number = prNumber(raw)
-    const usage = 'send { "kind": "default" | "tandem" | "stack" | "fix", "runner": "claude" | "codex" | "hermes", "model": "registry id, with hermes only", "repo": "owner/name", "viewer": "login", "checkComments": true | false, "extraInstructions": "text", "jump": true | false }'
+    const usage = 'send { "kind": "default" | "tandem" | "stack" | "relevancy" | "fix", "runner": "claude" | "codex" | "hermes", "model": "registry id, with hermes only", "repo": "owner/name", "viewer": "login", "checkComments": true | false, "extraInstructions": "text", "jump": true | false, "fixPrompt": { "runId": 12, "text": "the relevancy check\'s prompt" } }'
     const length = Number(req.headers['content-length'] ?? 0)
     const body = length > 0 || req.headers['transfer-encoding'] !== undefined ? await readJson(req) : {}
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, usage)
-    const { runner: asked, model: askedModel, kind: askedKind, repo: confirmedRepo, viewer: confirmed, checkComments, extraInstructions: box, jump, ...rest } = body as Record<string, unknown>
+    const { runner: asked, model: askedModel, kind: askedKind, repo: confirmedRepo, viewer: confirmed, checkComments, extraInstructions: box, jump, fixPrompt, ...rest } = body as Record<string, unknown>
     if (Object.keys(rest).length > 0) throw new HttpError(400, `unknown field ${Object.keys(rest)[0]}; ${usage}`)
     // the page always names the repository its confirmation showed; a start that does not is from an older page and is refused rather than guessed at
     if (typeof confirmedRepo !== 'string') throw new HttpError(400, `repo is required and must be a string; ${usage}`)
     if (confirmed !== undefined && typeof confirmed !== 'string') throw new HttpError(400, 'viewer must be a string')
     if (asked !== undefined && !askableRunners.includes(asked as RunRunner)) throw new HttpError(400, 'runner must be claude, codex, or hermes')
     if (askedModel !== undefined && typeof askedModel !== 'string') throw new HttpError(400, 'model must be a registry id, a string')
-    if (askedKind !== undefined && !startKinds.includes(askedKind as StartKind)) throw new HttpError(400, 'kind must be default, tandem, stack or fix')
+    if (askedKind !== undefined && !startKinds.includes(askedKind as StartKind)) throw new HttpError(400, 'kind must be default, tandem, stack, relevancy, or fix')
     if (checkComments !== undefined && typeof checkComments !== 'boolean') throw new HttpError(400, 'checkComments must be true or false')
     if (jump !== undefined && typeof jump !== 'boolean') throw new HttpError(400, 'jump must be true or false')
     if (box !== undefined && typeof box !== 'string') throw new HttpError(400, 'extraInstructions must be a string')
     const boxProblem = box === undefined ? null : extraInstructionsProblem(box as string)
     if (boxProblem !== null) throw new HttpError(400, `extraInstructions ${boxProblem}`)
+    const handed = fixPromptOf(fixPrompt)
     // a tandem primary launches its secondary in the background, which only Claude can do
     if (askedKind === 'tandem' && (asked === 'codex' || asked === 'hermes')) throw new HttpError(400, 'Review in tandem runs with Claude only; send runner claude or leave it out')
     if (askedKind === 'fix' && (asked === 'codex' || asked === 'hermes')) throw new HttpError(400, 'Fix session runs with Claude only; send runner claude or leave it out')
@@ -738,7 +747,19 @@ export const startServer = async (options: ServerOptions): Promise<PitServer> =>
     if (args === undefined) throw new HttpError(422, `Check the latest comments is offered only on a Self-review of your own PR, and this start of #${number} is not one`)
     // the box rides on a review's start alone, as the option says, so a Fix session or a Dependabot review neither takes it nor takes the standing default
     if (box !== undefined && option.extraInstructions === undefined) throw new HttpError(422, `Extra instructions are offered only on a review, a re-review, a self-review, a tandem review, or a stack review, and this start of #${number} is not one`)
-    const extra = option.extraInstructions === undefined ? null : chooseExtraInstructions(box as string | undefined, config.extraReviewInstructions)
+    // the relevancy check's prompt rides on a Fix session alone, and only as the check that is latest now wrote it: the text the confirmation showed must still be that prompt, so the run never takes a prompt the viewer did not see
+    if (handed !== null && kind !== 'fix') throw new HttpError(422, `The relevancy check's prompt is taken only by a Fix session, and this start of #${number} is not one`)
+    if (kind === 'fix' && handed === null) {
+      const needs = fixNeedsPrompt(row.pr, runs)
+      if (needs !== null) throw new HttpError(422, needs)
+    }
+    const current = handed === null ? null : relevancyPromptOf(row.pr, runs)
+    if (handed !== null && (current === null || current.runId !== handed.runId || current.text !== normalizeExtraInstructions(handed.text))) {
+      throw new HttpError(409, `the relevancy check's prompt for #${number} is no longer the one you saw; nothing was started. Open the drawer again to see the current one`)
+    }
+    const extra = current !== null
+      ? { text: current.text, source: 'relevancy' as const }
+      : option.extraInstructions === undefined ? null : chooseExtraInstructions(box as string | undefined, config.extraReviewInstructions)
     // a tandem or fix start without a runner is Claude's, whatever the configured default is
     const runner = asked as RunRunner | undefined ?? (kind === 'tandem' || kind === 'fix' ? 'claude' : undefined)
     try {

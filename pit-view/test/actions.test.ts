@@ -1191,7 +1191,7 @@ test('orList joins one, two, and three or more items as plain English', () => {
 })
 
 test('an unknown action names the allowed actions with a final "or"', () => {
-  assert.throws(() => parseAction({ action: 'comment', repo: 'o/r' }), /action must be one of merge, markReady, convertToDraft, requestReview, update, or resolveConflicts;/)
+  assert.throws(() => parseAction({ action: 'comment', repo: 'o/r' }), /action must be one of merge, markReady, convertToDraft, requestReview, update, resolveConflicts, or close;/)
 })
 
 // Update (section 9 of DESIGN.md, Direct actions): an agent session through the launcher, never a gh write of its own. The runner is the fake launch, so no git command runs and no branch is rebased or pushed

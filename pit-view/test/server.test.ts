@@ -1866,14 +1866,14 @@ test('a fix session starts only on the viewer\'s own PR: fix-pr with Claude, nev
       repo: scenario.repo,
       viewer: 'vera-quill',
       unavailable: null,
-      fix: { remote: true, selfReview: null },
+      fix: { remote: true, selfReview: null, relevancy: null },
     })
     assert.deepEqual([rowIn(view, 101)?.agent?.action.kind, rowIn(view, 101)?.agent?.action.args], ['selfReview', ['101', '--tandem', '--no-post']])
 
     // refusals come before anything runs: a PR with nothing to fix is refused whatever the page sends
     const nothing = await send(url(104), 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))
     assert.equal(nothing.status, 422)
-    assert.match(String(nothing.body.error), /GitHub shows no request to act on and no finished self-review of its current head has findings/)
+    assert.match(String(nothing.body.error), /GitHub shows no request to act on, no finished self-review of its current head has findings, and no relevancy check of its current head wrote a prompt/)
     const others = await send(url(113), 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))
     assert.equal(others.status, 422)
     assert.match(String(others.body.error), /Fix session is offered only on your own PRs, and #113 is not yours/)
@@ -2088,7 +2088,7 @@ test('a fix start reads the self-review that finished last, not the one created 
     assert.equal((await send(url, 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))).status, 422)
     // a run that finishes after both, with findings, is the one the offer reads
     record('2026-10-26T16:00:00Z', false)
-    assert.deepEqual((await fixOf())?.fix, { remote: false, selfReview: { sha: sha.slice(0, 7), findings: 1 } })
+    assert.deepEqual((await fixOf())?.fix, { remote: false, selfReview: { sha: sha.slice(0, 7), findings: 1 }, relevancy: null })
   } finally {
     await h.cleanup()
   }
@@ -2113,7 +2113,7 @@ test('a fix start is offered and runs as fix-pr with no --source on a PR with on
     // a self-review of the head with findings offers it, and the start carries no --source
     record(sha)
     const option = await fixOf()
-    assert.deepEqual(option?.fix, { remote: false, selfReview: { sha: sha.slice(0, 7), findings: 1 } })
+    assert.deepEqual(option?.fix, { remote: false, selfReview: { sha: sha.slice(0, 7), findings: 1 }, relevancy: null })
     const started = await send(url, 'POST', { repo: scenario.repo, kind: 'fix' }, token(h))
     assert.equal(started.status, 200)
     assert.deepEqual([started.body.command, started.body.args], ['fix-pr', ['104']])

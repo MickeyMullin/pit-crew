@@ -7,7 +7,7 @@ import type { Config } from './config.ts'
 import { deriveIssues, deriveMerge, isPrimaryBase, offersMerge } from './derive.ts'
 import { GhError, GhTimeoutError, WriteIdentityError } from './github.ts'
 import type { Gh, GhErrorKind, RawOpenPr, WriteLimits } from './github.ts'
-import { currentOffers, isHttpUrl, offersFix, postArgs, stackRunCover } from './launcher.ts'
+import { currentOffers, isHttpUrl, offersFix, postArgs, relevancyCheckOf, stackRunCover } from './launcher.ts'
 import type { Posted, PostForm, PostGuard, RunView, SweepOffer, UpdateAction } from './launcher.ts'
 import { namesInText, resolveModels } from './models.ts'
 import type { PostedTextHit } from './models.ts'
@@ -15,8 +15,8 @@ import { parseReviewedCommit, readReport, reportHash, ReportReadError } from './
 import { sweepOfferOf } from './sweeps.ts'
 import type { SweepView } from './sweeps.ts'
 
-// direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs, each through gh with the viewer's own token. This module decides whether an action is allowed and what gh is asked; it never trusts the page, so every rule is checked here again. merge is always a squash into the repository's primary branch; the method is fixed, not a setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused. update writes nothing itself: it starts an agent session through the launcher, which brings the PR's branch up to date with the primary branch and pushes it. resolveConflicts is that same session, asked for on a PR the cache holds as conflicting
-export const actionNames = ['merge', 'markReady', 'convertToDraft', 'requestReview', 'update', 'resolveConflicts'] as const
+// direct actions (section 9 of DESIGN.md): explicit GitHub writes on the viewer's own open PRs, each through gh with the viewer's own token. This module decides whether an action is allowed and what gh is asked; it never trusts the page, so every rule is checked here again. merge is always a squash into the repository's primary branch; the method is fixed, not a setting, and a PR whose base is anything else (a stacked PR's parent, a release branch) is refused. update writes nothing itself: it starts an agent session through the launcher, which brings the PR's branch up to date with the primary branch and pushes it. resolveConflicts is that same session, asked for on a PR the cache holds as conflicting. close closes the PR without merging it, offered only once the latest relevancy check of its current head found it irrelevant, and takes the one comment Pit View ever posts besides a review report: the closing comment the viewer confirmed, which may be empty. No action approves, and no other action comments
+export const actionNames = ['merge', 'markReady', 'convertToDraft', 'requestReview', 'update', 'resolveConflicts', 'close'] as const
 export type ActionName = typeof actionNames[number]
 
 // every request names the repository the confirmation displayed; a merge also names the full head SHA and the base branch it displayed, and an update or a resolveConflicts all of those and the viewer
@@ -28,6 +28,8 @@ export type ActionRequest =
   | { action: 'markReady', repo: string }
   | { action: 'convertToDraft', repo: string }
   | { action: 'requestReview', repo: string, reviewer: string }
+  // the relevancy check the confirmation showed, by its run, and the closing comment cleaned, empty for none
+  | { action: 'close', repo: string, viewer: string, headSha: string, runId: number, comment: string }
 
 // an update or a resolveConflicts answers once its session has started, with the run
 export type ActionResult =
@@ -71,7 +73,7 @@ export const mergeRefusal = (number: number, pr: RawOpenPr, defaultBranch: strin
   return null
 }
 
-const usage = 'send { "action": "merge", "repo": "<owner/name shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "update" | "resolveConflicts", "repo": "<owner/name shown>", "viewer": "<login shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "markReady" | "convertToDraft", "repo": "<owner/name shown>" }, or { "action": "requestReview", "repo": "<owner/name shown>", "reviewer": "<login from people>" }'
+const usage = 'send { "action": "merge", "repo": "<owner/name shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "update" | "resolveConflicts", "repo": "<owner/name shown>", "viewer": "<login shown>", "headSha": "<full head SHA shown>", "base": "<base branch shown>" }, { "action": "markReady" | "convertToDraft", "repo": "<owner/name shown>" }, { "action": "requestReview", "repo": "<owner/name shown>", "reviewer": "<login from people>" }, or { "action": "close", "repo": "<owner/name shown>", "viewer": "<login shown>", "headSha": "<full head SHA shown>", "runId": <the relevancy check\'s run shown>, "comment": "<the closing comment, optional>" }'
 
 // "a", "a or b", "a, b, or c": the words for a choice among the items
 export const orList = (items: readonly string[]): string =>
@@ -83,16 +85,38 @@ const andList = (items: readonly string[]): string =>
 
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
+// the closing comment's bound, in characters as a reader counts them
+export const maxCloseComment = 2000
+
+// the closing comment as it is posted: line breaks made plain, every control character but a line break and a tab removed, and the ends trimmed, so an empty or blank box is no comment at all
+export const cleanComment = (text: string): string =>
+  text.replace(/\r\n?|[\u2028\u2029]/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '').trim()
+
 // the body, checked field by field: an unknown field is refused rather than ignored
 export const parseAction = (body: unknown): ActionRequest => {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new ActionError('badRequest', usage)
-  const { action, repo, reviewer, headSha, base, viewer, ...rest } = body as Record<string, unknown>
+  const { action, repo, reviewer, headSha, base, viewer, runId, comment, ...rest } = body as Record<string, unknown>
   if (typeof action !== 'string' || !actionNames.includes(action as ActionName)) {
     throw new ActionError('badRequest', `action must be one of ${orList(actionNames)}; ${usage}`)
   }
+  // Close PR's closing comment is the only comment an action takes
+  if (action !== 'close' && comment !== undefined) throw new ActionError('badRequest', `${action} takes no comment; ${usage}`)
+  if (action !== 'close' && runId !== undefined) throw new ActionError('badRequest', `${action} takes no runId; ${usage}`)
   const extra = Object.keys(rest)[0]
   if (extra !== undefined) throw new ActionError('badRequest', `unknown field ${extra}; ${usage}`)
   if (typeof repo !== 'string' || repo === '') throw new ActionError('badRequest', `${action} needs repo, the repository the confirmation showed; ${usage}`)
+  if (action === 'close') {
+    if (reviewer !== undefined) throw new ActionError('badRequest', `close takes no reviewer; ${usage}`)
+    if (base !== undefined) throw new ActionError('badRequest', `close takes no base; ${usage}`)
+    if (typeof viewer !== 'string' || viewer === '') throw new ActionError('badRequest', `close needs viewer, the login the confirmation showed; ${usage}`)
+    if (typeof headSha !== 'string' || !/^[0-9a-f]{40}$/i.test(headSha)) throw new ActionError('badRequest', `close needs headSha, the full 40-character head SHA the confirmation showed; ${usage}`)
+    if (!Number.isInteger(runId) || (runId as number) < 1) throw new ActionError('badRequest', `close needs runId, the relevancy check the confirmation showed; ${usage}`)
+    if (comment !== undefined && typeof comment !== 'string') throw new ActionError('badRequest', `comment must be a string; ${usage}`)
+    const cleaned = comment === undefined ? '' : cleanComment(comment)
+    const length = [...cleaned].length
+    if (length > maxCloseComment) throw new ActionError('badRequest', `comment must be at most ${maxCloseComment.toLocaleString('en-US')} characters; it has ${length.toLocaleString('en-US')}`)
+    return { action, repo, viewer, headSha: headSha.toLowerCase(), runId: runId as number, comment: cleaned }
+  }
   if (!isUpdateAction(action) && viewer !== undefined) throw new ActionError('badRequest', `${action} takes no viewer; ${usage}`)
   if (isUpdateAction(action)) {
     if (reviewer !== undefined) throw new ActionError('badRequest', `${action} takes no reviewer; ${usage}`)
@@ -117,13 +141,14 @@ export const parseAction = (body: unknown): ActionRequest => {
   return { action: action as 'markReady' | 'convertToDraft', repo }
 }
 
-// exactly what gh is asked for each action that writes through gh. Merge uses GitHub's REST merge endpoint rather than `gh pr merge`: that endpoint refuses when branch rules require a queue, so one click cannot silently enable auto-merge or enqueue anything. The method is fixed to squash. The merge carries the head SHA the viewer's confirmation showed as GitHub's `sha` precondition, so a push after that is refused by GitHub (409) instead of merged.
+// exactly what gh is asked for each action that writes through gh. Close is `gh pr close`, which never merges, with no --delete-branch, so the branch is kept and the PR can be reopened; its comment rides along only when the box held one. Merge uses GitHub's REST merge endpoint rather than `gh pr merge`: that endpoint refuses when branch rules require a queue, so one click cannot silently enable auto-merge or enqueue anything. The method is fixed to squash. The merge carries the head SHA the viewer's confirmation showed as GitHub's `sha` precondition, so a push after that is refused by GitHub (409) instead of merged.
 export const ghArgs = (repo: string, number: number, request: Exclude<ActionRequest, { action: UpdateAction }>, headSha = ''): string[] => {
   switch (request.action) {
     case 'merge': return ['api', '--method', 'PUT', `repos/${repo}/pulls/${number}/merge`, '-f', 'merge_method=squash', '-f', `sha=${headSha}`]
     case 'markReady': return ['pr', 'ready', String(number), '--repo', repo]
     case 'convertToDraft': return ['pr', 'ready', String(number), '--undo', '--repo', repo]
     case 'requestReview': return ['api', '--method', 'POST', `repos/${repo}/pulls/${number}/requested_reviewers`, '-f', `reviewers[]=${request.reviewer}`]
+    case 'close': return ['pr', 'close', String(number), '--repo', repo, ...(request.comment === '' ? [] : ['--comment', request.comment])]
   }
 }
 
@@ -333,7 +358,7 @@ export const createActions = (options: ActionsOptions): Actions => {
     // the repository the confirmation displayed must still be the one in effect: the page learns of a change in Settings only when its feed patch arrives, and #<n> in another repository is another PR. Nothing is read, written, or held in flight
     if (request.repo !== repo) throw new ActionError('stale', `the repository is now ${repo}, not ${request.repo}; the confirmation was for ${request.repo}, so nothing was done`)
     // an update's session pushes as the viewer, so the viewer the confirmation displayed must still be the one in effect too
-    if ((request.action === 'update' || request.action === 'resolveConflicts') && !sameLogin(request.viewer, viewer)) {
+    if ((request.action === 'update' || request.action === 'resolveConflicts' || request.action === 'close') && !sameLogin(request.viewer, viewer)) {
       throw new ActionError('stale', `the viewer is now ${viewer || 'nobody'}, not ${request.viewer}; the confirmation was for ${request.viewer}, so nothing was started`)
     }
     const cached = cache.readView(repo)
@@ -344,6 +369,17 @@ export const createActions = (options: ActionsOptions): Actions => {
     if (request.action === 'update' || request.action === 'resolveConflicts') return update(number, request, row.pr, cached.defaultBranch, config)
     let reviewer: string | undefined
     let merging: { base: string, headSha: string } | undefined
+    let closing: { headSha: string } | undefined
+    if (request.action === 'close') {
+      // the latest run of the PR must be a done relevancy check of its current head that found it irrelevant, and the one the confirmation showed
+      const check = relevancyCheckOf(row.pr, cache.runsFor(repo, number))
+      if (check === null || check.result.verdict !== 'irrelevant') throw new ActionError('notAllowed', `#${number} has no relevancy check that found it irrelevant; Close PR is offered only then`)
+      if (check.run.id !== request.runId || request.headSha !== row.pr.headRefOid.toLowerCase()) {
+        refresh(repo, number)
+        throw new ActionError('stale', `#${number} changed since you saw it (${check.run.id !== request.runId ? `its latest relevancy check is now run ${check.run.id}, not run ${request.runId}` : 'it has new commits'}); nothing was closed. Reload its confirmation to see the current state`)
+      }
+      closing = { headSha: request.headSha }
+    }
     if (request.action === 'merge') {
       // the state the row shows, derived again from the cached PR rather than taken from the page
       const refusal = mergeRefusal(number, row.pr, cached.defaultBranch)
@@ -371,7 +407,19 @@ export const createActions = (options: ActionsOptions): Actions => {
       // gh writes as whichever account it is signed in as, and this machine holds more than one: the write confirms the account with the token it then writes with, and runs once
       const checked: Exclude<ActionRequest, { action: UpdateAction }> = reviewer === undefined ? request : { action: 'requestReview', repo, reviewer }
       try {
-        const check = merging === undefined ? undefined : async (read: (args: string[]) => Promise<string>): Promise<void> => {
+        const closeCheck = closing === undefined ? undefined : async (read: (args: string[]) => Promise<string>): Promise<void> => {
+          // the PR is read once more, live: one that has closed, merged, or moved on since the check is not closed
+          let live: LivePr
+          try {
+            live = JSON.parse(await read(['api', `repos/${repo}/pulls/${number}`])) as LivePr
+          } catch (error) {
+            if (error instanceof GhError) throw error
+            throw new ActionError('ghFailed', `cannot read #${number} before closing: ${messageOf(error)}; nothing was closed`)
+          }
+          if (live.state !== 'open' || live.merged === true) throw new ActionError('notAllowed', `#${number} is no longer open; nothing was closed`)
+          if (live.head?.sha !== closing!.headSha) throw new ActionError('notAllowed', `#${number} has new commits since you saw it; nothing was closed`)
+        }
+        const check = merging === undefined ? closeCheck : async (read: (args: string[]) => Promise<string>): Promise<void> => {
           // the confirmation named the cached base and head; the PR is read once more, live, and anything that differs refuses before a write is made
           let live: LivePr
           try {
@@ -401,7 +449,7 @@ export const createActions = (options: ActionsOptions): Actions => {
         }
         throw new ActionError('ghFailed', messageOf(error), error instanceof GhError ? error.kind : null)
       }
-      log(`PR #${number}: ${request.action}${reviewer === undefined ? '' : ` ${reviewer}`}`)
+      log(`PR #${number}: ${request.action}${reviewer === undefined ? '' : ` ${reviewer}`}${request.action === 'close' ? (request.comment === '' ? ' with no comment' : ' with a comment') : ''}`)
       refresh(repo, number)
       return { number, action: request.action, done: true, ...(reviewer === undefined ? {} : { reviewer }) }
     } finally {

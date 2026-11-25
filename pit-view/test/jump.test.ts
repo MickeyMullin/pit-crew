@@ -314,9 +314,13 @@ test('every review start a PR offers carries the jump while it would wait, namin
     const stack = markedStack(pr)
     assert.equal(stack !== null, number === 111)
     const options = startOptions(pr, config, stack, false, waitsAll)
-    const reviews = options.filter((option) => option.kind !== 'fix')
+    const reviews = options.filter((option) => option.kind !== 'fix' && option.kind !== 'relevancy')
     assert.ok(reviews.length >= 1)
     for (const option of reviews) assert.deepEqual(option.jump, over, `#${number} ${option.kind}`)
+    // a relevancy check is no review, so it stands in no line and is never held by the cap
+    const relevancy = options.find((option) => option.kind === 'relevancy')
+    assert.equal(relevancy !== undefined, pr.author?.login === 'vera-quill', `#${number} offers the check on the viewer's own PRs alone`)
+    assert.equal(relevancy?.jump, undefined)
   }
   // #101 is the viewer's own with a change request standing, so it offers a Fix session, which stands in no line
   const fix = startOptions(await prOf(101), config, null, false, waitsAll).find((option) => option.kind === 'fix')

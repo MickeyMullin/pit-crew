@@ -5,7 +5,7 @@ import { closeSync, constants, openSync, watch as watchDir } from 'node:fs'
 import { chmod, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, join, resolve, sep } from 'node:path'
 import type { Cache, NewRun, NewSweep, Origin, PostRecord, QueueReason, Run, RunChanges, RunStatus, Session, Sweep, SweepChanges, SweepRowReport } from './cache.ts'
-import { defaultHermesProfile, expandHome, normalizeExtraInstructions, tildePath } from './config.ts'
+import { defaultHermesProfile, expandHome, extraInstructionsProblem, normalizeExtraInstructions, tildePath } from './config.ts'
 import type { AgentSettings, Clock, Config, ExtraInstructions, RunnerName, RunRunner } from './config.ts'
 import { ciStateOf, hasStandingChangeRequest, isBotLogin, isMine, markedStack, markedStackMembers, viewerReview } from './derive.ts'
 import type { CiReading } from './derive.ts'
@@ -96,8 +96,8 @@ export const fixPriorities: readonly FixPriority[] = ['P0', 'P1', 'P2', 'P3']
 export type FixRequest = {
   // the review thread's or the review's node id
   id: string
-  // a finding is one of a self-review report's, which has no URL and no reviewer
-  kind: 'thread' | 'review' | 'finding'
+  // a finding is one of a self-review report's, and a prompt request one of the relevancy check's prompt handed to the run; neither has a URL or a reviewer
+  kind: 'thread' | 'review' | 'finding' | 'prompt'
   author: string | null
   // null for a review
   path: string | null
@@ -112,7 +112,7 @@ export type FixRequest = {
   // full SHAs
   commits: string[]
   // which source it came from, and the P# it carries; a result that lacks them is still read
-  source?: 'remote' | 'local'
+  source?: 'remote' | 'local' | 'prompt'
   priority?: FixPriority | null
 }
 
@@ -174,7 +174,30 @@ export type UpdateResult = {
   error: string | null
 }
 
-export type RunResultJson = ReviewResult | SweepResult | FixResult | UpdateResult
+// relevancy-pr's response, pinned with it as pit-crew/relevancy-result@1 (section 8 of DESIGN.md): whether the viewer's own PR is still needed against its base branch, why, whether it needs updates, and the prompt a Fix session takes when it does. The command is read-only, so the result names no push and no report
+export type RelevancyVerdict = 'relevant' | 'irrelevant'
+export const relevancyVerdicts: readonly RelevancyVerdict[] = ['relevant', 'irrelevant']
+
+export type RelevancyResult = {
+  schema: 'pit-crew/relevancy-result@1'
+  command: 'relevancy-pr'
+  status: ResultStatus
+  // base is the PR's base branch, which the check judged against
+  target: { repo: string, pr: number, base: string } | null
+  // the PR head the run read, and the base branch's commit it judged against
+  head: { sha: string } | null
+  upstream: { sha: string } | null
+  // null exactly when the run stopped before judging, and then reason and needsUpdates are null too
+  verdict: RelevancyVerdict | null
+  reason: string | null
+  needsUpdates: boolean | null
+  // the prompt for a Fix session, set exactly when needsUpdates is true
+  fixPrompt: string | null
+  question: string | null
+  error: string | null
+}
+
+export type RunResultJson = ReviewResult | SweepResult | FixResult | UpdateResult | RelevancyResult
 
 export type Parsed<T> = { ok: true, value: T } | { ok: false, error: string }
 
@@ -193,6 +216,7 @@ const check = (ok: boolean, message: string): void => {
   if (!ok) throw new Invalid(message)
 }
 
+const relevancyFields = ['schema', 'command', 'status', 'target', 'head', 'upstream', 'verdict', 'reason', 'needsUpdates', 'fixPrompt', 'question', 'error']
 const updateFields = ['schema', 'command', 'status', 'target', 'head', 'upstream', 'method', 'methodReason', 'conflicts', 'checks', 'pushed', 'notPushedReason', 'worktree', 'question', 'error']
 const fixFields = ['schema', 'command', 'status', 'target', 'head', 'requests', 'checks', 'pushed', 'notPushedReason', 'worktree', 'report', 'question', 'error']
 const reviewFields = ['schema', 'command', 'status', 'target', 'reviewed', 'verdict', 'recommendation', 'findings', 'ci', 'fixAttempts', 'posted', 'notPostedReason', 'report', 'question', 'error']
@@ -267,19 +291,20 @@ const checkFixRequest = (request: unknown, index: number): void => {
   check(isObject(request), `${at} must be an object`)
   const value = request as Record<string, unknown>
   check(typeof value.id === 'string' && value.id !== '', `${at}.id must be a node id`)
-  check(value.kind === 'thread' || value.kind === 'review' || value.kind === 'finding', `${at}.kind must be thread, review or finding`)
+  check(value.kind === 'thread' || value.kind === 'review' || value.kind === 'finding' || value.kind === 'prompt', `${at}.kind must be thread, review, finding or prompt`)
   check(isStringOrNull(value.author), `${at}.author must be a login or null`)
   check(isStringOrNull(value.path), `${at}.path must be a path or null`)
   check(value.line === null || isPositiveInteger(value.line), `${at}.line must be a line number or null`)
   check(typeof value.outdated === 'boolean', `${at}.outdated must be true or false`)
   // the page may link it, so it is held to the same rule as posted.url
   if (value.kind === 'finding') check(value.url === null, `${at}.url must be null for a finding`)
+  else if (value.kind === 'prompt') check(value.url === null, `${at}.url must be null for a prompt request`)
   else check(isHttpUrl(value.url), `${at}.url must be an absolute http or https url`)
   check(typeof value.summary === 'string', `${at}.summary must be a string`)
   check(fixTriages.includes(value.triage as FixTriage), `${at}.triage must be needsJudgment, noChange, disagree, outOfScope or clear`)
   check(fixOutcomes.includes(value.outcome as FixOutcome), `${at}.outcome must be fixed, notFixed or awaitingAnswer`)
   check(Array.isArray(value.commits) && value.commits.every(isFullSha), `${at}.commits must be a list of full SHAs`)
-  check(!('source' in value) || value.source === 'remote' || value.source === 'local', `${at}.source must be remote or local`)
+  check(!('source' in value) || value.source === 'remote' || value.source === 'local' || value.source === 'prompt', `${at}.source must be remote, local or prompt`)
   check(!('priority' in value) || oneOfOrNull(value.priority, fixPriorities), `${at}.priority must be P0, P1, P2, P3 or null`)
 }
 
@@ -352,6 +377,50 @@ const checkUpdate = (value: Record<string, unknown>): void => {
   check(isStringOrNull(value.worktree), 'worktree must be a path or null')
 }
 
+const checkRelevancy = (value: Record<string, unknown>): void => {
+  for (const field of relevancyFields) check(field in value, `${field} is missing`)
+  check(value.command === 'relevancy-pr', 'command must be relevancy-pr')
+  checkStatus(value)
+  const target = value.target
+  check(target === null || (isObject(target) && typeof target.repo === 'string' && isPositiveInteger(target.pr) && typeof target.base === 'string' && target.base !== ''),
+    'target must be null or { repo, pr, base }')
+  for (const field of ['head', 'upstream']) {
+    const sha = value[field]
+    check(sha === null || (isObject(sha) && isFullSha(sha.sha)), `${field} must be null or { sha } with a full 40-character SHA`)
+  }
+  check(oneOfOrNull(value.verdict, relevancyVerdicts), 'verdict must be relevant, irrelevant or null')
+  check(isStringOrNull(value.reason), 'reason must be a string or null')
+  check(value.needsUpdates === null || typeof value.needsUpdates === 'boolean', 'needsUpdates must be true, false or null')
+  check(isStringOrNull(value.fixPrompt), 'fixPrompt must be a string or null')
+}
+
+// the reason is the one closing comment Close PR prefills, so it is one short line of plain text
+export const maxRelevancyReason = 500
+
+// a well-formed relevancy result whose fields contradict each other, or whose reason or prompt breaks its rule: the run fails, keeping the result for the drawer. Null when they agree. The prompt is held to the extra instructions' own rule, since a Fix session reads it from extra-instructions.txt
+export const relevancyMismatch = (result: RelevancyResult): string | null => {
+  const { verdict, reason, needsUpdates, fixPrompt } = result
+  if (result.status === 'done' && verdict === null && reason === null && needsUpdates === null) return 'a done relevancy result carries no verdict'
+  if (verdict !== null && reason === null) return `reason is null while verdict is ${verdict}`
+  if (verdict !== null && needsUpdates === null) return `needsUpdates is null while verdict is ${verdict}`
+  if (verdict === null && (reason !== null || needsUpdates !== null)) return `verdict is null while ${reason !== null ? 'reason' : 'needsUpdates'} is set`
+  if (verdict === 'irrelevant' && (needsUpdates === true || fixPrompt !== null)) return 'an irrelevant PR needs no updates, so needsUpdates must be false and fixPrompt null'
+  if (needsUpdates === true && fixPrompt === null) return 'needsUpdates is true but fixPrompt is null'
+  if (fixPrompt !== null && needsUpdates !== true) return 'fixPrompt is set but needsUpdates is not true'
+  if (reason !== null) {
+    if (reason.trim() === '') return 'reason is empty'
+    if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(reason)) return 'reason must be one line of plain text, with no line breaks or other control characters'
+    const length = [...reason].length
+    if (length > maxRelevancyReason) return `reason must be at most ${maxRelevancyReason} characters; it has ${length.toLocaleString('en-US')}`
+  }
+  if (fixPrompt !== null) {
+    if (normalizeExtraInstructions(fixPrompt) === '') return 'fixPrompt is empty'
+    const problem = extraInstructionsProblem(fixPrompt)
+    if (problem !== null) return `fixPrompt ${problem}`
+  }
+  return null
+}
+
 // a well-formed update result whose fields contradict each other: the run fails, keeping the result for the drawer. Null when they agree
 export const updateMismatch = (result: UpdateResult): string | null => {
   const target = result.target
@@ -408,6 +477,8 @@ export const parseResult = (text: string): Parsed<RunResultJson> => {
       checkFix(result)
     } else if (result.schema === 'pit-crew/update-result@1') {
       checkUpdate(result)
+    } else if (result.schema === 'pit-crew/relevancy-result@1') {
+      checkRelevancy(result)
     } else {
       throw new Invalid(`unknown schema ${String(result.schema)}`)
     }
@@ -450,9 +521,9 @@ export const foldSteps = (steps: readonly StepSlot[], events: readonly StepEvent
 // a run never recorded as having stepped reads as five pending slots, never as an error
 export const stepsOf = (run: Pick<Session, 'steps'>): StepSlot[] => run.steps ?? emptySteps()
 
-// the report a done result names: the review's or the fix's report, or the sweep's summary; an update writes none
+// the report a done result names: the review's or the fix's report, or the sweep's summary; an update and a relevancy check write none
 export const reportPath = (result: RunResultJson): string | null => {
-  if (result.schema === 'pit-crew/update-result@1') return null
+  if (result.schema === 'pit-crew/update-result@1' || result.schema === 'pit-crew/relevancy-result@1') return null
   return result.schema === 'pit-crew/sweep-result@1' ? result.summary : result.report
 }
 
@@ -689,12 +760,10 @@ export const withExtraInstructions = (request: StartRequest, extra: ExtraInstruc
 const argsUnderText = (args: readonly string[], extra: ExtraInstructions | null): string[] =>
   [...args.filter((arg) => arg !== extraInstructionsFlag), ...(extra === null ? [] : [extraInstructionsFlag])]
 
-// the starts the drawer offers (section 8 of DESIGN.md, Drawer): the row's default run, the same
-// review in tandem (Claude only), a review of the whole stack, and on the viewer's own PRs a fix
-// session (Claude only), which acts on the changes reviewers requested and pushes its fixes
+// the starts the drawer offers (section 8 of DESIGN.md, Drawer): the row's default run, the same review in tandem (Claude only), a review of the whole stack, and on the viewer's own PRs a relevancy check, which reads the PR and its base and changes nothing, and a fix session (Claude only), which acts on the changes reviewers requested and pushes its fixes
 
-export type StartKind = 'default' | 'tandem' | 'stack' | 'fix'
-export const startKinds: readonly StartKind[] = ['default', 'tandem', 'stack', 'fix']
+export type StartKind = 'default' | 'tandem' | 'stack' | 'relevancy' | 'fix'
+export const startKinds: readonly StartKind[] = ['default', 'tandem', 'stack', 'relevancy', 'fix']
 
 // what a start does on GitHub, for the confirmation: the kind says how to style it, the text is
 // ready to show
@@ -736,8 +805,8 @@ export const isTandemRun = (args: readonly string[]): boolean => args.includes('
 export const offersFix = (pr: RawOpenPr, config: Config): boolean =>
   isMine(pr, config) && pr.author?.__typename !== 'Bot' && !isBotLogin(pr.author?.login, config)
 
-// what a Fix session has to act on, as far as the cached PR and its runs show (section 8 of DESIGN.md, Fix session): remote is whether GitHub has a change request standing, and selfReview is the PR's self-review that finished last when it read the PR's current head and has findings. The start passes no --source, so the command picks the more recent of the two itself
-export type FixOffer = { remote: boolean, selfReview: { sha: string, findings: number } | null }
+// what a Fix session has to act on, as far as the cached PR and its runs show (section 8 of DESIGN.md, Fix session): remote is whether GitHub has a change request standing, and selfReview is the PR's self-review that finished last when it read the PR's current head and has findings. The start passes no --source, so the command picks the more recent of the two itself. relevancy is the PR's latest run when it is a relevancy check of the current head that found updates needed, whose prompt a Fix session may take (relevancyPromptOf)
+export type FixOffer = { remote: boolean, selfReview: { sha: string, findings: number } | null, relevancy: { runId: number } | null }
 
 // two commits are the same when one SHA is a prefix of the other, in any letter case
 const sameCommit = (a: string, b: string): boolean => {
@@ -749,6 +818,25 @@ const sameCommit = (a: string, b: string): boolean => {
 const isSelfReviewRun = (run: Run): boolean =>
   run.command === 'review-pr' && run.args.includes('--no-post') && run.status === 'done' && run.result?.schema === 'pit-crew/review-result@1' && run.result.reviewed !== null
 
+// the PR's latest run, the one its cell is about: the highest id, whatever order the runs came in
+const latestOf = (runs: readonly Run[]): Run | undefined => runs.reduce<Run | undefined>((best, run) => best === undefined || run.id > best.id ? run : best, undefined)
+
+// the relevancy check a PR's drawer acts on: its latest run, when that is a relevancy check that finished done with a verdict, of the PR's current head. A newer run of any kind, or a push since the check, leaves none, since the verdict is then about something else
+export const relevancyCheckOf = (pr: RawOpenPr, runs: readonly Run[]): { run: Run, result: RelevancyResult } | null => {
+  const run = latestOf(runs)
+  const result = run?.result
+  if (run === undefined || run.command !== 'relevancy-pr' || run.status !== 'done' || result?.schema !== 'pit-crew/relevancy-result@1' || result.verdict === null) return null
+  if (result.head === null || !sameCommit(result.head.sha, pr.headRefOid)) return null
+  return { run, result }
+}
+
+// the prompt a Fix session may take: the latest relevancy check's, when it found updates needed
+export const relevancyPromptOf = (pr: RawOpenPr, runs: readonly Run[]): { runId: number, text: string } | null => {
+  const check = relevancyCheckOf(pr, runs)
+  if (check === null || check.result.needsUpdates !== true || check.result.fixPrompt === null) return null
+  return { runId: check.run.id, text: normalizeExtraInstructions(check.result.fixPrompt) }
+}
+
 export const fixOfferOf = (pr: RawOpenPr, runs: readonly Run[]): FixOffer => {
   // only the self-review that finished last counts, the one whose report PR-<n>.md holds: an earlier one with findings never stands in for a later one that has none or has gone stale; a null or unparsable finishedAt ranks below every valid time, and ties and such times fall back to the higher run id
   const finished = (run: Run): number => { const at = run.finishedAt === null ? NaN : Date.parse(run.finishedAt); return Number.isNaN(at) ? -Infinity : at }
@@ -756,9 +844,11 @@ export const fixOfferOf = (pr: RawOpenPr, runs: readonly Run[]): FixOffer => {
   const result = latest?.result?.schema === 'pit-crew/review-result@1' ? latest.result : undefined
   const reviewed = result?.reviewed?.sha
   const current = reviewed !== undefined && sameCommit(reviewed, pr.headRefOid) && result !== undefined && result.findings.length > 0
+  const prompt = relevancyPromptOf(pr, runs)
   return {
     remote: hasStandingChangeRequest(pr),
     selfReview: current ? { sha: pr.headRefOid.slice(0, 7).toLowerCase(), findings: result.findings.length } : null,
+    relevancy: prompt === null ? null : { runId: prompt.runId },
   }
 }
 
@@ -769,12 +859,21 @@ export const claudeOnly = (command: string, args: readonly string[]): boolean =>
 export const notOffered = (kind: StartKind, pr: RawOpenPr, config: Config, stack: Stack | null, runs: readonly Run[] = []): string | null => {
   if (kind === 'tandem' && singleRun(pr, config).command !== 'review-pr') return `Review in tandem is not offered for #${pr.number}: review-dependabot has no tandem mode`
   if (kind === 'stack' && stack === null) return `Review stack is not offered for #${pr.number}: GitHub does not mark it as part of a stack`
+  // the check reads the PR as its author, and judges it against what its own body set out to do, so it is offered on the viewer's own PRs alone, never a bot's
+  if (kind === 'relevancy' && !offersFix(pr, config)) return `Relevancy check is offered only on your own PRs, and #${pr.number} is not yours`
   if (kind === 'fix' && !offersFix(pr, config)) return `Fix session is offered only on your own PRs, and #${pr.number} is not yours`
+  // a relevancy check's prompt is something to act on too; the start route still refuses a start that has only that and does not send the prompt (fixNeedsPrompt)
   if (kind === 'fix') {
     const offer = fixOfferOf(pr, runs)
-    if (!offer.remote && offer.selfReview === null) return `Fix requested changes is not offered for #${pr.number}: GitHub shows no request to act on and no finished self-review of its current head has findings`
+    if (!offer.remote && offer.selfReview === null && offer.relevancy === null) return `Fix requested changes is not offered for #${pr.number}: GitHub shows no request to act on, no finished self-review of its current head has findings, and no relevancy check of its current head wrote a prompt`
   }
   return null
+}
+
+// why a Fix session that sends no prompt is refused when the relevancy check's prompt is all the PR has to act on, or null: the plain start would find nothing to fix
+export const fixNeedsPrompt = (pr: RawOpenPr, runs: readonly Run[]): string | null => {
+  const offer = fixOfferOf(pr, runs)
+  return !offer.remote && offer.selfReview === null ? `Fix requested changes is not offered for #${pr.number}: GitHub shows no request to act on and no finished self-review of its current head has findings, so a Fix session here starts only with the relevancy check's prompt` : null
 }
 
 const postsFor = (command: string, args: readonly string[], viewer: string): StartPosts => {
@@ -849,6 +948,17 @@ export const startOptions = (pr: RawOpenPr, config: Config, stack: Stack | null,
       runners: ['claude', 'codex'], posts: postsFor('review-stack', [], viewer), repo, viewer, unavailable, ...extraBox('review-stack'), ...jump, ...replacing,
     })
   }
+  // read-only and never the default: it takes no box, jumps no queue, and stands in no line, as a Fix session does not
+  if (notOffered('relevancy', pr, config, stack) === null) {
+    options.push({
+      kind: 'relevancy', label: 'Relevancy check', button: 'Check relevancy', command: 'relevancy-pr', args: [String(pr.number)], runners: ['claude', 'codex'],
+      posts: { kind: 'nothing', text: 'Posts nothing and changes nothing: it reads the PR and its base branch and says whether the PR is still needed and whether it needs updates.' },
+      repo,
+      viewer,
+      unavailable,
+      ...replacing,
+    })
+  }
   // never --no-post: the push is what it is for; and no --source, so the command's own default (the more recent of the two sources) applies
   if (notOffered('fix', pr, config, stack, runs) === null) {
     options.push({
@@ -914,8 +1024,20 @@ export type UpdateSummary = {
   worktree: string | null
 }
 
+// the cell's summary of a relevancy check's result.json: the whole verdict, since the drawer shows the reason, offers Close PR on it, and shows the prompt
+export type RelevancySummary = {
+  kind: 'relevancy'
+  verdict: RelevancyVerdict | null
+  reason: string | null
+  needsUpdates: boolean | null
+  fixPrompt: string | null
+  // the base branch it judged against, and its commit, short
+  base: string | null
+  upstream: string | null
+}
+
 // null for a sweep, whose rows the bot group's drawer renders (P2.7)
-export type AgentResult = ReviewSummary | FixSummary | UpdateSummary
+export type AgentResult = ReviewSummary | FixSummary | UpdateSummary | RelevancySummary
 
 export type AgentCell = {
   // queued while a review waits for a slot under the cap; running while a run is in flight; done while its latest run's outcome still stands; idle with no run, or once the PR's head has moved past the commit the latest run reviewed
@@ -1047,6 +1169,8 @@ export const doneText = (run: Pick<Run, 'status' | 'result' | 'note'> & { resolv
   const byHand = run.resolvedByHand === true ? ' · finished by hand' : ''
   if (result?.schema === 'pit-crew/fix-result@1') return `${fixText(result)}${byHand}`
   if (result?.schema === 'pit-crew/update-result@1') return `${updateText(result)}${byHand}`
+  // Relevant or Irrelevant and nothing more, whether or not updates are needed: the drawer says that
+  if (result?.schema === 'pit-crew/relevancy-result@1') return `${result.verdict === 'irrelevant' ? 'Irrelevant' : result.verdict === 'relevant' ? 'Relevant' : 'Done'}${byHand}`
   if (result === null || result.schema !== 'pit-crew/review-result@1' || result.verdict === null) return `Done${byHand}`
   let text = 'Clean'
   if (result.verdict === 'changesRequested') text = 'Changes requested'
@@ -1092,8 +1216,19 @@ const updateSummary = (result: UpdateResult): UpdateSummary => ({
   worktree: result.worktree,
 })
 
+const relevancySummary = (result: RelevancyResult): RelevancySummary => ({
+  kind: 'relevancy',
+  verdict: result.verdict,
+  reason: result.reason,
+  needsUpdates: result.needsUpdates,
+  fixPrompt: result.fixPrompt === null ? null : normalizeExtraInstructions(result.fixPrompt),
+  base: result.target?.base ?? null,
+  upstream: result.upstream === null ? null : result.upstream.sha.slice(0, 7),
+})
+
 const agentResult = (result: RunResultJson | null): AgentResult | null => {
   if (result?.schema === 'pit-crew/fix-result@1') return fixSummary(result)
+  if (result?.schema === 'pit-crew/relevancy-result@1') return relevancySummary(result)
   if (result?.schema === 'pit-crew/update-result@1') return updateSummary(result)
   if (result === null || result.schema !== 'pit-crew/review-result@1') return null
   return {
@@ -1115,6 +1250,7 @@ const standingShas = (run: Run): string[] => {
   if (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1') {
     return [result.pushed?.head, result.head?.sha].filter((sha) => sha !== undefined)
   }
+  if (result?.schema === 'pit-crew/relevancy-result@1') return result.head === null ? [] : [result.head.sha]
   return []
 }
 
@@ -1122,7 +1258,7 @@ const standingShas = (run: Run): string[] => {
 const recordedCommit = (run: Run): string | null => {
   const result = run.result
   if (result?.schema === 'pit-crew/review-result@1') return result.reviewed?.sha ?? null
-  if (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1') return result.head?.sha ?? null
+  if (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1' || result?.schema === 'pit-crew/relevancy-result@1') return result.head?.sha ?? null
   return null
 }
 
@@ -1616,6 +1752,14 @@ const blockedPost = (value: RunResultJson, reportExists: boolean | null): Review
   return { ...value, status: 'done', notPostedReason: 'postBlocked', question: null }
 }
 
+// the consistency check of a result's own schema, or null for a schema that has none
+const resultMismatch = (value: RunResultJson): string | null => {
+  if (value.schema === 'pit-crew/fix-result@1') return fixMismatch(value)
+  if (value.schema === 'pit-crew/update-result@1') return updateMismatch(value)
+  if (value.schema === 'pit-crew/relevancy-result@1') return relevancyMismatch(value)
+  return null
+}
+
 export const judge = (input: JudgeInput): Judgement => {
   const result = input.parsed?.ok === true ? input.parsed.value : null
   if (input.stopped) return { status: 'stopped', note: null, result }
@@ -1633,7 +1777,7 @@ export const judge = (input: JudgeInput): Judgement => {
     return { status: 'failed', note: `noResult: ${why}; ${exitText(input.exit)}; last event: ${input.lastEvent ?? 'none'}`, result: null }
   }
   const value = input.parsed.value
-  const mismatch = value.schema === 'pit-crew/fix-result@1' ? fixMismatch(value) : value.schema === 'pit-crew/update-result@1' ? updateMismatch(value) : null
+  const mismatch = resultMismatch(value)
   if (mismatch !== null) return { status: 'failed', note: `badResult: ${mismatch}`, result: value }
   if (value.status === 'failed') return { status: 'failed', note: value.error, result: value }
   // a worker that recorded the refusal itself and stopped to ask about it is read the same way
@@ -1645,8 +1789,8 @@ export const judge = (input: JudgeInput): Judgement => {
   if (value.status === 'needsInput' && input.unattended === true) return { status: 'failed', note: `unattendedStop: ${value.question}`, result: value }
   if (value.status === 'needsInput') return { status: 'needsInput', note: null, result: value }
   const path = reportPath(value)
-  // a sweep with nothing to sweep writes no summary and is still done, and an update writes no report at all
-  const reportless = value.schema === 'pit-crew/update-result@1' || (value.schema === 'pit-crew/sweep-result@1' && value.counts !== null && value.counts.swept === 0)
+  // a sweep with nothing to sweep writes no summary and is still done, and an update or a relevancy check writes no report at all
+  const reportless = value.schema === 'pit-crew/update-result@1' || value.schema === 'pit-crew/relevancy-result@1' || (value.schema === 'pit-crew/sweep-result@1' && value.counts !== null && value.counts.swept === 0)
   if (path === null && !reportless) {
     return { status: 'failed', note: 'noReport: result.json names no report', result: value }
   }
@@ -3873,7 +4017,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       // the report the result names is cleared before any refusal below, so a refused re-read leaves no key in it
       const named = run.runner === 'hermes' ? written ?? reportPath(value) : reportPath(value)
       if (run.runner === 'hermes') await clearReport(value, id, secrets, named)
-      const expected = run.command === 'fix-pr' ? 'pit-crew/fix-result@1' : run.command === 'update-pr' ? 'pit-crew/update-result@1' : 'pit-crew/review-result@1'
+      const expected = run.command === 'fix-pr' ? 'pit-crew/fix-result@1' : run.command === 'update-pr' ? 'pit-crew/update-result@1' : run.command === 'relevancy-pr' ? 'pit-crew/relevancy-result@1' : 'pit-crew/review-result@1'
       if (value.schema !== expected) return refuse(`result.json has schema ${value.schema}, but this run's result has schema ${expected}`)
       if (value.command !== run.command) return refuse(`result.json is for command ${value.command}, not ${run.command}`)
       const moved = targetMismatch(run, run.result, value) ?? reviewedMismatch(run.result, value)
@@ -3883,7 +4027,7 @@ const createEngine = <T extends Session>(options: LauncherOptions<T>, store: Ses
       // judged on its own: the stream's denials belong to the original attempt, and the owner has resolved them
       const judgement = judge({ stopped: false, restarted: false, exit: null, parsed, reportExists, denials: [], mayPost: mayPost(run.command, run.args), lastEvent: null })
       // a guard failure is the launcher's own verdict; a valid failed result carries its own error, whatever words that starts with
-      const ownFailure = value.status === 'failed' && judgement.note === value.error && (value.schema !== 'pit-crew/fix-result@1' || fixMismatch(value) === null) && (value.schema !== 'pit-crew/update-result@1' || updateMismatch(value) === null)
+      const ownFailure = value.status === 'failed' && judgement.note === value.error && resultMismatch(value) === null
       if (judgement.status === 'failed' && !ownFailure && noteKind(judgement.note) !== null) return refuse(judgement.note ?? 'the result is not valid')
       const note = judgement.status === 'failed' ? judgement.note : run.note
       if (judgement.status === run.status && note === run.note && JSON.stringify(judgement.result) === JSON.stringify(run.result)) {

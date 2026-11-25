@@ -241,7 +241,7 @@ test('the starts a row offers name the standing default and the flag on review s
     const offered = { standing: 'skip fixtures', flag }
     // #101 has changes requested, which offers its Fix session
     const own = await cellOf(h, 101)
-    assert.deepEqual(own.starts.map((option) => [option.kind, option.extraInstructions]), [['tandem', offered], ['default', offered], ['fix', undefined]])
+    assert.deepEqual(own.starts.map((option) => [option.kind, option.extraInstructions]), [['tandem', offered], ['default', offered], ['relevancy', undefined], ['fix', undefined]])
     const others = await cellOf(h, 113)
     assert.deepEqual(others.starts.map((option) => [option.kind, option.extraInstructions]), [['tandem', offered], ['default', offered]])
     const stacked = await cellOf(h, 111)

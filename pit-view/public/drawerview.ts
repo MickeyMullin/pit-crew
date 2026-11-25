@@ -8,7 +8,7 @@ import type { ReportListing } from '../src/reports.ts'
 import { actionConfirmModel, actionOffers } from './actionsview.ts'
 import type { ActionConfirm, ActionConfirmModel, ActionOffer, PersonChoice } from './actionsview.ts'
 import { commandLine, doneTone, runnerLabels, sentence, stepTitle } from './agent.ts'
-import type { AgentCell, AgentResult, DoneTone, PostForm, RunnerModels, RunnerName, RunView, StartKind, StartOption, StepSlot, StoredOffer } from './agent.ts'
+import type { AgentCell, AgentResult, DoneTone, FixPromptAsk, PostForm, RunnerModels, RunnerName, RunView, StartKind, StartOption, StepSlot, StoredOffer } from './agent.ts'
 import { formatCached, shortSha } from './format.ts'
 import { safeHref } from './safeurl.ts'
 
@@ -16,8 +16,8 @@ export type Loadable<T> = { state: 'loading' } | { state: 'error', message: stri
 
 // what the drawer is asking about: a start waiting for its Start, a stop waiting for its Stop, or a direct action on the PR waiting for its confirmation
 export type Confirm =
-  // checkComments is the Self-review's box, extraOn the checkbox of a review's Special instructions box (unchecked until clicked), and extraText what was typed in that box, undefined until then: all three live here, so they last as long as this confirmation and no longer
-  | { type: 'start', kind: StartKind, runner: RunnerName, checkComments?: boolean, extraOn?: boolean, extraText?: string }
+  // checkComments is the Self-review's box, extraOn the checkbox of a review's Special instructions box (unchecked until clicked), and extraText what was typed in that box, undefined until then: all three live here, so they last as long as this confirmation and no longer. fixPrompt is set only on a Fix session asked for from the relevancy check's prompt, which it hands over
+  | { type: 'start', kind: StartKind, runner: RunnerName, checkComments?: boolean, extraOn?: boolean, extraText?: string, fixPrompt?: FixPromptAsk }
   | { type: 'stop', andOpen: boolean, runId: number }
   // a re-read of the latest run's result, with everything its confirmation showed
   | { type: 'reread', runId: number, repo: string, viewer: string, headSha: string, baseRef: string }
@@ -86,13 +86,13 @@ export const closedDrawerRow = (row: ClosedRow, last: LastReadings | null): Open
 
 export const goneText = (number: number): string => `#${number} is no longer open`
 
-// the Start section: one button per offered start, in the order the server offers them (the tandem review first where one is offered, then the plain review). A start that cannot run says why in the drawer's own text; when every button gives the same reason it is said once
+// the Start section: one button per offered start, in the order the server offers them (the tandem review first where one is offered, then the plain review). A start that cannot run says why in the drawer's own text; when every button gives the same reason it is said once. A Fix session offered only for the relevancy check's prompt has no button here: it is started from the prompt, since without it there is nothing to fix
 export type StartButton = { kind: StartKind, text: string, disabled: boolean, reason: string | null }
 export type StartsModel = { buttons: StartButton[], shared: string | null }
 
 export const startsModel = (cell: AgentCell, open: boolean, number: number): StartsModel => {
   const closed = open ? null : `Starting is off: ${goneText(number)}.`
-  const buttons = cell.starts.map((option): StartButton => {
+  const buttons = cell.starts.filter((option) => !promptOnly(option)).map((option): StartButton => {
     const reason = closed ?? (option.unavailable === null ? null : sentence(option.unavailable))
     return { kind: option.kind, text: option.button, disabled: reason !== null, reason }
   })
@@ -101,6 +101,18 @@ export const startsModel = (cell: AgentCell, open: boolean, number: number): Sta
     return { buttons: buttons.map((button) => ({ ...button, reason: null })), shared: first }
   }
   return { buttons, shared: null }
+}
+
+// a Fix session the PR offers for the relevancy check's prompt alone: GitHub shows no request and no self-review of its head has findings
+const promptOnly = (option: StartOption): boolean =>
+  option.kind === 'fix' && option.fix !== undefined && !option.fix.remote && option.fix.selfReview === null && option.fix.relevancy !== null
+
+// the relevancy check's prompt a Fix session can take now: the latest run's, while it is a done check of the current head that found updates needed and the PR offers a Fix session for it; null otherwise
+export const cellPrompt = (cell: AgentCell): FixPromptAsk | null => {
+  const result = cell.result
+  if (cell.state !== 'done' || cell.status !== 'done' || cell.runId === null || result?.kind !== 'relevancy' || result.needsUpdates !== true || result.fixPrompt === null) return null
+  const offered = optionOf(cell, 'fix')?.fix?.relevancy?.runId
+  return offered === cell.runId ? { runId: cell.runId, text: result.fixPrompt } : null
 }
 
 export const optionOf = (cell: AgentCell, kind: StartKind): StartOption | undefined =>
@@ -144,6 +156,8 @@ export type StartConfirmModel = {
   effectKind: StartOption['posts']['kind']
   // a Fix session's line about what it acts on; null for every other start, and for an entry from before the field
   sources: string | null
+  // the relevancy check's prompt a Fix session hands over, shown whole under the command; null for every other start
+  prompt: string | null
   // a start that pushes to the PR's branch is confirmed with a caution treatment and this plain
   // line about the push; null for a review
   caution: string | null
@@ -158,6 +172,12 @@ export type StartConfirmModel = {
 // null when the PR no longer offers that start. A Fix session pushes commits, so its confirmation
 // names the branch in its heading, says plainly what the push does, and has a Start of its own
 // what a Fix session says it addresses: the command's default, the more recent of GitHub's requested changes and the latest self-review report, which it names at its short SHA when the PR has one for its current head
+// a Fix session started from the relevancy check's prompt addresses that prompt, and the default sources besides when the PR has any
+export const fixPromptSourcesLine = (fix: StartOption['fix']): string => {
+  if (fix === undefined || (!fix.remote && fix.selfReview === null)) return 'It addresses the relevancy check\'s prompt below; GitHub shows no request and this PR has no self-review report for its current head.'
+  return (fixSourcesLine(fix) ?? '').replace(/^It addresses /, 'It addresses the relevancy check\'s prompt below, as well as ')
+}
+
 export const fixSourcesLine = (fix: StartOption['fix']): string | null => {
   if (fix === undefined) return null
   const base = 'It addresses the more recent of GitHub\'s requested changes and your self-review report'
@@ -166,16 +186,20 @@ export const fixSourcesLine = (fix: StartOption['fix']): string | null => {
   return fix.remote ? `${named}.` : `${named}; GitHub shows no request, so it addresses that report.`
 }
 
-export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headRef'>, cell: AgentCell, kind: StartKind, runner: RunnerName, checkComments = false, extraText?: string, extraOn = false): StartConfirmModel | null => {
+export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headRef'>, cell: AgentCell, kind: StartKind, runner: RunnerName, checkComments = false, extraText?: string, extraOn = false, fixPrompt?: FixPromptAsk): StartConfirmModel | null => {
   const option = optionOf(cell, kind)
   if (option === undefined) return null
+  // the prompt rides on a Fix session alone, as the file the flag names; the command shows the flag, never the text
+  const handed = kind === 'fix' ? fixPrompt ?? null : null
   const chosen = option.runners.includes(runner) ? runner : defaultRunner(option, cell.action.runner)
   const push = option.posts.kind === 'push'
   const checked = commentsCheckOn({ checkComments }, option)
   const args = checked ? option.checkCommentsArgs ?? option.args : option.args
   const sent = specialInstructionsSent({ extraOn, ...(extraText === undefined ? {} : { extraText }) }, option)
   // the command shows the flag, and never the text, when special instructions are sent or, with none sent, a standing default is set, which a start without the field runs under
-  const flagged = option.extraInstructions !== undefined && (sent !== undefined || option.extraInstructions.standing.trim() !== '') ? [...args, option.extraInstructions.flag] : args
+  const flagged = handed !== null
+    ? [...args, '--extra-instructions']
+    : option.extraInstructions !== undefined && (sent !== undefined || option.extraInstructions.standing.trim() !== '') ? [...args, option.extraInstructions.flag] : args
   return {
     kind,
     heading: push ? `Push fixes to ${row.headRef}?` : `${option.label} #${row.number}?`,
@@ -200,7 +224,8 @@ export const startConfirmModel = (row: Pick<OpenRow, 'number' | 'title' | 'headR
     },
     effect: option.posts.text,
     effectKind: option.posts.kind,
-    sources: option.kind === 'fix' ? fixSourcesLine(option.fix) : null,
+    sources: option.kind !== 'fix' ? null : handed === null ? fixSourcesLine(option.fix) : fixPromptSourcesLine(option.fix),
+    prompt: handed?.text ?? null,
     caution: push ? `It pushes new commits to ${row.headRef} on GitHub under your account, and never force-pushes.` : null,
     confirm: push ? 'Start fix session' : 'Start',
     busy: push ? 'Starting fix session…' : 'Starting…',
@@ -215,8 +240,12 @@ export const jumpedLine = (jumped: boolean | undefined): string | null => jumped
 // the extra review instructions a run used, for its card and its line in the previous runs; a run without any shows nothing
 export type ExtraLine = { term: string, from: string, text: string }
 
-export const extraLine = (extra: AgentCell['extraInstructions']): ExtraLine | null =>
-  extra === null ? null : { term: 'Extra instructions', from: extra.source === 'default' ? 'from Settings' : 'typed for this run', text: extra.text }
+// a Fix session started from the relevancy check's prompt ran under that prompt, which its line names
+export const extraLine = (extra: AgentCell['extraInstructions']): ExtraLine | null => {
+  if (extra === null) return null
+  if (extra.source === 'relevancy') return { term: 'Fix prompt', from: 'from the relevancy check', text: extra.text }
+  return { term: 'Extra instructions', from: extra.source === 'default' ? 'from Settings' : 'typed for this run', text: extra.text }
+}
 
 // the roles and models a run recorded (section 8 of DESIGN.md, Launching runs, Recording the models): one line, with a flag for a role the pinned fallback replaced and for a review that ended degraded; a run from before they were recorded reads as not recorded
 export type ModelsLine = { term: string, text: string, flags: string[] }
@@ -553,6 +582,8 @@ const updateFacts = (result: UpdateSummary): Fact[] => {
 const resultFacts = (cell: AgentCell): Fact[] => {
   const result = cell.result
   if (result?.kind === 'update') return updateFacts(result)
+  // a relevancy check's verdict has a block of its own; its facts say what it judged against
+  if (result?.kind === 'relevancy') return result.base === null ? [] : [{ label: 'Base', value: result.upstream === null ? result.base : `${result.base} at ${result.upstream}`, href: null }]
   // a fix's summary has a block of its own
   if (result === null || result.kind !== 'review') return []
   const facts: Fact[] = []
@@ -662,6 +693,8 @@ export type ResultModel = {
   facts: Fact[]
   // a Fix session's own block; null for a review
   fix: FixModel | null
+  // a relevancy check's own block; null for every other run
+  relevancy: RelevancyModel | null
   // set when the PR's head moved past the commit this run reviewed
   stale: string | null
   // set when the owner's re-read replaced this run's recorded outcome, and why it had one
@@ -696,6 +729,42 @@ const blockedReport = (result: AgentResult | null): ResultModel['report'] => {
   return name === null ? null : { name, openName: `Open report ${name}` }
 }
 
+// a relevancy check's verdict, its reason, and the next step it points at: Close PR in the Actions section for an irrelevant PR, the prompt with its copy control and its Fix session when updates are needed, and nothing more for a relevant PR with nothing to update, which gets the actions any PR gets
+export type RelevancyModel = {
+  verdict: 'Relevant' | 'Irrelevant'
+  reason: string
+  // whether updates are needed, in words; null for an irrelevant PR
+  updates: string | null
+  // says where Close PR is, and does nothing itself; null unless the Actions section offers it now
+  close: string | null
+  // the prompt, its copy control's name, and the button that asks the Fix session's confirmation with it; null when the check wrote none
+  prompt: { text: string, copyName: string, fix: { text: string, disabled: boolean, reason: string | null } } | null
+}
+
+export const relevancyModel = (cell: AgentCell, number: number, offers: readonly ActionOffer[]): RelevancyModel | null => {
+  const result = cell.result
+  if (result?.kind !== 'relevancy' || cell.status !== 'done' || result.verdict === null) return null
+  const irrelevant = result.verdict === 'irrelevant'
+  const option = optionOf(cell, 'fix')
+  const ready = cellPrompt(cell) !== null && option !== undefined && option.unavailable === null
+  const why = ready
+    ? null
+    : cell.state === 'idle'
+      ? 'The head has moved since this check, so its prompt covers an earlier commit.'
+      : option?.unavailable != null ? sentence(option.unavailable) : `A Fix session is not offered for #${number} now.`
+  return {
+    verdict: irrelevant ? 'Irrelevant' : 'Relevant',
+    reason: result.reason ?? '',
+    updates: irrelevant ? null : result.needsUpdates === true ? 'Updates needed: the check wrote a prompt for a Fix session.' : 'No updates needed.',
+    close: irrelevant && offers.some((offer) => offer.action === 'close') ? 'Close it from the Actions section above: Close PR.' : null,
+    prompt: irrelevant || result.needsUpdates !== true || result.fixPrompt === null ? null : {
+      text: result.fixPrompt,
+      copyName: 'Copy prompt',
+      fix: { text: 'Start fix session with this prompt', disabled: !ready, reason: why },
+    },
+  }
+}
+
 export const resultModel = (cell: AgentCell, number: number, headOid: string, offers: readonly ActionOffer[]): ResultModel => ({
   text: cell.text ?? 'Done',
   tone: doneTone({ status: cell.status, text: cell.text }),
@@ -709,7 +778,10 @@ export const resultModel = (cell: AgentCell, number: number, headOid: string, of
   copyName: `Copy resume command for #${number}`,
   facts: resultFacts(cell),
   fix: cell.result?.kind === 'fix' ? fixModel(cell.result) : null,
-  stale: cell.state !== 'idle' ? null : cell.command === 'fix-pr' || cell.command === 'update-pr'
+  relevancy: relevancyModel(cell, number, offers),
+  stale: cell.state !== 'idle' ? null : cell.command === 'relevancy-pr'
+    ? 'The head has moved since this check, so it covers an earlier commit. Check relevancy again for the current one.'
+    : cell.command === 'fix-pr' || cell.command === 'update-pr'
     ? 'The head has moved since this run, so it covers an earlier commit.'
     : 'The head has moved since this run, so it covers an earlier commit. Start a new review for the current one.',
   byHand: cell.resolvedByHand && cell.status === 'done' ? byHandText(cell.firstNote ?? cell.note) : null,
@@ -794,6 +866,11 @@ const outcomeText = (run: Pick<RunView, 'status' | 'result' | 'note'>): { text: 
   if (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1') {
     const text = result.schema === 'pit-crew/fix-result@1' ? fixDoneText(result) : updateDoneText(result)
     return { text, tone: doneTone({ status: 'done', text }) }
+  }
+  // a relevancy check reads as its verdict, a client copy of the server's
+  if (result?.schema === 'pit-crew/relevancy-result@1') {
+    const text = result.verdict === 'irrelevant' ? 'Irrelevant' : result.verdict === 'relevant' ? 'Relevant' : 'Done'
+    return { text, tone: text === 'Done' ? 'gray' : doneTone({ status: 'done', text }) }
   }
   if (result === null || result.schema !== 'pit-crew/review-result@1' || result.verdict === null) return { text: 'Done', tone: 'gray' }
   if (result.notPostedReason === 'postBlocked' && result.posted === null) return { text: `${result.verdict === 'changesRequested' ? 'Changes requested' : 'Clean'} · post not made`, tone: 'amber' }
@@ -1029,7 +1106,7 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
   // the read-only form has no Stop, so a run still going there is a line of its history
   const card = closed !== null && (kind === 'queued' || kind === 'running') ? 'none' : kind
   const act = closed === null
-  const startAsk = confirm?.type === 'start' && cell !== null ? startConfirmModel(row, cell, confirm.kind, confirm.runner, confirm.checkComments, confirm.extraText, confirm.extraOn) : null
+  const startAsk = confirm?.type === 'start' && cell !== null ? startConfirmModel(row, cell, confirm.kind, confirm.runner, confirm.checkComments, confirm.extraText, confirm.extraOn, confirm.fixPrompt) : null
   const runs = input.runs
   const reports = input.reports
   return {
@@ -1108,6 +1185,17 @@ export const summaryOf = (result: RunView['result']): AgentResult | null => {
       worktree: result.worktree,
     }
   }
+  if (result?.schema === 'pit-crew/relevancy-result@1') {
+    return {
+      kind: 'relevancy',
+      verdict: result.verdict,
+      reason: result.reason,
+      needsUpdates: result.needsUpdates,
+      fixPrompt: result.fixPrompt === null ? null : result.fixPrompt.replace(/\r\n?|[\u2028\u2029]/g, '\n').trim(),
+      base: result.target?.base ?? null,
+      upstream: result.upstream === null ? null : result.upstream.sha.slice(0, 7),
+    }
+  }
   if (result?.schema !== 'pit-crew/review-result@1') return null
   return {
     kind: 'review', verdict: result.verdict, recommendation: result.recommendation, findings: result.findings.length, ci: result.ci,
@@ -1118,7 +1206,7 @@ export const summaryOf = (result: RunView['result']): AgentResult | null => {
 // the commit a run's record names as the one it read, a client copy of the server's
 const recordedCommit = (result: RunView['result']): string | null => {
   if (result?.schema === 'pit-crew/review-result@1') return result.reviewed?.sha ?? null
-  if (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1') return result.head?.sha ?? null
+  if (result?.schema === 'pit-crew/fix-result@1' || result?.schema === 'pit-crew/update-result@1' || result?.schema === 'pit-crew/relevancy-result@1') return result.head?.sha ?? null
   return null
 }
 
@@ -1202,7 +1290,11 @@ export const confirmHolds = (confirm: Confirm, cell: AgentCell | null, open: boo
   }
   if (!open) return false
   const option = optionOf(cell, confirm.kind)
-  return option !== undefined && option.unavailable === null
+  if (option === undefined || option.unavailable !== null) return false
+  // a Fix session asked for with the relevancy check's prompt is about that prompt: a newer run, a push, or another text drops it
+  if (confirm.fixPrompt === undefined) return true
+  const now = cellPrompt(cell)
+  return confirm.kind === 'fix' && now !== null && now.runId === confirm.fixPrompt.runId && now.text === confirm.fixPrompt.text
 }
 
 // a re-read's confirmation is dropped when what it showed no longer holds: the head or base of the PR, the repository the page shows, or the viewer

@@ -164,10 +164,10 @@ test('a fix result with a bad source, floor, priority, or skipped entry is no re
     [fixResult({ skipped: [{ source: 'elsewhere', id: 'x', priority: 'P3', path: null, line: null, summary: 's' }] }), /skipped\[0\]\.source must be remote or local/],
     [fixResult({ skipped: [{ source: 'local', id: '', priority: 'P3', path: null, line: null, summary: 's' }] }), /skipped\[0\]\.id must be an id/],
     [fixResult({ requests: [fixRequest({ priority: 'urgent' })] }), /requests\[0\]\.priority must be P0, P1, P2, P3 or null/],
-    [fixResult({ requests: [fixRequest({ source: 'both' })] }), /requests\[0\]\.source must be remote or local/],
+    [fixResult({ requests: [fixRequest({ source: 'both' })] }), /requests\[0\]\.source must be remote, local or prompt/],
     [fixResult({ requests: [fixRequest({ url: null })] }), /requests\[0\]\.url must be an absolute http or https url/],
     [fixResult({ requests: [finding({ url: 'https://github.com/octo-example/orbit/pull/101' })] }), /requests\[0\]\.url must be null for a finding/],
-    [fixResult({ requests: [fixRequest({ kind: 'comment' })] }), /requests\[0\]\.kind must be thread, review or finding/],
+    [fixResult({ requests: [fixRequest({ kind: 'comment' })] }), /requests\[0\]\.kind must be thread, review, finding or prompt/],
   ]
   for (const [value, expected] of refusals) assert.match(outcome(value), expected)
 })
@@ -182,7 +182,7 @@ test('the drawer paints the sources line under the facts, the styles carry its c
   assert.match(drawer, /ask\.sources === null \? null : h\('p', \{ class: 'confirm-sources' \}, ask\.sources\)/)
   assert.match(await read('pit-view/public/styles.css'), /\.confirm-sources \{/)
   const design = await read('pit-view/DESIGN.md')
-  assert.match(design, /`fix-pr <n> \[--source=remote\|local\|both\] \[--severity=P0\|P1\|P2\|P3\]`/)
+  assert.match(design, /`fix-pr <n> \[--source=remote\|local\|both\] \[--severity=P0\|P1\|P2\|P3\] \[--extra-instructions\]`/)
   assert.match(design, /A stale report is never addressed/)
   assert.match(design, /A request or finding with no P# is always addressed, whatever the floor/)
   assert.match(design, /a tie goes to `remote`/)
