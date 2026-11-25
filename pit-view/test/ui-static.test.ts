@@ -210,7 +210,7 @@ test('the manifest names the app and its two icons, which exist, and holds no co
 
 // the logo in the page header is the owner's art, drawn as a mask in a theme token, not the old inline branch glyph
 test('the header brand is the logo picture masked in a theme color, and the old inline branch glyph is gone', async () => {
-  const brand = (await read('index.html')).split('<div class="brand">')[1]!.split('</div>')[0]!
+  const brand = (await read('index.html')).split('<div class="brand">')[1]!.split('<span class="brand-name">')[0]!
   assert.match(brand, /<span class="brand-logo" aria-hidden="true"><\/span>/)
   assert.doesNotMatch(brand, /<svg/, 'no inline glyph in the brand')
   const rule = (await read('styles.css')).match(/\.brand-logo \{[^}]*\}/)?.[0] ?? ''
