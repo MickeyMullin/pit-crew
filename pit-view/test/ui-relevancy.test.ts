@@ -13,7 +13,7 @@ import { agentCell } from '../src/launcher.ts'
 import type { AgentCell, RunResultJson } from '../src/launcher.ts'
 import { actionConfirmModel, actionDoneText, actionHolds, actionOffers, actionRequest, closeAsk } from '../public/actionsview.ts'
 import { cellModel, doneTone, startRequest, stepTitle } from '../public/agent.ts'
-import { confirmHolds, extraLine, resultModel, runText, startConfirmModel, startsModel, summaryOf } from '../public/drawerview.ts'
+import { cardKind, confirmHolds, extraLine, resultModel, runText, startConfirmModel, startsModel, summaryOf } from '../public/drawerview.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { openPage1, openPage2, relevancyHead, relevancyResult } from './helpers.ts'
 
@@ -114,6 +114,25 @@ test('once the PR targets another base than the check judged, the drawer says so
   const same = await rowWith(irrelevant)
   assert.equal(resultModel(same.agent!, 104, same.headOid, actionOffers(same, true), same.baseRef).stale, null)
   assert.deepEqual(actionOffers(same, true).at(-1), { action: 'close', text: 'Close PR' })
+})
+
+test('a retarget idles only a check that finished done with a verdict: a run waiting for an answer keeps its waiting card and question, and a failed one keeps its failure and error', async () => {
+  const judged = { repo: scenario.repo, pr: 104, base: 'release/2.4' }
+  const pr = await pr104()
+  const cellOf = (latest: Run): AgentCell => agentCell(pr, config(), latest, undefined, null, null, undefined, [latest])
+  const question = 'The PR body names two features: judge which?'
+  const waiting = cellOf(run(relevancyResult({ status: 'needsInput', target: judged, verdict: null, reason: null, needsUpdates: null, question }), { status: 'needsInput' }))
+  assert.deepEqual([waiting.state, waiting.status, waiting.text, waiting.question, cardKind(waiting)], ['done', 'needsInput', 'Needs your answer', question, 'waiting'])
+  const error = 'git show failed while reading the base'
+  const failed = cellOf(run(relevancyResult({ status: 'failed', target: judged, verdict: null, reason: null, needsUpdates: null, error }), { status: 'failed', note: error }))
+  assert.deepEqual([failed.state, failed.status, failed.text, cardKind(failed)], ['done', 'failed', 'Failed', 'result'])
+  const failedModel = resultModel(failed, 104, pr.headRefOid, [], 'main')
+  assert.deepEqual([failedModel.text, failedModel.note, failedModel.stale, failedModel.relevancy], ['Failed', error, null, null], 'its own error shows, with no line saying it judged a base')
+  // a done verdict at the old base still goes idle, its card the last run's
+  for (const patch of [irrelevant, updates]) {
+    const done = cellOf(run(relevancyResult({ ...patch, target: judged })))
+    assert.deepEqual([done.state, cardKind(done)], ['idle', 'result'])
+  }
 })
 
 test('Close PR\'s confirmation names the PR, says it closes without merging, and opens with the reason in an editable box; its request sends what the box holds', async () => {

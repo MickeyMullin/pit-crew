@@ -833,11 +833,15 @@ const latestOf = (runs: readonly Run[]): Run | undefined => runs.reduce<Run | un
 // whether the PR now targets another base branch than the one a relevancy check judged; false for a check that names none
 const retargeted = (result: RelevancyResult, pr: RawOpenPr): boolean => result.target !== null && result.target.base !== pr.baseRefName
 
+// a relevancy run's result when the run finished done with a verdict; null for any other run, one waiting for an answer or failed included
+const verdictOf = (run: Run): RelevancyResult | null =>
+  run.command === 'relevancy-pr' && run.status === 'done' && run.result?.schema === 'pit-crew/relevancy-result@1' && run.result.verdict !== null ? run.result : null
+
 // the relevancy check a PR's drawer acts on: its latest run, when that is a relevancy check that finished done with a verdict, of the PR's current head and base branch. A newer run of any kind, a push since the check, or a retarget leaves none, since the verdict is then about something else
 export const relevancyCheckOf = (pr: RawOpenPr, runs: readonly Run[]): { run: Run, result: RelevancyResult, base: string } | null => {
   const run = latestOf(runs)
-  const result = run?.result
-  if (run === undefined || run.command !== 'relevancy-pr' || run.status !== 'done' || result?.schema !== 'pit-crew/relevancy-result@1' || result.verdict === null) return null
+  const result = run === undefined ? null : verdictOf(run)
+  if (run === undefined || result === null) return null
   if (result.head === null || !sameCommit(result.head.sha, pr.headRefOid)) return null
   if (result.target === null || retargeted(result, pr)) return null
   return { run, result, base: result.target.base }
@@ -1504,8 +1508,8 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
   if (run.status === 'running' || run.status === 'queued') state = run.status
   // a stack review reads the top layer, whose commit is not this PR's head
   else if (run.command !== 'review-stack' && shas.length > 0 && !shas.some((sha) => head.startsWith(sha.toLowerCase()))) state = 'idle'
-  // a relevancy verdict is about the base it judged too, so a retarget leaves it standing for nothing, as a push does
-  else if (run.result?.schema === 'pit-crew/relevancy-result@1' && retargeted(run.result, pr)) state = 'idle'
+  // a relevancy verdict is about the base it judged too, so a retarget leaves it standing for nothing, as a push does; a run waiting for an answer, or a failed one, reached no verdict, so it keeps its question or its error at any base
+  else if (run.result?.schema === 'pit-crew/relevancy-result@1' && verdictOf(run) !== null && retargeted(run.result, pr)) state = 'idle'
   const from = `Stack review from #${run.number}`
   const ended = run.status === 'running' || run.status === 'queued' ? null : doneText(withPostFate(run), mine && pr.isDraft)
   return {
