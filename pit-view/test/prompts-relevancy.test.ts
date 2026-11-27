@@ -200,7 +200,7 @@ test('a done relevancy result names its target, head, and upstream, and a run th
   assert.ok(schema.includes('when `needsUpdates` is `true`; null otherwise. A run that fails or stops after judging and before writing it leaves it null.\n'))
 })
 
-test('fix-pr keeps five of its existing constraint sentences word for word beside the relevancy prompt: the one write, no force, the stop to ask, the diff limit, and findings as requests', async () => {
+test('guard, passes without the relevancy change: fix-pr keeps five of its existing constraint sentences word for word beside the relevancy prompt: the one write, no force, the stop to ask, the diff limit, and findings as requests', async () => {
   const prompt = await read(fixPath)
   for (const sentence of [
     '**Pushing new commits to the PR\'s branch is the only GitHub write this command performs, and it happens at most once per run.**',
