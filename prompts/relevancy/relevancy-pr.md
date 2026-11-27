@@ -82,7 +82,7 @@ The fix prompt:
 Result:
 
 - With `--emit-json`, record `writeReport` `skipped` with the note `no report file`, then `post` `skipped` with the note `read-only: nothing to post`, then write `<run-dir>/result.json` under the `pit-crew/relevancy-result@1` schema in `emit-json.md`, as the run's last act. Your closing chat message may follow it; nothing else may.
-- Every field is always present, null when it does not apply: `schema`, `command`, `status`, `target` (the PR and its base branch), `head` (the head SHA), `upstream` (the upstream SHA), `verdict`, `reason`, `needsUpdates`, `fixPrompt` (the fix prompt when `needsUpdates` is true), `question`, and `error`. A `"done"` result always carries a `verdict`, a `reason`, and `needsUpdates`.
+- Every field is always present, null when it does not apply: `schema`, `command`, `status`, `target` (the PR and its base branch), `head` (the head SHA), `upstream` (the upstream SHA), `verdict`, `reason`, `needsUpdates`, `fixPrompt` (the fix prompt when `needsUpdates` is true), `question`, and `error`. A `"done"` result always carries a `verdict`, a `reason`, and `needsUpdates`. It carries its `target`, `head`, and `upstream` too: a verdict is about that PR at that head, judged against that base commit.
 
 Closing message:
 

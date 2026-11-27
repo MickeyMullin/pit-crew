@@ -173,6 +173,33 @@ test('fix-pr accepts --extra-instructions beside --emit-json and reads the relev
   assert.match(section(prompt, 'Report format:'), /`### <i>\. relevancy prompt · [^\n]*no suggested reply/)
 })
 
+test('fix-pr settles a run with only the prompt\'s requests: no remote or local source was chosen, in chat, on the Source line, and as a null source', async () => {
+  const prompt = await read(fixPath)
+  const sources = section(prompt, 'Sources and severity:')
+  // each exception is a sentence added right after the rule it qualifies, which keeps its words
+  const nothing = 'When neither does, there is nothing to fix.'
+  const nothingException = ' The one exception is a run with `--extra-instructions` whose relevancy prompt holds at least one request, as the next point says: it is not nothing to fix.'
+  assert.ok(sources.includes(`${nothing}${nothingException}\n`), 'the nothing-to-fix exception follows its rule')
+  const say = '  - Say in chat which source was chosen, and why, before triaging.'
+  const sayException = ' When neither source holds requests and only the relevancy prompt\'s requests are addressed, no remote or local source was chosen: say so, and say that the relevancy prompt is the only source with requests. The report\'s Source line and `result.json`\'s `source` then say the same (see "Report format" and `emit-json.md`).'
+  assert.ok(sources.includes(`\n${say}${sayException}\n`), 'the chosen-source exception follows its rule')
+  assert.ok(sources.includes('  - With `--extra-instructions`, a run whose relevancy prompt holds at least one request still has something to address when neither source does: the prompt\'s requests alone (see "Relevancy prompt").\n'))
+  const report = section(prompt, 'Report format:')
+  assert.ok(report.includes('Source: remote | local | both (<why it was chosen: asked for, or the more recent of the two, or the only one with requests>)\n'), 'the Source line keeps its form')
+  assert.ok(report.includes('\nWhen neither source holds requests and only the relevancy prompt\'s requests are addressed (see "Sources and severity"), the Source line is `Source: none (the relevancy prompt is the only source with requests)`.\n'))
+  const emit = await read(emitPath)
+  assert.ok(emit.includes('- `source`: `"remote"`, `"local"`, or `"both"`, the source the run addressed, as `fix-pr.md` resolves it (the source asked for, or under the default the more recent of the two). Null when the run stopped before it resolved one. Null too in a run that addressed only the relevancy prompt\'s requests because neither source held any: no remote or local source was chosen, as `fix-pr.md`\'s "Sources and severity" says.\n'))
+})
+
+test('a done relevancy result names its target, head, and upstream, and a run that stops before the prompt leaves it null', async () => {
+  const added = ' It carries its `target`, `head`, and `upstream` too: a verdict is about that PR at that head, judged against that base commit.'
+  const prompt = await read(promptPath)
+  assert.ok(prompt.includes(`A \`"done"\` result always carries a \`verdict\`, a \`reason\`, and \`needsUpdates\`.${added}\n`))
+  const schema = schemaSection(await read(emitPath))
+  assert.ok(schema.includes(`A \`"done"\` result always carries a \`verdict\`, a \`reason\`, and \`needsUpdates\`.${added}\n`))
+  assert.ok(schema.includes('when `needsUpdates` is `true`; null otherwise. A run that fails or stops after judging and before writing it leaves it null.\n'))
+})
+
 test('fix-pr keeps its existing constraints word for word beside the relevancy prompt', async () => {
   const prompt = await read(fixPath)
   for (const sentence of [

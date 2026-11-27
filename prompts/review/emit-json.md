@@ -134,7 +134,7 @@ The fix's response, `pit-crew/fix-result@1`:
 - `status`: `"done"` when the run reached its end: the fixes were pushed, there was nothing to fix, or the owner, answering a stop, told it to discard its commits. `"needsInput"` when it stopped to ask; `"failed"` when it cannot complete, a push still refused after the one format-and-retry included.
 - `target`: `{ "repo": "<owner>/<name>", "pr": <number>, "branch": "<the PR's head branch>" }`. Null when the run stopped before resolving its target.
 - `head`: `{ "sha": "<full SHA>" }`, the full 40-character SHA of the PR head the run read and triaged against, and at which any worktree was created. When the run started again because the head moved, the head of the pass that ended the run. Null when the run stopped before reading it.
-- `source`: `"remote"`, `"local"`, or `"both"`, the source the run addressed, as `fix-pr.md` resolves it (the source asked for, or under the default the more recent of the two). Null when the run stopped before it resolved one.
+- `source`: `"remote"`, `"local"`, or `"both"`, the source the run addressed, as `fix-pr.md` resolves it (the source asked for, or under the default the more recent of the two). Null when the run stopped before it resolved one. Null too in a run that addressed only the relevancy prompt's requests because neither source held any: no remote or local source was chosen, as `fix-pr.md`'s "Sources and severity" says.
 - `severity`: the floor as `"P0"`, `"P1"`, `"P2"`, or `"P3"`, in capitals whatever the letter case it was asked in (`"P3"` when none was asked). Null when the run stopped before it read its arguments.
 - `skipped`: one object per request or finding the floor skipped, in the report's order: `{ "source": "remote" | "local", "id": "<as in requests>", "priority": "P0" | "P1" | "P2" | "P3", "path": "<repo-relative path>" | null, "line": <number> | null, "summary": "<one line>" }`. `[]` when the floor skipped nothing. A skipped item is in `skipped` and not in `requests`.
 - `requests`: one object per request addressed or triaged, in the report's order (threads in file order, then review bodies, then findings, then prompt requests), the same requests as the report's Requests section, or the stop's list when no report was written:
@@ -238,14 +238,14 @@ The relevancy check's response, `pit-crew/relevancy-result@1`:
 
 - `schema`: `"pit-crew/relevancy-result@1"`.
 - `command`: `"relevancy-pr"`.
-- `status`: `"done"` when the run reached its verdict; `"failed"` when it cannot complete, at any instruction to stop and say so included, with `error`; `"needsInput"` when it stopped to ask under "Stopping to ask" below, with `question`. A `"done"` result always carries a `verdict`, a `reason`, and `needsUpdates`.
+- `status`: `"done"` when the run reached its verdict; `"failed"` when it cannot complete, at any instruction to stop and say so included, with `error`; `"needsInput"` when it stopped to ask under "Stopping to ask" below, with `question`. A `"done"` result always carries a `verdict`, a `reason`, and `needsUpdates`. It carries its `target`, `head`, and `upstream` too: a verdict is about that PR at that head, judged against that base commit.
 - `target`: `{ "repo": "<owner>/<name>", "pr": <number>, "base": "<the PR's base branch>" }`, the PR and its base branch. Null when the run stopped before resolving it.
 - `head`: `{ "sha": "<full SHA>" }`, the full 40-character SHA of the PR head the run read. Null when the run stopped before reading it.
 - `upstream`: `{ "sha": "<full SHA>" }`, the full 40-character SHA of the base branch's commit the run judged against. Null when the run stopped before reading it.
 - `verdict`: `"relevant"` or `"irrelevant"`, as `relevancy-pr.md` judges it against the problem or feature the PR's body states. Null when the run stopped before judging.
 - `reason`: one concise sentence, at most 500 characters, plain text with no line breaks or other control characters; for `"irrelevant"` it names why. It never names a model, provider, or agent. Null exactly when `verdict` is.
 - `needsUpdates`: `true` or `false`, whether the PR's own changes need editing because of what landed on the base branch since its merge base; being behind the base branch alone is `false`. Always `false` for `"irrelevant"`. Null exactly when `verdict` is.
-- `fixPrompt`: the fix prompt, as `relevancy-pr.md` writes it (plain text, at most 2,000 characters, line breaks and tabs allowed and no other control characters), when `needsUpdates` is `true`; null otherwise.
+- `fixPrompt`: the fix prompt, as `relevancy-pr.md` writes it (plain text, at most 2,000 characters, line breaks and tabs allowed and no other control characters), when `needsUpdates` is `true`; null otherwise. A run that fails or stops after judging and before writing it leaves it null.
 - `question`, `error`: as in `review-result@1`.
 
 Stopping to ask:
