@@ -6,7 +6,7 @@ import type { Run } from '../src/cache.ts'
 import { defaultConfig } from '../src/config.ts'
 import type { Config } from '../src/config.ts'
 import type { RawOpenPr } from '../src/github.ts'
-import { agentCell, claudeOnly, doneText, fixOfferOf, judge, notOffered, parseResult, relevancyMismatch, reportPath, startKinds, startOptions } from '../src/launcher.ts'
+import { agentCell, claudeOnly, doneText, fixOfferOf, judge, notOffered, parseResult, relevancyCheckOf, relevancyMismatch, relevancyPromptOf, reportPath, startKinds, startOptions } from '../src/launcher.ts'
 import type { RelevancyResult, RunResultJson } from '../src/launcher.ts'
 import { scenario } from './fixtures/scenario.ts'
 import { fixRequest, fixResult, openPage1, openPage2, relevancyHead, relevancyResult, relevancyUpstream } from './helpers.ts'
@@ -96,6 +96,52 @@ test('a relevancy result that contradicts itself is a bad result, kept for the d
   assert.equal(relevancyMismatch(parsed({ status: 'failed', verdict: null, reason: null, needsUpdates: null, error: 'no clone here' })), null)
 })
 
+test('a done result with a verdict names the PR, its head, and the base commit it judged: each null alone is a bad result', () => {
+  for (const [patch, message] of [
+    [{ target: null }, /a done relevancy result with a verdict has no target/],
+    [{ head: null }, /a done relevancy result with a verdict has no head/],
+    [{ upstream: null }, /a done relevancy result with a verdict has no upstream/],
+  ] as const) {
+    for (const verdict of [{}, irrelevant]) {
+      const value = parsed({ ...verdict, ...patch })
+      assert.match(relevancyMismatch(value) ?? '', message, String(message))
+      assert.match(judge({ ...settle, reportExists: null, parsed: { ok: true, value } }).note ?? '', /^badResult: /)
+    }
+    // a run that failed before it read them may leave each null
+    assert.equal(relevancyMismatch(parsed({ ...patch, status: 'failed', verdict: null, reason: null, needsUpdates: null, error: 'no clone here' })), null)
+  }
+})
+
+test('a failed run that judged updates needed but wrote no prompt keeps its own error; the same fields done are still a bad result', () => {
+  const fields = { verdict: 'relevant', reason: needsUpdates.reason, needsUpdates: true, fixPrompt: null }
+  const failed = parsed({ ...fields, status: 'failed', error: 'git show failed while writing the prompt' })
+  assert.equal(relevancyMismatch(failed), null)
+  const judged = judge({ ...settle, reportExists: null, parsed: { ok: true, value: failed } })
+  assert.deepEqual([judged.status, judged.note, judged.result], ['failed', 'git show failed while writing the prompt', failed])
+  const done = parsed(fields)
+  assert.equal(relevancyMismatch(done), 'needsUpdates is true but fixPrompt is null')
+  assert.equal(judge({ ...settle, reportExists: null, parsed: { ok: true, value: done } }).note, 'badResult: needsUpdates is true but fixPrompt is null')
+})
+
+test('a check stands only while the PR targets the base it judged: a retarget takes away the verdict, the prompt, and the done cell', async () => {
+  const pr = await prOf(104)
+  for (const patch of [irrelevant, needsUpdates]) {
+    const same = relevancyRun(relevancyResult(patch), { id: 30 })
+    assert.equal(relevancyCheckOf(pr, [same])?.run.id, 30, 'same base')
+    assert.equal(agentCell(pr, config(), same, undefined).state, 'done', 'same base')
+    const judgedElsewhere = relevancyRun(relevancyResult({ ...patch, target: { repo: scenario.repo, pr: 104, base: 'release/2.4' } }), { id: 30 })
+    assert.equal(relevancyCheckOf(pr, [judgedElsewhere]), null, 'judged another base')
+    const retargeted = { ...pr, baseRefName: 'release/2.4' }
+    assert.equal(relevancyCheckOf(retargeted, [same]), null, 'the PR now targets another base')
+    assert.equal(relevancyPromptOf(retargeted, [same]), null)
+    assert.equal(fixOfferOf(retargeted, [same]).relevancy, null)
+    const cell = agentCell(retargeted, config(), same, undefined)
+    assert.equal(cell.state, 'idle', 'the cell goes idle as it does once the head moves')
+    assert.equal(cell.runId, 30, 'the run is still attached')
+  }
+  assert.equal(relevancyPromptOf(pr, [relevancyRun(relevancyResult(needsUpdates), { id: 30 })])?.runId, 30, 'same base, the prompt stands')
+})
+
 test('a relevancy run writes no report, so a done result settles done without one', () => {
   for (const value of [parsed(), parsed(irrelevant), parsed(needsUpdates)]) {
     assert.equal(reportPath(value), null)
@@ -170,7 +216,7 @@ test('a Fix session is offered with the relevancy prompt when the latest run is 
   }
 })
 
-test('a Fix session handed the relevancy prompt reports its requests as kind and source prompt, with no URL, and nothing else may claim either', () => {
+test('a Fix session handed the relevancy prompt reports its requests as kind and source prompt, with no URL, and neither appears without the other', () => {
   const prompt = fixRequest({ id: 'prompt-1', kind: 'prompt', source: 'prompt', priority: null, author: null, url: null, summary: 'Call createLogger instead of makeLogger' })
   const read = parseResult(JSON.stringify(fixResult({ requests: [fixRequest({ source: 'remote' }), prompt] })))
   assert.equal(read.ok, true, read.ok ? '' : read.error)
@@ -182,6 +228,11 @@ test('a Fix session handed the relevancy prompt reports its requests as kind and
   bad({ ...prompt, url: 'https://github.com/octo-example/orbit/pull/101#discussion_r1' }, /requests\[0\]\.url must be null for a prompt request/)
   bad({ ...prompt, kind: 'comment' }, /requests\[0\]\.kind must be thread, review, finding or prompt/)
   bad({ ...prompt, source: 'relevancy' }, /requests\[0\]\.source must be remote, local or prompt/)
+  // kind prompt and source prompt are one pairing: emit-json.md gives a prompt request source prompt, and only a prompt request has it
+  for (const source of ['remote', 'local']) bad({ ...prompt, source }, /requests\[0\]\.kind prompt and source prompt go together/)
+  bad((({ source: _source, ...rest }) => rest)(prompt), /requests\[0\]\.kind prompt and source prompt go together/)
+  for (const kind of ['thread', 'review']) bad(fixRequest({ kind, source: 'prompt' }), /requests\[0\]\.kind prompt and source prompt go together/)
+  bad(fixRequest({ kind: 'finding', url: null, source: 'prompt' }), /requests\[0\]\.kind prompt and source prompt go together/)
   // a finding keeps its own rule
   bad(fixRequest({ kind: 'finding' }), /requests\[0\]\.url must be null for a finding/)
 })

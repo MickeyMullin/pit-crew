@@ -23,12 +23,12 @@ const writesOf = (gh: FakeRunner): Call[] => gh.calls.filter((call) => isWrite(c
 const headOf = async (number: number): Promise<string> => (await singlePr(number)).data.repository!.pullRequest!.headRefOid
 
 // the fixture world, a live read that says the PR is open at its cached head unless a test says otherwise, and writes that succeed unless told to fail
-const ghWorld = (live: { state?: string, head?: string } = {}, writeError?: string): FakeRunner => {
+const ghWorld = (live: { state?: string, head?: string, base?: string } = {}, writeError?: string): FakeRunner => {
   const base = fixtureRunner()
   return fakeRunner(async (args) => {
     if (isLiveRead(args)) {
       const number = Number(args[1]!.split('/').pop())
-      return ok(JSON.stringify({ state: live.state ?? 'open', merged: false, head: { sha: live.head ?? await headOf(number) } }))
+      return ok(JSON.stringify({ state: live.state ?? 'open', merged: false, base: { ref: live.base ?? 'main' }, head: { sha: live.head ?? await headOf(number) } }))
     }
     if (isWrite(args)) return writeError === undefined ? ok('') : failed(writeError)
     if (args[0] === 'api' && args[1] === 'user') return ok(`${scenario.viewer}\n`)
@@ -70,13 +70,13 @@ const runDir = (h: Harness, id: unknown): string => join(h.stateDir, 'runs', Str
 const claudeRequest = (child: FakeChild): string => (JSON.parse(child.writes[0] ?? '{}') as { message: { content: string } }).message.content
 const exists = (path: string): Promise<boolean> => stat(path).then(() => true, () => false)
 
-// a Relevancy check of #104 that ran and finished with this result
-const checked = async (h: Harness, patch: Record<string, unknown>): Promise<number> => {
-  const started = await start(h, 104, { kind: 'relevancy', runner: 'claude' })
+// a Relevancy check of #104, or of the PR named, that ran and finished with this result
+const checked = async (h: Harness, patch: Record<string, unknown>, number = 104): Promise<number> => {
+  const started = await start(h, number, { kind: 'relevancy', runner: 'claude' })
   assert.equal(started.status, 200, JSON.stringify(started.body))
   const id = Number(started.body.id)
   const settled = h.server.launcher.settled(id)
-  await writeFile(join(runDir(h, id), 'result.json'), JSON.stringify(relevancyResult({ head: { sha: await headOf(104) }, ...patch })))
+  await writeFile(join(runDir(h, id), 'result.json'), JSON.stringify(relevancyResult({ target: { repo: scenario.repo, pr: number, base: 'main' }, head: { sha: await headOf(number) }, ...patch })))
   ;(h.launch.children.at(-1) as FakeChild).exit(0)
   await settled
   return id
@@ -143,6 +143,58 @@ test('a Fix session with a prompt is refused, with nothing run, when the prompt 
     assert.equal(h.launch.children.length, before)
   } finally {
     await h.cleanup()
+  }
+})
+
+test('a Fix session takes the prompt only while the PR targets the base the check judged: a retarget refuses it with nothing run', async () => {
+  // #101 has a change request standing, so its Fix session is offered whatever the check says, and the prompt is what the server re-checks
+  const updates = { reason: 'Still needed, but it calls computeDelay, which #88 renamed.', needsUpdates: true, fixPrompt: prompt }
+  const h = await setup()
+  try {
+    const elsewhere = await checked(h, { ...updates, target: { repo: scenario.repo, pr: 101, base: 'release/2.4' } }, 101)
+    const before = h.launch.children.length
+    const refused = await start(h, 101, { kind: 'fix', fixPrompt: { runId: elsewhere, text: prompt } })
+    assert.equal(refused.status, 409, JSON.stringify(refused.body))
+    assert.equal(refused.body.error, `the relevancy check's prompt for #101 is no longer the one you saw; nothing was started. Open the drawer again to see the current one`)
+    assert.equal(h.launch.children.length, before)
+    const same = await checked(h, updates, 101)
+    const taken = await start(h, 101, { kind: 'fix', fixPrompt: { runId: same, text: prompt } })
+    assert.equal(taken.status, 200, JSON.stringify(taken.body))
+    assert.deepEqual(taken.body.args, ['101', '--extra-instructions'])
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('Close PR stands only while the PR targets the base the check judged, in the cache and in the live read, and a retarget writes nothing', async () => {
+  const gone = { verdict: 'irrelevant', reason, needsUpdates: false, fixPrompt: null }
+  const cached = await setup()
+  try {
+    const id = await checked(cached, { ...gone, target: { repo: scenario.repo, pr: 104, base: 'release/2.4' } })
+    const refused = await close(cached, 104, { runId: id, comment: reason })
+    assert.equal(refused.status, 422)
+    assert.equal(refused.body.error, '#104 has no relevancy check that found it irrelevant; Close PR is offered only then')
+    assert.deepEqual(writesOf(cached.gh), [])
+  } finally {
+    await cached.cleanup()
+  }
+  const live = await setup(ghWorld({ base: 'release/2.4' }))
+  try {
+    const id = await checked(live, gone)
+    const refused = await close(live, 104, { runId: id, comment: reason })
+    assert.equal(refused.status, 422)
+    assert.equal(refused.body.error, '#104 now targets release/2.4, not main, the base the relevancy check judged; nothing was closed')
+    assert.deepEqual(writesOf(live.gh), [])
+  } finally {
+    await live.cleanup()
+  }
+  const same = await setup(ghWorld({ base: 'main' }))
+  try {
+    const id = await checked(same, gone)
+    assert.equal((await close(same, 104, { runId: id, comment: reason })).status, 200, 'same base')
+    assert.deepEqual(writesOf(same.gh).map((call) => call.args), [['pr', 'close', '104', '--repo', scenario.repo, '--comment', reason]])
+  } finally {
+    await same.cleanup()
   }
 })
 

@@ -305,6 +305,8 @@ const checkFixRequest = (request: unknown, index: number): void => {
   check(fixOutcomes.includes(value.outcome as FixOutcome), `${at}.outcome must be fixed, notFixed or awaitingAnswer`)
   check(Array.isArray(value.commits) && value.commits.every(isFullSha), `${at}.commits must be a list of full SHAs`)
   check(!('source' in value) || value.source === 'remote' || value.source === 'local' || value.source === 'prompt', `${at}.source must be remote, local or prompt`)
+  // emit-json.md gives a prompt request source prompt and no other request that source
+  check((value.kind === 'prompt') === (value.source === 'prompt'), `${at}.kind prompt and source prompt go together`)
   check(!('priority' in value) || oneOfOrNull(value.priority, fixPriorities), `${at}.priority must be P0, P1, P2, P3 or null`)
 }
 
@@ -397,15 +399,22 @@ const checkRelevancy = (value: Record<string, unknown>): void => {
 // the reason is the one closing comment Close PR prefills, so it is one short line of plain text
 export const maxRelevancyReason = 500
 
+// what a verdict is about: the PR and its base branch, the head read, and the base branch's commit judged against
+const relevancyEvidence = ['target', 'head', 'upstream'] as const
+
 // a well-formed relevancy result whose fields contradict each other, or whose reason or prompt breaks its rule: the run fails, keeping the result for the drawer. Null when they agree. The prompt is held to the extra instructions' own rule, since a Fix session reads it from extra-instructions.txt
 export const relevancyMismatch = (result: RelevancyResult): string | null => {
   const { verdict, reason, needsUpdates, fixPrompt } = result
   if (result.status === 'done' && verdict === null && reason === null && needsUpdates === null) return 'a done relevancy result carries no verdict'
+  // a verdict is about one PR at one head judged against one base commit, so a done run that reached one has read all three
+  const unread = result.status === 'done' && verdict !== null ? relevancyEvidence.find((field) => result[field] === null) : undefined
+  if (unread !== undefined) return `a done relevancy result with a verdict has no ${unread}`
   if (verdict !== null && reason === null) return `reason is null while verdict is ${verdict}`
   if (verdict !== null && needsUpdates === null) return `needsUpdates is null while verdict is ${verdict}`
   if (verdict === null && (reason !== null || needsUpdates !== null)) return `verdict is null while ${reason !== null ? 'reason' : 'needsUpdates'} is set`
   if (verdict === 'irrelevant' && (needsUpdates === true || fixPrompt !== null)) return 'an irrelevant PR needs no updates, so needsUpdates must be false and fixPrompt null'
-  if (needsUpdates === true && fixPrompt === null) return 'needsUpdates is true but fixPrompt is null'
+  // the prompt is written after the verdict, so a run that failed or stopped between the two keeps its own error
+  if (result.status === 'done' && needsUpdates === true && fixPrompt === null) return 'needsUpdates is true but fixPrompt is null'
   if (fixPrompt !== null && needsUpdates !== true) return 'fixPrompt is set but needsUpdates is not true'
   if (reason !== null) {
     if (reason.trim() === '') return 'reason is empty'
@@ -821,13 +830,17 @@ const isSelfReviewRun = (run: Run): boolean =>
 // the PR's latest run, the one its cell is about: the highest id, whatever order the runs came in
 const latestOf = (runs: readonly Run[]): Run | undefined => runs.reduce<Run | undefined>((best, run) => best === undefined || run.id > best.id ? run : best, undefined)
 
-// the relevancy check a PR's drawer acts on: its latest run, when that is a relevancy check that finished done with a verdict, of the PR's current head. A newer run of any kind, or a push since the check, leaves none, since the verdict is then about something else
-export const relevancyCheckOf = (pr: RawOpenPr, runs: readonly Run[]): { run: Run, result: RelevancyResult } | null => {
+// whether the PR now targets another base branch than the one a relevancy check judged; false for a check that names none
+const retargeted = (result: RelevancyResult, pr: RawOpenPr): boolean => result.target !== null && result.target.base !== pr.baseRefName
+
+// the relevancy check a PR's drawer acts on: its latest run, when that is a relevancy check that finished done with a verdict, of the PR's current head and base branch. A newer run of any kind, a push since the check, or a retarget leaves none, since the verdict is then about something else
+export const relevancyCheckOf = (pr: RawOpenPr, runs: readonly Run[]): { run: Run, result: RelevancyResult, base: string } | null => {
   const run = latestOf(runs)
   const result = run?.result
   if (run === undefined || run.command !== 'relevancy-pr' || run.status !== 'done' || result?.schema !== 'pit-crew/relevancy-result@1' || result.verdict === null) return null
   if (result.head === null || !sameCommit(result.head.sha, pr.headRefOid)) return null
-  return { run, result }
+  if (result.target === null || retargeted(result, pr)) return null
+  return { run, result, base: result.target.base }
 }
 
 // the prompt a Fix session may take: the latest relevancy check's, when it found updates needed
@@ -1491,6 +1504,8 @@ export const agentCell = (pr: RawOpenPr, config: Config, ownRun: Run | undefined
   if (run.status === 'running' || run.status === 'queued') state = run.status
   // a stack review reads the top layer, whose commit is not this PR's head
   else if (run.command !== 'review-stack' && shas.length > 0 && !shas.some((sha) => head.startsWith(sha.toLowerCase()))) state = 'idle'
+  // a relevancy verdict is about the base it judged too, so a retarget leaves it standing for nothing, as a push does
+  else if (run.result?.schema === 'pit-crew/relevancy-result@1' && retargeted(run.result, pr)) state = 'idle'
   const from = `Stack review from #${run.number}`
   const ended = run.status === 'running' || run.status === 'queued' ? null : doneText(withPostFate(run), mine && pr.isDraft)
   return {

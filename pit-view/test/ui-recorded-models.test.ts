@@ -46,8 +46,8 @@ test('the running card, the waiting card, and the finished card each carry the l
   assert.equal(runningModel(row, cell({ recorded: pair })).models.text, modelsLine(pair).text)
   assert.equal(runningModel(row, cell()).models.text, 'not recorded')
   assert.equal(waitingModel(cell({ recorded: single }), 101).models.text, 'Reviewer: sonnet (Claude Code)')
-  assert.equal(resultModel(cell({ recorded: pair }), 101, row.headOid, []).models.text, modelsLine(pair).text)
-  assert.equal(resultModel(cell(), 101, row.headOid, []).models.text, 'not recorded')
+  assert.equal(resultModel(cell({ recorded: pair }), 101, row.headOid, [], 'main').models.text, modelsLine(pair).text)
+  assert.equal(resultModel(cell(), 101, row.headOid, [], 'main').models.text, 'not recorded')
 })
 
 test('each earlier run carries its own line', () => {

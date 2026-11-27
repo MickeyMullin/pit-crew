@@ -63,19 +63,19 @@ test('the cell reads Relevant in green and Irrelevant in amber, and the step bar
 
 test('the drawer\'s block, verdict by verdict: Close PR for Irrelevant, the prompt and its Fix session when updates are needed, and nothing more when Relevant with nothing to update', async () => {
   const relevant = await rowWith({})
-  const plain = resultModel(relevant.agent!, 104, relevant.headOid, actionOffers(relevant, true))
+  const plain = resultModel(relevant.agent!, 104, relevant.headOid, actionOffers(relevant, true), relevant.baseRef)
   assert.deepEqual(plain.relevancy, { verdict: 'Relevant', reason: 'The retry backoff the PR adds is still missing on main.', updates: 'No updates needed.', close: null, prompt: null })
   assert.deepEqual(actionOffers(relevant, true).map((offer) => offer.action), ['convertToDraft', 'requestReview', 'update'], 'the same actions any other PR gets')
   // the Start section is the one any own PR gets, with Check relevancy among the starts
   assert.ok(startsModel(relevant.agent!, true, 104).buttons.some((button) => button.kind === 'relevancy' && button.text === 'Check relevancy'))
 
   const gone = await rowWith(irrelevant)
-  const closing = resultModel(gone.agent!, 104, gone.headOid, actionOffers(gone, true))
+  const closing = resultModel(gone.agent!, 104, gone.headOid, actionOffers(gone, true), gone.baseRef)
   assert.deepEqual(closing.relevancy, { verdict: 'Irrelevant', reason, updates: null, close: 'Close it from the Actions section above: Close PR.', prompt: null })
   assert.deepEqual(actionOffers(gone, true).at(-1), { action: 'close', text: 'Close PR' })
 
   const needed = await rowWith(updates)
-  const fixing = resultModel(needed.agent!, 104, needed.headOid, actionOffers(needed, true))
+  const fixing = resultModel(needed.agent!, 104, needed.headOid, actionOffers(needed, true), needed.baseRef)
   assert.deepEqual(fixing.relevancy, {
     verdict: 'Relevant', reason: updates.reason, updates: 'Updates needed: the check wrote a prompt for a Fix session.', close: null,
     prompt: { text: prompt, copyName: 'Copy prompt', fix: { text: 'Start fix session with this prompt', disabled: false, reason: null } },
@@ -88,12 +88,32 @@ test('the drawer\'s block, verdict by verdict: Close PR for Irrelevant, the prom
   for (const patch of [irrelevant, updates]) {
     const moved = await rowWith(patch, 'f'.repeat(40))
     assert.equal(actionOffers(moved, true).some((offer) => offer.action === 'close'), false)
-    const model = resultModel(moved.agent!, 104, moved.headOid, actionOffers(moved, true))
+    const model = resultModel(moved.agent!, 104, moved.headOid, actionOffers(moved, true), moved.baseRef)
     assert.equal(model.relevancy?.close ?? null, null)
     assert.equal(model.relevancy?.prompt?.fix.disabled ?? true, true)
   }
   // a PR that left the open tables offers neither
   assert.deepEqual(actionOffers(gone, false), [])
+})
+
+test('once the PR targets another base than the check judged, the drawer says so and offers neither Close PR nor the prompt\'s Fix session', async () => {
+  const judged = { repo: scenario.repo, pr: 104, base: 'release/2.4' }
+  for (const patch of [irrelevant, updates]) {
+    const row = await rowWith({ ...patch, target: judged })
+    assert.equal(row.agent!.state, 'idle')
+    assert.equal(actionOffers(row, true).some((offer) => offer.action === 'close'), false)
+    const model = resultModel(row.agent!, 104, row.headOid, actionOffers(row, true), row.baseRef)
+    assert.equal(model.stale, 'The PR now targets main, not release/2.4, the base this check judged. Check relevancy again for the current one.')
+    assert.equal(model.relevancy?.close ?? null, null)
+  }
+  const prompted = await rowWith({ ...updates, target: judged })
+  assert.deepEqual(resultModel(prompted.agent!, 104, prompted.headOid, actionOffers(prompted, true), prompted.baseRef).relevancy?.prompt?.fix, {
+    text: 'Start fix session with this prompt', disabled: true, reason: 'The PR now targets main, not release/2.4, the base this check judged, so its prompt was written for another base.',
+  })
+  // at the base it judged, the check stands
+  const same = await rowWith(irrelevant)
+  assert.equal(resultModel(same.agent!, 104, same.headOid, actionOffers(same, true), same.baseRef).stale, null)
+  assert.deepEqual(actionOffers(same, true).at(-1), { action: 'close', text: 'Close PR' })
 })
 
 test('Close PR\'s confirmation names the PR, says it closes without merging, and opens with the reason in an editable box; its request sends what the box holds', async () => {

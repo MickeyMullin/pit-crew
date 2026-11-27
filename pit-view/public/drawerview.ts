@@ -741,14 +741,21 @@ export type RelevancyModel = {
   prompt: { text: string, copyName: string, fix: { text: string, disabled: boolean, reason: string | null } } | null
 }
 
-export const relevancyModel = (cell: AgentCell, number: number, offers: readonly ActionOffer[]): RelevancyModel | null => {
+// the base a relevancy check judged, when the PR now targets another one; null otherwise
+const judgedBaseIfRetargeted = (cell: AgentCell, baseRef: string): string | null =>
+  cell.result?.kind === 'relevancy' && cell.result.base !== null && cell.result.base !== baseRef ? cell.result.base : null
+
+export const relevancyModel = (cell: AgentCell, number: number, offers: readonly ActionOffer[], baseRef: string): RelevancyModel | null => {
   const result = cell.result
   if (result?.kind !== 'relevancy' || cell.status !== 'done' || result.verdict === null) return null
   const irrelevant = result.verdict === 'irrelevant'
   const option = optionOf(cell, 'fix')
   const ready = cellPrompt(cell) !== null && option !== undefined && option.unavailable === null
+  const judged = judgedBaseIfRetargeted(cell, baseRef)
   const why = ready
     ? null
+    : judged !== null
+      ? `The PR now targets ${baseRef}, not ${judged}, the base this check judged, so its prompt was written for another base.`
     : cell.state === 'idle'
       ? 'The head has moved since this check, so its prompt covers an earlier commit.'
       : option?.unavailable != null ? sentence(option.unavailable) : `A Fix session is not offered for #${number} now.`
@@ -765,7 +772,17 @@ export const relevancyModel = (cell: AgentCell, number: number, offers: readonly
   }
 }
 
-export const resultModel = (cell: AgentCell, number: number, headOid: string, offers: readonly ActionOffer[]): ResultModel => ({
+// why an idle cell's run no longer stands: a relevancy check's PR was retargeted, or the head moved on; null while it stands
+const staleText = (cell: AgentCell, baseRef: string): string | null => {
+  if (cell.state !== 'idle') return null
+  const judged = judgedBaseIfRetargeted(cell, baseRef)
+  if (cell.command === 'relevancy-pr' && judged !== null) return `The PR now targets ${baseRef}, not ${judged}, the base this check judged. Check relevancy again for the current one.`
+  if (cell.command === 'relevancy-pr') return 'The head has moved since this check, so it covers an earlier commit. Check relevancy again for the current one.'
+  if (cell.command === 'fix-pr' || cell.command === 'update-pr') return 'The head has moved since this run, so it covers an earlier commit.'
+  return 'The head has moved since this run, so it covers an earlier commit. Start a new review for the current one.'
+}
+
+export const resultModel = (cell: AgentCell, number: number, headOid: string, offers: readonly ActionOffer[], baseRef: string): ResultModel => ({
   text: cell.text ?? 'Done',
   tone: doneTone({ status: cell.status, text: cell.text }),
   runnerLabel: cell.runner === null ? 'its runner' : runnerLabels[cell.runner],
@@ -778,12 +795,8 @@ export const resultModel = (cell: AgentCell, number: number, headOid: string, of
   copyName: `Copy resume command for #${number}`,
   facts: resultFacts(cell),
   fix: cell.result?.kind === 'fix' ? fixModel(cell.result) : null,
-  relevancy: relevancyModel(cell, number, offers),
-  stale: cell.state !== 'idle' ? null : cell.command === 'relevancy-pr'
-    ? 'The head has moved since this check, so it covers an earlier commit. Check relevancy again for the current one.'
-    : cell.command === 'fix-pr' || cell.command === 'update-pr'
-    ? 'The head has moved since this run, so it covers an earlier commit.'
-    : 'The head has moved since this run, so it covers an earlier commit. Start a new review for the current one.',
+  relevancy: relevancyModel(cell, number, offers, baseRef),
+  stale: staleText(cell, baseRef),
   byHand: cell.resolvedByHand && cell.status === 'done' ? byHandText(cell.firstNote ?? cell.note) : null,
   ready: readyPointer(cell.text, offers),
   notPosted: isBlockedPost(cell.result) ? 'Review done, post not made: a permission check refused the post before it ran, so nothing reached GitHub.' : null,
@@ -1129,7 +1142,7 @@ export const drawerModel = (input: DrawerInput): DrawerModel => {
     storedAsk: act && cell !== null && confirm?.type === 'storedPost' ? storedAskModel(row, cell, confirm, input.open) : null,
     stopsEnabled: act && (input.open || input.runs.state === 'ready'),
     waiting: cell !== null && card === 'waiting' ? waitingModel(cell, row.number) : null,
-    result: cell !== null && card === 'result' ? resultModel(cell, row.number, row.headOid, actionOffers(row, input.open)) : null,
+    result: cell !== null && card === 'result' ? resultModel(cell, row.number, row.headOid, actionOffers(row, input.open), row.baseRef) : null,
     runs: {
       state: runs.state,
       message: runs.state === 'error' ? runs.message : null,

@@ -166,6 +166,13 @@ const refuseIfMoved = (number: number, live: LivePr, base: string, headSha: stri
   if (live.mergeable !== true || !liveMergeableStates.includes(live.mergeable_state ?? '')) throw new ActionError('notAllowed', `#${number} is not mergeable right now (${live.mergeable_state ?? 'unknown'}); nothing was merged`)
 }
 
+// Close PR's live read, in refuseIfMoved's shape: a PR that closed, was retargeted away from the base the check judged, or moved on is not closed
+const refuseIfCloseMoved = (number: number, live: LivePr, base: string, headSha: string): void => {
+  if (live.state !== 'open' || live.merged === true) throw new ActionError('notAllowed', `#${number} is no longer open; nothing was closed`)
+  if (live.base?.ref !== base) throw new ActionError('notAllowed', `#${number} now targets ${live.base?.ref ?? 'another branch'}, not ${base}, the base the relevancy check judged; nothing was closed`)
+  if (live.head?.sha !== headSha) throw new ActionError('notAllowed', `#${number} has new commits since you saw it; nothing was closed`)
+}
+
 const sameLogin = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
 
 // Post it (section 8, Launching runs, Blocked post): everything its confirmation showed comes back, and nothing else is taken from the page
@@ -369,7 +376,7 @@ export const createActions = (options: ActionsOptions): Actions => {
     if (request.action === 'update' || request.action === 'resolveConflicts') return update(number, request, row.pr, cached.defaultBranch, config)
     let reviewer: string | undefined
     let merging: { base: string, headSha: string } | undefined
-    let closing: { headSha: string } | undefined
+    let closing: { base: string, headSha: string } | undefined
     if (request.action === 'close') {
       // the latest run of the PR must be a done relevancy check of its current head that found it irrelevant, and the one the confirmation showed
       const check = relevancyCheckOf(row.pr, cache.runsFor(repo, number))
@@ -378,7 +385,8 @@ export const createActions = (options: ActionsOptions): Actions => {
         refresh(repo, number)
         throw new ActionError('stale', `#${number} changed since you saw it (${check.run.id !== request.runId ? `its latest relevancy check is now run ${check.run.id}, not run ${request.runId}` : 'it has new commits'}); nothing was closed. Reload its confirmation to see the current state`)
       }
-      closing = { headSha: request.headSha }
+      // the base the check judged is the one the confirmation's verdict is about
+      closing = { base: check.base, headSha: request.headSha }
     }
     if (request.action === 'merge') {
       // the state the row shows, derived again from the cached PR rather than taken from the page
@@ -416,8 +424,7 @@ export const createActions = (options: ActionsOptions): Actions => {
             if (error instanceof GhError) throw error
             throw new ActionError('ghFailed', `cannot read #${number} before closing: ${messageOf(error)}; nothing was closed`)
           }
-          if (live.state !== 'open' || live.merged === true) throw new ActionError('notAllowed', `#${number} is no longer open; nothing was closed`)
-          if (live.head?.sha !== closing!.headSha) throw new ActionError('notAllowed', `#${number} has new commits since you saw it; nothing was closed`)
+          refuseIfCloseMoved(number, live, closing!.base, closing!.headSha)
         }
         const check = merging === undefined ? closeCheck : async (read: (args: string[]) => Promise<string>): Promise<void> => {
           // the confirmation named the cached base and head; the PR is read once more, live, and anything that differs refuses before a write is made
