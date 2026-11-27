@@ -216,7 +216,7 @@ test('a Fix session is offered with the relevancy prompt when the latest run is 
   }
 })
 
-test('a Fix session handed the relevancy prompt reports its requests as kind and source prompt, with no URL, and neither appears without the other', () => {
+test('the fix result validator accepts a prompt request of kind and source prompt with no URL, and refuses a URL on it, an unknown kind or source, kind or source prompt without the other, and a URL on a finding', () => {
   const prompt = fixRequest({ id: 'prompt-1', kind: 'prompt', source: 'prompt', priority: null, author: null, url: null, summary: 'Call createLogger instead of makeLogger' })
   const read = parseResult(JSON.stringify(fixResult({ requests: [fixRequest({ source: 'remote' }), prompt] })))
   assert.equal(read.ok, true, read.ok ? '' : read.error)

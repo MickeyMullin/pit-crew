@@ -134,7 +134,7 @@ test('the relevancy wrappers carry the flag, point at the prompt, and only the C
   assert.ok(!prompt.includes('Claude Code'), 'the prompt is agent-agnostic')
 })
 
-test('emit-json carries the relevancy schema after the update schema, with every field and its rules', async () => {
+test('emit-json carries the relevancy schema after the update schema, naming every field, with the verdict, reason, needsUpdates, and fixPrompt rules, the done result\'s three fields, the skipped steps\' notes, and the own-PR check', async () => {
   const emit = await read(emitPath)
   assert.ok(emit.indexOf(schemaHeading) > emit.indexOf('The update\'s response, `pit-crew/update-result@1`:'), 'after update-result@1')
   const schema = schemaSection(emit)
@@ -200,7 +200,7 @@ test('a done relevancy result names its target, head, and upstream, and a run th
   assert.ok(schema.includes('when `needsUpdates` is `true`; null otherwise. A run that fails or stops after judging and before writing it leaves it null.\n'))
 })
 
-test('fix-pr keeps its existing constraints word for word beside the relevancy prompt', async () => {
+test('fix-pr keeps five of its existing constraint sentences word for word beside the relevancy prompt: the one write, no force, the stop to ask, the diff limit, and findings as requests', async () => {
   const prompt = await read(fixPath)
   for (const sentence of [
     '**Pushing new commits to the PR\'s branch is the only GitHub write this command performs, and it happens at most once per run.**',
@@ -244,7 +244,7 @@ test('the docs list relevancy-pr as they list update-pr, and fix-pr\'s new flag'
 // built from parts, so this file can check itself too
 const homeRoot = ['', 'Users', ''].join('/')
 
-test('no new or changed file names a real home directory', async () => {
+test('the relevancy prompt, its two commands, fix-pr\'s prompt and its two commands, emit-json, extra-instructions, this test, both READMEs, and prompts.test.ts name no real home directory', async () => {
   for (const path of [promptPath, claudePath, skillPath, fixPath, emitPath, 'prompts/review/extra-instructions.md', 'commands/claude/fix-pr.md', 'commands/skills/fix-pr/SKILL.md', 'pit-view/test/prompts-relevancy.test.ts']) {
     assert.ok(!(await read(path)).includes(homeRoot), path)
   }

@@ -5,6 +5,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import type { Config } from '../src/config.ts'
+import { actionNames } from '../src/actions.ts'
 import { startServer } from '../src/server.ts'
 import type { PitServer } from '../src/server.ts'
 import { scenario } from './fixtures/scenario.ts'
@@ -271,24 +272,34 @@ test('the one comment Pit View posts is Close PR\'s: every other action refuses 
       assert.equal(refused.status, 400, action)
       assert.match(String(refused.body.error), /^action must be one of merge, markReady, convertToDraft, requestReview, update, resolveConflicts, or close/)
     }
-    for (const body of [{ action: 'markReady' }, { action: 'convertToDraft' }, { action: 'requestReview', reviewer: 'alex-mendez' }, { action: 'merge', headSha: 'a'.repeat(40), base: 'main' }]) {
-      const refused = await send(h, '/api/prs/104/actions', { repo: scenario.repo, comment: 'hello', ...body })
-      assert.equal(refused.status, 400, body.action)
-      assert.match(String(refused.body.error), new RegExp(`^${body.action} takes no comment`))
+    // each action but close, from the server's own list, with an otherwise valid body
+    const bodies: Readonly<Record<string, Record<string, unknown>>> = {
+      merge: { headSha: 'a'.repeat(40), base: 'main' }, markReady: {}, convertToDraft: {}, requestReview: { reviewer: 'alex-mendez' },
+      update: { viewer: scenario.viewer, headSha: 'a'.repeat(40), base: 'main' }, resolveConflicts: { viewer: scenario.viewer, headSha: 'a'.repeat(40), base: 'main' },
+    }
+    const others = actionNames.filter((action) => action !== 'close')
+    assert.deepEqual(others.filter((action) => bodies[action] === undefined), [], 'every other action has a body here')
+    for (const action of others) {
+      const refused = await send(h, '/api/prs/104/actions', { repo: scenario.repo, comment: 'hello', ...bodies[action], action })
+      assert.equal(refused.status, 400, action)
+      assert.match(String(refused.body.error), new RegExp(`^${action} takes no comment`))
     }
     assert.deepEqual(writesOf(h.gh), [])
+    assert.equal(h.launch.children.length, 0, 'neither update nor resolveConflicts started a session')
   } finally {
     await h.cleanup()
   }
 })
 
-test('a Close PR that GitHub refuses says so, and a check whose run folder holds no extra file starts nothing extra', async () => {
+test('a Close PR that GitHub refuses answers 502 and starts no run, and the check\'s run folder holds no extra-instructions file', async () => {
   const h = await setup(ghWorld({}, 'GraphQL: Could not close the pull request'))
   try {
     const id = await checked(h, { verdict: 'irrelevant', reason, needsUpdates: false, fixPrompt: null })
     assert.equal(await exists(join(runDir(h, id), 'extra-instructions.txt')), false)
+    const before = h.launch.children.length
     const refused = await close(h, 104, { runId: id, comment: reason })
     assert.equal(refused.status, 502)
+    assert.equal(h.launch.children.length, before, 'the refused close started no run')
   } finally {
     await h.cleanup()
   }
