@@ -53,8 +53,12 @@ Output: print the report-day report as that prompt specifies, then the timesheet
 
 - Omit the standup. Its hours stay in the total and in Skuld; only its words go.
 - Merge duplicates and near-duplicates, and fold repeated work on one thing (`Address findings`, `Resolve conflicts`, `CI fix`, `Merge`) into one item per thing.
-- Drop PR numbers for the user's own work, as above. List reviews of other people's PRs once, as `Review PRs 884, 913, 970`, with ranges as `992–996` (en dash, full numbers); fold re-reviews into the plain review. When a day has many reviews with no numbers worth keeping, roll them up by theme (`Review PRs on ETL and refresh performance, portal on the core database`).
-- Keep the order of the day's real work where it costs nothing, put the largest items first otherwise, and prefer a theme over a list of minor items. No parenthetical detail.
+- Drop PR numbers for the user's own work, as above. Fold all reviews of other people's PRs, re-reviews included, into the single trailing item `PR reviews`; the numbers stay in the per-day table and in Skuld, not the company-sheet note.
+- Put the day's real work first and review work last. Reviews of other people's PRs are one final item, `PR reviews` (never `PR reviews and fixes`, and no PR numbers in the note); the user's own PR work (findings, conflicts, merges) is real work and goes in the work items. Within the real work, keep the day's order where it costs nothing and put the largest items first otherwise.
+- Between items use `; `. Inside an item use `, `. Never write `and` in the note; use a comma. The headline item's label and the things that carried it are separated by `; ` too, as in the example below.
+- For the headline item, name the two to four things that carried the day, not a bare category: `Planner UI fixes; road miles, action writes, side panel, ETL lock`, not `Planner UI fixes`. Prefer a theme over a list of minor items.
+- No parentheticals, no PR numbers for the user's own work, no standup words, and no small one-off fixes. Be brutal: the note has to fit a spreadsheet cell, and Skuld keeps the detail.
+- Write ticket keys in full, `, `-separated (`RES-322, RES-338`), never as a range or bare numbers.
 
 This row is a rendering for the sheet only. Never write it back into Skuld, and never edit or delete Skuld entries to match it. On a `preview` run, print it as well.
 
