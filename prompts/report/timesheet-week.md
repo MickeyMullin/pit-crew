@@ -2,7 +2,7 @@
 
 This task renders one Sunday-to-Saturday week of company-timesheet rows from work already recorded. It files nothing: never write to Skuld, and never edit or delete Skuld entries to match what is printed. Skuld is read only, to total hours.
 
-Arguments: an optional week (a date inside it, `last week`, or `this week`; default is the current Sunday-to-Saturday week), optional `tsv`, optional client and project name (default `PortCity Logistics - Dispatch Intelligence Platform II`; for any other project use the name the user gives, and ask if there is none), and any chat edit requests.
+Arguments: an optional week (a date inside it, `last week`, or `this week`; default is the current Sunday-to-Saturday week), optional `tsv`, optional `reset today` or `reset week` (see Saved hand edits), optional client and project name (default `PortCity Logistics - Dispatch Intelligence Platform II`; for any other project use the name the user gives, and ask if there is none), and any chat edit requests.
 
 ## Gather the days
 
@@ -17,6 +17,9 @@ The user edits rows by hand and expects those edits to survive reruns. Keep them
 
 - When the user pastes or states a replacement for a row, or asks for a change to it ("shorter", "cut X", "turn 'and' into commas"), apply it to that row, save the result in the edits file, and reprint the table.
 - A change that names no row applies to every row that has no saved edit. A row with a saved edit is changed only when the request names that row.
+- `reset today` discards the saved edit for today's date only (the local date; if today is not in the requested week, say so and change nothing). Today's row is then rebuilt from its day file, or from a `timesheet-day` preview when there is none, and every other row keeps its saved edits. Use it when a day was edited early and has since been completed.
+- `reset week` discards every saved edit for the week, by deleting that week's `.edits.json`, and rebuilds all seven rows from the day files (preview for a weekday with none) as if the week had never been run. It never touches the day files, the TSV from an earlier run (until `tsv` overwrites it), or Skuld. State which saved edits were discarded, by date, so the user can see what was lost.
+- A reset applies before anything else in the run, and the table or TSV that follows reflects it. Chat edits made in the same invocation are applied after the reset and saved as new edits.
 - On every run, read the edits file first and apply it over the day-file rows, so a rerun never overwrites the user's wording. Say how many rows came from saved edits.
 - When a day file is newer than a saved edit for the same date, keep the saved edit and mention that the day was regenerated.
 
