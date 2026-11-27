@@ -9,12 +9,12 @@ Arguments: an optional week (a date inside it, `last week`, or `this week`; defa
 `show` only displays what a previous run left behind. It reads, regenerates nothing, and writes nothing: no day files, no preview runs, no Skuld reads, no edits-file or TSV writes.
 
 1. Work out the week as usual (default: the current Sunday-to-Saturday week).
-2. Read `{{HOME}}/agents/output/timesheet-week-<YYYY-MM-DD>.tsv` (the week's Sunday). If it exists, print its contents verbatim in a `tsv` code block, state the file path and its modified time, then print the same rows as a Markdown table (date, hours, task, tickets) with the one-line client and project header and a total row.
+2. Read `{{HOME}}/agents/output/timesheet-week-<YYYY-MM-DD>.tsv` (the week's Sunday). If it exists, print in this order, so the TSV is the last thing on screen and never scrolls off a small window: first the one-line client and project header with the file path and modified time, then the same rows as a Markdown table (date, hours, task, tickets) with a total row, then the notes from steps 4 and 5 below, and finally the file's contents verbatim in a `tsv` code block. Print nothing after the code block, not even a closing remark.
 3. If the TSV is missing, say so, and list the `timesheet-week-*.tsv` files that do exist so the user can pick one. Do not build the week. Tell the user `/timesheet-week tsv` would.
-4. If a saved edits file exists for the week, add one line naming the dates with saved edits.
-5. If a day file for the week is newer than the TSV, add one line saying the TSV may be stale and which days changed. Do not refresh it.
+4. If a saved edits file exists for the week, add one line naming the dates with saved edits (printed before the code block).
+5. If a day file for the week is newer than the TSV, add one line saying the TSV may be stale and which days changed (printed before the code block). Do not refresh it.
 
-`show` combined with chat edits or a reset does nothing for those parts; say that edits and resets need a normal run.
+`show` combined with chat edits or a reset does nothing for those parts; say, before the code block, that edits and resets need a normal run.
 
 ## Gather the days
 
