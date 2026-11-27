@@ -1,0 +1,8 @@
+---
+description: "Print a week's company-sheet timesheet table from the day files (preview fallback for missing days). Add `tsv` to write the 7-column file. Files nothing in Skuld."
+argument-hint: "[week | last week] [tsv] [client and project name] [row edits]"
+---
+
+Follow the instructions in `{{HOME}}/agents/prompts/report/timesheet-week.md` in full. You are running as Claude Code — also read and apply `{{HOME}}/agents/prompts/review/claude-code-notes.md`.
+
+ARGUMENTS: $ARGUMENTS
