@@ -250,3 +250,13 @@ test('DESIGN.md pins pit-crew/relevancy-result@1 with exactly the fields the che
   assert.match(emit, /"schema": "pit-crew\/relevancy-result@1"/)
   for (const field of Object.keys(relevancyResult())) assert.match(emit, new RegExp(`"${field}":`), field)
 })
+
+test('DESIGN.md names the retarget refusal beside the head rule, the drawer\'s retarget lines, and Close PR among the direct actions', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const { join } = await import('node:path')
+  const design = await readFile(join(import.meta.dirname, '..', 'DESIGN.md'), 'utf8')
+  assert.ok(design.includes('its live base ref is not the base branch the check judged ("#104 now targets release/2.4, not main, the base the relevancy check judged; nothing was closed"), or its live head is not `headSha`'))
+  assert.ok(design.includes('"The PR now targets main, not release/2.4, the base this check judged. Check relevancy again for the current one."'))
+  assert.ok(design.includes('"The PR now targets main, not release/2.4, the base this check judged, so its prompt was written for another base."'))
+  assert.ok(design.includes('request review (choosing from `people`), update from the primary branch, and Close PR (closing without merging, with the one closing comment its confirmation holds).'))
+})
