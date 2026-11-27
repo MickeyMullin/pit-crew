@@ -7,8 +7,8 @@ Arguments: an optional week (a date inside it, `last week`, or `this week`; defa
 ## Gather the days
 
 1. Work out the week's Sunday and the seven dates through Saturday.
-2. For each Monday through Friday (and Sunday or Saturday when a day file exists), read `{{HOME}}/agents/output/timesheet-<YYYY-MM-DD-dow>.md` (`dow` is the lowercase three-letter weekday). From the `tsv` block that file holds for the company sheet row, take hours, note, and tickets. Do not rebuild a row that exists.
-3. For a weekday with no file, run the `timesheet-day` task for that day in `preview` mode, following `{{HOME}}/agents/prompts/report/timesheet-day.md`, and use its company-sheet row. Say which days were generated this way. Preview files nothing in Skuld. A weekend day with no file stays an empty row; do not generate it.
+2. For each Monday through Friday (and Sunday or Saturday when a day file exists), read `{{HOME}}/agents/output/timesheet-<YYYY-MM-DD-dow>.md` (`dow` is the lowercase three-letter weekday). From the `tsv` block that file holds for the company sheet row, take hours, note, and tickets. Do not regenerate a row that exists from the day's records. A day file written before the current note rules may hold a long note: re-render its words under those rules (shorten, reorder, no `and`, no parentheticals) without inventing work, and say so. A saved hand edit always wins over both.
+3. For a weekday with no file, run the `timesheet-day` task for that day in `preview` mode, following `{{HOME}}/agents/prompts/report/timesheet-day.md`, and use its company-sheet row. Say which days were generated this way. Preview files nothing in Skuld. If preview stops to ask because recorded work is thin, do not guess: leave that day's row empty and flag it. A weekend day with no file stays an empty row; do not generate it.
 4. Read each day's Skuld hours (read only) and compare. Total the week's hours from Skuld and from the rows, and say so on one line. Flag every weekday with no entries, and every row with a blank ticket.
 
 ## Saved hand edits
@@ -38,7 +38,7 @@ Emit the TSV in a `tsv` code block and also write it to `{{HOME}}/agents/output/
 6. tickets, `, `-separated;
 7. the client and project name.
 
-Sunday and Saturday are rows with an empty hours, task, and ticket field and the date and project name still in place: `Sun, 11/15/2026` then tabs for the empty fields (still seven columns) and the project name. A weekday with no work is flagged, not silently emptied. Write real tab characters and no trailing newline problems: end each line with a single newline. After writing the file, read it back and confirm each line has seven fields.
+Sunday and Saturday with no day file are rows with an empty hours, task, and ticket field (a weekend day that has a file is written like any other day) and the date and project name still in place: `Sun, 11/15/2026` then tabs for the empty fields (still seven columns) and the project name. A weekday with no work is flagged, not silently emptied. Write real tab characters and no trailing newline problems: end each line with a single newline. After writing the file, read it back and confirm each line has seven fields.
 
 ## End
 
