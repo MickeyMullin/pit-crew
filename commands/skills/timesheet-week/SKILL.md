@@ -7,7 +7,7 @@ description: Print a week's company-sheet timesheet table from the day files (pr
 
 Follow the instructions in `{{HOME}}/agents/prompts/report/timesheet-week.md` in full. That file is the whole specification for this task — read it before doing anything else, and follow it as written rather than substituting your own process.
 
-The invocation may carry the week, `tsv`, `reset today` or `reset week` (discard saved row edits), a client and project name, and chat edits to rows ("shorter", "cut X", "turn 'and' into commas"). Pass all of it to the prompt.
+The invocation may carry the week, `tsv`, `reset <day>` (today, a weekday, a date, yesterday) or `reset week` (discard saved row edits), a client and project name, and chat edits to rows ("shorter", "cut X", "turn 'and' into commas"). Pass all of it to the prompt.
 
 This skill never files or changes anything in Skuld. For a day with no output file it uses `timesheet-day` in `preview` mode.
 
