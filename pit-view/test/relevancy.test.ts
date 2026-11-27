@@ -260,3 +260,14 @@ test('DESIGN.md names the retarget refusal beside the head rule, the drawer\'s r
   assert.ok(design.includes('"The PR now targets main, not release/2.4, the base this check judged, so its prompt was written for another base."'))
   assert.ok(design.includes('request review (choosing from `people`), update from the primary branch, and Close PR (closing without merging, with the one closing comment its confirmation holds).'))
 })
+
+test('DESIGN.md names the Fix session\'s prompt flag beside the ordinary start, and Post it and the post button as the exceptions beside Close PR\'s one comment', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const { join } = await import('node:path')
+  const design = await readFile(join(import.meta.dirname, '..', 'DESIGN.md'), 'utf8')
+  assert.ok(design.includes('The command line stays `fix-pr <n>` for an ordinary start, and a start handed the relevancy check\'s prompt adds only the valueless `--extra-instructions` flag, `fix-pr <n> --extra-instructions`'))
+  assert.ok(design.includes('which post a run\'s report under the posting rule (section 1, Scope), may approve, request changes, or comment, and are separate and unchanged, Close PR is the one direct action that posts a comment, and no direct action approves.'))
+  assert.ok(design.includes('Apart from the reports the posting rule posts, the one comment Pit View posts is Close PR\'s closing comment'))
+  assert.ok(design.includes('Post it and the post button, which post a run\'s report under the posting rule (section 1, Scope) on endpoints of their own, are separate and unchanged.'))
+  assert.equal(design.includes('nothing else Pit View does comments, and nothing approves'), false, 'the unqualified sentence is gone')
+})
