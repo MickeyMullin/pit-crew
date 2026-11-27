@@ -51,9 +51,9 @@ Emit the TSV in a `tsv` code block and also write it to `{{HOME}}/agents/output/
 4. empty;
 5. empty;
 6. tickets, `, `-separated;
-7. the client and project name.
+7. the client and project name (only on a row that has hours; empty otherwise).
 
-Sunday and Saturday with no day file are rows with an empty hours, task, and ticket field (a weekend day that has a file is written like any other day) and the date and project name still in place: `Sun, 11/15/2026` then tabs for the empty fields (still seven columns) and the project name. A weekday with no work is flagged, not silently emptied. Write real tab characters and no trailing newline problems: end each line with a single newline. After writing the file, read it back and confirm each line has seven fields.
+A day with no hours (Sunday and Saturday with no day file, and any weekday with no work or no row) is a date followed by six empty fields: seven columns, with the client and project column empty too, because that column is only filled on a row that has hours (a weekend day that has a file is written like any other day). A weekday with no work is flagged, not silently emptied. Write real tab characters, and end each line with a single newline. After writing the file, read it back and confirm each line has seven fields, and that no row without hours has a client and project name.
 
 ## End
 
