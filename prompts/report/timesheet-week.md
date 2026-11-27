@@ -2,7 +2,19 @@
 
 This task renders one Sunday-to-Saturday week of company-timesheet rows from work already recorded. It files nothing: never write to Skuld, and never edit or delete Skuld entries to match what is printed. Skuld is read only, to total hours.
 
-Arguments: an optional week (a date inside it, `last week`, or `this week`; default is the current Sunday-to-Saturday week), optional `tsv`, optional `reset <day>` or `reset week` (see Saved hand edits), optional client and project name (default `PortCity Logistics - Dispatch Intelligence Platform II`; for any other project use the name the user gives, and ask if there is none), and any chat edit requests.
+Arguments: an optional week (a date inside it, `last week`, or `this week`; default is the current Sunday-to-Saturday week), optional `tsv`, optional `show` (or `view`; see Show what is on disk), optional `reset <day>` or `reset week` (see Saved hand edits), optional client and project name (default `PortCity Logistics - Dispatch Intelligence Platform II`; for any other project use the name the user gives, and ask if there is none), and any chat edit requests.
+
+## Show what is on disk (`show`)
+
+`show` only displays what a previous run left behind. It reads, regenerates nothing, and writes nothing: no day files, no preview runs, no Skuld reads, no edits-file or TSV writes.
+
+1. Work out the week as usual (default: the current Sunday-to-Saturday week).
+2. Read `{{HOME}}/agents/output/timesheet-week-<YYYY-MM-DD>.tsv` (the week's Sunday). If it exists, print its contents verbatim in a `tsv` code block, state the file path and its modified time, then print the same rows as a Markdown table (date, hours, task, tickets) with the one-line client and project header and a total row.
+3. If the TSV is missing, say so, and list the `timesheet-week-*.tsv` files that do exist so the user can pick one. Do not build the week. Tell the user `/timesheet-week tsv` would.
+4. If a saved edits file exists for the week, add one line naming the dates with saved edits.
+5. If a day file for the week is newer than the TSV, add one line saying the TSV may be stale and which days changed. Do not refresh it.
+
+`show` combined with chat edits or a reset does nothing for those parts; say that edits and resets need a normal run.
 
 ## Gather the days
 
